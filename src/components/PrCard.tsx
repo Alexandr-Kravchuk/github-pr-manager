@@ -11,14 +11,22 @@ interface Props {
 }
 
 /**
- * Left-accent color of the card, by signal priority. Red (blocked: failing CI
- * or changes requested) is reserved for PRs you authored — on PRs you only
- * review, those aren't your action items, so they never go red.
+ * Left-accent color of the card, by signal priority.
+ *  - Red: your PR is blocked and needs your action — failing CI, or a change
+ *    request you haven't re-requested review on. Only for PRs you authored.
+ *  - Gray (waiting): your PR is just awaiting someone else's review (ball in
+ *    their court) — nothing required from you, even with open threads.
+ *  - Amber: needs attention (new comments, open threads, CI running).
+ *  - Green: approved and CI green.
  */
 function accentClass(pr: PullRequest): string {
   const isAuthor = pr.roles.includes("author");
-  if (isAuthor && (pr.failingChecks.length > 0 || pr.reviewDecision === "CHANGES_REQUESTED")) {
+
+  if (isAuthor && (pr.failingChecks.length > 0 || pr.hasUnaddressedChangeRequest)) {
     return "border-l-red-500";
+  }
+  if (isAuthor && pr.awaitingReview && !pr.hasNewActivity && pr.reviewDecision !== "APPROVED") {
+    return "border-l-zinc-700";
   }
   if (pr.hasNewActivity || pr.unresolvedThreads > 0 || pr.pendingChecks.length > 0) {
     return "border-l-amber-500";

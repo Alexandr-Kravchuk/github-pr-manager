@@ -73,11 +73,14 @@ export async function applyActivity(prs: PullRequest[]): Promise<void> {
       pr.lastSeenAt = entry.seenAt;
     }
 
+    // Mirrors the card accent: a re-requested change request and "just awaiting
+    // someone else's review" (for your own PR) don't count as needing attention.
+    const isAuthor = pr.roles.includes("author");
     pr.needsAttention =
       pr.failingChecks.length > 0 ||
-      pr.reviewDecision === "CHANGES_REQUESTED" ||
-      pr.unresolvedThreads > 0 ||
-      pr.hasNewActivity;
+      pr.hasUnaddressedChangeRequest ||
+      pr.hasNewActivity ||
+      (pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview));
   }
 
   if (mutated) await writeState(state);

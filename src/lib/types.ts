@@ -92,6 +92,15 @@ export interface PullRequest {
   /** Aggregated CI state (from statusCheckRollup, falling back to checks). */
   ciState: CheckState;
 
+  /** A reviewer's review is still pending (GitHub's "yellow dots"). */
+  awaitingReview: boolean;
+  /**
+   * A reviewer requested changes and has NOT been re-requested — i.e. the ball
+   * is in the author's court. If the change-requester was re-requested, this is
+   * false (we're waiting on them again, not on the author).
+   */
+  hasUnaddressedChangeRequest: boolean;
+
   /** true if new comments/activity appeared since the last time it was viewed. */
   hasNewActivity: boolean;
   /** ISO time of the last "mark seen", if any. */

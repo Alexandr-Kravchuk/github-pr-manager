@@ -34,6 +34,13 @@ fragment PrFields on PullRequest {
   author { login avatarUrl }
   repository { nameWithOwner }
   reviewDecision
+  reviewRequests(first: 50) {
+    totalCount
+    nodes { requestedReviewer { __typename ... on User { login } } }
+  }
+  latestOpinionatedReviews(first: 50) {
+    nodes { author { login } state }
+  }
   comments { totalCount }
   reviewThreads(first: 100) {
     nodes { isResolved comments { totalCount } }
@@ -85,6 +92,12 @@ interface RawPr {
   author: { login: string; avatarUrl: string } | null;
   repository: { nameWithOwner: string };
   reviewDecision: ReviewDecision;
+  reviewRequests: {
+    totalCount: number;
+    // requestedReviewer is a union (User/Team/…); only Users have `login`.
+    nodes: Array<{ requestedReviewer: { __typename: string; login?: string } | null }>;
+  };
+  latestOpinionatedReviews: { nodes: Array<{ author: { login: string } | null; state: string }> };
   comments: { totalCount: number };
   reviewThreads: { nodes: Array<{ isResolved: boolean; comments: { totalCount: number } }> };
   commits: {
@@ -229,6 +242,22 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
   const ciState: CheckState =
     failingChecks.length > 0 ? "failure" : checks.length === 0 ? "unknown" : rollupState;
 
+  // awaitingReview: someone's review is still pending (GitHub's "yellow dots").
+  // hasUnaddressedChangeRequest: a reviewer requested changes and has NOT been
+  // re-requested — i.e. the ball is in the author's court. If the change-requester
+  // was re-requested they reappear in reviewRequests, so the ball is back on them.
+  // (Capped at 50 reviewers/reviews — ample for normal PRs.)
+  const pendingReviewers = new Set(
+    pr.reviewRequests.nodes
+      .map((n) => n.requestedReviewer?.login)
+      .filter((login): login is string => Boolean(login)),
+  );
+  const hasUnaddressedChangeRequest = pr.latestOpinionatedReviews.nodes.some(
+    (r) =>
+      r.state === "CHANGES_REQUESTED" && r.author != null && !pendingReviewers.has(r.author.login),
+  );
+  const awaitingReview = pr.reviewRequests.totalCount > 0;
+
   return {
     id: pr.id,
     hostLabel,
@@ -248,6 +277,8 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
     failingChecks,
     pendingChecks,
     ciState,
+    awaitingReview,
+    hasUnaddressedChangeRequest,
     // Activity fields are overwritten in state.ts:
     hasNewActivity: false,
     lastSeenAt: null,
