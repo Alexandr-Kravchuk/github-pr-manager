@@ -10,4 +10,4 @@ npm run build
 echo "Restarting service…"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 
-echo "Done → http://localhost:3000"
+echo "Done → http://localhost:3737"

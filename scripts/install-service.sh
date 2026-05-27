@@ -9,6 +9,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 NODE_BIN_DIR="$(dirname "$(command -v node)")"
 UID_NUM="$(id -u)"
+PORT_NUM="${PORT:-3737}"
 
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 
@@ -33,7 +34,7 @@ cat > "$PLIST" <<PLIST_EOF
         <key>NODE_ENV</key>
         <string>production</string>
         <key>PORT</key>
-        <string>3000</string>
+        <string>$PORT_NUM</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -49,12 +50,18 @@ cat > "$PLIST" <<PLIST_EOF
 </plist>
 PLIST_EOF
 
-# Reload if it was already loaded, then start.
+# Reload if it was already loaded, then start. Wait for the old instance to
+# fully unload before bootstrapping — otherwise launchd can return a transient
+# "Input/output error". Retry the bootstrap once just in case.
 launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+for _ in 1 2 3 4 5 6 7 8; do
+  launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1 || break
+  sleep 1
+done
+launchctl bootstrap "gui/$UID_NUM" "$PLIST" || { sleep 2; launchctl bootstrap "gui/$UID_NUM" "$PLIST"; }
 launchctl enable "gui/$UID_NUM/$LABEL"
 
 echo "Installed $LABEL"
 echo "Plist: $PLIST"
-echo "Dashboard: http://localhost:3000"
+echo "Dashboard: http://localhost:$PORT_NUM"
 echo "Logs: ~/Library/Logs/github-pr-manager.{out,err}.log"

@@ -78,7 +78,7 @@ Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 · GitHub G
 
 ```bash
 npm install   # already done when the project was created
-npm run dev    # http://localhost:3000
+npm run dev    # http://localhost:3737
 ```
 
 For production mode:
@@ -99,7 +99,7 @@ npm run build               # production build (required by `next start`)
 ./scripts/install-service.sh
 ```
 
-It then serves http://localhost:3000 in production mode (`RunAtLoad` +
+It then serves http://localhost:3737 in production mode (`RunAtLoad` +
 `KeepAlive`). Management:
 
 ```bash
