@@ -173,7 +173,7 @@ export default function Dashboard() {
   const newInView = filtered.filter((p) => p.hasNewActivity);
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-6">
+    <div className="mx-auto max-w-[1800px] px-4 py-6">
       {/* Header */}
       <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-zinc-800 bg-zinc-950/85 px-4 pb-3 pt-1 backdrop-blur">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -307,9 +307,9 @@ export default function Dashboard() {
       )}
 
       {groups ? (
-        <div className="space-y-9">
+        <div className="columns-1 gap-x-6 lg:columns-2 2xl:columns-3">
           {groups.map((g) => (
-            <section key={`${g.hostLabel}/${g.repo}`}>
+            <section key={`${g.hostLabel}/${g.repo}`} className="mb-8 break-inside-avoid">
               <div className="mb-3 flex items-center gap-2 border-b border-zinc-800 pb-2">
                 <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
                   {g.hostLabel}
@@ -336,7 +336,7 @@ export default function Dashboard() {
           ))}
         </div>
       ) : (
-        <div className="grid gap-2">
+        <div className="grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3">
           {filtered.map((pr) => (
             <PrCard key={pr.id} pr={pr} onOpen={openPr} onMarkSeen={(p) => postSeen([p])} />
           ))}
