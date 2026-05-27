@@ -88,6 +88,35 @@ npm run build
 npm start
 ```
 
+## Run as a background service (always-on, survives reboots)
+
+On macOS, install the dashboard as a `launchd` LaunchAgent so it runs in the
+background, starts automatically at login (i.e. after a reboot), and restarts
+itself if it ever crashes:
+
+```bash
+npm run build               # production build (required by `next start`)
+./scripts/install-service.sh
+```
+
+It then serves http://localhost:3000 in production mode (`RunAtLoad` +
+`KeepAlive`). Management:
+
+```bash
+./scripts/redeploy.sh        # after code changes: rebuild + restart
+./scripts/uninstall-service.sh   # stop and remove the service
+
+# status / logs
+launchctl print gui/$(id -u)/com.akravchuk.github-pr-manager | grep state
+tail -f ~/Library/Logs/github-pr-manager.err.log
+```
+
+Notes:
+- The token is resolved server-side. For `"token": "gh"` the service runs
+  `gh auth token --hostname <host>`, so stay logged in via the `gh` CLI.
+- The service starts at **login**, not at the boot screen — open your laptop,
+  log in, and the dashboard is already running.
+
 ## Structure
 
 ```
@@ -109,6 +138,7 @@ src/
     types.ts                  # domain types
     format.ts                 # client-side helpers
 config.example.json           # config template (config.json is gitignored)
+scripts/                      # serve / install-service / redeploy / uninstall-service
 ```
 
 ## Notes
