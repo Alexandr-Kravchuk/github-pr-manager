@@ -16,6 +16,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [tick, setTick] = useState(0);
   const fetchingRef = useRef(false);
+  const versionRef = useRef<string | null>(null);
 
   // Filters
   const [search, setSearch] = useState("");
@@ -45,6 +46,13 @@ export default function Dashboard() {
         return;
       }
       const json: DashboardResponse = await res.json();
+      // The server is running a newer build than this tab — reload to pick it
+      // up (fixes stale tabs after a redeploy, no manual refresh needed).
+      if (versionRef.current && json.version && versionRef.current !== json.version) {
+        window.location.reload();
+        return;
+      }
+      versionRef.current = json.version ?? versionRef.current;
       setData(json);
       setError(null);
       setConfigError(null);
@@ -76,18 +84,25 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, [fetchData, pollInterval]);
 
-  // Refresh when the tab regains focus.
+  // Refresh when the tab/window regains focus or the network reconnects —
+  // so returning to the dashboard always shows current data.
   useEffect(() => {
-    const onVis = () => {
+    const onWake = () => {
       if (document.visibilityState === "visible") fetchData();
     };
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    window.addEventListener("online", onWake);
+    return () => {
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+      window.removeEventListener("online", onWake);
+    };
   }, [fetchData]);
 
-  // Tick to refresh relative times.
+  // Tick to refresh relative times and the freshness indicator.
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 30000);
+    const id = setInterval(() => setTick((t) => t + 1), 10000);
     return () => clearInterval(id);
   }, []);
 
@@ -170,6 +185,12 @@ export default function Dashboard() {
     [data, tick],
   );
 
+  // Data is "stale" if older than ~2.5× the poll interval (a poll was missed).
+  const isStale = useMemo(
+    () => (data ? Date.now() - new Date(data.fetchedAt).getTime() > pollInterval * 2500 : false),
+    [data, tick, pollInterval],
+  );
+
   const newInView = filtered.filter((p) => p.hasNewActivity);
 
   return (
@@ -194,7 +215,18 @@ export default function Dashboard() {
                 {rl.hostLabel}: {rl.remaining}
               </span>
             ))}
-            <span className="text-zinc-500">{data ? `updated ${fetchedAgo}` : ""}</span>
+            {data && (
+              <span className="flex items-center gap-1.5 text-zinc-500">
+                <span
+                  className={cn(
+                    "inline-block h-2 w-2 rounded-full",
+                    isStale ? "bg-amber-500" : "animate-pulse bg-emerald-500",
+                  )}
+                  title={isStale ? "Data may be stale" : "Live — auto-refreshing"}
+                />
+                updated {fetchedAgo}
+              </span>
+            )}
             <button
               type="button"
               onClick={fetchData}

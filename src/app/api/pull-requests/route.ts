@@ -4,6 +4,7 @@ import { ConfigError, loadConfig } from "@/lib/config";
 import { fetchHost } from "@/lib/github";
 import { applyActivity } from "@/lib/state";
 import type { DashboardResponse, HostError, PullRequest, RateLimitInfo } from "@/lib/types";
+import { appVersion } from "@/lib/version";
 
 // Always fresh data — no Next cache.
 export const dynamic = "force-dynamic";
@@ -54,6 +55,7 @@ export async function GET() {
     errors,
     rateLimits,
     fetchedAt: new Date().toISOString(),
+    version: appVersion(),
   };
   return NextResponse.json(body);
 }

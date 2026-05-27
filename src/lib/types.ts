@@ -120,4 +120,6 @@ export interface DashboardResponse {
   errors: HostError[];
   rateLimits: RateLimitInfo[];
   fetchedAt: string;
+  /** Running build id — lets the client auto-reload after a redeploy. */
+  version: string;
 }
