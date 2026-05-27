@@ -10,9 +10,14 @@ interface Props {
   hideRepo?: boolean;
 }
 
-/** Left-accent color of the card, by signal priority. */
+/**
+ * Left-accent color of the card, by signal priority. Red (blocked: failing CI
+ * or changes requested) is reserved for PRs you authored — on PRs you only
+ * review, those aren't your action items, so they never go red.
+ */
 function accentClass(pr: PullRequest): string {
-  if (pr.failingChecks.length > 0 || pr.reviewDecision === "CHANGES_REQUESTED") {
+  const isAuthor = pr.roles.includes("author");
+  if (isAuthor && (pr.failingChecks.length > 0 || pr.reviewDecision === "CHANGES_REQUESTED")) {
     return "border-l-red-500";
   }
   if (pr.hasNewActivity || pr.unresolvedThreads > 0 || pr.pendingChecks.length > 0) {
