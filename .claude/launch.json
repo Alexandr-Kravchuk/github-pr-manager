@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
       "port": 3737
+    },
+    {
+      "name": "dev-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["next", "dev", "-p", "3838"],
+      "port": 3838
     }
   ]
 }

@@ -19,7 +19,7 @@ Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 · GitHub G
 - One GraphQL request per host per refresh (two searches — `author:@me` + `review-requested:@me`, merged via aliases). Cheap on rate limit (~1 point).
 - Tokens live **only on the server** (route handlers). They never reach the browser.
 - The "already seen" state is stored in `data/state.json` (also gitignored), so new-comment detection survives reloads and switching browsers.
-- Data refreshes automatically every `pollIntervalSeconds`, when the tab regains focus, and via the "Refresh" button.
+- A **single server-side poller** queries GitHub every `pollIntervalSeconds`, regardless of how many tabs are open. Each open tab subscribes to a **Server-Sent Events** stream (`/api/stream`) and receives updates the moment the poller sees a real change — no client-side polling, no manual refresh. EventSource auto-reconnects on transient drops; a focus/visibility wake-up triggers a one-shot fetch as a safety net after laptop sleep.
 
 ## Setup
 
@@ -122,10 +122,11 @@ Notes:
 ```
 src/
   app/
-    page.tsx                  # dashboard (client): polling, filters, grouping
+    page.tsx                  # dashboard (client): SSE subscription, filters, grouping
     layout.tsx                # dark theme
     api/
-      pull-requests/route.ts  # GET — aggregates PRs across all hosts
+      pull-requests/route.ts  # GET — initial paint (returns the poller's cached snapshot)
+      stream/route.ts         # GET — Server-Sent Events live updates
       seen/route.ts           # POST — mark a PR as seen
       config/route.ts         # GET — sanitized config (no tokens)
   components/
@@ -135,6 +136,8 @@ src/
     config.ts                 # loads config.json + resolves tokens
     github.ts                 # GraphQL query and mapping
     state.ts                  # data/state.json — "seen" state
+    poller.ts                 # singleton server-side poller (one per process)
+    broadcast.ts              # in-memory pub/sub feeding the SSE stream
     types.ts                  # domain types
     format.ts                 # client-side helpers
 config.example.json           # config template (config.json is gitignored)

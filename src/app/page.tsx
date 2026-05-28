@@ -15,6 +15,13 @@ export default function Dashboard() {
   const [configError, setConfigError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [tick, setTick] = useState(0);
+  /**
+   * SSE link health. Set from `EventSource` open/error handlers and used to
+   * power the "Live" / "Disconnected" dot in the header. Replaces the
+   * previous time-based staleness heuristic — since broadcasts only fire on
+   * actual data changes, `fetchedAt` is no longer a reliable freshness signal.
+   */
+  const [connected, setConnected] = useState(false);
   const fetchingRef = useRef(false);
   const versionRef = useRef<string | null>(null);
 
@@ -27,7 +34,18 @@ export default function Dashboard() {
   const [newOnly, setNewOnly] = useState(false);
   const [groupByRepo, setGroupByRepo] = useState(true);
 
-  const pollInterval = config?.pollIntervalSeconds ?? 60;
+  // Applies a snapshot received either from the initial fetch or from SSE.
+  // The version check handles the "server got redeployed under me" case.
+  const applySnapshot = useCallback((json: DashboardResponse) => {
+    if (versionRef.current && json.version && versionRef.current !== json.version) {
+      window.location.reload();
+      return;
+    }
+    versionRef.current = json.version ?? versionRef.current;
+    setData(json);
+    setError(null);
+    setConfigError(null);
+  }, []);
 
   const fetchData = useCallback(async () => {
     if (fetchingRef.current) return;
@@ -45,24 +63,14 @@ export default function Dashboard() {
         }
         return;
       }
-      const json: DashboardResponse = await res.json();
-      // The server is running a newer build than this tab — reload to pick it
-      // up (fixes stale tabs after a redeploy, no manual refresh needed).
-      if (versionRef.current && json.version && versionRef.current !== json.version) {
-        window.location.reload();
-        return;
-      }
-      versionRef.current = json.version ?? versionRef.current;
-      setData(json);
-      setError(null);
-      setConfigError(null);
+      applySnapshot(await res.json());
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
       fetchingRef.current = false;
     }
-  }, []);
+  }, [applySnapshot]);
 
   // Config (interval, host list) — once.
   useEffect(() => {
@@ -77,15 +85,40 @@ export default function Dashboard() {
       .catch(() => {});
   }, []);
 
-  // Initial fetch + auto-refresh on an interval.
+  // Initial fetch (paints from the server-side poller's cache) + SSE
+  // subscription for live updates. EventSource auto-reconnects on its own,
+  // so we don't need a client-side polling fallback.
   useEffect(() => {
     fetchData();
-    const id = setInterval(fetchData, pollInterval * 1000);
-    return () => clearInterval(id);
-  }, [fetchData, pollInterval]);
 
-  // Refresh when the tab/window regains focus or the network reconnects —
-  // so returning to the dashboard always shows current data.
+    const es = new EventSource("/api/stream");
+    es.onopen = () => setConnected(true);
+    es.onerror = () => {
+      // Fires on both transient blips (readyState=CONNECTING, auto-retry)
+      // and terminal failures (readyState=CLOSED). Either way, paint the
+      // header dot as "disconnected" until `onopen` clears it.
+      setConnected(false);
+    };
+    es.addEventListener("snapshot", (e) => {
+      try {
+        applySnapshot(JSON.parse((e as MessageEvent).data) as DashboardResponse);
+      } catch {
+        // Malformed payload — ignore; next snapshot will likely be clean.
+      }
+    });
+    es.addEventListener("config-error", (e) => {
+      setConfigError((e as MessageEvent).data);
+      setData(null);
+    });
+    return () => {
+      es.close();
+      setConnected(false);
+    };
+  }, [fetchData, applySnapshot]);
+
+  // EventSource keeps the connection alive across focus changes, but a long
+  // suspend (laptop sleep) can leave the tab on stale data while the browser
+  // re-establishes. A one-shot fetch on wake covers that gap.
   useEffect(() => {
     const onWake = () => {
       if (document.visibilityState === "visible") fetchData();
@@ -185,11 +218,10 @@ export default function Dashboard() {
     [data, tick],
   );
 
-  // Data is "stale" if older than ~2.5× the poll interval (a poll was missed).
-  const isStale = useMemo(
-    () => (data ? Date.now() - new Date(data.fetchedAt).getTime() > pollInterval * 2500 : false),
-    [data, tick, pollInterval],
-  );
+  // "Stale" now means the SSE link is down — the server only broadcasts on
+  // actual changes, so a quiet stream is healthy, not stale. EventSource will
+  // auto-reconnect; this just paints the dot amber while it tries.
+  const isStale = !connected;
 
   const newInView = filtered.filter((p) => p.hasNewActivity);
 

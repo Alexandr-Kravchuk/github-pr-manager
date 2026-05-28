@@ -1,61 +1,35 @@
 import { NextResponse } from "next/server";
 
-import { ConfigError, loadConfig } from "@/lib/config";
-import { fetchHost } from "@/lib/github";
-import { applyActivity } from "@/lib/state";
-import type { DashboardResponse, HostError, PullRequest, RateLimitInfo } from "@/lib/types";
-import { appVersion } from "@/lib/version";
+import { awaitFirstTick, ensurePollerStarted, getConfigError, getSnapshot } from "@/lib/poller";
 
-// Always fresh data — no Next cache.
+// Always fresh data — and we drive that freshness via the singleton poller
+// rather than refetching from GitHub on each browser request.
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+/**
+ * Initial-load endpoint for the dashboard. Returns whatever the server-side
+ * poller has cached; if nothing has been polled yet, waits for the very first
+ * tick before responding so the first paint isn't empty.
+ *
+ * Live updates after the initial load come through `/api/stream` (SSE).
+ */
 export async function GET() {
-  let config;
-  try {
-    config = loadConfig();
-  } catch (e) {
-    if (e instanceof ConfigError) {
-      return NextResponse.json({ error: e.message, kind: "config" }, { status: 400 });
-    }
-    throw e;
+  ensurePollerStarted();
+  await awaitFirstTick();
+
+  const configError = getConfigError();
+  if (configError) {
+    return NextResponse.json({ error: configError, kind: "config" }, { status: 400 });
   }
 
-  const allPrs: PullRequest[] = [];
-  const errors: HostError[] = [];
-  const rateLimits: RateLimitInfo[] = [];
+  const snapshot = getSnapshot();
+  if (!snapshot) {
+    // First tick resolved without producing a snapshot AND without a config
+    // error — only happens on truly exceptional failures. Surface as 503 so
+    // the client can retry.
+    return NextResponse.json({ error: "No data available yet.", kind: "transient" }, { status: 503 });
+  }
 
-  // Hosts are queried in parallel; one failing doesn't break the rest.
-  const results = await Promise.allSettled(config.hosts.map((h) => fetchHost(h)));
-  results.forEach((result, i) => {
-    const host = config.hosts[i];
-    if (result.status === "fulfilled") {
-      allPrs.push(...result.value.pullRequests);
-      if (host.repos.length > 0) rateLimits.push(result.value.rateLimit);
-    } else {
-      const reason = result.reason;
-      errors.push({
-        hostLabel: host.label,
-        message: reason instanceof Error ? reason.message : String(reason),
-      });
-    }
-  });
-
-  // Set the new-activity/attention flags by comparing against the stored state.
-  await applyActivity(allPrs);
-
-  // Attention-needing first; then by most recently updated.
-  allPrs.sort((a, b) => {
-    if (a.needsAttention !== b.needsAttention) return a.needsAttention ? -1 : 1;
-    return b.updatedAt.localeCompare(a.updatedAt);
-  });
-
-  const body: DashboardResponse = {
-    pullRequests: allPrs,
-    errors,
-    rateLimits,
-    fetchedAt: new Date().toISOString(),
-    version: appVersion(),
-  };
-  return NextResponse.json(body);
+  return NextResponse.json(snapshot);
 }
