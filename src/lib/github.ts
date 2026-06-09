@@ -8,21 +8,7 @@ import type {
   ReviewDecision,
 } from "./types";
 
-/**
- * One GraphQL request per host: two searches (authored + review-requested)
- * merged into a single HTTP call via aliases. Each search is filtered by all
- * of the host's repositories (multiple `repo:` qualifiers act as OR).
- */
-const QUERY = /* GraphQL */ `
-query ($authoredQuery: String!, $reviewingQuery: String!) {
-  rateLimit { remaining cost resetAt }
-  authored: search(query: $authoredQuery, type: ISSUE, first: 100) {
-    nodes { ...PrFields }
-  }
-  reviewing: search(query: $reviewingQuery, type: ISSUE, first: 100) {
-    nodes { ...PrFields }
-  }
-}
+const PR_FIELDS_FRAGMENT = /* GraphQL */ `
 fragment PrFields on PullRequest {
   id
   number
@@ -63,6 +49,34 @@ fragment PrFields on PullRequest {
   }
 }
 `;
+
+/**
+ * One GraphQL request per host, merged into a single HTTP call via aliases:
+ *  - authored        — PRs the current user opened (author:@me)
+ *  - reviewing        — PRs the user is *personally* asked to review (review-requested:@me)
+ *  - team0..teamN     — PRs asked of a *team* the user belongs to
+ *                       (team-review-requested:org/team). `review-requested:@me`
+ *                       does NOT cover team requests, so these are searched
+ *                       separately — one alias per team — and merged by id.
+ *
+ * Each search is filtered by all of the host's repositories (multiple `repo:`
+ * qualifiers act as OR).
+ */
+function buildQuery(teamCount: number): string {
+  const teamVarDecls = Array.from({ length: teamCount }, (_, i) => `, $teamQuery${i}: String!`).join("");
+  const teamSearches = Array.from(
+    { length: teamCount },
+    (_, i) => `  team${i}: search(query: $teamQuery${i}, type: ISSUE, first: 100) { nodes { ...PrFields } }`,
+  ).join("\n");
+  return /* GraphQL */ `
+query ($authoredQuery: String!, $reviewingQuery: String!${teamVarDecls}) {
+  rateLimit { remaining cost resetAt }
+  authored: search(query: $authoredQuery, type: ISSUE, first: 100) { nodes { ...PrFields } }
+  reviewing: search(query: $reviewingQuery, type: ISSUE, first: 100) { nodes { ...PrFields } }
+${teamSearches}
+}
+${PR_FIELDS_FRAGMENT}`;
+}
 
 // --- Raw GraphQL response types (narrowed to the fields we need) ---
 
@@ -109,11 +123,15 @@ interface RawPr {
   };
 }
 
+type SearchNodes = { nodes: Array<RawPr | Record<string, never>> };
+
 interface RawResponse {
   data?: {
     rateLimit: { remaining: number; cost: number; resetAt: string };
-    authored: { nodes: Array<RawPr | Record<string, never>> };
-    reviewing: { nodes: Array<RawPr | Record<string, never>> };
+    authored: SearchNodes;
+    reviewing: SearchNodes;
+    // team0, team1, … — one per team-review-requested search.
+    [alias: string]: SearchNodes | { remaining: number; cost: number; resetAt: string };
   };
   errors?: Array<{ message: string }>;
 }
@@ -296,6 +314,64 @@ function buildSearchQuery(repos: string[], qualifier: string): string {
 }
 
 /**
+ * Derives the REST `/user/teams` endpoint from a host's GraphQL URL:
+ *  - https://api.github.com/graphql        -> https://api.github.com/user/teams
+ *  - https://api.<tenant>.ghe.com/graphql  -> https://api.<tenant>.ghe.com/user/teams
+ *  - https://github.company.com/api/graphql -> https://github.company.com/api/v3/user/teams
+ */
+function userTeamsUrl(graphqlUrl: string): string {
+  const url = new URL(graphqlUrl);
+  // Enterprise Server keeps REST under /api/v3; Cloud serves it from the root.
+  const prefix = url.pathname.endsWith("/api/graphql") ? "/api/v3" : "";
+  return `${url.origin}${prefix}/user/teams`;
+}
+
+interface RawTeam {
+  slug: string;
+  organization: { login: string };
+}
+
+/**
+ * Teams the authenticated user belongs to, as `org/team-slug` combined slugs
+ * (the form `team-review-requested:` expects). Cached per host for a few
+ * minutes — membership changes rarely and the poller runs every ~30s.
+ */
+const teamCache = new Map<string, { slugs: string[]; fetchedAt: number }>();
+const TEAM_CACHE_TTL_MS = 10 * 60 * 1000;
+
+async function fetchViewerTeams(host: HostConfig): Promise<string[]> {
+  const cacheKey = host.graphqlUrl;
+  const cached = teamCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < TEAM_CACHE_TTL_MS) {
+    return cached.slugs;
+  }
+
+  const headers = {
+    Authorization: `Bearer ${host.token}`,
+    Accept: "application/vnd.github+json",
+    "User-Agent": "github-pr-manager",
+  };
+  const slugs: string[] = [];
+  const baseUrl = userTeamsUrl(host.graphqlUrl);
+  // Paginate defensively; almost everyone fits in the first page.
+  for (let page = 1; page <= 5; page++) {
+    const res = await fetch(`${baseUrl}?per_page=100&page=${page}`, {
+      headers,
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    const teams = (await res.json()) as RawTeam[];
+    for (const t of teams) {
+      if (t?.organization?.login && t.slug) slugs.push(`${t.organization.login}/${t.slug}`);
+    }
+    if (teams.length < 100) break;
+  }
+
+  teamCache.set(cacheKey, { slugs, fetchedAt: Date.now() });
+  return slugs;
+}
+
+/**
  * Queries a single host and returns the list of PRs (author or requested
  * reviewer) along with rate-limit info. Throws on network/GraphQL failures.
  */
@@ -307,10 +383,28 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
     };
   }
 
-  const variables = {
+  // `review-requested:@me` only matches *personal* requests. When a review is
+  // asked of a team the user belongs to, the PR is invisible to it — so we also
+  // search `team-review-requested:org/team` for each of the user's teams whose
+  // org owns a configured repo. Team discovery is best-effort: a failure here
+  // must not take down the dashboard, so we fall back to no team searches.
+  const repoOrgs = new Set(host.repos.map((r) => r.split("/")[0]));
+  let teamSlugs: string[] = [];
+  try {
+    teamSlugs = (await fetchViewerTeams(host)).filter((slug) =>
+      repoOrgs.has(slug.split("/")[0]),
+    );
+  } catch (e) {
+    console.warn(`[github] team discovery failed for "${host.label}": ${(e as Error).message}`);
+  }
+
+  const variables: Record<string, string> = {
     authoredQuery: buildSearchQuery(host.repos, "author:@me"),
     reviewingQuery: buildSearchQuery(host.repos, "review-requested:@me"),
   };
+  teamSlugs.forEach((slug, i) => {
+    variables[`teamQuery${i}`] = buildSearchQuery(host.repos, `team-review-requested:${slug}`);
+  });
 
   const res = await fetch(host.graphqlUrl, {
     method: "POST",
@@ -319,7 +413,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
       "Content-Type": "application/json",
       "User-Agent": "github-pr-manager",
     },
-    body: JSON.stringify({ query: QUERY, variables }),
+    body: JSON.stringify({ query: buildQuery(teamSlugs.length), variables }),
     cache: "no-store",
   });
 
@@ -353,6 +447,11 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
 
   addNodes(json.data.authored.nodes, "author");
   addNodes(json.data.reviewing.nodes, "reviewer");
+  // Team-requested PRs count as a "reviewer" role, same as personal requests.
+  for (let i = 0; i < teamSlugs.length; i++) {
+    const teamResult = json.data[`team${i}`] as SearchNodes | undefined;
+    if (teamResult?.nodes) addNodes(teamResult.nodes, "reviewer");
+  }
 
   return {
     pullRequests: [...byId.values()],
