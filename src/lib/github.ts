@@ -6,6 +6,7 @@ import type {
   PullRequest,
   RateLimitInfo,
   ReviewDecision,
+  Reviewer,
 } from "./types";
 
 const PR_FIELDS_FRAGMENT = /* GraphQL */ `
@@ -22,10 +23,10 @@ fragment PrFields on PullRequest {
   reviewDecision
   reviewRequests(first: 50) {
     totalCount
-    nodes { requestedReviewer { __typename ... on User { login } } }
+    nodes { requestedReviewer { __typename ... on User { login avatarUrl } } }
   }
   latestOpinionatedReviews(first: 50) {
-    nodes { author { login } state }
+    nodes { author { login avatarUrl } state }
   }
   comments { totalCount }
   reviewThreads(first: 100) {
@@ -109,9 +110,9 @@ interface RawPr {
   reviewRequests: {
     totalCount: number;
     // requestedReviewer is a union (User/Team/…); only Users have `login`.
-    nodes: Array<{ requestedReviewer: { __typename: string; login?: string } | null }>;
+    nodes: Array<{ requestedReviewer: { __typename: string; login?: string; avatarUrl?: string } | null }>;
   };
-  latestOpinionatedReviews: { nodes: Array<{ author: { login: string } | null; state: string }> };
+  latestOpinionatedReviews: { nodes: Array<{ author: { login: string; avatarUrl: string } | null; state: string }> };
   comments: { totalCount: number };
   reviewThreads: { nodes: Array<{ isResolved: boolean; comments: { totalCount: number } }> };
   commits: {
@@ -276,6 +277,28 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
   );
   const awaitingReview = pr.reviewRequests.totalCount > 0;
 
+  // Build reviewer list: pending first (requested but not yet reviewed, or re-requested),
+  // then opinionated reviews that are still the "latest" state for that person.
+  const reviewers: Reviewer[] = [];
+  const seenLogins = new Set<string>();
+  for (const n of pr.reviewRequests.nodes) {
+    const r = n.requestedReviewer;
+    if (r?.__typename === "User" && r.login) {
+      reviewers.push({ login: r.login, avatarUrl: r.avatarUrl ?? "", reviewState: "pending" });
+      seenLogins.add(r.login);
+    }
+  }
+  for (const r of pr.latestOpinionatedReviews.nodes) {
+    if (!r.author || seenLogins.has(r.author.login)) continue;
+    if (r.state !== "APPROVED" && r.state !== "CHANGES_REQUESTED") continue;
+    reviewers.push({
+      login: r.author.login,
+      avatarUrl: r.author.avatarUrl,
+      reviewState: r.state === "APPROVED" ? "approved" : "changes_requested",
+    });
+    seenLogins.add(r.author.login);
+  }
+
   return {
     id: pr.id,
     hostLabel,
@@ -295,6 +318,7 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
     failingChecks,
     pendingChecks,
     ciState,
+    reviewers,
     awaitingReview,
     hasUnaddressedChangeRequest,
     // Activity fields are overwritten in state.ts:

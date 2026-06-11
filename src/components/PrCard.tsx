@@ -1,4 +1,4 @@
-import type { PullRequest, ReviewDecision } from "@/lib/types";
+import type { PullRequest, ReviewDecision, Reviewer } from "@/lib/types";
 import { cn, relativeTime } from "@/lib/format";
 import { CheckBadge } from "./CheckBadge";
 
@@ -51,6 +51,41 @@ function reviewLabel(decision: ReviewDecision): { text: string; cls: string } | 
 }
 
 const pill = "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium";
+
+const REVIEWER_RING: Record<Reviewer["reviewState"], string> = {
+  approved: "ring-emerald-500",
+  changes_requested: "ring-red-500",
+  pending: "ring-zinc-600",
+};
+
+function ReviewerBadge({ r }: { r: Reviewer }) {
+  const label = r.reviewState === "approved"
+    ? "approved"
+    : r.reviewState === "changes_requested"
+      ? "changes requested"
+      : "pending";
+  return r.avatarUrl ? (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={r.avatarUrl}
+      alt=""
+      width={18}
+      height={18}
+      title={`${r.login}: ${label}`}
+      className={cn("rounded-full ring-2", REVIEWER_RING[r.reviewState])}
+    />
+  ) : (
+    <span
+      title={`${r.login}: ${label}`}
+      className={cn(
+        "inline-flex h-[18px] w-[18px] items-center justify-center rounded-full ring-2 bg-zinc-800 text-[9px] text-zinc-400 uppercase",
+        REVIEWER_RING[r.reviewState],
+      )}
+    >
+      {r.login[0]}
+    </span>
+  );
+}
 
 export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
   const review = reviewLabel(pr.reviewDecision);
@@ -143,6 +178,16 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
           </span>
         )}
       </div>
+
+      {/* Reviewers */}
+      {pr.reviewers.length > 0 && (
+        <div className="mb-2 flex items-center gap-1.5">
+          <span className="text-xs text-zinc-500">Reviewers:</span>
+          {pr.reviewers.map((r) => (
+            <ReviewerBadge key={r.login} r={r} />
+          ))}
+        </div>
+      )}
 
       {/* CI: failures first, then pending; otherwise a summary */}
       <div className="flex flex-wrap items-center gap-1.5">

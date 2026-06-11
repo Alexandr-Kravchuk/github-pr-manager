@@ -52,6 +52,16 @@ export interface PublicConfig {
   hosts: Array<{ label: string; repos: string[] }>;
 }
 
+/** State of an individual reviewer on a PR. */
+export type ReviewerState = "approved" | "changes_requested" | "pending";
+
+/** An individual reviewer and their current review state. */
+export interface Reviewer {
+  login: string;
+  avatarUrl: string;
+  reviewState: ReviewerState;
+}
+
 /** A single status/CI check on the PR's latest commit. */
 export interface CheckItem {
   name: string;
@@ -91,6 +101,9 @@ export interface PullRequest {
   pendingChecks: CheckItem[];
   /** Aggregated CI state (from statusCheckRollup, falling back to checks). */
   ciState: CheckState;
+
+  /** Individual reviewers with their current review state. */
+  reviewers: Reviewer[];
 
   /** A reviewer's review is still pending (GitHub's "yellow dots"). */
   awaitingReview: boolean;
