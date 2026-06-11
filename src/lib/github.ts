@@ -21,15 +21,15 @@ fragment PrFields on PullRequest {
   author { login avatarUrl }
   repository { nameWithOwner }
   reviewDecision
-  reviewRequests(first: 50) {
+  reviewRequests(first: 15) {
     totalCount
     nodes { requestedReviewer { __typename ... on User { login avatarUrl } } }
   }
-  latestOpinionatedReviews(first: 50) {
+  latestOpinionatedReviews(first: 15) {
     nodes { author { login avatarUrl } state }
   }
   comments { totalCount }
-  reviewThreads(first: 100) {
+  reviewThreads(first: 50) {
     nodes { isResolved comments { totalCount } }
   }
   commits(last: 1) {
@@ -37,7 +37,7 @@ fragment PrFields on PullRequest {
       commit {
         statusCheckRollup {
           state
-          contexts(first: 100) {
+          contexts(first: 30) {
             nodes {
               __typename
               ... on CheckRun { name conclusion status detailsUrl }
@@ -67,13 +67,13 @@ function buildQuery(teamCount: number): string {
   const teamVarDecls = Array.from({ length: teamCount }, (_, i) => `, $teamQuery${i}: String!`).join("");
   const teamSearches = Array.from(
     { length: teamCount },
-    (_, i) => `  team${i}: search(query: $teamQuery${i}, type: ISSUE, first: 100) { nodes { ...PrFields } }`,
+    (_, i) => `  team${i}: search(query: $teamQuery${i}, type: ISSUE, first: 25) { nodes { ...PrFields } }`,
   ).join("\n");
   return /* GraphQL */ `
 query ($authoredQuery: String!, $reviewingQuery: String!${teamVarDecls}) {
   rateLimit { remaining cost resetAt }
-  authored: search(query: $authoredQuery, type: ISSUE, first: 100) { nodes { ...PrFields } }
-  reviewing: search(query: $reviewingQuery, type: ISSUE, first: 100) { nodes { ...PrFields } }
+  authored: search(query: $authoredQuery, type: ISSUE, first: 25) { nodes { ...PrFields } }
+  reviewing: search(query: $reviewingQuery, type: ISSUE, first: 25) { nodes { ...PrFields } }
 ${teamSearches}
 }
 ${PR_FIELDS_FRAGMENT}`;

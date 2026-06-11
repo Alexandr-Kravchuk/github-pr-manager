@@ -89,7 +89,44 @@ function hashSnapshot(s: DashboardResponse): string {
   });
 }
 
-async function tick(): Promise<void> {
+/**
+ * Computes how long to wait before the next tick based on rate-limit state.
+ *
+ * For each host we have `remaining` points and a `resetAt` timestamp. The
+ * safe number of ticks until reset is `floor(remaining / cost)`. If we have
+ * fewer safe ticks than natural ticks at the base interval we back off so we
+ * don't exceed the budget. Capped at 1 h; never goes below the base interval.
+ */
+function computeNextIntervalMs(rateLimits: RateLimitInfo[], baseMs: number): number {
+  let nextMs = baseMs;
+  for (const rl of rateLimits) {
+    if (!rl.resetAt || rl.cost <= 0) continue;
+    const secondsUntilReset = Math.max(0, (new Date(rl.resetAt).getTime() - Date.now()) / 1000);
+    const safeTicks = Math.floor(rl.remaining / rl.cost);
+    if (safeTicks <= 0) {
+      // Exhausted — sleep until the reset window, minimum 60 s.
+      const backoff = Math.max(60_000, secondsUntilReset * 1000);
+      if (backoff > nextMs) {
+        console.warn(
+          `[poller] ${rl.hostLabel}: rate limit exhausted, backing off ${Math.round(backoff / 1000)}s`,
+        );
+        nextMs = backoff;
+      }
+    } else {
+      // Spread remaining ticks evenly across the reset window.
+      const safeMs = (secondsUntilReset / safeTicks) * 1000;
+      if (safeMs > nextMs) {
+        console.warn(
+          `[poller] ${rl.hostLabel}: ${rl.remaining} points left (cost ${rl.cost}), slowing to ${Math.round(safeMs / 1000)}s`,
+        );
+        nextMs = safeMs;
+      }
+    }
+  }
+  return Math.min(nextMs, 3_600_000);
+}
+
+async function tick(): Promise<number> {
   const state = getState();
 
   let config;
@@ -105,11 +142,11 @@ async function tick(): Promise<void> {
         publish("config-error", e.message);
       }
       state.resolveFirst();
-      return;
+      return state.intervalMs;
     }
     console.error("[poller] loadConfig failed:", e);
     state.resolveFirst();
-    return;
+    return state.intervalMs;
   }
 
   const allPrs: PullRequest[] = [];
@@ -158,19 +195,23 @@ async function tick(): Promise<void> {
     publish("snapshot", JSON.stringify(snapshot));
   }
   state.resolveFirst();
+
+  return computeNextIntervalMs(rateLimits, state.intervalMs);
 }
 
-function scheduleNext(): void {
+function scheduleNext(nextMs?: number): void {
   const state = getState();
+  const delay = nextMs ?? state.intervalMs;
   state.timer = setTimeout(async () => {
+    let next: number | undefined;
     try {
-      await tick();
+      next = await tick();
     } catch (e) {
       console.error("[poller] tick failed:", e);
     } finally {
-      scheduleNext();
+      scheduleNext(next);
     }
-  }, state.intervalMs);
+  }, delay);
   // Don't keep the Node event loop alive just for the poller — if everything
   // else has exited (tests, SIGTERM handlers), let the process die.
   state.timer.unref?.();
@@ -197,8 +238,11 @@ export function ensurePollerStarted(): void {
   // First tick is fire-and-forget; promise hooks (awaitFirstTick) handle
   // any caller that needs to wait for it.
   tick()
-    .catch((e) => console.error("[poller] initial tick failed:", e))
-    .finally(scheduleNext);
+    .then((ms) => scheduleNext(ms))
+    .catch((e) => {
+      console.error("[poller] initial tick failed:", e);
+      scheduleNext();
+    });
 }
 
 /** Latest snapshot, or null if no successful tick has happened yet. */
