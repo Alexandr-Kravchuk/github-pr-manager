@@ -73,6 +73,7 @@ function hashSnapshot(s: DashboardResponse): string {
     p.unresolvedThreads,
     p.ciState,
     p.reviewDecision,
+    p.hasHumanApproval,
     p.hasNewActivity,
     p.needsAttention,
     p.failingChecks.length,

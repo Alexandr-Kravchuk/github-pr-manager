@@ -113,6 +113,13 @@ export interface PullRequest {
    * false (we're waiting on them again, not on the author).
    */
   hasUnaddressedChangeRequest: boolean;
+  /**
+   * At least one non-bot reviewer's latest review is an approval. This is what
+   * marks a PR "good to go" — a single human approve is enough, independent of
+   * the host's branch-protection `reviewDecision` (which stays null/REVIEW_REQUIRED
+   * on repos without required-review rules, even when someone has approved).
+   */
+  hasHumanApproval: boolean;
 
   /** true if new comments/activity appeared since the last time it was viewed. */
   hasNewActivity: boolean;

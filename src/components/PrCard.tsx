@@ -14,10 +14,15 @@ interface Props {
  * Left-accent color of the card, by signal priority.
  *  - Red: your PR is blocked and needs your action — failing CI, or a change
  *    request you haven't re-requested review on. Only for PRs you authored.
- *  - Gray (waiting): your PR is just awaiting someone else's review (ball in
- *    their court) — nothing required from you, even with open threads.
+ *  - Gray (waiting): your PR is awaiting someone else's review and nobody has
+ *    approved yet (ball in their court) — nothing required from you, even with
+ *    open threads.
  *  - Amber: needs attention (new comments, open threads, CI running).
- *  - Green: approved and CI green.
+ *  - Green: at least one human approval, and CI isn't failing or running. A
+ *    single human approve is enough — even if other reviewers are still pending,
+ *    and even if the PR has no checks at all. We key off an actual approval
+ *    rather than `reviewDecision`, which stays null/REVIEW_REQUIRED on repos
+ *    without required-review rules.
  */
 function accentClass(pr: PullRequest): string {
   const isAuthor = pr.roles.includes("author");
@@ -25,13 +30,13 @@ function accentClass(pr: PullRequest): string {
   if (isAuthor && (pr.failingChecks.length > 0 || pr.hasUnaddressedChangeRequest)) {
     return "border-l-red-500";
   }
-  if (isAuthor && pr.awaitingReview && !pr.hasNewActivity && pr.reviewDecision !== "APPROVED") {
+  if (isAuthor && pr.awaitingReview && !pr.hasNewActivity && !pr.hasHumanApproval) {
     return "border-l-zinc-700";
   }
   if (pr.hasNewActivity || pr.unresolvedThreads > 0 || pr.pendingChecks.length > 0) {
     return "border-l-amber-500";
   }
-  if (pr.ciState === "success" && pr.reviewDecision === "APPROVED") {
+  if (pr.hasHumanApproval && pr.ciState !== "failure" && pr.ciState !== "pending") {
     return "border-l-emerald-500";
   }
   return "border-l-zinc-700";

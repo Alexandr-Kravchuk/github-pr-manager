@@ -26,7 +26,7 @@ fragment PrFields on PullRequest {
     nodes { requestedReviewer { __typename ... on User { login avatarUrl } } }
   }
   latestOpinionatedReviews(first: 15) {
-    nodes { author { login avatarUrl } state }
+    nodes { author { __typename login avatarUrl } state }
   }
   comments { totalCount }
   reviewThreads(first: 50) {
@@ -112,7 +112,9 @@ interface RawPr {
     // requestedReviewer is a union (User/Team/…); only Users have `login`.
     nodes: Array<{ requestedReviewer: { __typename: string; login?: string; avatarUrl?: string } | null }>;
   };
-  latestOpinionatedReviews: { nodes: Array<{ author: { login: string; avatarUrl: string } | null; state: string }> };
+  latestOpinionatedReviews: {
+    nodes: Array<{ author: { __typename: string; login: string; avatarUrl: string } | null; state: string }>;
+  };
   comments: { totalCount: number };
   reviewThreads: { nodes: Array<{ isResolved: boolean; comments: { totalCount: number } }> };
   commits: {
@@ -281,6 +283,9 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
   // then opinionated reviews that are still the "latest" state for that person.
   const reviewers: Reviewer[] = [];
   const seenLogins = new Set<string>();
+  // A single human approve marks the PR good-to-go (see PullRequest.hasHumanApproval).
+  // Bots that leave an APPROVED review (rare — agents usually only COMMENT) don't count.
+  let hasHumanApproval = false;
   for (const n of pr.reviewRequests.nodes) {
     const r = n.requestedReviewer;
     if (r?.__typename === "User" && r.login) {
@@ -291,6 +296,7 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
   for (const r of pr.latestOpinionatedReviews.nodes) {
     if (!r.author || seenLogins.has(r.author.login)) continue;
     if (r.state !== "APPROVED" && r.state !== "CHANGES_REQUESTED") continue;
+    if (r.state === "APPROVED" && r.author.__typename === "User") hasHumanApproval = true;
     reviewers.push({
       login: r.author.login,
       avatarUrl: r.author.avatarUrl,
@@ -321,6 +327,7 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
     reviewers,
     awaitingReview,
     hasUnaddressedChangeRequest,
+    hasHumanApproval,
     // Activity fields are overwritten in state.ts:
     hasNewActivity: false,
     lastSeenAt: null,
