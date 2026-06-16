@@ -1,0 +1,50 @@
+<!--
+  WinSW service definition template for the PR Dashboard (Windows).
+
+  This is the SOURCE template — install-service.ps1 substitutes the @TOKENS@
+  below and writes the deployed copy next to the WinSW binary. Do not run this
+  file directly.
+
+  Secrets are deliberately NOT in this file. AUTH_SECRET and the OAuth client
+  secrets are read from MACHINE-level environment variables, which the service
+  inherits at start — so they never sit in plaintext on disk. Only non-secret
+  settings live here.
+-->
+<service>
+  <id>github-pr-manager</id>
+  <name>GitHub PR Dashboard</name>
+  <description>Server-side poller + dashboard for GitHub / GHE pull requests.</description>
+
+  <!-- node must be on the machine PATH (the Node MSI adds it for all users),
+       or replace with a full path like C:\Program Files\nodejs\node.exe -->
+  <executable>@NODE_EXE@</executable>
+  <arguments>node_modules\next\dist\bin\next start -p @PORT@</arguments>
+  <workingdirectory>@WORKDIR@</workingdirectory>
+
+  <!-- Automatic = start at boot (not just at user login, unlike macOS launchd). -->
+  <startmode>Automatic</startmode>
+
+  <!-- KeepAlive equivalent: restart on crash after a short delay. -->
+  <onfailure action="restart" delay="10 sec" />
+  <resetfailure>1 hour</resetfailure>
+
+  <!-- Cap disk use: roll by size, keep a bounded number of files. -->
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+
+  <!-- Low-privilege gMSA (domain-joined host) — no password stored anywhere. -->
+  <serviceaccount>
+    <username>@SERVICE_ACCOUNT@</username>
+    <allowservicelogonright>true</allowservicelogonright>
+  </serviceaccount>
+
+  <!-- Non-secret runtime config. Secrets come from machine env (see header). -->
+  <env name="NODE_ENV" value="production" />
+  <env name="PORT" value="@PORT@" />
+  <!-- Behind IIS/ARR the request arrives as 127.0.0.1:3737; AUTH_URL pins the
+       real external origin so OAuth callbacks aren't generated for loopback. -->
+  <env name="AUTH_TRUST_HOST" value="true" />
+  <env name="AUTH_URL" value="@AUTH_URL@" />
+</service>

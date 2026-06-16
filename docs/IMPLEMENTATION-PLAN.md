@@ -47,14 +47,16 @@
 - [x] Проаналізовано → **неможливо** (див. розділ 3). Дій з реалізації немає.
 
 ### Ціль 3 — Windows `ts1-core-dev04`
-- [ ] Ф.0 Передумови (Node LTS, git, `npm ci && build`, сервіс-акаунт/gMSA)
-- [ ] Ф.1 DNS + HTTPS + встановити URL Rewrite + ARR
-- [ ] Ф.2 Reverse proxy + SSE-тюнінг (charset/buffer=0/compression off/timeout)
-- [ ] Ф.3 Служба WinSW (`prdash.xml`, `startmode=Automatic`, onfailure restart, env)
-- [ ] Ф.4 Токени/секрети (перехідний PAT-міст → per-user OAuth)
-- [ ] Ф.5 `data\` persistence, бекап, firewall (443 in, 3737 closed, 1 worker)
-- [ ] Ф.6 PowerShell: `install-service.ps1` / `redeploy.ps1` / `uninstall-service.ps1`
-- [ ] Ф.7 Верифікація (reboot-старт, авто-рестарт, SSE end-to-end, OAuth-callback)
+Артефакти готові в гілці; решта — серверні операції на самому `ts1-core-dev04` (доступ потрібен).
+- [ ] Ф.0 Передумови (Node 24.14.1, git, `npm ci && build`, gMSA) — **сервер-опс**
+- [ ] Ф.1 DNS + HTTPS + URL Rewrite + ARR — **сервер-опс** (розблоковує реєстрацію OAuth)
+- [x] Ф.2 Reverse proxy + SSE-тюнінг — `web.config` (rule + compression off); charset-fix зроблено;
+  buffer=0/timeout — серверні ARR-налаштування, задокументовано в README/`web.config`
+- [x] Ф.3 Служба WinSW — `scripts/prdash.xml` (Automatic, onfailure restart, roll-логи, gMSA, env)
+- [x] Ф.4 Токени/секрети — OAuth (Ц.1) + секрети через **machine env** (не на диску); PAT-міст не потрібен
+- [~] Ф.5 persistence/бекап/firewall — політика задокументована (443 in, 3737 closed, 1 worker); застосування — **сервер-опс**
+- [x] Ф.6 PowerShell: `install-service.ps1` / `redeploy.ps1` / `uninstall-service.ps1` (WinSW-ідемпотентність)
+- [ ] Ф.7 Верифікація (reboot-старт, авто-рестарт, SSE end-to-end, OAuth-callback) — **сервер-опс**
 
 ---
 

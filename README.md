@@ -8,7 +8,7 @@ It shows an always-current list of PRs where you're involved (author or requeste
 - 💬 **unresolved comments** — how many threads still need to be resolved;
 - review state (approved / changes requested / review required), drafts, author, last update.
 
-Designed for a **single user**: tokens are stored locally in `config.json` (which is gitignored).
+**Multi-user**: each person signs in via **OAuth** (GitHub and/or GHE) and sees their own pull requests. Access tokens live in an encrypted session cookie — never in `config.json`, never in the browser.
 
 ## Tech stack
 
@@ -16,10 +16,10 @@ Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 · GitHub G
 
 ## How it works
 
-- One GraphQL request per host per refresh (two searches — `author:@me` + `review-requested:@me`, merged via aliases). Cheap on rate limit (~1 point).
-- Tokens live **only on the server** (route handlers). They never reach the browser.
-- The "already seen" state is stored in `data/state.json` (also gitignored), so new-comment detection survives reloads and switching browsers.
-- A **single server-side poller** queries GitHub every `pollIntervalSeconds`, regardless of how many tabs are open. Each open tab subscribes to a **Server-Sent Events** stream (`/api/stream`) and receives updates the moment the poller sees a real change — no client-side polling, no manual refresh. EventSource auto-reconnects on transient drops; a focus/visibility wake-up triggers a one-shot fetch as a safety net after laptop sleep.
+- One GraphQL request per host per refresh (`author:@me` + `review-requested:@me` + any `team-review-requested:` searches, merged via aliases). Cheap on rate limit (~1 point on GHE).
+- Each user authenticates via **OAuth Authorization Code** (web-redirect — credentials are entered on github.com / the GHE tenant, never here). Their tokens are held in an **encrypted (JWE) session cookie** and used only server-side; the browser never sees them.
+- The "already seen" state lives in `data/state.json` (gitignored), namespaced per session, so new-comment detection survives reloads.
+- A **per-user server-side poller** queries GitHub every `pollIntervalSeconds` using that session's tokens. Each open tab subscribes to a **Server-Sent Events** stream (`/api/stream`) on its own channel and receives updates the moment the poller sees a real change — no client-side polling, no manual refresh. EventSource auto-reconnects on transient drops; a focus/visibility wake-up triggers a one-shot fetch as a safety net after laptop sleep.
 
 ## Setup
 
@@ -29,7 +29,7 @@ Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 · GitHub G
    cp config.example.json config.json
    ```
 
-2. Edit `config.json` — add your hosts, repositories and tokens.
+2. Edit `config.json` — list the hosts, their repositories and which OAuth provider authenticates each. `config.json` holds **no credentials**; tokens come from each user's login.
 
    ```jsonc
    {
@@ -38,13 +38,13 @@ Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 · GitHub G
        {
          "label": "GitHub",
          "graphqlUrl": "https://api.github.com/graphql",
-         "token": "gh",
+         "oauthProvider": "github",
          "repos": ["owner/repo-1", "owner/repo-2"]
        },
        {
          "label": "Creatio GHE",
          "graphqlUrl": "https://api.creatio.ghe.com/graphql",
-         "token": "gh",
+         "oauthProvider": "ghe",
          "repos": ["org/repo-a"]
        }
      ]
@@ -53,25 +53,38 @@ Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 · GitHub G
 
    **Host fields**
 
-   | Field        | Description |
-   | ------------ | ----------- |
-   | `label`      | Name shown in the UI (host badge and host filter). |
-   | `graphqlUrl` | GraphQL endpoint. github.com → `https://api.github.com/graphql`; GitHub Enterprise Cloud with data residency (`*.ghe.com`) → `https://api.<tenant>.ghe.com/graphql`; GitHub Enterprise Server → `https://<host>/api/graphql`. |
-   | `token`      | How to obtain the token (see below). |
-   | `repos`      | Repositories in `owner/name` form. |
+   | Field           | Description |
+   | --------------- | ----------- |
+   | `label`         | Name shown in the UI (host badge and host filter). |
+   | `graphqlUrl`    | GraphQL endpoint. github.com → `https://api.github.com/graphql`; GitHub Enterprise Cloud with data residency (`*.ghe.com`) → `https://api.<tenant>.ghe.com/graphql`; GitHub Enterprise Server → `https://<host>/api/graphql`. |
+   | `oauthProvider` | Provider id — maps to the `<PREFIX>_OAUTH_*` env vars (e.g. `"github"` → `GITHUB_OAUTH_*`). The OAuth authorize/token endpoints are derived from `graphqlUrl`. |
+   | `repos`         | Repositories in `owner/name` form. |
 
-   **Ways to set `token`**
+3. **Register an OAuth App** on each host and wire up the environment.
 
-   - `"gh"` — take the token from the [`gh` CLI](https://cli.github.com/). The host is derived from `graphqlUrl`, so it runs `gh auth token --hostname <host>` and works for both github.com and a GHE host you're logged into (`gh auth login --hostname <host>`).
-   - `"env:GHE_TOKEN"` — read from an env variable (e.g. from `.env.local`).
-   - `"ghp_..."` — put the token inline (a string in `config.json`, which isn't committed).
+   For each host, register a (classic) OAuth App with the callback
+   `https://<your-host>/api/auth/callback/<oauthProvider>` and scopes
+   **`repo`** (private PRs) + **`read:org`** (team-requested reviews). On a
+   data-residency GHE tenant this must be done by an **enterprise owner**, and
+   the server's egress IP must be allow-listed (IdP Conditional Access / IP allow list).
 
-   The token needs a Personal Access Token with the **`repo` scope** (for private repositories). For GitHub Enterprise, use a token on that host.
+   Then set environment variables (e.g. in `.env.local` for dev):
 
-3. (Optional) If you use `env:`, create `.env.local`:
+   | Variable | Purpose |
+   | -------- | ------- |
+   | `AUTH_SECRET` | Secret used to encrypt session cookies (any long random string). **Required.** |
+   | `AUTH_URL` | Public origin for OAuth callbacks, e.g. `https://prdash.creatio`. Required behind a reverse proxy; falls back to the request origin locally. |
+   | `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | Credentials for the `github` provider. |
+   | `GHE_OAUTH_CLIENT_ID` / `GHE_OAUTH_CLIENT_SECRET` | Credentials for the `ghe` provider. |
+   | `<PREFIX>_OAUTH_SCOPES` | Optional; overrides the default `repo read:org`. |
 
    ```bash
-   echo 'GHE_TOKEN=your_ghe_token' > .env.local
+   cat > .env.local <<'ENV'
+   AUTH_SECRET=$(openssl rand -hex 32)
+   AUTH_URL=http://localhost:3737
+   GITHUB_OAUTH_CLIENT_ID=...
+   GITHUB_OAUTH_CLIENT_SECRET=...
+   ENV
    ```
 
 ## Run
@@ -112,36 +125,85 @@ tail -f ~/Library/Logs/github-pr-manager.err.log
 ```
 
 Notes:
-- The token is resolved server-side. For `"token": "gh"` the service runs
-  `gh auth token --hostname <host>`, so stay logged in via the `gh` CLI.
 - The service starts at **login**, not at the boot screen — open your laptop,
   log in, and the dashboard is already running.
+
+### Windows (WinSW behind IIS)
+
+On a shared Windows server the dashboard runs as a [WinSW](https://github.com/winsw/winsw)
+service bound to `127.0.0.1:3737`, with **IIS + URL Rewrite + ARR** terminating
+TLS on 443 and reverse-proxying to it. Unlike the macOS LaunchAgent, the service
+starts at **boot** (not login).
+
+Prerequisites: Node on the machine PATH; IIS with **URL Rewrite** and **ARR**
+(enable ARR proxy mode); a DNS name + TLS cert bound in IIS; a domain **gMSA**
+service account; the OAuth secrets set as **machine** environment variables
+(so they're never on disk):
+
+```powershell
+[Environment]::SetEnvironmentVariable('AUTH_SECRET', '<random>', 'Machine')
+[Environment]::SetEnvironmentVariable('GITHUB_OAUTH_CLIENT_ID', '...', 'Machine')
+[Environment]::SetEnvironmentVariable('GITHUB_OAUTH_CLIENT_SECRET', '...', 'Machine')
+```
+
+Install (elevated PowerShell):
+
+```powershell
+.\scripts\install-service.ps1 `
+  -WinSWPath C:\tools\WinSW-x64.exe `
+  -ServiceAccount 'CONTOSO\prdash$' `
+  -AuthUrl 'https://prdash.creatio'
+```
+
+This builds the app, deploys `service\prdash.{exe,xml}`, and (idempotently)
+installs + starts the service. Then drop [`web.config`](web.config) at the IIS
+site root for the reverse-proxy rule. Management:
+
+```powershell
+.\scripts\redeploy.ps1            # after code changes: rebuild + restart
+.\scripts\uninstall-service.ps1   # stop and remove
+Get-Service github-pr-manager
+```
+
+**ARR + SSE — server-wide settings** (not in `web.config`): set ARR *Response
+buffer threshold* to `0`, raise the proxy *timeout* above the 25 s SSE heartbeat
+(e.g. `appcmd set config -section:system.webServer/proxy /timeout:"00:10:00"
+/commit:apphost`), and keep the site's app pool at **one worker** (the poller,
+broadcast and seen-state are per-process). Open 443 inbound; keep 3737 closed.
 
 ## Structure
 
 ```
 src/
   app/
-    page.tsx                  # dashboard (client): SSE subscription, filters, grouping
+    page.tsx                  # dashboard (client): SSE subscription, filters, 401→/login, logout
+    login/page.tsx            # login screen: per-host "Connect" buttons
     layout.tsx                # dark theme
     api/
-      pull-requests/route.ts  # GET — initial paint (returns the poller's cached snapshot)
-      stream/route.ts         # GET — Server-Sent Events live updates
+      pull-requests/route.ts  # GET — seeds the poller with session tokens, returns snapshot
+      stream/route.ts         # GET — per-session Server-Sent Events live updates
       seen/route.ts           # POST — mark a PR as seen
       config/route.ts         # GET — sanitized config (no tokens)
+      auth/
+        login/[provider]/     # GET — start OAuth (CSRF state + redirect to authorize)
+        callback/[provider]/  # GET — exchange code, fetch viewer, write session
+        logout/               # POST — clear session + stop the session's poller
   components/
     PrCard.tsx                # PR card
     CheckBadge.tsx            # CI check badge
   lib/
-    config.ts                 # loads config.json + resolves tokens
-    github.ts                 # GraphQL query and mapping
-    state.ts                  # data/state.json — "seen" state
-    poller.ts                 # singleton server-side poller (one per process)
-    broadcast.ts              # in-memory pub/sub feeding the SSE stream
+    session.ts                # encrypted (JWE) session cookie
+    oauth.ts                  # OAuth provider resolution (endpoints from graphqlUrl, env creds)
+    config.ts                 # loads config.json (hosts/repos + oauthProvider; no credentials)
+    github.ts                 # GraphQL query and mapping; teamCache keyed per token
+    state.ts                  # data/state.json — "seen" state, namespaced per session
+    poller.ts                 # per-user server-side pollers (Map<sid>), request-seeded tokens
+    broadcast.ts              # in-memory pub/sub, per-session channels
     types.ts                  # domain types
     format.ts                 # client-side helpers
 config.example.json           # config template (config.json is gitignored)
-scripts/                      # serve / install-service / redeploy / uninstall-service
+web.config                    # IIS reverse-proxy rule + SSE tuning (Windows)
+scripts/                      # *.sh (macOS launchd) · *.ps1 + prdash.xml (Windows WinSW)
 ```
 
 ## Notes
