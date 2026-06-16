@@ -10,6 +10,7 @@ import type {
   SaveSettingsResult,
   Settings,
 } from "../shared/types";
+import { ensureCliPath } from "./cli-path";
 import { validateExternalUrl, validateSeenItems } from "./ipc-validation";
 import { Poller } from "./poller";
 import { loadSettings, persistSettings, seenStatePath } from "./settings";
@@ -183,8 +184,14 @@ function registerIpc(): void {
 }
 
 void app.whenReady().then(() => {
+  // Must run before any `gh` invocation: a Finder/.app launch inherits a minimal
+  // PATH without Homebrew, so without this `gh` is not found and token
+  // resolution fails with a misleading "not signed in".
+  ensureCliPath();
+
   if (process.env.PRD_DEBUG) {
     console.log("[main] userData:", app.getPath("userData"));
+    console.log("[main] PATH:", process.env.PATH);
   }
 
   applyCsp();

@@ -49,9 +49,16 @@ export function resolveGhToken(graphqlUrl: string): string {
     if (!token) throw new Error("empty output");
     ghTokenCache.set(hostname, token);
     return token;
-  } catch {
+  } catch (e) {
+    // ENOENT means the `gh` binary wasn't found at all (not on PATH / not
+    // installed) — a different problem from being installed but not signed in.
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") {
+      throw new ConfigError(
+        `GitHub CLI (gh) was not found. Install it from https://cli.github.com and make sure it's on your PATH, then refresh.`,
+      );
+    }
     throw new ConfigError(
-      `Not signed in to ${hostname}. Run \`gh auth login --hostname ${hostname}\` (install the GitHub CLI from https://cli.github.com if needed), then refresh.`,
+      `Not signed in to ${hostname}. Run \`gh auth login --hostname ${hostname}\`, then refresh.`,
     );
   }
 }
