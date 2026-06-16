@@ -1,13 +1,13 @@
 <!--
   WinSW service definition template for the PR Dashboard (Windows).
 
-  This is the SOURCE template — install-service.ps1 substitutes the @TOKENS@
+  This is the SOURCE template - install-service.ps1 substitutes the @TOKENS@
   below and writes the deployed copy next to the WinSW binary. Do not run this
   file directly.
 
   Secrets are deliberately NOT in this file. AUTH_SECRET and the OAuth client
   secrets are read from MACHINE-level environment variables, which the service
-  inherits at start — so they never sit in plaintext on disk. Only non-secret
+  inherits at start - so they never sit in plaintext on disk. Only non-secret
   settings live here.
 -->
 <service>
@@ -34,7 +34,7 @@
     <keepFiles>8</keepFiles>
   </log>
 
-  <!-- Low-privilege gMSA (domain-joined host) — no password stored anywhere. -->
+  <!-- Low-privilege gMSA (domain-joined host) - no password stored anywhere. -->
   <serviceaccount>
     <username>@SERVICE_ACCOUNT@</username>
     <allowservicelogonright>true</allowservicelogonright>

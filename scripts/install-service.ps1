@@ -57,7 +57,7 @@ if (-not $SkipBuild) {
 # --- 2. Warn on missing secrets ------------------------------------------
 foreach ($name in 'AUTH_SECRET', 'GITHUB_OAUTH_CLIENT_ID', 'GITHUB_OAUTH_CLIENT_SECRET') {
   if (-not [Environment]::GetEnvironmentVariable($name, 'Machine')) {
-    Write-Warning "Machine env var '$name' is not set — the service will not authenticate until it is."
+    Write-Warning "Machine env var '$name' is not set - the service will not authenticate until it is."
   }
 }
 
@@ -80,7 +80,7 @@ Set-Content -Path $xmlPath -Value $template -Encoding UTF8
 
 # --- 4. Idempotent (re)install -------------------------------------------
 if (Get-Service -Name $ServiceId -ErrorAction SilentlyContinue) {
-  Write-Host "Existing service found — stopping and uninstalling..."
+  Write-Host "Existing service found - stopping and uninstalling..."
   & $exePath stop   2>$null
   & $exePath uninstall
   # The SCM removes a service asynchronously; a service can linger as
