@@ -16,6 +16,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { EncryptJWT, jwtDecrypt } from "jose";
 import { cookies } from "next/headers";
 
+import { isSecureDeployment } from "./oauth";
 import type { SessionPayload } from "./types";
 
 export const SESSION_COOKIE = "ghpr_session";
@@ -101,7 +102,7 @@ export async function writeSession(payload: SessionPayload): Promise<void> {
   const store = await cookies();
   store.set(SESSION_COOKIE, await encodeSession(payload), {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: isSecureDeployment(),
     sameSite: "lax",
     path: "/",
     maxAge: MAX_AGE_SECONDS,

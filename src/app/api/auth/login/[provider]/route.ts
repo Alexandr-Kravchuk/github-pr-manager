@@ -12,7 +12,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import { getHostByProvider } from "@/lib/config";
-import { callbackUrl, resolveProvider } from "@/lib/oauth";
+import { callbackUrl, isSecureDeployment, resolveProvider } from "@/lib/oauth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,7 +37,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ provider: strin
   const state = randomUUID();
   (await cookies()).set(`${STATE_COOKIE_PREFIX}${provider}`, state, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: isSecureDeployment(),
     sameSite: "lax",
     path: "/",
     maxAge: 600, // 10 minutes to complete the round-trip.

@@ -108,3 +108,13 @@ export function publicBaseUrl(req: Request): string {
 export function callbackUrl(req: Request, providerId: string): string {
   return `${publicBaseUrl(req)}/api/auth/callback/${providerId}`;
 }
+
+/**
+ * Whether the deployment is served over HTTPS — drives the `Secure` cookie flag.
+ * Tied to the scheme (AUTH_URL), NOT NODE_ENV: a production deployment over plain
+ * http (e.g. http://host:3737 on an internal network) must NOT mark cookies
+ * Secure, or the browser silently refuses to send them and login never sticks.
+ */
+export function isSecureDeployment(): boolean {
+  return (process.env.AUTH_URL ?? "").startsWith("https://");
+}
