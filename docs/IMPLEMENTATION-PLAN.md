@@ -51,9 +51,15 @@
 - [x] Проаналізовано → **неможливо** (див. розділ 3). Дій з реалізації немає.
 
 ### Ціль 3 — Windows `ts1-core-dev04`
-Артефакти готові в гілці; решта — серверні операції на самому `ts1-core-dev04` (доступ потрібен).
-- [ ] Ф.0 Передумови (Node 24.14.1, git, `npm ci && build`, gMSA) — **сервер-опс**
-- [ ] Ф.1 DNS + HTTPS + URL Rewrite + ARR — **сервер-опс** (розблоковує реєстрацію OAuth)
+> **⚠️ Знахідка 2026-06-16 (SSH-доступ є):** `ts1-core-dev04` — **спільний** сервер з чужими workload-ами:
+> 7 `node`-процесів + IIS-сайти `Default Web Site`, **`AutoTest` (вже на `*:443:ts1-core-dev04.tscrm.com`)**,
+> `Maintainer`(81), `Diagnostics`(82), FTP. Наслідки: (1) **потрібен окремий DNS-хост** (не `ts1-core-dev04.tscrm.com` —
+> 443 зайнято; новий сайт — host-header/SNI на 443 коексистує з AutoTest); (2) **enable ARR proxy — серверний global toggle**,
+> зачіпає всі сайти → робити лише з явним дозволом, обережно. Решта (новий сайт/біндинг/служба) — ізольовано.
+- [x] Ф.0 Передумови — на сервері вже є **Node 24.14.1**, git 2.52, IIS; код у `C:\apps\github-pr-manager`,
+  `npm ci` + `npm run build` зелені; **застосунок підтверджено запускається** (smoke на 127.0.0.1:3737:
+  `/login`+кнопка, gate 401, OAuth-redirect 307). gMSA — ще ні.
+- [ ] Ф.1 **окремий** DNS-хост + TLS-cert + увімкнути URL Rewrite/ARR — **сервер-опс + людські гейти**
 - [x] Ф.2 Reverse proxy + SSE-тюнінг — `web.config` (rule + compression off); charset-fix зроблено;
   buffer=0/timeout — серверні ARR-налаштування, задокументовано в README/`web.config`
 - [x] Ф.3 Служба WinSW — `scripts/prdash.xml` (Automatic, onfailure restart, roll-логи, gMSA, env)
