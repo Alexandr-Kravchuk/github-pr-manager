@@ -14,13 +14,13 @@ interface SeenEntry {
 }
 
 /**
- * State is namespaced by session id (`sid`): each logged-in user sees their own
- * pull requests, so their "seen" snapshots must not collide. Within a session
- * the cookie (and therefore the sid) is stable for ~30 days, so the NEW badges
- * persist across reloads; a fresh login after logout starts a clean slate.
+ * State is namespaced by a stable per-user key (see `sessionUserKey` — the
+ * viewer login, falling back to the session id): each user sees their own pull
+ * requests, so their "seen" snapshots must not collide, and the NEW badges
+ * survive logout/login rather than resetting with every new session.
  */
-type SessionState = Record<string, SeenEntry>;
-type StateFile = Record<string, SessionState>;
+type UserState = Record<string, SeenEntry>;
+type StateFile = Record<string, UserState>;
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const STATE_PATH = path.join(DATA_DIR, "state.json");
@@ -65,9 +65,9 @@ async function withState<T>(fn: (state: StateFile) => { value: T; dirty: boolean
  * First encounter of a PR creates a baseline (not highlighted as new), so a
  * "forest" of NEW badges doesn't light up on first run.
  */
-export async function applyActivity(sid: string, prs: PullRequest[]): Promise<void> {
+export async function applyActivity(userKey: string, prs: PullRequest[]): Promise<void> {
   await withState((file) => {
-    const state = (file[sid] ??= {});
+    const state = (file[userKey] ??= {});
     const now = new Date().toISOString();
     let dirty = false;
 
@@ -108,23 +108,14 @@ export interface SeenInput {
 }
 
 /** Updates a session's snapshot of the given PRs to the provided values (clears NEW). */
-export async function markSeen(sid: string, items: SeenInput[]): Promise<void> {
+export async function markSeen(userKey: string, items: SeenInput[]): Promise<void> {
   if (items.length === 0) return;
   await withState((file) => {
-    const state = (file[sid] ??= {});
+    const state = (file[userKey] ??= {});
     const now = new Date().toISOString();
     for (const item of items) {
       state[item.id] = { comments: item.comments, updatedAt: item.updatedAt, seenAt: now };
     }
     return { value: undefined, dirty: true };
-  });
-}
-
-/** Drops a session's seen-state entirely (e.g. on logout). */
-export async function dropState(sid: string): Promise<void> {
-  await withState((file) => {
-    const existed = sid in file;
-    if (existed) delete file[sid];
-    return { value: undefined, dirty: existed };
   });
 }

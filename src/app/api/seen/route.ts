@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/session";
+import { getSession, sessionUserKey } from "@/lib/session";
 import { markSeen, type SeenInput } from "@/lib/state";
 
 export const runtime = "nodejs";
@@ -35,6 +35,6 @@ export async function POST(req: Request) {
     )
     .map((it) => ({ id: it.id, comments: it.comments, updatedAt: it.updatedAt }));
 
-  await markSeen(session.sid, items);
+  await markSeen(sessionUserKey(session), items);
   return NextResponse.json({ ok: true, count: items.length });
 }

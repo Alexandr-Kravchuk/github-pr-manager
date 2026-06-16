@@ -310,9 +310,19 @@ export default function Dashboard() {
       {data?.errors?.map((e) => (
         <div
           key={e.hostLabel}
-          className="mb-2 rounded-lg border border-red-600/40 bg-red-950/30 p-3 text-sm text-red-200"
+          className="mb-2 flex flex-wrap items-center gap-x-2 rounded-lg border border-red-600/40 bg-red-950/30 p-3 text-sm text-red-200"
         >
-          <span className="font-semibold">{e.hostLabel}:</span> {e.message}
+          <span>
+            <span className="font-semibold">{e.hostLabel}:</span> {e.message}
+          </span>
+          {e.disconnected && e.provider && (
+            <a
+              href={`/api/auth/login/${e.provider}`}
+              className="rounded-md border border-red-500/50 px-2 py-0.5 font-medium text-red-100 hover:bg-red-900/40"
+            >
+              Reconnect →
+            </a>
+          )}
         </div>
       ))}
 

@@ -19,7 +19,7 @@
 
 import { publish } from "./broadcast";
 import { ConfigError, readConfig } from "./config";
-import { fetchHost } from "./github";
+import { fetchHost, GitHubAuthError } from "./github";
 import { applyActivity } from "./state";
 import type {
   DashboardResponse,
@@ -32,8 +32,16 @@ import { appVersion } from "./version";
 
 interface UserPoller {
   sid: string;
+  /** Stable identity key for seen-state namespacing (see sessionUserKey). */
+  userKey: string;
   /** provider id -> access token; refreshed on every authenticated request. */
   tokens: Record<string, string>;
+  /**
+   * provider id -> the exact token value that was rejected with 401. Keeps us
+   * from re-probing a revoked token every page load; cleared when the user
+   * reconnects (the cookie carries a different token value).
+   */
+  deadTokens: Record<string, string>;
   started: boolean;
   timer: NodeJS.Timeout | null;
   intervalMs: number;
@@ -63,7 +71,9 @@ function createPoller(sid: string): UserPoller {
   });
   return {
     sid,
+    userKey: sid,
     tokens: {},
+    deadTokens: {},
     started: false,
     timer: null,
     intervalMs: 60_000,
@@ -174,15 +184,24 @@ async function tick(p: UserPoller): Promise<number> {
       allPrs.push(...result.value.pullRequests);
       if (host.repos.length > 0) rateLimits.push(result.value.rateLimit);
     } else {
+      const reason = result.reason;
+      const isAuth = reason instanceof GitHubAuthError;
+      if (isAuth && host.oauthProvider) {
+        // Stop hammering with a revoked token: remember the dead value and drop
+        // it until the user reconnects with a fresh one.
+        p.deadTokens[host.oauthProvider] = host.token ?? "";
+        delete p.tokens[host.oauthProvider];
+      }
       errors.push({
         hostLabel: host.label,
-        message: result.reason instanceof Error ? result.reason.message : String(result.reason),
+        message: reason instanceof Error ? reason.message : String(reason),
+        ...(isAuth ? { disconnected: true, provider: host.oauthProvider } : {}),
       });
     }
   });
 
   try {
-    await applyActivity(p.sid, allPrs);
+    await applyActivity(p.userKey, allPrs);
   } catch (e) {
     console.error("[poller] applyActivity failed:", e);
   }
@@ -235,14 +254,29 @@ function scheduleNext(p: UserPoller, nextMs?: number): void {
  * Called from the authenticated `/api/pull-requests` route, which has the
  * cookie the timer-driven tick can't read. Safe to call on every request.
  */
-export function seedPoller(identity: { sid: string; tokens: Record<string, string> }): void {
+export function seedPoller(identity: {
+  sid: string;
+  userKey: string;
+  tokens: Record<string, string>;
+}): void {
   const reg = registry();
   let p = reg.get(identity.sid);
   if (!p) {
     p = createPoller(identity.sid);
     reg.set(identity.sid, p);
   }
-  p.tokens = identity.tokens;
+  p.userKey = identity.userKey;
+
+  // Refresh tokens, but don't re-add a token we already know is revoked. If the
+  // cookie now carries a *different* token for that provider, the user has
+  // reconnected — clear the dead marker and accept it.
+  const next: Record<string, string> = {};
+  for (const [provider, token] of Object.entries(identity.tokens)) {
+    if (p.deadTokens[provider] === token) continue;
+    delete p.deadTokens[provider];
+    next[provider] = token;
+  }
+  p.tokens = next;
 
   if (!p.started) {
     p.started = true;

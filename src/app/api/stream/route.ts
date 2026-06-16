@@ -18,7 +18,7 @@
 
 import { subscribe } from "@/lib/broadcast";
 import { getConfigError, getSnapshot, seedPoller } from "@/lib/poller";
-import { getSession, sessionTokens } from "@/lib/session";
+import { getSession, sessionTokens, sessionUserKey } from "@/lib/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,7 +46,7 @@ export async function GET(req: Request) {
   const sid = session.sid;
 
   // Opening a tab is also a valid trigger to (re)start the session's poller.
-  seedPoller({ sid, tokens: sessionTokens(session) });
+  seedPoller({ sid, userKey: sessionUserKey(session), tokens: sessionTokens(session) });
 
   let unsubscribe: (() => void) | null = null;
   let heartbeat: NodeJS.Timeout | null = null;

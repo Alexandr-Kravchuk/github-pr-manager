@@ -165,6 +165,10 @@ export interface PullRequest {
 export interface HostError {
   hostLabel: string;
   message: string;
+  /** True when the host's token was rejected (401) — the user must reconnect. */
+  disconnected?: boolean;
+  /** OAuth provider id for the reconnect link, when `disconnected`. */
+  provider?: string;
 }
 
 /** GraphQL rate-limit info at request time. */

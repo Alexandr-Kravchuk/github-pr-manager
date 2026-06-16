@@ -145,6 +145,9 @@ export interface HostFetchResult {
   rateLimit: RateLimitInfo;
 }
 
+/** Thrown when the host rejects the token (HTTP 401) — i.e. it was revoked or expired. */
+export class GitHubAuthError extends Error {}
+
 // --- Check-state normalization ---
 
 const STATE_WEIGHT: Record<CheckState, number> = {
@@ -453,6 +456,9 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
+    if (res.status === 401) {
+      throw new GitHubAuthError("Token rejected (HTTP 401) — revoked or expired. Reconnect to continue.");
+    }
     throw new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 200)}` : ""}`);
   }
 

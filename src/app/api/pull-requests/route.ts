@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { awaitFirstTick, getConfigError, getSnapshot, seedPoller } from "@/lib/poller";
-import { getSession, sessionTokens } from "@/lib/session";
+import { getSession, sessionTokens, sessionUserKey } from "@/lib/session";
 
 // Always fresh data — and we drive that freshness via the per-user poller
 // rather than refetching from GitHub on each browser request.
@@ -21,7 +21,11 @@ export async function GET() {
     return NextResponse.json({ error: "Not authenticated.", kind: "auth" }, { status: 401 });
   }
 
-  seedPoller({ sid: session.sid, tokens: sessionTokens(session) });
+  seedPoller({
+    sid: session.sid,
+    userKey: sessionUserKey(session),
+    tokens: sessionTokens(session),
+  });
   await awaitFirstTick(session.sid);
 
   const configError = getConfigError(session.sid);

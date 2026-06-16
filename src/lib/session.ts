@@ -64,6 +64,21 @@ export async function decodeSession(token: string): Promise<SessionPayload | nul
   }
 }
 
+/**
+ * A stable identity key for namespacing seen-state, so the NEW badges survive
+ * logout/login and adding a second provider — unlike `sid`, which is fresh per
+ * login. Prefers the github.com login, then any provider with a known login;
+ * falls back to the ephemeral `sid` only if no viewer login resolved (e.g. a
+ * GHE host whose viewer fetch was IP-blocked).
+ */
+export function sessionUserKey(session: SessionPayload): string {
+  const entries = Object.entries(session.providers);
+  const preferred =
+    entries.find(([id, p]) => id === "github" && p.login) ??
+    entries.find(([, p]) => p.login);
+  return preferred ? `${preferred[0]}:${preferred[1].login}` : session.sid;
+}
+
 /** Flattens a session's providers into a `{ providerId: accessToken }` map for the poller. */
 export function sessionTokens(session: SessionPayload): Record<string, string> {
   const tokens: Record<string, string> = {};

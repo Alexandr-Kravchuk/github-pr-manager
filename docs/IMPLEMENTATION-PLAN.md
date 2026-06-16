@@ -39,9 +39,13 @@
 > обов'язково за ARR), `GITHUB_OAUTH_CLIENT_ID`/`GITHUB_OAUTH_CLIENT_SECRET`, (пізніше) `GHE_OAUTH_CLIENT_ID`/`_SECRET`,
 > опційно `*_OAUTH_SCOPES`. `config.json`: `token` більше не credential — замість нього `oauthProvider` (`"github"`/`"ghe"`).
 >
-> **Свідомі компроміси v1:** seen-state ключується за `sid` (нова сесія після logout → чистий стан; прийнятно за 30-дн. cookie);
-> merge двох провайдерів у callback має теоретичну гонку при паралельних логінах (послідовні логіни — норма; per-host cookies — мітигація на потім);
-> 401 від GitHub (revoke) поки показується як host-error, без авто-«disconnected». `loadConfig`/`resolveToken` лишились як dead-code для перехідного PAT-мосту.
+> **Хардненг (зроблено):** 401 від GitHub (revoke/expire) → хост позначається `disconnected`, токен викидається з поллера (`deadTokens`,
+> без повторного hammering), UI показує «Reconnect →»; reconnect із новим токеном автоматично знімає dead-стан (пункт 7).
+> seen-state ключується за **стабільною ідентичністю** (`sessionUserKey`: github-login, fallback на `sid`) → NEW переживає logout/login.
+> Logout зупиняє поллер сесії (пункт 6).
+>
+> **Свідомо відкладено:** per-host cookies (пункт 8) — не потрібні поки активний один провайдер (github.com): merge-гонки немає,
+> до 4KB-стелі далеко. Робити при вмиканні GHE. `loadConfig`/`resolveToken` лишились як dead-code для можливого PAT-мосту.
 
 ### Ціль 2 — GitHub Pages
 - [x] Проаналізовано → **неможливо** (див. розділ 3). Дій з реалізації немає.
