@@ -142,6 +142,10 @@ function readAndValidate(): AppConfig {
     );
   }
 
+  // Strip a UTF-8 BOM — Windows editors (Notepad) and PowerShell's
+  // `Set-Content -Encoding UTF8` prepend one, and JSON.parse chokes on it.
+  text = text.replace(/^\uFEFF/, "");
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
