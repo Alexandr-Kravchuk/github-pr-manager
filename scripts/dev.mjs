@@ -9,7 +9,11 @@ import net from "node:net";
 import process from "node:process";
 
 const DEV_PORT = 5173;
-const DEV_URL = `http://localhost:${DEV_PORT}`;
+// Pin to IPv4 so the readiness probe and Electron hit the same address Vite
+// binds — Vite defaults to "localhost" which can resolve to IPv6 ::1, while a
+// 127.0.0.1 probe would then never connect.
+const DEV_HOST = "127.0.0.1";
+const DEV_URL = `http://${DEV_HOST}:${DEV_PORT}`;
 const children = [];
 
 function run(command, args, extraEnv = {}) {
@@ -26,7 +30,7 @@ function waitForPort(port, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
     const tryConnect = () => {
-      const socket = net.connect(port, "127.0.0.1");
+      const socket = net.connect(port, DEV_HOST);
       socket.once("connect", () => {
         socket.destroy();
         resolve();
@@ -54,7 +58,16 @@ function shutdown(code = 0) {
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
-const vite = run("npx", ["vite", "--config", "vite.renderer.config.ts", "--port", String(DEV_PORT), "--strictPort"]);
+const vite = run("npx", [
+  "vite",
+  "--config",
+  "vite.renderer.config.ts",
+  "--host",
+  DEV_HOST,
+  "--port",
+  String(DEV_PORT),
+  "--strictPort",
+]);
 vite.on("exit", (code) => shutdown(code ?? 0));
 
 try {
@@ -72,6 +85,7 @@ tscMain.on("exit", (code) => {
     shutdown(code ?? 1);
     return;
   }
+  console.log(`[dev] Vite ready at ${DEV_URL}, launching Electron…`);
   const electron = run("npx", ["electron", "."], { ELECTRON_RENDERER_URL: DEV_URL });
   electron.on("exit", (electronCode) => shutdown(electronCode ?? 0));
 });
