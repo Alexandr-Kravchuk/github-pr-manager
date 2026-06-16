@@ -1,27 +1,39 @@
 /**
- * Singleton server-side poller.
+ * Per-user server-side pollers (Tier B multi-user).
  *
- * Replaces per-tab browser polling: one process polls GitHub, all open tabs
- * receive updates via SSE (see `broadcast.ts` and the `/api/stream` route).
+ * Each logged-in session (`sid`) gets its own poller: it queries GitHub with
+ * that session's OAuth tokens and therefore sees that user's pull requests.
+ * Results are pushed to the session's own SSE channel (see `broadcast.ts`).
  *
- * Lifecycle:
- *  - `ensurePollerStarted()` is called from the first request that needs data
- *    (either `/api/pull-requests` or `/api/stream`). It's a no-op on subsequent
- *    calls.
- *  - The poller never stops on its own — it lives for the whole process. On
- *    SIGTERM the OS will reclaim the timer.
- *  - State (started flag, timer, latest snapshot) lives on `globalThis` so
- *    that Next.js dev-mode HMR doesn't accidentally start a second poller.
+ * Request-seeded tokens (the crux of multi-user). A poller's `tick()` runs on a
+ * timer with no request context, so it can't read the session cookie itself.
+ * Instead the authenticated `/api/pull-requests` route — which *does* have the
+ * cookie — calls `seedPoller()` to drop the session's tokens into the registry
+ * and start (or refresh) that session's loop. The loop then reuses those tokens
+ * until the next authenticated request refreshes them or `dropPollerIdentity()`
+ * (logout) removes the session.
+ *
+ * State lives on `globalThis` so Next.js dev-mode HMR doesn't spin up a second
+ * registry.
  */
 
 import { publish } from "./broadcast";
-import { ConfigError, loadConfig } from "./config";
+import { ConfigError, readConfig } from "./config";
 import { fetchHost } from "./github";
 import { applyActivity } from "./state";
-import type { DashboardResponse, HostError, PullRequest, RateLimitInfo } from "./types";
+import type {
+  DashboardResponse,
+  HostConfig,
+  HostError,
+  PullRequest,
+  RateLimitInfo,
+} from "./types";
 import { appVersion } from "./version";
 
-interface PollerState {
+interface UserPoller {
+  sid: string;
+  /** provider id -> access token; refreshed on every authenticated request. */
+  tokens: Record<string, string>;
   started: boolean;
   timer: NodeJS.Timeout | null;
   intervalMs: number;
@@ -37,27 +49,30 @@ interface PollerState {
 }
 
 const G = globalThis as typeof globalThis & {
-  __ghprPoller?: PollerState;
+  __ghprPollers?: Map<string, UserPoller>;
 };
 
-function getState(): PollerState {
-  if (!G.__ghprPoller) {
-    let resolveFirst: () => void = () => {};
-    const firstReady = new Promise<void>((resolve) => {
-      resolveFirst = resolve;
-    });
-    G.__ghprPoller = {
-      started: false,
-      timer: null,
-      intervalMs: 60_000,
-      currentSnapshot: null,
-      currentConfigError: null,
-      lastHash: "",
-      firstReady,
-      resolveFirst,
-    };
-  }
-  return G.__ghprPoller;
+function registry(): Map<string, UserPoller> {
+  return (G.__ghprPollers ??= new Map());
+}
+
+function createPoller(sid: string): UserPoller {
+  let resolveFirst: () => void = () => {};
+  const firstReady = new Promise<void>((resolve) => {
+    resolveFirst = resolve;
+  });
+  return {
+    sid,
+    tokens: {},
+    started: false,
+    timer: null,
+    intervalMs: 60_000,
+    currentSnapshot: null,
+    currentConfigError: null,
+    lastHash: "",
+    firstReady,
+    resolveFirst,
+  };
 }
 
 /**
@@ -83,20 +98,12 @@ function hashSnapshot(s: DashboardResponse): string {
     p.hasUnaddressedChangeRequest,
     p.isDraft,
   ]);
-  return JSON.stringify({
-    prs: lite,
-    errors: s.errors,
-    version: s.version,
-  });
+  return JSON.stringify({ prs: lite, errors: s.errors, version: s.version });
 }
 
 /**
  * Computes how long to wait before the next tick based on rate-limit state.
- *
- * For each host we have `remaining` points and a `resetAt` timestamp. The
- * safe number of ticks until reset is `floor(remaining / cost)`. If we have
- * fewer safe ticks than natural ticks at the base interval we back off so we
- * don't exceed the budget. Capped at 1 h; never goes below the base interval.
+ * Capped at 1 h; never goes below the base interval.
  */
 function computeNextIntervalMs(rateLimits: RateLimitInfo[], baseMs: number): number {
   let nextMs = baseMs;
@@ -105,7 +112,6 @@ function computeNextIntervalMs(rateLimits: RateLimitInfo[], baseMs: number): num
     const secondsUntilReset = Math.max(0, (new Date(rl.resetAt).getTime() - Date.now()) / 1000);
     const safeTicks = Math.floor(rl.remaining / rl.cost);
     if (safeTicks <= 0) {
-      // Exhausted — sleep until the reset window, minimum 60 s.
       const backoff = Math.max(60_000, secondsUntilReset * 1000);
       if (backoff > nextMs) {
         console.warn(
@@ -114,7 +120,6 @@ function computeNextIntervalMs(rateLimits: RateLimitInfo[], baseMs: number): num
         nextMs = backoff;
       }
     } else {
-      // Spread remaining ticks evenly across the reset window.
       const safeMs = (secondsUntilReset / safeTicks) * 1000;
       if (safeMs > nextMs) {
         console.warn(
@@ -127,37 +132,44 @@ function computeNextIntervalMs(rateLimits: RateLimitInfo[], baseMs: number): num
   return Math.min(nextMs, 3_600_000);
 }
 
-async function tick(): Promise<number> {
-  const state = getState();
+async function tick(p: UserPoller): Promise<number> {
+  // The session may have been dropped (logout) while a tick was scheduled.
+  if (!registry().has(p.sid)) return p.intervalMs;
 
   let config;
   try {
-    config = loadConfig();
-    // Recovering from a previous config error — clear it for new clients
-    // and broadcast a snapshot once we have one.
-    state.currentConfigError = null;
+    config = readConfig();
+    p.currentConfigError = null;
   } catch (e) {
     if (e instanceof ConfigError) {
-      if (state.currentConfigError !== e.message) {
-        state.currentConfigError = e.message;
-        publish("config-error", e.message);
+      if (p.currentConfigError !== e.message) {
+        p.currentConfigError = e.message;
+        publish(p.sid, "config-error", e.message);
       }
-      state.resolveFirst();
-      return state.intervalMs;
+      p.resolveFirst();
+      return p.intervalMs;
     }
-    console.error("[poller] loadConfig failed:", e);
-    state.resolveFirst();
-    return state.intervalMs;
+    console.error("[poller] readConfig failed:", e);
+    p.resolveFirst();
+    return p.intervalMs;
+  }
+
+  // Only poll hosts whose provider this session has connected — inject the
+  // session token into a per-request host copy. Hosts the user hasn't linked
+  // are silently skipped (not an error).
+  const authedHosts: HostConfig[] = [];
+  for (const host of config.hosts) {
+    const token = host.oauthProvider ? p.tokens[host.oauthProvider] : undefined;
+    if (token) authedHosts.push({ ...host, token });
   }
 
   const allPrs: PullRequest[] = [];
   const errors: HostError[] = [];
   const rateLimits: RateLimitInfo[] = [];
 
-  // Hosts are queried in parallel; one failing doesn't break the rest.
-  const results = await Promise.allSettled(config.hosts.map((h) => fetchHost(h)));
+  const results = await Promise.allSettled(authedHosts.map((h) => fetchHost(h)));
   results.forEach((result, i) => {
-    const host = config.hosts[i];
+    const host = authedHosts[i];
     if (result.status === "fulfilled") {
       allPrs.push(...result.value.pullRequests);
       if (host.repos.length > 0) rateLimits.push(result.value.rateLimit);
@@ -170,7 +182,7 @@ async function tick(): Promise<number> {
   });
 
   try {
-    await applyActivity(allPrs);
+    await applyActivity(p.sid, allPrs);
   } catch (e) {
     console.error("[poller] applyActivity failed:", e);
   }
@@ -190,73 +202,84 @@ async function tick(): Promise<number> {
   };
 
   const hash = hashSnapshot(snapshot);
-  state.currentSnapshot = snapshot;
-  if (hash !== state.lastHash) {
-    state.lastHash = hash;
-    publish("snapshot", JSON.stringify(snapshot));
+  p.currentSnapshot = snapshot;
+  if (hash !== p.lastHash) {
+    p.lastHash = hash;
+    publish(p.sid, "snapshot", JSON.stringify(snapshot));
   }
-  state.resolveFirst();
+  p.resolveFirst();
 
-  return computeNextIntervalMs(rateLimits, state.intervalMs);
+  return computeNextIntervalMs(rateLimits, p.intervalMs);
 }
 
-function scheduleNext(nextMs?: number): void {
-  const state = getState();
-  const delay = nextMs ?? state.intervalMs;
-  state.timer = setTimeout(async () => {
+function scheduleNext(p: UserPoller, nextMs?: number): void {
+  // Don't reschedule a poller that's been dropped.
+  if (!registry().has(p.sid)) return;
+  const delay = nextMs ?? p.intervalMs;
+  p.timer = setTimeout(async () => {
     let next: number | undefined;
     try {
-      next = await tick();
+      next = await tick(p);
     } catch (e) {
       console.error("[poller] tick failed:", e);
     } finally {
-      scheduleNext(next);
+      scheduleNext(p, next);
     }
   }, delay);
-  // Don't keep the Node event loop alive just for the poller — if everything
-  // else has exited (tests, SIGTERM handlers), let the process die.
-  state.timer.unref?.();
+  // Don't keep the Node event loop alive just for the poller.
+  p.timer.unref?.();
 }
 
 /**
- * Starts the singleton poller. Safe to call repeatedly — the second and
- * subsequent calls are no-ops.
+ * Seeds (or refreshes) a session's tokens and ensures its poller is running.
+ * Called from the authenticated `/api/pull-requests` route, which has the
+ * cookie the timer-driven tick can't read. Safe to call on every request.
  */
-export function ensurePollerStarted(): void {
-  const state = getState();
-  if (state.started) return;
-  state.started = true;
-
-  // Read the desired interval from config; tolerate missing config (the
-  // first tick will surface the same error to clients).
-  try {
-    const cfg = loadConfig();
-    state.intervalMs = Math.max(10, cfg.pollIntervalSeconds) * 1000;
-  } catch {
-    // Stick with the default; tick() will publish the config-error.
+export function seedPoller(identity: { sid: string; tokens: Record<string, string> }): void {
+  const reg = registry();
+  let p = reg.get(identity.sid);
+  if (!p) {
+    p = createPoller(identity.sid);
+    reg.set(identity.sid, p);
   }
+  p.tokens = identity.tokens;
 
-  // First tick is fire-and-forget; promise hooks (awaitFirstTick) handle
-  // any caller that needs to wait for it.
-  tick()
-    .then((ms) => scheduleNext(ms))
-    .catch((e) => {
-      console.error("[poller] initial tick failed:", e);
-      scheduleNext();
-    });
+  if (!p.started) {
+    p.started = true;
+    try {
+      p.intervalMs = Math.max(10, readConfig().pollIntervalSeconds) * 1000;
+    } catch {
+      // Stick with the default; tick() will publish the config-error.
+    }
+    tick(p)
+      .then((ms) => scheduleNext(p, ms))
+      .catch((e) => {
+        console.error("[poller] initial tick failed:", e);
+        scheduleNext(p);
+      });
+  }
 }
 
-/** Latest snapshot, or null if no successful tick has happened yet. */
-export function getSnapshot(): DashboardResponse | null {
-  return getState().currentSnapshot;
+/** Stops and forgets a session's poller (logout, or token revocation). */
+export function dropPollerIdentity(sid: string): void {
+  const reg = registry();
+  const p = reg.get(sid);
+  if (!p) return;
+  if (p.timer) clearTimeout(p.timer);
+  reg.delete(sid);
 }
 
-/** Current config error, or null if config is OK. */
-export function getConfigError(): string | null {
-  return getState().currentConfigError;
+/** Latest snapshot for a session, or null if no successful tick yet. */
+export function getSnapshot(sid: string): DashboardResponse | null {
+  return registry().get(sid)?.currentSnapshot ?? null;
 }
 
-/** Resolves once the first tick has completed (snapshot OR config error). */
-export function awaitFirstTick(): Promise<void> {
-  return getState().firstReady;
+/** Current config error for a session, or null if config is OK / unknown. */
+export function getConfigError(sid: string): string | null {
+  return registry().get(sid)?.currentConfigError ?? null;
+}
+
+/** Resolves once a session's first tick has completed; resolves immediately if unknown. */
+export function awaitFirstTick(sid: string): Promise<void> {
+  return registry().get(sid)?.firstReady ?? Promise.resolve();
 }

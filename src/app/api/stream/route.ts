@@ -17,7 +17,8 @@
  */
 
 import { subscribe } from "@/lib/broadcast";
-import { ensurePollerStarted, getConfigError, getSnapshot } from "@/lib/poller";
+import { getConfigError, getSnapshot, seedPoller } from "@/lib/poller";
+import { getSession, sessionTokens } from "@/lib/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,7 +35,18 @@ function frame(type: string, data: string): Uint8Array {
 const HEARTBEAT_MS = 25_000;
 
 export async function GET(req: Request) {
-  ensurePollerStarted();
+  // The browser's EventSource can't read a 401 body and would reconnect-loop,
+  // so the page drives the auth gate via its regular `fetch` calls. Here we
+  // just refuse to open the stream when there's no session — no body to parse,
+  // the connection simply doesn't establish.
+  const session = await getSession();
+  if (!session) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  const sid = session.sid;
+
+  // Opening a tab is also a valid trigger to (re)start the session's poller.
+  seedPoller({ sid, tokens: sessionTokens(session) });
 
   let unsubscribe: (() => void) | null = null;
   let heartbeat: NodeJS.Timeout | null = null;
@@ -66,16 +78,16 @@ export async function GET(req: Request) {
       }
 
       // Replay current state so the tab paints without a server round-trip.
-      const snapshot = getSnapshot();
+      const snapshot = getSnapshot(sid);
       if (snapshot) {
         controller.enqueue(frame("snapshot", JSON.stringify(snapshot)));
       }
-      const configError = getConfigError();
+      const configError = getConfigError(sid);
       if (configError) {
         controller.enqueue(frame("config-error", configError));
       }
 
-      unsubscribe = subscribe(({ type, data }) => {
+      unsubscribe = subscribe(sid, ({ type, data }) => {
         try {
           controller.enqueue(frame(type, data));
         } catch {
@@ -112,7 +124,7 @@ export async function GET(req: Request) {
 
   return new Response(stream, {
     headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
+      "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
       // Nginx / similar reverse proxies sometimes buffer this content type;

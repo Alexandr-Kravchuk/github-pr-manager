@@ -40,6 +40,10 @@ function ghHostnameFromUrl(graphqlUrl: string): string {
 function resolveToken(host: HostConfig): string {
   const value = host.token?.trim();
   if (!value) {
+    // With OAuth the token comes from the user session, not config. A host
+    // with no token is valid — the data path supplies a per-user token at
+    // request time. Callers must therefore only call resolveToken when a
+    // transitional/legacy token is actually present.
     throw new ConfigError(`Host "${host.label}": token is not set.`);
   }
 
@@ -104,8 +108,10 @@ function validate(raw: unknown): AppConfig {
     if (typeof host.graphqlUrl !== "string" || !host.graphqlUrl.trim()) {
       throw new ConfigError(`config.json: hosts[${i}] (${label}) — missing graphqlUrl.`);
     }
-    if (typeof host.token !== "string") {
-      throw new ConfigError(`config.json: hosts[${i}] (${label}) — missing token.`);
+    // `token` is optional now: under OAuth the credential comes from the user
+    // session. Only reject a token of the wrong *type* if it's present.
+    if (host.token !== undefined && typeof host.token !== "string") {
+      throw new ConfigError(`config.json: hosts[${i}] (${label}) — token must be a string.`);
     }
     const repos = Array.isArray(host.repos)
       ? host.repos.filter((r): r is string => typeof r === "string" && r.includes("/"))
@@ -113,7 +119,11 @@ function validate(raw: unknown): AppConfig {
     return {
       label,
       graphqlUrl: host.graphqlUrl.trim(),
-      token: host.token,
+      oauthProvider:
+        typeof host.oauthProvider === "string" && host.oauthProvider.trim()
+          ? host.oauthProvider.trim()
+          : undefined,
+      token: typeof host.token === "string" ? host.token : undefined,
       repos,
     };
   });
@@ -148,11 +158,30 @@ function readAndValidate(): AppConfig {
  */
 export function loadConfig(): AppConfig {
   const config = readAndValidate();
-  // Resolve tokens eagerly so misconfiguration surfaces immediately.
+  // Resolve only legacy/transitional tokens that are actually present. Hosts
+  // with no token rely on a per-user OAuth token injected at request time.
   for (const host of config.hosts) {
-    host.token = resolveToken(host);
+    if (host.token) host.token = resolveToken(host);
   }
   return config;
+}
+
+/** Finds the configured host served by a given OAuth provider id, or null. */
+export function getHostByProvider(providerId: string): HostConfig | null {
+  return readAndValidate().hosts.find((h) => h.oauthProvider === providerId) ?? null;
+}
+
+/** All configured hosts, without resolving any tokens. */
+export function listHosts(): HostConfig[] {
+  return readAndValidate().hosts;
+}
+
+/**
+ * Reads and validates config WITHOUT resolving tokens — the shape the per-user
+ * poller needs (hosts/repos + interval; the credential comes from the session).
+ */
+export function readConfig(): AppConfig {
+  return readAndValidate();
 }
 
 /** Loads a sanitized config for the client — without reading or resolving tokens. */

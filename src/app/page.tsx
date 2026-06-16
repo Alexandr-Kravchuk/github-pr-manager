@@ -55,6 +55,10 @@ export default function Dashboard() {
       const res = await fetch("/api/pull-requests", { cache: "no-store" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
+        if (res.status === 401 || body?.kind === "auth") {
+          window.location.href = "/login";
+          return;
+        }
         if (body?.kind === "config") {
           setConfigError(body.error);
           setData(null);
@@ -79,6 +83,10 @@ export default function Dashboard() {
         if (r.ok) setConfig(await r.json());
         else {
           const b = await r.json().catch(() => ({}));
+          if (r.status === 401 || b?.kind === "auth") {
+            window.location.href = "/login";
+            return;
+          }
           if (b?.kind === "config") setConfigError(b.error);
         }
       })
@@ -158,6 +166,11 @@ export default function Dashboard() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ items }),
     }).catch(() => {});
+  }, []);
+
+  const logout = useCallback(async () => {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    window.location.href = "/login";
   }, []);
 
   const openPr = useCallback(
@@ -266,6 +279,13 @@ export default function Dashboard() {
               className="rounded-md border border-zinc-700 px-3 py-1 font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
             >
               {loading ? "Refreshing…" : "↻ Refresh"}
+            </button>
+            <button
+              type="button"
+              onClick={logout}
+              className="rounded-md border border-zinc-700 px-3 py-1 font-medium text-zinc-400 hover:bg-zinc-800"
+            >
+              Log out
             </button>
           </div>
         </div>

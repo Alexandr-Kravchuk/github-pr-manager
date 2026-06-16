@@ -371,7 +371,10 @@ const teamCache = new Map<string, { slugs: string[]; fetchedAt: number }>();
 const TEAM_CACHE_TTL_MS = 10 * 60 * 1000;
 
 async function fetchViewerTeams(host: HostConfig): Promise<string[]> {
-  const cacheKey = host.graphqlUrl;
+  // Key by token (per identity), not just the host URL — under multi-user the
+  // same host is queried with different users' tokens, and team membership is
+  // per user. Keying by URL alone would hand one user another's teams.
+  const cacheKey = `${host.graphqlUrl}\n${host.token ?? ""}`;
   const cached = teamCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < TEAM_CACHE_TTL_MS) {
     return cached.slugs;

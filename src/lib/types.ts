@@ -29,14 +29,46 @@ export interface HostConfig {
   /** Full URL of the GraphQL endpoint, e.g. https://api.github.com/graphql. */
   graphqlUrl: string;
   /**
-   * Access token. Supported forms:
-   *  - literal:      "ghp_xxx"
-   *  - env variable: "env:GITHUB_TOKEN"
-   *  - gh CLI:       "gh" (uses `gh auth token --hostname <host>`)
+   * Id of the OAuth provider that authenticates this host — matches the prefix
+   * of its `*_OAUTH_CLIENT_ID/SECRET` env vars (e.g. "github" → GITHUB_OAUTH_*).
+   * The per-user access token is supplied by the session, not by config.
    */
-  token: string;
+  oauthProvider?: string;
+  /**
+   * Legacy/transitional token (the PAT bridge on the shared server, before
+   * per-user OAuth is live). Supported forms:
+   *  - literal:      "ghp_xxx"
+   *  - env variable: "env:GH_TOKEN_GITHUB"
+   *  - gh CLI:       "gh" (uses `gh auth token --hostname <host>`)
+   * Empty/absent once OAuth is the only source of identity.
+   */
+  token?: string;
   /** Repositories in "owner/name" form. */
   repos: string[];
+}
+
+/** One authenticated OAuth provider inside a user session. */
+export interface ProviderSession {
+  /** OAuth access token for this provider's host (opaque Bearer). */
+  accessToken: string;
+  /**
+   * Viewer login, or null when the post-callback viewer fetch degraded (e.g.
+   * a GHE host whose IP allow-list hasn't been opened yet — token is still
+   * usable, the label is filled in later).
+   */
+  login: string | null;
+}
+
+/**
+ * Encrypted session payload (JWE cookie). Kept deliberately small — no avatar
+ * URLs (those are fetched on the client) — to stay clear of the ~4KB ceiling
+ * with two providers.
+ */
+export interface SessionPayload {
+  /** Stable per-session id: key for the per-user poller, broadcast channel and seen-state. */
+  sid: string;
+  /** Authenticated providers, keyed by provider id (matches HostConfig.oauthProvider). */
+  providers: Record<string, ProviderSession>;
 }
 
 /** Root application config (config.json). */

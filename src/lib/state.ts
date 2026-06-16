@@ -13,13 +13,20 @@ interface SeenEntry {
   seenAt: string;
 }
 
-type StateFile = Record<string, SeenEntry>;
+/**
+ * State is namespaced by session id (`sid`): each logged-in user sees their own
+ * pull requests, so their "seen" snapshots must not collide. Within a session
+ * the cookie (and therefore the sid) is stable for ~30 days, so the NEW badges
+ * persist across reloads; a fresh login after logout starts a clean slate.
+ */
+type SessionState = Record<string, SeenEntry>;
+type StateFile = Record<string, SessionState>;
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const STATE_PATH = path.join(DATA_DIR, "state.json");
 
-/** Serializes writes to the file to avoid concurrent corruption. */
-let writeChain: Promise<void> = Promise.resolve();
+/** Serializes the whole read-modify-write cycle to avoid concurrent corruption. */
+let writeChain: Promise<unknown> = Promise.resolve();
 
 async function readState(): Promise<StateFile> {
   try {
@@ -31,10 +38,20 @@ async function readState(): Promise<StateFile> {
   }
 }
 
-async function writeState(state: StateFile): Promise<void> {
+/**
+ * Runs `fn` against the latest on-disk state inside the serialized chain, so
+ * concurrent sessions can't clobber each other's read-modify-write. Persists
+ * only when `fn` reports a mutation.
+ */
+async function withState<T>(fn: (state: StateFile) => { value: T; dirty: boolean }): Promise<T> {
   const op = writeChain.then(async () => {
-    await mkdir(DATA_DIR, { recursive: true });
-    await writeFile(STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+    const state = await readState();
+    const { value, dirty } = fn(state);
+    if (dirty) {
+      await mkdir(DATA_DIR, { recursive: true });
+      await writeFile(STATE_PATH, JSON.stringify(state, null, 2), "utf8");
+    }
+    return value;
   });
   // The chain must not break because of a single failure.
   writeChain = op.catch(() => {});
@@ -42,48 +59,45 @@ async function writeState(state: StateFile): Promise<void> {
 }
 
 /**
- * Sets the activity flags on PRs (hasNewActivity, lastSeenAt, needsAttention)
- * by comparing against the last stored snapshot.
+ * Sets the activity flags on a session's PRs (hasNewActivity, lastSeenAt,
+ * needsAttention) by comparing against that session's last stored snapshot.
  *
- * Behavior on first encounter of a PR: we create a baseline snapshot from the
- * current values and do NOT highlight it as new — so a "forest" of NEW badges
- * doesn't light up on first run. Existing snapshots are not updated on read
- * (only mark-seen advances them).
+ * First encounter of a PR creates a baseline (not highlighted as new), so a
+ * "forest" of NEW badges doesn't light up on first run.
  */
-export async function applyActivity(prs: PullRequest[]): Promise<void> {
-  const state = await readState();
-  let mutated = false;
+export async function applyActivity(sid: string, prs: PullRequest[]): Promise<void> {
+  await withState((file) => {
+    const state = (file[sid] ??= {});
+    const now = new Date().toISOString();
+    let dirty = false;
 
-  for (const pr of prs) {
-    const entry = state[pr.id];
-    if (!entry) {
-      state[pr.id] = {
-        comments: pr.totalComments,
-        updatedAt: pr.updatedAt,
-        seenAt: new Date().toISOString(),
-      };
-      mutated = true;
-      pr.hasNewActivity = false;
-      pr.lastSeenAt = null;
-    } else {
-      // Signal specifically NEW COMMENTS: a change in updatedAt (your own commit
-      // push, labels, reviewer changes) does not count as new activity —
-      // otherwise it drowns out the signal on your own PRs, where pushes are frequent.
-      pr.hasNewActivity = pr.totalComments > entry.comments;
-      pr.lastSeenAt = entry.seenAt;
+    for (const pr of prs) {
+      const entry = state[pr.id];
+      if (!entry) {
+        state[pr.id] = { comments: pr.totalComments, updatedAt: pr.updatedAt, seenAt: now };
+        dirty = true;
+        pr.hasNewActivity = false;
+        pr.lastSeenAt = null;
+      } else {
+        // Signal specifically NEW COMMENTS: a change in updatedAt (your own commit
+        // push, labels, reviewer changes) does not count as new activity —
+        // otherwise it drowns out the signal on your own PRs, where pushes are frequent.
+        pr.hasNewActivity = pr.totalComments > entry.comments;
+        pr.lastSeenAt = entry.seenAt;
+      }
+
+      // Mirrors the card accent: a re-requested change request and "just awaiting
+      // someone else's review" (for your own PR) don't count as needing attention.
+      const isAuthor = pr.roles.includes("author");
+      pr.needsAttention =
+        pr.failingChecks.length > 0 ||
+        pr.hasUnaddressedChangeRequest ||
+        pr.hasNewActivity ||
+        (pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview));
     }
 
-    // Mirrors the card accent: a re-requested change request and "just awaiting
-    // someone else's review" (for your own PR) don't count as needing attention.
-    const isAuthor = pr.roles.includes("author");
-    pr.needsAttention =
-      pr.failingChecks.length > 0 ||
-      pr.hasUnaddressedChangeRequest ||
-      pr.hasNewActivity ||
-      (pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview));
-  }
-
-  if (mutated) await writeState(state);
+    return { value: undefined, dirty };
+  });
 }
 
 /** Data for marking a PR as seen (sent by the client from its own copy). */
@@ -93,17 +107,24 @@ export interface SeenInput {
   updatedAt: string;
 }
 
-/** Updates the snapshot of the given PRs to the provided values (clears NEW). */
-export async function markSeen(items: SeenInput[]): Promise<void> {
+/** Updates a session's snapshot of the given PRs to the provided values (clears NEW). */
+export async function markSeen(sid: string, items: SeenInput[]): Promise<void> {
   if (items.length === 0) return;
-  const state = await readState();
-  const now = new Date().toISOString();
-  for (const item of items) {
-    state[item.id] = {
-      comments: item.comments,
-      updatedAt: item.updatedAt,
-      seenAt: now,
-    };
-  }
-  await writeState(state);
+  await withState((file) => {
+    const state = (file[sid] ??= {});
+    const now = new Date().toISOString();
+    for (const item of items) {
+      state[item.id] = { comments: item.comments, updatedAt: item.updatedAt, seenAt: now };
+    }
+    return { value: undefined, dirty: true };
+  });
+}
+
+/** Drops a session's seen-state entirely (e.g. on logout). */
+export async function dropState(sid: string): Promise<void> {
+  await withState((file) => {
+    const existed = sid in file;
+    if (existed) delete file[sid];
+    return { value: undefined, dirty: existed };
+  });
 }

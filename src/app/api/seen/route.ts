@@ -1,11 +1,17 @@
 import { NextResponse } from "next/server";
 
+import { getSession } from "@/lib/session";
 import { markSeen, type SeenInput } from "@/lib/state";
 
 export const runtime = "nodejs";
 
-/** Marks one or more PRs as seen (clears the NEW badge). */
+/** Marks one or more PRs as seen (clears the NEW badge) for the current session. */
 export async function POST(req: Request) {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "Not authenticated.", kind: "auth" }, { status: 401 });
+  }
+
   let body: unknown;
   try {
     body = await req.json();
@@ -29,6 +35,6 @@ export async function POST(req: Request) {
     )
     .map((it) => ({ id: it.id, comments: it.comments, updatedAt: it.updatedAt }));
 
-  await markSeen(items);
+  await markSeen(session.sid, items);
   return NextResponse.json({ ok: true, count: items.length });
 }

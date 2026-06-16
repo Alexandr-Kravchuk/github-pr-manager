@@ -1,33 +1,38 @@
 import { NextResponse } from "next/server";
 
-import { awaitFirstTick, ensurePollerStarted, getConfigError, getSnapshot } from "@/lib/poller";
+import { awaitFirstTick, getConfigError, getSnapshot, seedPoller } from "@/lib/poller";
+import { getSession, sessionTokens } from "@/lib/session";
 
-// Always fresh data — and we drive that freshness via the singleton poller
+// Always fresh data — and we drive that freshness via the per-user poller
 // rather than refetching from GitHub on each browser request.
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 /**
- * Initial-load endpoint for the dashboard. Returns whatever the server-side
- * poller has cached; if nothing has been polled yet, waits for the very first
- * tick before responding so the first paint isn't empty.
+ * Initial-load endpoint for the dashboard. Seeds the caller's session tokens
+ * into their poller (the timer-driven tick can't read the cookie itself), waits
+ * for the first tick, then returns that session's cached snapshot.
  *
  * Live updates after the initial load come through `/api/stream` (SSE).
  */
 export async function GET() {
-  ensurePollerStarted();
-  await awaitFirstTick();
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "Not authenticated.", kind: "auth" }, { status: 401 });
+  }
 
-  const configError = getConfigError();
+  seedPoller({ sid: session.sid, tokens: sessionTokens(session) });
+  await awaitFirstTick(session.sid);
+
+  const configError = getConfigError(session.sid);
   if (configError) {
     return NextResponse.json({ error: configError, kind: "config" }, { status: 400 });
   }
 
-  const snapshot = getSnapshot();
+  const snapshot = getSnapshot(session.sid);
   if (!snapshot) {
-    // First tick resolved without producing a snapshot AND without a config
-    // error — only happens on truly exceptional failures. Surface as 503 so
-    // the client can retry.
+    // First tick resolved without a snapshot AND without a config error — only
+    // on truly exceptional failures. Surface as 503 so the client can retry.
     return NextResponse.json({ error: "No data available yet.", kind: "transient" }, { status: 503 });
   }
 

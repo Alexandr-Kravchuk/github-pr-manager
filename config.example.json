@@ -4,13 +4,13 @@
     {
       "label": "GitHub",
       "graphqlUrl": "https://api.github.com/graphql",
-      "token": "gh",
+      "oauthProvider": "github",
       "repos": ["owner/repo-1", "owner/repo-2"]
     },
     {
       "label": "Creatio GHE",
       "graphqlUrl": "https://api.creatio.ghe.com/graphql",
-      "token": "gh",
+      "oauthProvider": "ghe",
       "repos": ["org/repo-a"]
     }
   ]
