@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 
-import type { GhStatus, Settings, SettingsHost } from "../../../shared/types";
+import type { GhStatus, Settings } from "../../../shared/types";
 import { cn } from "../format";
 
 const GITHUB_GRAPHQL = "https://api.github.com/graphql";
 
-function emptyHost(): SettingsHost {
-  return { label: "", graphqlUrl: "", repos: [] };
+// While editing, repos are kept as the raw textarea text (reposText) so typing
+// newlines / partial entries isn't stripped mid-edit. They're parsed into the
+// owner/name list only on save.
+interface DraftHost {
+  label: string;
+  graphqlUrl: string;
+  reposText: string;
+}
+
+function emptyHost(): DraftHost {
+  return { label: "", graphqlUrl: "", reposText: "" };
 }
 
 /** Derives the gh hostname from a GraphQL URL — renderer-side mirror of the
@@ -22,8 +31,17 @@ function ghHostname(graphqlUrl: string): string {
   }
 }
 
+function parseRepos(reposText: string): string[] {
+  return reposText
+    .split("\n")
+    .map((r) => r.trim())
+    .filter((r) => r.includes("/"));
+}
+
 export function SettingsScreen({ onClose }: { onClose: () => void }) {
-  const [settings, setSettings] = useState<Settings | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [pollIntervalSeconds, setPollIntervalSeconds] = useState(60);
+  const [hosts, setHosts] = useState<DraftHost[]>([]);
   const [gh, setGh] = useState<GhStatus | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,25 +53,39 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     window.api
       .getSettings()
-      .then(setSettings)
+      .then((s) => {
+        setPollIntervalSeconds(s.pollIntervalSeconds);
+        setHosts(
+          s.hosts.map((h) => ({
+            label: h.label,
+            graphqlUrl: h.graphqlUrl,
+            reposText: h.repos.join("\n"),
+          })),
+        );
+        setLoaded(true);
+      })
       .catch((e) => setError((e as Error).message));
     loadGh();
   }, [loadGh]);
 
-  const updateHost = (i: number, patch: Partial<SettingsHost>) =>
-    setSettings((s) =>
-      s ? { ...s, hosts: s.hosts.map((h, j) => (j === i ? { ...h, ...patch } : h)) } : s,
-    );
-  const addHost = (preset?: SettingsHost) =>
-    setSettings((s) => (s ? { ...s, hosts: [...s.hosts, preset ?? emptyHost()] } : s));
-  const removeHost = (i: number) =>
-    setSettings((s) => (s ? { ...s, hosts: s.hosts.filter((_, j) => j !== i) } : s));
+  const updateHost = (i: number, patch: Partial<DraftHost>) =>
+    setHosts((prev) => prev.map((h, j) => (j === i ? { ...h, ...patch } : h)));
+  const addHost = (preset?: DraftHost) =>
+    setHosts((prev) => [...prev, preset ?? emptyHost()]);
+  const removeHost = (i: number) => setHosts((prev) => prev.filter((_, j) => j !== i));
 
   const save = async () => {
-    if (!settings) return;
     setSaving(true);
     setError(null);
     try {
+      const settings: Settings = {
+        pollIntervalSeconds,
+        hosts: hosts.map((h) => ({
+          label: h.label,
+          graphqlUrl: h.graphqlUrl,
+          repos: parseRepos(h.reposText),
+        })),
+      };
       const res = await window.api.saveSettings(settings);
       if (res.ok) {
         onClose();
@@ -67,7 +99,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
     }
   };
 
-  if (!settings) {
+  if (!loaded) {
     return <div className="p-8 text-sm text-zinc-500">Loading settings…</div>;
   }
 
@@ -163,12 +195,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           id="poll"
           type="number"
           min={10}
-          value={settings.pollIntervalSeconds}
-          onChange={(e) =>
-            setSettings((s) =>
-              s ? { ...s, pollIntervalSeconds: Math.max(10, Number(e.target.value) || 10) } : s,
-            )
-          }
+          value={pollIntervalSeconds}
+          onChange={(e) => setPollIntervalSeconds(Math.max(10, Number(e.target.value) || 10))}
           className={cn(inputCls, "max-w-[10rem]")}
         />
         <p className="mt-1 text-xs text-zinc-600">
@@ -183,7 +211,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => addHost({ label: "GitHub", graphqlUrl: GITHUB_GRAPHQL, repos: [] })}
+              onClick={() => addHost({ label: "GitHub", graphqlUrl: GITHUB_GRAPHQL, reposText: "" })}
               className="rounded-md border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-800"
             >
               + GitHub.com
@@ -198,14 +226,14 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        {settings.hosts.length === 0 && (
+        {hosts.length === 0 && (
           <p className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 text-sm text-zinc-500">
             No hosts yet. Add GitHub.com or an Enterprise host, then list the repositories to watch.
           </p>
         )}
 
         <div className="space-y-4">
-          {settings.hosts.map((host, i) => {
+          {hosts.map((host, i) => {
             const hostname = ghHostname(host.graphqlUrl);
             const auth = gh?.hosts.find((h) => h.hostname === hostname);
             return (
@@ -244,15 +272,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                 <div className="mt-3">
                   <label className={labelCls}>Repositories (one owner/name per line)</label>
                   <textarea
-                    value={host.repos.join("\n")}
-                    onChange={(e) =>
-                      updateHost(i, {
-                        repos: e.target.value
-                          .split("\n")
-                          .map((r) => r.trim())
-                          .filter((r) => r.includes("/")),
-                      })
-                    }
+                    value={host.reposText}
+                    onChange={(e) => updateHost(i, { reposText: e.target.value })}
                     rows={3}
                     placeholder={"owner/repo-1\nowner/repo-2"}
                     className={cn(inputCls, "font-mono text-xs")}
