@@ -59,7 +59,12 @@
 - [x] Ф.0 Передумови — на сервері вже є **Node 24.14.1**, git 2.52, IIS; код у `C:\apps\github-pr-manager`,
   `npm ci` + `npm run build` зелені; **застосунок підтверджено запускається** (smoke на 127.0.0.1:3737:
   `/login`+кнопка, gate 401, OAuth-redirect 307). gMSA — ще ні.
-- [ ] Ф.1 **окремий** DNS-хост + TLS-cert + увімкнути URL Rewrite/ARR — **сервер-опс + людські гейти**
+- [x] **DEPLOYED & LIVE (2026-06-16):** обрано спрощену модель — **прямий HTTP на `:3737` без IIS/ARR/TLS**
+  (спільний сервер, AutoTest на 443). Служба WinSW `github-pr-manager` встановлена під `NT AUTHORITY\NetworkService`
+  (інтерим; gMSA заблоковано — `New-ADServiceAccount` Access denied, треба домен-адмін), Running, boot-старт,
+  firewall 3737 in. Підтверджено зовні: `http://ts1-core-dev04.tscrm.com:3737/login`=200, gate=401,
+  OAuth-redirect→github.com з реальним client_id. OAuth App на github.com створено (`Ov23liWW702ad31zKnx1`).
+- [ ] ~~Ф.1 IIS/ARR/TLS~~ — **не застосовується** в спрощеній моделі (лишається опцією для https/власного хоста)
 - [x] Ф.2 Reverse proxy + SSE-тюнінг — `web.config` (rule + compression off); charset-fix зроблено;
   buffer=0/timeout — серверні ARR-налаштування, задокументовано в README/`web.config`
 - [x] Ф.3 Служба WinSW — `scripts/prdash.xml` (Automatic, onfailure restart, roll-логи, gMSA, env)
