@@ -1,0 +1,52 @@
+name: Release
+
+# Manual release. Bump "version" in package.json first, then run this workflow.
+# It builds the Windows installer and publishes a DRAFT GitHub Release
+# (v<version>) with the .exe + latest.yml (the electron-updater Windows feed).
+#
+# The macOS DMG/ZIP + latest-mac.yml are built and signed locally on a Mac with
+# a Developer ID certificate and uploaded to the SAME release:
+#   UPLOAD_RELEASE=1 GH_TOKEN=<token> \
+#   MAC_CERT_P12=... MAC_CERT_PASSWORD=... \
+#   APPLE_API_KEY=... APPLE_API_KEY_ID=... APPLE_API_ISSUER=... \
+#   npm run release:mac
+#
+# Then review and publish the draft release.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  release-windows:
+    name: Build & publish Windows
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build
+      - name: Build and publish Windows installer
+        run: npx --no-install electron-builder --win nsis --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

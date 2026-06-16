@@ -1,152 +1,145 @@
 # PR Dashboard
 
-A personal dashboard for pull requests across **GitHub** and **GitHub Enterprise** in one place.
-It shows an always-current list of PRs where you're involved (author or requested reviewer) and highlights what needs attention:
+A **desktop app** (Electron) for tracking pull requests across **GitHub** and
+**GitHub Enterprise** in one place. It shows an always-current list of PRs where
+you're involved (author or requested reviewer) and highlights what needs
+attention:
 
 - ✗ **failing CI** — individual named checks (unit tests, Sonar, etc.) are shown by name;
 - ✦ **new comments** — comments added since the last time you viewed the PR;
 - 💬 **unresolved comments** — how many threads still need to be resolved;
 - review state (approved / changes requested / review required), drafts, author, last update.
 
-Designed for a **single user**: tokens are stored locally in `config.json` (which is gitignored).
+It is **per-user and single-identity**: tokens are read from the
+[`gh` CLI](https://cli.github.com/) you're already signed into — there is no
+OAuth flow and **nothing is stored** by the app. Settings (hosts, repos, refresh
+interval) live in the OS user-data directory, never in the repo.
 
 ## Tech stack
 
-Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 · GitHub GraphQL API.
+Electron · Vite + React 19 + Tailwind CSS v4 (renderer) · TypeScript · Node
+(main) · GitHub GraphQL API · `electron-updater` for auto-update.
 
 ## How it works
 
-- One GraphQL request per host per refresh (two searches — `author:@me` + `review-requested:@me`, merged via aliases). Cheap on rate limit (~1 point).
-- Tokens live **only on the server** (route handlers). They never reach the browser.
-- The "already seen" state is stored in `data/state.json` (also gitignored), so new-comment detection survives reloads and switching browsers.
-- A **single server-side poller** queries GitHub every `pollIntervalSeconds`, regardless of how many tabs are open. Each open tab subscribes to a **Server-Sent Events** stream (`/api/stream`) and receives updates the moment the poller sees a real change — no client-side polling, no manual refresh. EventSource auto-reconnects on transient drops; a focus/visibility wake-up triggers a one-shot fetch as a safety net after laptop sleep.
+- The **main process** runs a single poller that queries every configured host
+  (one GraphQL request per host — `author:@me` + `review-requested:@me` +
+  team-review requests, merged via aliases; ~1–8 rate-limit points). It backs
+  off automatically as a host's rate limit runs low.
+- The **renderer** (the dashboard UI) talks to main only through a typed
+  `window.api` bridge (`contextIsolation` on, `nodeIntegration` off). It gets the
+  initial snapshot via `invoke`, then live updates pushed on every real change —
+  no client-side polling.
+- **Tokens** are resolved per host from `gh auth token --hostname <host>` at
+  fetch time. The host is derived from the GraphQL URL, so the same logic covers
+  github.com, Enterprise Cloud (`*.ghe.com`) and Enterprise Server.
+- The **"seen" state** (for new-comment detection) is stored in the user-data
+  directory, so it survives restarts.
 
-## Setup
+## Prerequisites
 
-1. Copy the config template:
-
-   ```bash
-   cp config.example.json config.json
-   ```
-
-2. Edit `config.json` — add your hosts, repositories and tokens.
-
-   ```jsonc
-   {
-     "pollIntervalSeconds": 60,
-     "hosts": [
-       {
-         "label": "GitHub",
-         "graphqlUrl": "https://api.github.com/graphql",
-         "token": "gh",
-         "repos": ["owner/repo-1", "owner/repo-2"]
-       },
-       {
-         "label": "Creatio GHE",
-         "graphqlUrl": "https://api.creatio.ghe.com/graphql",
-         "token": "gh",
-         "repos": ["org/repo-a"]
-       }
-     ]
-   }
-   ```
-
-   **Host fields**
-
-   | Field        | Description |
-   | ------------ | ----------- |
-   | `label`      | Name shown in the UI (host badge and host filter). |
-   | `graphqlUrl` | GraphQL endpoint. github.com → `https://api.github.com/graphql`; GitHub Enterprise Cloud with data residency (`*.ghe.com`) → `https://api.<tenant>.ghe.com/graphql`; GitHub Enterprise Server → `https://<host>/api/graphql`. |
-   | `token`      | How to obtain the token (see below). |
-   | `repos`      | Repositories in `owner/name` form. |
-
-   **Ways to set `token`**
-
-   - `"gh"` — take the token from the [`gh` CLI](https://cli.github.com/). The host is derived from `graphqlUrl`, so it runs `gh auth token --hostname <host>` and works for both github.com and a GHE host you're logged into (`gh auth login --hostname <host>`).
-   - `"env:GHE_TOKEN"` — read from an env variable (e.g. from `.env.local`).
-   - `"ghp_..."` — put the token inline (a string in `config.json`, which isn't committed).
-
-   The token needs a Personal Access Token with the **`repo` scope** (for private repositories). For GitHub Enterprise, use a token on that host.
-
-3. (Optional) If you use `env:`, create `.env.local`:
+1. Install the GitHub CLI: <https://cli.github.com/>
+2. Sign in to each host you want to watch:
 
    ```bash
-   echo 'GHE_TOKEN=your_ghe_token' > .env.local
+   gh auth login --hostname github.com
+   gh auth login --hostname your-tenant.ghe.com
    ```
 
-## Run
+   The token needs the **`repo` scope** (for private repositories).
+
+## Develop
 
 ```bash
-npm install   # already done when the project was created
-npm run dev    # http://localhost:3737
+npm install
+npm run dev      # Vite dev server (HMR) + Electron
 ```
 
-For production mode:
+On first launch the dashboard is empty — open **Settings (⚙)** and add a host:
+
+| Field        | Description |
+| ------------ | ----------- |
+| `label`      | Name shown in the UI (host badge + host filter). |
+| `graphqlUrl` | github.com → `https://api.github.com/graphql`; Enterprise Cloud → `https://api.<tenant>.ghe.com/graphql`; Enterprise Server → `https://<host>/api/graphql`. |
+| repos        | Repositories in `owner/name` form, one per line. |
+
+The Settings screen also shows whether `gh` is installed and signed in for each
+host, with the exact `gh auth login` command if not.
+
+## Build & package
 
 ```bash
-npm run build
-npm start
+npm run typecheck    # tsc, both projects
+npm test             # unit tests for the config/host logic
+npm run build        # tsc (main) + vite (renderer) -> dist/
+npm run package      # electron-builder: .dmg (mac) / .exe (win)
+npm run package:dir  # unpacked app dir (fast, unsigned) for a quick check
 ```
 
-## Run as a background service (always-on, survives reboots)
+## Releases & auto-update
 
-On macOS, install the dashboard as a `launchd` LaunchAgent so it runs in the
-background, starts automatically at login (i.e. after a reboot), and restarts
-itself if it ever crashes:
+Updates are delivered via **GitHub Releases** (public repo, so clients update
+without a token). `electron-updater` checks on launch and every few hours, and
+prompts **Restart now / Later** once an update is downloaded.
 
-```bash
-npm run build               # production build (required by `next start`)
-./scripts/install-service.sh
-```
+To cut a release:
 
-It then serves http://localhost:3737 in production mode (`RunAtLoad` +
-`KeepAlive`). Management:
+1. Bump `version` in `package.json`.
+2. Run the **Release** GitHub Action (`workflow_dispatch`). It runs the tests,
+   builds the **Windows** installer, and publishes a **draft** GitHub Release
+   `v<version>` with `PR Dashboard Setup <version>.exe` + `latest.yml` (the
+   Windows update feed).
+3. On a Mac with a **Developer ID Application** certificate, build, sign and
+   notarize the macOS artifacts and upload them to the same release:
 
-```bash
-./scripts/redeploy.sh        # after code changes: rebuild + restart
-./scripts/uninstall-service.sh   # stop and remove the service
+   ```bash
+   UPLOAD_RELEASE=1 GH_TOKEN=<token with repo scope> \
+   MAC_CERT_P12=~/secrets/devid.p12 MAC_CERT_PASSWORD=... \
+   APPLE_API_KEY=~/secrets/AuthKey_XXXX.p8 \
+   APPLE_API_KEY_ID=XXXX APPLE_API_ISSUER=<uuid> \
+   npm run release:mac
+   ```
 
-# status / logs
-launchctl print gui/$(id -u)/com.akravchuk.github-pr-manager | grep state
-tail -f ~/Library/Logs/github-pr-manager.err.log
-```
+   This uploads the signed `.dmg`, the `.zip` and `latest-mac.yml` (the macOS
+   update feed) to the draft release.
+4. Review and **publish** the draft release. Existing installs pick it up
+   automatically.
 
-Notes:
-- The token is resolved server-side. For `"token": "gh"` the service runs
-  `gh auth token --hostname <host>`, so stay logged in via the `gh` CLI.
-- The service starts at **login**, not at the boot screen — open your laptop,
-  log in, and the dashboard is already running.
+> First-time setup the maintainer must do once: create the App Store Connect API
+> key (Issuer ID + Key ID + `.p8`) and export the Developer ID Application `.p12`.
+> Windows builds are **unsigned** for now (SmartScreen will warn on first run).
 
 ## Structure
 
 ```
 src/
-  app/
-    page.tsx                  # dashboard (client): SSE subscription, filters, grouping
-    layout.tsx                # dark theme
-    api/
-      pull-requests/route.ts  # GET — initial paint (returns the poller's cached snapshot)
-      stream/route.ts         # GET — Server-Sent Events live updates
-      seen/route.ts           # POST — mark a PR as seen
-      config/route.ts         # GET — sanitized config (no tokens)
-  components/
-    PrCard.tsx                # PR card
-    CheckBadge.tsx            # CI check badge
-  lib/
-    config.ts                 # loads config.json + resolves tokens
-    github.ts                 # GraphQL query and mapping
-    state.ts                  # data/state.json — "seen" state
-    poller.ts                 # singleton server-side poller (one per process)
-    broadcast.ts              # in-memory pub/sub feeding the SSE stream
-    types.ts                  # domain types
-    format.ts                 # client-side helpers
-config.example.json           # config template (config.json is gitignored)
-scripts/                      # serve / install-service / redeploy / uninstall-service
+  main/                 # Node / Electron main process
+    main.ts             # window, lifecycle, IPC registration, CSP, updater wiring
+    preload.ts          # contextBridge -> window.api (typed)
+    poller.ts           # single poller -> webContents.send("snapshot"/"config-error")
+    settings.ts         # read/write userData/settings.json
+    ipc-validation.ts   # validate renderer-supplied IPC arguments
+    updater.ts          # electron-updater (check / download / restart)
+  shared/               # Node domain logic (renderer imports types only)
+    github.ts           # GraphQL query + mapping
+    state.ts            # seen-state (new-comment baseline)
+    config.ts           # gh token resolution + settings validation + gh status
+    types.ts            # domain types + the window.api contract
+  renderer/             # Vite + React + Tailwind v4
+    index.html
+    src/
+      App.tsx           # dashboard + settings routing
+      components/        # PrCard, CheckBadge, Settings
+      format.ts         # client-side formatting helpers
+build/                  # icon.png + mac entitlements (electron-builder resources)
+scripts/                # dev launcher, mac release, icon generator
 ```
 
 ## Notes
 
-- Multiple `repo:` qualifiers in a single GitHub search act as OR — so one request covers all of a host's repositories.
+- One request per host per refresh; multiple `repo:` qualifiers act as OR.
 - Checks are deduplicated by name; on re-runs, the worst state wins.
-- The first time a PR appears, its current state is recorded as a baseline — so you don't get a "forest" of NEW badges on the first run.
-- "New comments" is based on the comment count, not on any update — pushing your own commit or changing labels does not flag a PR.
+- The first time a PR appears its state is recorded as a baseline, so you don't
+  get a "forest" of NEW badges on first run.
+- "New comments" is based on the comment count, not on `updatedAt` — pushing
+  your own commit or changing labels does not flag a PR.

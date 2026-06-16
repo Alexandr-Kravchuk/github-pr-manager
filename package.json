@@ -2,25 +2,92 @@
   "name": "github-pr-manager",
   "version": "0.1.0",
   "private": true,
+  "description": "Desktop dashboard for pull requests across GitHub and GitHub Enterprise.",
+  "productName": "PR Dashboard",
+  "author": "Alex Kravchuk",
+  "main": "dist/main/main/main.js",
   "scripts": {
-    "dev": "next dev -p 3737",
-    "build": "next build",
-    "start": "next start -p 3737",
-    "lint": "eslint"
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "vite build --config vite.renderer.config.ts",
+    "build": "npm run build:main && npm run build:renderer",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "test": "npm run build:main && node tests/run-tests.cjs",
+    "dev": "node scripts/dev.mjs",
+    "start": "npm run build && electron .",
+    "package": "npm run build && electron-builder",
+    "package:dir": "npm run build && electron-builder --dir",
+    "release:mac": "bash scripts/release-mac.sh"
   },
   "dependencies": {
-    "next": "16.2.6",
-    "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.2.6",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+    "@tailwindcss/vite": "^4.1.5",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "tailwindcss": "^4.1.5",
+    "typescript": "^5.8.0",
+    "vite": "^7.0.0"
+  },
+  "build": {
+    "appId": "com.creatio.prdashboard",
+    "productName": "PR Dashboard",
+    "icon": "build/icon.png",
+    "files": [
+      "dist/main/**/*",
+      "dist/renderer/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "build"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Alexandr-Kravchuk",
+        "repo": "github-pr-manager"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "mac": {
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }
