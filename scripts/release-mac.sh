@@ -1,38 +1,30 @@
 #!/usr/bin/env bash
 #
-# release-mac.sh - build, sign and notarize the macOS build (DMG + update ZIP).
+# release-mac.sh - build, sign and notarize the macOS build (DMG + update ZIP),
+# then upload it to the GitHub Release for the current version.
 #
-# Produces a Developer ID-signed, Apple-notarized universal build that opens
-# without Gatekeeper warnings on any Mac. Designed to run on any macOS machine
-# with Xcode Command Line Tools and Node installed - it is NOT tied to a
-# particular developer's login keychain: the certificate is imported into a
-# throwaway keychain that is removed when the script exits.
+# Clean multi-platform flow (shared with scripts/release-win.ps1):
+#   electron-builder only BUILDS (--publish never); this script then uploads the
+#   artifacts to a single release identified by its ID. The release is resolved
+#   from the /releases LIST (which matches DRAFT releases too), not the by-tag
+#   endpoint (which 404s on drafts). That is what previously made electron-builder
+#   create a second draft when it couldn't find the existing one by tag. Uploading
+#   by ID means mac + Windows land on the SAME release with no duplicates.
 #
-# electron-builder does the signing, notarization (notarytool) and stapling, and
-# emits both the .dmg (manual download) and the .zip + latest-mac.yml that
-# electron-updater needs for auto-update.
+# Required env: MAC_CERT_P12, MAC_CERT_PASSWORD, APPLE_API_KEY, APPLE_API_KEY_ID,
+#   APPLE_API_ISSUER.
+# Optional: UPLOAD_RELEASE=1 (+ GH_TOKEN with repo scope) to upload to the release.
 #
-# Required environment variables:
-#   MAC_CERT_P12        Path to the "Developer ID Application" certificate (.p12)
-#   MAC_CERT_PASSWORD   Password for the .p12
-#   APPLE_API_KEY       Path to the App Store Connect API key (.p8)
-#   APPLE_API_KEY_ID    Key ID (the LAQQ... part of the AuthKey_<KeyID>.p8 filename)
-#   APPLE_API_ISSUER    Issuer ID (UUID from App Store Connect -> Users and Access -> Integrations)
-#
-# Optional:
-#   UPLOAD_RELEASE=1    Publish the artifacts (dmg + zip + latest-mac.yml) to the
-#                       matching GitHub release via electron-builder. Requires
-#                       GH_TOKEN with repo scope. The release is created as a
-#                       draft if it does not exist yet.
-#
-# Usage:
-#   MAC_CERT_P12=~/secrets/devid.p12 MAC_CERT_PASSWORD=... \
-#   APPLE_API_KEY=~/secrets/AuthKey_LAQQ7Y8W5T.p8 \
-#   APPLE_API_KEY_ID=LAQQ7Y8W5T APPLE_API_ISSUER=... \
-#   npm run release:mac
-#
+# Release flow (see README):
+#   1. bump version, tag vX.Y.Z, push
+#   2. UPLOAD_RELEASE=1 GH_TOKEN=... <apple env> npm run release:mac
+#   3. run scripts/release-win.ps1 on a Windows host (e.g. ts1-core-dev04)
+#   4. review, then: gh release edit vX.Y.Z --draft=false --latest
+#   (Steps 2 and 3 may run in any order, even in parallel, IF the release was
+#    pre-created: gh release create vX.Y.Z --draft ... )
 set -euo pipefail
 
+REPO="Alexandr-Kravchuk/github-pr-manager"
 log() { printf '\n\033[1;34m> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31mx %s\033[0m\n' "$*" >&2; exit 1; }
 
@@ -55,13 +47,13 @@ command -v node     >/dev/null || die "node not found - install Node.js."
 cd "$(dirname "$0")/.."
 [[ -d node_modules ]] || die "Dependencies not installed - run 'npm ci' first."
 VERSION="$(node -p "require('./package.json').version")"
-log "Releasing macOS build for v$VERSION"
+TAG="v$VERSION"
+log "Releasing macOS build for $TAG"
 
 # -- throwaway keychain -------------------------------------------------------
 KEYCHAIN_DIR="$(mktemp -d)"
 KEYCHAIN="$KEYCHAIN_DIR/release.keychain-db"
 KEYCHAIN_PASSWORD="$(uuidgen)"
-# Capture the current user keychain search list, preserving paths with spaces.
 ORIG_KEYCHAINS=()
 while IFS= read -r _kc; do
   _kc="${_kc#"${_kc%%[![:space:]]*}"}"   # ltrim leading whitespace
@@ -85,7 +77,6 @@ security import "$MAC_CERT_P12" -k "$KEYCHAIN" -P "$MAC_CERT_PASSWORD" -T /usr/b
 security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
 security list-keychains -d user -s "$KEYCHAIN" "${ORIG_KEYCHAINS[@]}"
 
-# Resolve the identity as its 40-char SHA-1 hash: unambiguous and prefix-proof.
 IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/Developer ID Application/ {print $2; exit}')"
 [[ -n "$IDENTITY" ]] || die "No 'Developer ID Application' identity found in $MAC_CERT_P12"
 log "Signing identity: $IDENTITY"
@@ -95,26 +86,18 @@ log "Cleaning previous build artifacts"
 rm -rf dist/mac-universal dist/mac-universal-*-temp
 rm -f dist/*.dmg dist/*.dmg.blockmap dist/*.zip dist/*.zip.blockmap dist/latest-mac.yml
 
-# -- build + sign + notarize + (optional) publish -----------------------------
-PUBLISH_FLAG="never"
-if [[ "${UPLOAD_RELEASE:-}" == "1" || "${PUBLISH:-}" == "always" ]]; then
-  : "${GH_TOKEN:?Set GH_TOKEN (repo scope) to publish to GitHub Releases}"
-  PUBLISH_FLAG="always"
-  log "Publishing to GitHub Releases is ENABLED"
-fi
-
-log "Building, signing and notarizing (electron-builder)"
-export CSC_KEYCHAIN="$KEYCHAIN"
+# -- build + sign + notarize (NO publish) -------------------------------------
 # @electron/notarize (notarytool) reads APPLE_API_KEY / APPLE_API_KEY_ID /
-# APPLE_API_ISSUER from the environment - already exported above.
+# APPLE_API_ISSUER from the environment. --publish never still emits
+# latest-mac.yml (the update feed); we upload it ourselves below.
+log "Building, signing and notarizing (electron-builder, no publish)"
+export CSC_KEYCHAIN="$KEYCHAIN"
 npm run build
-# --no-install: use the repo-pinned binary; never silently download a different one.
 npx --no-install electron-builder --mac \
-  --publish "$PUBLISH_FLAG" \
+  --publish never \
   --config.mac.identity="$IDENTITY" \
   --config.mac.notarize=true
 
-# Select the DMG deterministically: expect exactly one (dist/ was cleaned above).
 shopt -s nullglob
 DMG_FILES=(dist/*.dmg)
 shopt -u nullglob
@@ -129,8 +112,46 @@ APP_PATH="$(find dist -maxdepth 2 -name '*.app' -type d | head -1)"
 codesign --verify --deep --strict --verbose=4 "$APP_PATH"
 xcrun stapler validate "$APP_PATH"
 spctl -a -vvv -t execute "$APP_PATH"
+log "Signed + notarized + stapled: $DMG"
 
-log "Done: $DMG (signed + notarized + stapled)"
-if [[ "$PUBLISH_FLAG" == "always" ]]; then
-  log "Artifacts (dmg + zip + latest-mac.yml) uploaded to the v$VERSION GitHub release."
+# -- upload to the GitHub release (by ID, draft-aware) ------------------------
+if [[ "${UPLOAD_RELEASE:-}" == "1" ]]; then
+  : "${GH_TOKEN:?Set GH_TOKEN (repo scope) to upload to the release}"
+  command -v gh >/dev/null || die "gh CLI not found - install it or upload manually."
+
+  # Resolve the release by tag from the LIST (matches drafts, unlike the by-tag
+  # endpoint); retry a few times to ride out the brief lag before a freshly
+  # created draft shows up in the list. Create a draft only if truly absent.
+  RELID=""
+  for _ in 1 2 3 4 5; do
+    RELID="$(gh api "repos/$REPO/releases" --paginate --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)"
+    [[ -n "$RELID" ]] && break
+    sleep 3
+  done
+  if [[ -z "$RELID" ]]; then
+    log "No release for $TAG yet - creating a draft"
+    RELID="$(gh api --method POST "repos/$REPO/releases" -f tag_name="$TAG" -f name="$VERSION" -F draft=true --jq '.id')"
+  fi
+  log "Uploading macOS assets to release $TAG (id $RELID)"
+
+  upload_asset() {
+    local file="$1" name ct existing
+    name="$(basename "$file" | tr ' ' '-')"   # GitHub asset names have no spaces; matches latest-mac.yml urls
+    ct="application/octet-stream"; [[ "$name" == *.yml ]] && ct="text/yaml"
+    existing="$(gh api "repos/$REPO/releases/$RELID/assets" --jq ".[] | select(.name==\"$name\") | .id")"
+    [[ -n "$existing" ]] && gh api --method DELETE "repos/$REPO/releases/assets/$existing" >/dev/null 2>&1 || true
+    curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: $ct" \
+      --data-binary @"$file" \
+      "https://uploads.github.com/repos/$REPO/releases/$RELID/assets?name=$name" \
+      -o /dev/null -w "  $name: HTTP %{http_code}\n"
+  }
+
+  shopt -s nullglob
+  for f in dist/*.dmg dist/*.dmg.blockmap dist/*.zip dist/*.zip.blockmap dist/latest-mac.yml; do
+    upload_asset "$f"
+  done
+  shopt -u nullglob
+
+  log "macOS assets uploaded to $TAG. After Windows is uploaded too, publish with:"
+  log "  gh release edit $TAG --draft=false --latest"
 fi

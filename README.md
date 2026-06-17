@@ -82,39 +82,46 @@ Updates are delivered via **GitHub Releases** (public repo, so clients update
 without a token). `electron-updater` checks on launch and every few hours, and
 prompts **Restart now / Later** once an update is downloaded.
 
+Both release scripts only **build** with electron-builder (`--publish never`,
+which still emits the `latest*.yml` update feeds) and then upload artifacts to a
+single release **by its ID**, resolved from the `/releases` list (which matches
+draft releases). This is what keeps the macOS and Windows artifacts on the *same*
+release with no duplicate drafts — don't pass `--publish` to electron-builder for
+releases.
+
 To cut a release:
 
-1. Bump `version` in `package.json`.
-2. Build the **Windows** installer + `latest.yml` (the Windows update feed), either:
-   - **CI:** run the **Release** GitHub Action (`workflow_dispatch`) — builds on a
-     hosted runner and publishes to the `v<version>` release; or
-   - **On a Windows host** (e.g. ts1-core-dev04) over SSH:
-
-     ```powershell
-     powershell -ExecutionPolicy Bypass -File scripts\release-win.ps1 -Token <gh-token>
-     ```
-
-     `scripts/release-win.ps1` clones/updates the repo, builds the NSIS installer,
-     and uploads the `.exe` + `latest.yml` to the `v<version>` release via the
-     GitHub API (works even after the release is published).
-3. On a Mac with a **Developer ID Application** certificate, build, sign and
-   notarize the macOS artifacts and upload them to the same release:
+1. Bump `version` in `package.json`, sync the lockfile
+   (`npm install --package-lock-only`), commit, then tag and push `vX.Y.Z`.
+2. **macOS** — on a Mac with a Developer ID Application certificate:
 
    ```bash
    UPLOAD_RELEASE=1 GH_TOKEN=<token with repo scope> \
-   MAC_CERT_P12=~/secrets/devid.p12 MAC_CERT_PASSWORD=... \
+   MAC_CERT_P12=~/secrets/Certificates-1.p12 MAC_CERT_PASSWORD=... \
    APPLE_API_KEY=~/secrets/AuthKey_XXXX.p8 \
    APPLE_API_KEY_ID=XXXX APPLE_API_ISSUER=<uuid> \
    npm run release:mac
    ```
 
-   This uploads the signed `.dmg`, the `.zip` and `latest-mac.yml` (the macOS
-   update feed) to the draft release.
-4. Review and **publish** the draft release. Existing installs pick it up
-   automatically.
+   Builds, signs, notarizes, and uploads the `.dmg` + `.zip` + `latest-mac.yml`
+   to a **draft** `vX.Y.Z` release (creating it if it doesn't exist yet).
+3. **Windows** — on a Windows host (e.g. ts1-core-dev04) over SSH:
 
-> First-time setup the maintainer must do once: create the App Store Connect API
-> key (Issuer ID + Key ID + `.p8`) and export the Developer ID Application `.p12`.
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\release-win.ps1 -Token <gh-token>
+   ```
+
+   Builds the NSIS installer and uploads the `.exe` + `latest.yml` to the same
+   `vX.Y.Z` release. (Or use the **Release** GitHub Action for the Windows half.)
+4. Review, then publish: `gh release edit vX.Y.Z --draft=false --latest`. Existing
+   installs pick it up automatically.
+
+> Steps 2 and 3 may run in any order. To run them in **parallel**, pre-create the
+> release once first (`gh release create vX.Y.Z --draft --title vX.Y.Z`) so both
+> uploads target it instead of racing to create it.
+
+> First-time setup the maintainer does once: create the App Store Connect API key
+> (Issuer ID + Key ID + `.p8`) and export the Developer ID Application `.p12`.
 > Windows builds are **unsigned** for now (SmartScreen will warn on first run).
 
 ## Structure
