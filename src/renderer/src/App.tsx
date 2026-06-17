@@ -180,10 +180,21 @@ export function App() {
     [allPrs, role, host, attentionOnly, failingOnly, newOnly, search],
   );
 
+  // Reviewer PRs (your turn to review) float to the top — in the flat list and
+  // within each repo group. Array.prototype.sort is stable, so the rest of the
+  // order is preserved.
+  const sorted = useMemo(
+    () =>
+      [...filtered].sort(
+        (a, b) => Number(b.roles.includes("reviewer")) - Number(a.roles.includes("reviewer")),
+      ),
+    [filtered],
+  );
+
   const groups = useMemo(() => {
     if (!groupByRepo) return null;
     const map = new Map<string, { hostLabel: string; repo: string; prs: PullRequest[] }>();
-    for (const pr of filtered) {
+    for (const pr of sorted) {
       const key = `${pr.hostLabel}/${pr.repo}`;
       const g = map.get(key);
       if (g) g.prs.push(pr);
@@ -192,7 +203,7 @@ export function App() {
     return [...map.values()].sort((a, b) =>
       `${a.hostLabel}/${a.repo}`.localeCompare(`${b.hostLabel}/${b.repo}`),
     );
-  }, [filtered, groupByRepo]);
+  }, [sorted, groupByRepo]);
 
   const fetchedAgo = useMemo(
     // tick forces relative-time recomputation
@@ -200,7 +211,7 @@ export function App() {
     [data, tick],
   );
 
-  const newInView = filtered.filter((p) => p.hasNewActivity);
+  const newInView = sorted.filter((p) => p.hasNewActivity);
   const noHosts = config !== null && config.hosts.length === 0;
 
   if (view === "settings") {
@@ -419,7 +430,7 @@ export function App() {
         </div>
       ) : (
         <div className="grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3">
-          {filtered.map((pr) => (
+          {sorted.map((pr) => (
             <PrCard key={pr.id} pr={pr} onOpen={openPr} onMarkSeen={(p) => postSeen([p])} />
           ))}
         </div>

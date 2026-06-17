@@ -70,10 +70,12 @@ export async function applyActivity(prs: PullRequest[], statePath: string): Prom
       pr.lastSeenAt = entry.seenAt;
     }
 
-    // Mirrors the card accent: a re-requested change request and "just awaiting
-    // someone else's review" (for your own PR) don't count as needing attention.
+    // Mirrors the card accent: a review requested of you needs attention (your
+    // turn to act); a re-requested change request and "just awaiting someone
+    // else's review" (for your own PR) don't count as needing attention.
     const isAuthor = pr.roles.includes("author");
     pr.needsAttention =
+      pr.roles.includes("reviewer") ||
       pr.failingChecks.length > 0 ||
       pr.hasUnaddressedChangeRequest ||
       pr.hasNewActivity ||

@@ -14,6 +14,10 @@ interface Props {
  * Left-accent color of the card, by signal priority.
  *  - Red: your PR is blocked and needs your action — failing CI, or a change
  *    request you haven't re-requested review on. Only for PRs you authored.
+ *  - Violet: a review is being requested of you and you haven't submitted one
+ *    yet — your turn to act. The `reviewer` role comes from GitHub's
+ *    `review-requested:@me`, so it clears itself once you review. Ranked right
+ *    after your own blocked PRs so review requests never blend into the rest.
  *  - Gray (waiting): your PR is awaiting someone else's review and nobody has
  *    approved yet (ball in their court) — nothing required from you, even with
  *    open threads.
@@ -29,6 +33,9 @@ function accentClass(pr: PullRequest): string {
 
   if (isAuthor && (pr.failingChecks.length > 0 || pr.hasUnaddressedChangeRequest)) {
     return "border-l-red-500";
+  }
+  if (pr.roles.includes("reviewer")) {
+    return "border-l-violet-500";
   }
   if (isAuthor && pr.awaitingReview && !pr.hasNewActivity && !pr.hasHumanApproval) {
     return "border-l-line-strong";
@@ -100,11 +107,15 @@ function ReviewerBadge({ r }: { r: Reviewer }) {
 export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
   const review = reviewLabel(pr.reviewDecision);
   const passingCount = pr.checks.filter((c) => c.state === "success").length;
+  // A review is being asked of you — tint the whole card violet so it stands
+  // out from the rest. The tint fades to the plain surface on hover.
+  const needsMyReview = pr.roles.includes("reviewer");
 
   return (
     <div
       className={cn(
-        "rounded-lg border border-line border-l-4 bg-surface/60 p-4 transition-colors hover:bg-surface",
+        "rounded-lg border border-line border-l-4 p-4 transition-colors hover:bg-surface",
+        needsMyReview ? "bg-violet-500/10" : "bg-surface/60",
         accentClass(pr),
       )}
     >
