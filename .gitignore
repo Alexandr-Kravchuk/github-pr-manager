@@ -32,3 +32,6 @@ yarn-debug.log*
 next-env.d.ts
 /config.json
 /data/
+
+# internal planning docs — kept locally, not published in the public repo
+/docs/
