@@ -164,15 +164,13 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
           {pr.isDraft && (
             <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">Draft</span>
           )}
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
             onClick={copyUrl}
             title={copied ? "Copied" : "Copy PR link"}
             aria-label="Copy PR link"
             className={cn(
-              "rounded p-0.5 hover:bg-elevated",
+              "shrink-0 rounded p-0.5 hover:bg-elevated",
               copied
                 ? "text-emerald-600 dark:text-emerald-400"
                 : "text-fg-faint hover:text-fg-secondary",
@@ -180,8 +178,10 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
           >
             {copied ? <CheckIcon /> : <CopyIcon />}
           </button>
-          <span title={new Date(pr.updatedAt).toLocaleString()}>{relativeTime(pr.updatedAt)}</span>
         </div>
+        <span className="shrink-0" title={new Date(pr.updatedAt).toLocaleString()}>
+          {relativeTime(pr.updatedAt)}
+        </span>
       </div>
 
       {/* Title — clicking opens the PR and marks it as seen */}
