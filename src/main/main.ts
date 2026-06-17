@@ -30,6 +30,9 @@ function sendToRenderer(channel: string, payload: unknown): void {
 function applyLaunchAtLogin(enabled: boolean): void {
   if (!app.isPackaged || process.platform === "linux") return;
   app.setLoginItemSettings({ openAtLogin: enabled });
+  if (process.env.PRD_DEBUG) {
+    console.log("[main] launchAtLogin", enabled, "-> openAtLogin", app.getLoginItemSettings().openAtLogin);
+  }
 }
 
 /** Applies user preferences (launch-at-login + auto-update) to the OS/updater. */
