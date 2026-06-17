@@ -31,7 +31,7 @@ function accentClass(pr: PullRequest): string {
     return "border-l-red-500";
   }
   if (isAuthor && pr.awaitingReview && !pr.hasNewActivity && !pr.hasHumanApproval) {
-    return "border-l-zinc-700";
+    return "border-l-line-strong";
   }
   if (pr.hasNewActivity || pr.unresolvedThreads > 0 || pr.pendingChecks.length > 0) {
     return "border-l-amber-500";
@@ -39,17 +39,23 @@ function accentClass(pr: PullRequest): string {
   if (pr.hasHumanApproval && pr.ciState !== "failure" && pr.ciState !== "pending") {
     return "border-l-emerald-500";
   }
-  return "border-l-zinc-700";
+  return "border-l-line-strong";
 }
 
 function reviewLabel(decision: ReviewDecision): { text: string; cls: string } | null {
   switch (decision) {
     case "APPROVED":
-      return { text: "Approved", cls: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40" };
+      return {
+        text: "Approved",
+        cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40",
+      };
     case "CHANGES_REQUESTED":
-      return { text: "Changes requested", cls: "bg-red-500/15 text-red-300 border-red-500/40" };
+      return {
+        text: "Changes requested",
+        cls: "bg-red-500/15 text-red-700 dark:text-red-300 border-red-500/40",
+      };
     case "REVIEW_REQUIRED":
-      return { text: "Review required", cls: "bg-zinc-600/20 text-zinc-300 border-zinc-600/40" };
+      return { text: "Review required", cls: "bg-elevated text-fg-muted border-line-strong" };
     default:
       return null;
   }
@@ -60,7 +66,7 @@ const pill = "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-
 const REVIEWER_RING: Record<Reviewer["reviewState"], string> = {
   approved: "ring-emerald-500",
   changes_requested: "ring-red-500",
-  pending: "ring-zinc-600",
+  pending: "ring-line-strong",
 };
 
 function ReviewerBadge({ r }: { r: Reviewer }) {
@@ -82,7 +88,7 @@ function ReviewerBadge({ r }: { r: Reviewer }) {
     <span
       title={`${r.login}: ${label}`}
       className={cn(
-        "inline-flex h-[18px] w-[18px] items-center justify-center rounded-full ring-2 bg-zinc-800 text-[9px] text-zinc-400 uppercase",
+        "inline-flex h-[18px] w-[18px] items-center justify-center rounded-full ring-2 bg-elevated text-[9px] text-fg-muted uppercase",
         REVIEWER_RING[r.reviewState],
       )}
     >
@@ -98,25 +104,25 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
   return (
     <div
       className={cn(
-        "rounded-lg border border-zinc-800 border-l-4 bg-zinc-900/60 p-4 transition-colors hover:bg-zinc-900",
+        "rounded-lg border border-line border-l-4 bg-surface/60 p-4 transition-colors hover:bg-surface",
         accentClass(pr),
       )}
     >
       {/* Top row: repo/number + updated time */}
-      <div className="mb-1 flex items-center justify-between gap-2 text-xs text-zinc-500">
+      <div className="mb-1 flex items-center justify-between gap-2 text-xs text-fg-subtle">
         <div className="flex min-w-0 items-center gap-2">
           {hideRepo ? (
-            <span className="text-zinc-600">#{pr.number}</span>
+            <span className="text-fg-faint">#{pr.number}</span>
           ) : (
             <>
-              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-400">{pr.hostLabel}</span>
+              <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">{pr.hostLabel}</span>
               <span className="truncate" title={pr.repo}>
-                {pr.repo} <span className="text-zinc-600">#{pr.number}</span>
+                {pr.repo} <span className="text-fg-faint">#{pr.number}</span>
               </span>
             </>
           )}
           {pr.isDraft && (
-            <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-400">Draft</span>
+            <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">Draft</span>
           )}
         </div>
         <span className="shrink-0" title={new Date(pr.updatedAt).toLocaleString()}>
@@ -128,7 +134,7 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
       <button
         type="button"
         onClick={() => onOpen(pr)}
-        className="mb-2 block text-left text-[15px] font-semibold leading-snug text-zinc-100 hover:text-sky-300 hover:underline"
+        className="mb-2 block text-left text-[15px] font-semibold leading-snug text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300"
       >
         {pr.title}
       </button>
@@ -136,7 +142,7 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
       {/* Meta: author, roles, review decision, comments, new activity */}
       <div className="mb-2 flex flex-wrap items-center gap-2">
         {pr.author && (
-          <span className="inline-flex items-center gap-1.5 text-xs text-zinc-400">
+          <span className="inline-flex items-center gap-1.5 text-xs text-fg-muted">
             <img
               src={pr.author.avatarUrl}
               alt=""
@@ -149,10 +155,17 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
         )}
 
         {pr.roles.includes("author") && (
-          <span className={cn(pill, "border-sky-500/40 bg-sky-500/15 text-sky-300")}>Author</span>
+          <span className={cn(pill, "border-sky-500/40 bg-sky-500/15 text-sky-700 dark:text-sky-300")}>
+            Author
+          </span>
         )}
         {pr.roles.includes("reviewer") && (
-          <span className={cn(pill, "border-violet-500/40 bg-violet-500/15 text-violet-300")}>
+          <span
+            className={cn(
+              pill,
+              "border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-300",
+            )}
+          >
             Reviewer
           </span>
         )}
@@ -160,21 +173,31 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
         {review && <span className={cn(pill, review.cls)}>{review.text}</span>}
 
         {pr.unresolvedThreads > 0 && (
-          <span className={cn(pill, "border-orange-500/40 bg-orange-500/15 text-orange-300")}>
+          <span
+            className={cn(
+              pill,
+              "border-orange-500/40 bg-orange-500/15 text-orange-700 dark:text-orange-300",
+            )}
+          >
             💬 {pr.unresolvedThreads} to resolve
           </span>
         )}
 
         {pr.hasNewActivity && (
           <span className="inline-flex items-center gap-1">
-            <span className={cn(pill, "border-amber-400/50 bg-amber-400/20 text-amber-200")}>
+            <span
+              className={cn(
+                pill,
+                "border-amber-400/50 bg-amber-400/20 text-amber-700 dark:text-amber-200",
+              )}
+            >
               ✦ New comments
             </span>
             <button
               type="button"
               onClick={() => onMarkSeen(pr)}
               title="Mark as seen"
-              className="rounded-md border border-zinc-700 px-1.5 py-0.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+              className="rounded-md border border-line-strong px-1.5 py-0.5 text-xs text-fg-muted hover:bg-elevated hover:text-fg"
             >
               ✓
             </button>
@@ -185,7 +208,7 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
       {/* Reviewers */}
       {pr.reviewers.length > 0 && (
         <div className="mb-2 flex items-center gap-1.5">
-          <span className="text-xs text-zinc-500">Reviewers:</span>
+          <span className="text-xs text-fg-subtle">Reviewers:</span>
           {pr.reviewers.map((r) => (
             <ReviewerBadge key={r.login} r={r} />
           ))}
@@ -202,7 +225,7 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
         ))}
 
         {pr.failingChecks.length === 0 && pr.pendingChecks.length === 0 && (
-          <span className="text-xs text-zinc-500">
+          <span className="text-xs text-fg-subtle">
             {pr.ciState === "success" && passingCount > 0
               ? `✓ CI passed (${passingCount})`
               : pr.checks.length === 0

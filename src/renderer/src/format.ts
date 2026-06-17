@@ -30,13 +30,13 @@ export function relativeTime(iso: string): string {
 export function checkStateClasses(state: CheckState): string {
   switch (state) {
     case "failure":
-      return "border-red-500/40 bg-red-500/15 text-red-300";
+      return "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300";
     case "pending":
-      return "border-amber-500/40 bg-amber-500/15 text-amber-300";
+      return "border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300";
     case "success":
-      return "border-emerald-500/40 bg-emerald-500/15 text-emerald-300";
+      return "border-emerald-500/40 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300";
     default:
-      return "border-zinc-600/40 bg-zinc-600/15 text-zinc-400";
+      return "border-line-strong bg-elevated text-fg-muted";
   }
 }
 

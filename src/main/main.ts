@@ -1,5 +1,5 @@
 import path from "node:path";
-import { app, BrowserWindow, ipcMain, nativeImage, session, shell } from "electron";
+import { app, BrowserWindow, ipcMain, nativeImage, nativeTheme, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, toHostConfigs, toPublicConfig } from "../shared/config";
 import { markSeen } from "../shared/state";
@@ -11,7 +11,7 @@ import type {
   Settings,
 } from "../shared/types";
 import { ensureCliPath } from "./cli-path";
-import { validateExternalUrl, validateSeenItems } from "./ipc-validation";
+import { validateExternalUrl, validateSeenItems, validateThemePreference } from "./ipc-validation";
 import { Poller } from "./poller";
 import { loadSettings, persistSettings, seenStatePath } from "./settings";
 import { initAutoUpdater, setAutoUpdateEnabled } from "./updater";
@@ -35,10 +35,24 @@ function applyLaunchAtLogin(enabled: boolean): void {
   }
 }
 
-/** Applies user preferences (launch-at-login + auto-update) to the OS/updater. */
+/** Window chrome background for the current effective theme — matches the
+ *  renderer's `--canvas` so there's no flash before paint nor a mismatched
+ *  edge on resize. */
+function themeBackground(): string {
+  return nativeTheme.shouldUseDarkColors ? "#09090b" : "#f7f7f8";
+}
+
+/** Drives the renderer's `prefers-color-scheme` (and native chrome) from the
+ *  user's appearance preference. "system" hands control back to the OS. */
+function applyThemeSource(theme: Settings["theme"]): void {
+  nativeTheme.themeSource = theme;
+}
+
+/** Applies user preferences (launch-at-login + auto-update + theme) to the OS/updater. */
 function applyPreferences(settings: Settings): void {
   applyLaunchAtLogin(settings.launchAtLogin);
   setAutoUpdateEnabled(settings.autoUpdate);
+  applyThemeSource(settings.theme);
 }
 
 /**
@@ -73,7 +87,7 @@ function createWindow(): void {
     minWidth: 960,
     minHeight: 640,
     title: "PR Dashboard",
-    backgroundColor: "#09090b",
+    backgroundColor: themeBackground(),
     autoHideMenuBar: true,
     icon: resolveAppIcon(),
     webPreferences: {
@@ -188,6 +202,19 @@ function registerIpc(): void {
     }
   });
 
+  // Appearance toggle: apply instantly (so the click is reflected without a
+  // Save), then persist into settings. A broken settings file shouldn't block
+  // the live toggle, so persistence is best-effort.
+  ipcMain.handle("theme:set", async (_event, raw: unknown): Promise<void> => {
+    const theme = validateThemePreference(raw);
+    applyThemeSource(theme);
+    try {
+      persistSettings({ ...loadSettings(), theme });
+    } catch {
+      /* keep the in-session theme even if the file can't be written */
+    }
+  });
+
   ipcMain.handle("gh:status", async (): Promise<GhStatus> => {
     try {
       return getGhStatus(loadSettings());
@@ -234,17 +261,30 @@ void app.whenReady().then(() => {
   });
   poller.start();
 
-  createWindow();
-  initAutoUpdater(() => mainWindow);
-
-  // Apply saved prefs (launch-at-login + auto-update). Fall back to defaults if
-  // the settings file is invalid.
+  // Resolve the saved appearance before the first window so the initial paint
+  // and the native window background already match (no dark flash in light mode).
+  // Fall back to defaults if the settings file is invalid.
   let prefs: Settings;
   try {
     prefs = loadSettings();
   } catch {
     prefs = defaultSettings();
   }
+  applyThemeSource(prefs.theme);
+
+  // Keep the window's native background in sync when the effective theme flips —
+  // an OS change under "system", or a Light/Dark toggle.
+  nativeTheme.on("updated", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setBackgroundColor(themeBackground());
+    }
+  });
+
+  createWindow();
+  initAutoUpdater(() => mainWindow);
+
+  // Apply the remaining prefs (launch-at-login + auto-update; theme re-applied
+  // harmlessly). Runs after the updater is initialized.
   applyPreferences(prefs);
 
   app.on("activate", () => {

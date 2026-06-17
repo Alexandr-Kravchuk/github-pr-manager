@@ -225,27 +225,27 @@ export function App() {
   return (
     <div className="mx-auto max-w-[1800px] px-4 py-6">
       {/* Header */}
-      <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-zinc-800 bg-zinc-950/85 px-4 pb-3 pt-1 backdrop-blur">
+      <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-line bg-canvas/85 px-4 pb-3 pt-1 backdrop-blur">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-xl font-semibold text-zinc-100">Pull Requests</h1>
-            <p className="text-xs text-zinc-500">
+            <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
+            <p className="text-xs text-fg-subtle">
               {counts.total} PRs · {counts.attention} need attention · {counts.failing} failing CI ·{" "}
               {counts.fresh} with new comments
             </p>
           </div>
-          <div className="flex items-center gap-2 text-xs text-zinc-400">
+          <div className="flex items-center gap-2 text-xs text-fg-muted">
             {data?.rateLimits?.map((rl) => (
               <span
                 key={rl.hostLabel}
                 title={`Resets: ${rl.resetAt ? new Date(rl.resetAt).toLocaleTimeString() : "—"}`}
-                className="rounded bg-zinc-800 px-2 py-1"
+                className="rounded bg-elevated px-2 py-1"
               >
                 {rl.hostLabel}: {rl.remaining}
               </span>
             ))}
             {data && (
-              <span className="flex items-center gap-1.5 text-zinc-500">
+              <span className="flex items-center gap-1.5 text-fg-subtle">
                 <span
                   className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-500"
                   title="Live — auto-refreshing"
@@ -257,7 +257,7 @@ export function App() {
               type="button"
               onClick={refresh}
               disabled={loading}
-              className="rounded-md border border-zinc-700 px-3 py-1 font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+              className="rounded-md border border-line-strong px-3 py-1 font-medium text-fg-secondary hover:bg-elevated disabled:opacity-50"
             >
               {loading ? "Refreshing…" : "↻ Refresh"}
             </button>
@@ -265,7 +265,7 @@ export function App() {
               type="button"
               onClick={() => setView("settings")}
               title="Settings"
-              className="rounded-md border border-zinc-700 px-3 py-1 font-medium text-zinc-200 hover:bg-zinc-800"
+              className="rounded-md border border-line-strong px-3 py-1 font-medium text-fg-secondary hover:bg-elevated"
             >
               ⚙
             </button>
@@ -275,15 +275,17 @@ export function App() {
 
       {/* Config error */}
       {configError && (
-        <div className="mb-4 rounded-lg border border-amber-600/40 bg-amber-950/40 p-4 text-sm text-amber-200">
+        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-600/40 dark:bg-amber-950/40 dark:text-amber-200">
           <p className="font-semibold">Configuration required</p>
-          <p className="mt-1 whitespace-pre-wrap text-amber-100/90">{configError}</p>
+          <p className="mt-1 whitespace-pre-wrap text-amber-700 dark:text-amber-100/90">
+            {configError}
+          </p>
         </div>
       )}
 
       {/* Fetch error */}
       {error && (
-        <div className="mb-4 rounded-lg border border-red-600/40 bg-red-950/40 p-3 text-sm text-red-200">
+        <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/40 dark:text-red-200">
           Failed to fetch data: {error}
         </div>
       )}
@@ -292,7 +294,7 @@ export function App() {
       {data?.errors?.map((e) => (
         <div
           key={e.hostLabel}
-          className="mb-2 rounded-lg border border-red-600/40 bg-red-950/30 p-3 text-sm text-red-200"
+          className="mb-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/30 dark:text-red-200"
         >
           <span className="font-semibold">{e.hostLabel}:</span> {e.message}
         </div>
@@ -306,13 +308,13 @@ export function App() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search by title, repo, author…"
-            className="min-w-[14rem] flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-600 focus:outline-none"
+            className="min-w-[14rem] flex-1 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none"
           />
 
           <select
             value={role}
             onChange={(e) => setRole(e.target.value as RoleFilter)}
-            className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-200"
+            className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
           >
             <option value="all">All roles</option>
             <option value="author">I&apos;m the author</option>
@@ -323,7 +325,7 @@ export function App() {
             <select
               value={host}
               onChange={(e) => setHost(e.target.value)}
-              className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-200"
+              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
             >
               <option value="all">All hosts</option>
               {config.hosts.map((h) => (
@@ -351,7 +353,7 @@ export function App() {
             <button
               type="button"
               onClick={() => postSeen(newInView)}
-              className="ml-auto rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800"
+              className="ml-auto rounded-md border border-line-strong px-3 py-1.5 text-sm text-fg-secondary hover:bg-elevated"
             >
               ✓ Mark all as seen ({newInView.length})
             </button>
@@ -361,12 +363,12 @@ export function App() {
 
       {/* No hosts configured yet — guide to Settings. */}
       {!configError && noHosts && (
-        <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-8 text-center text-sm text-zinc-400">
+        <div className="rounded-lg border border-line bg-surface/40 p-8 text-center text-sm text-fg-muted">
           <p>No repositories configured yet.</p>
           <button
             type="button"
             onClick={() => setView("settings")}
-            className="mt-3 rounded-md border border-sky-500/60 bg-sky-500/15 px-3 py-1.5 text-sm font-medium text-sky-200 hover:bg-sky-500/25"
+            className="mt-3 rounded-md border border-sky-500/60 bg-sky-500/15 px-3 py-1.5 text-sm font-medium text-sky-700 dark:text-sky-200 hover:bg-sky-500/25"
           >
             Open Settings
           </button>
@@ -375,7 +377,7 @@ export function App() {
 
       {/* Content */}
       {!configError && !noHosts && data && filtered.length === 0 && (
-        <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-8 text-center text-sm text-zinc-500">
+        <div className="rounded-lg border border-line bg-surface/40 p-8 text-center text-sm text-fg-subtle">
           {allPrs.length === 0
             ? "No open pull requests where you're involved in the added repositories."
             : "No PRs match the current filters."}
@@ -383,21 +385,21 @@ export function App() {
       )}
 
       {!configError && !data && !error && (
-        <div className="p-8 text-center text-sm text-zinc-500">Loading…</div>
+        <div className="p-8 text-center text-sm text-fg-subtle">Loading…</div>
       )}
 
       {groups ? (
         <div className="columns-1 gap-x-6 lg:columns-2 2xl:columns-3">
           {groups.map((g) => (
             <section key={`${g.hostLabel}/${g.repo}`} className="mb-8 break-inside-avoid">
-              <div className="mb-3 flex items-center gap-2 border-b border-zinc-800 pb-2">
-                <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+              <div className="mb-3 flex items-center gap-2 border-b border-line pb-2">
+                <span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
                   {g.hostLabel}
                 </span>
-                <h2 className="truncate text-sm font-semibold text-zinc-200" title={g.repo}>
+                <h2 className="truncate text-sm font-semibold text-fg-secondary" title={g.repo}>
                   {g.repo}
                 </h2>
-                <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400">
+                <span className="rounded-full border border-line-strong px-2 py-0.5 text-xs text-fg-muted">
                   {g.prs.length}
                 </span>
               </div>
@@ -442,8 +444,8 @@ function FilterChip({
       className={cn(
         "rounded-md border px-3 py-1.5 text-sm transition-colors",
         active
-          ? "border-sky-500/60 bg-sky-500/15 text-sky-200"
-          : "border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800",
+          ? "border-sky-500/60 bg-sky-500/15 text-sky-700 dark:text-sky-200"
+          : "border-line-strong bg-surface text-fg-muted hover:bg-elevated",
       )}
     >
       {children}

@@ -49,6 +49,14 @@ export interface SettingsHost {
   repos: string[];
 }
 
+/**
+ * Appearance preference. "system" follows the OS light/dark setting (the
+ * default); "light"/"dark" force that theme regardless of the OS. Applied in the
+ * main process via `nativeTheme.themeSource`, which drives the renderer's
+ * `prefers-color-scheme` and the native window chrome alike.
+ */
+export type ThemePreference = "system" | "light" | "dark";
+
 /** Persisted application settings (userData/settings.json) — no tokens. */
 export interface Settings {
   /** Auto-refresh interval in seconds. */
@@ -57,6 +65,8 @@ export interface Settings {
   launchAtLogin: boolean;
   /** Periodically check for and install updates (electron-updater). */
   autoUpdate: boolean;
+  /** Light/dark appearance, or follow the OS. */
+  theme: ThemePreference;
   hosts: SettingsHost[];
 }
 
@@ -216,6 +226,8 @@ export interface PrManagerApi {
   getSettings(): Promise<Settings>;
   /** Validate + persist settings; applies immediately. */
   saveSettings(settings: Settings): Promise<SaveSettingsResult>;
+  /** Apply an appearance preference immediately and persist it. */
+  setTheme(theme: ThemePreference): Promise<void>;
   /** `gh` CLI install + auth status for the configured hosts. */
   getGhStatus(): Promise<GhStatus>;
   /** The running app version. */

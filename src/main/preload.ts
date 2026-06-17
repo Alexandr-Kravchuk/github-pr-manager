@@ -10,6 +10,7 @@ const api: PrManagerApi = {
   openExternal: (url) => ipcRenderer.invoke("app:openExternal", url),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (settings) => ipcRenderer.invoke("settings:save", settings),
+  setTheme: (theme) => ipcRenderer.invoke("theme:set", theme),
   getGhStatus: () => ipcRenderer.invoke("gh:status"),
   getAppVersion: () => ipcRenderer.invoke("app:getVersion"),
   onSnapshot: (listener) => {

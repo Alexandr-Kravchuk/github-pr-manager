@@ -84,6 +84,9 @@ export function validateSettings(raw: unknown): Settings {
   const launchAtLogin = typeof obj.launchAtLogin === "boolean" ? obj.launchAtLogin : false;
   const autoUpdate = typeof obj.autoUpdate === "boolean" ? obj.autoUpdate : true;
 
+  // Appearance defaults to following the OS; anything unrecognized falls back.
+  const theme = obj.theme === "light" || obj.theme === "dark" ? obj.theme : "system";
+
   // An empty hosts list is valid — it's the first-run / unconfigured state, not
   // an error (the UI guides the user to add a host).
   const rawHosts = Array.isArray(obj.hosts) ? obj.hosts : [];
@@ -106,7 +109,7 @@ export function validateSettings(raw: unknown): Settings {
     return { label, graphqlUrl: host.graphqlUrl.trim(), repos };
   });
 
-  return { pollIntervalSeconds, launchAtLogin, autoUpdate, hosts };
+  return { pollIntervalSeconds, launchAtLogin, autoUpdate, theme, hosts };
 }
 
 /** A fresh, empty settings object (first run). */
@@ -115,6 +118,7 @@ export function defaultSettings(): Settings {
     pollIntervalSeconds: DEFAULT_POLL_INTERVAL_SECONDS,
     launchAtLogin: false,
     autoUpdate: true,
+    theme: "system",
     hosts: [],
   };
 }

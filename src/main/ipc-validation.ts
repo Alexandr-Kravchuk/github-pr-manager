@@ -1,4 +1,4 @@
-import type { SeenInput } from "../shared/types";
+import type { SeenInput, ThemePreference } from "../shared/types";
 
 // Validators for values that cross the IPC boundary from the renderer. The
 // renderer is trusted, but a compromised/buggy caller must not be able to push
@@ -37,4 +37,12 @@ export function validateExternalUrl(value: unknown): string {
     throw new Error(`openExternal: refusing non-http(s) url: ${value}`);
   }
   return value;
+}
+
+/** Ensures a renderer-supplied theme is one of the known preferences. */
+export function validateThemePreference(value: unknown): ThemePreference {
+  if (value === "system" || value === "light" || value === "dark") {
+    return value;
+  }
+  throw new Error(`setTheme: invalid theme preference: ${String(value)}`);
 }

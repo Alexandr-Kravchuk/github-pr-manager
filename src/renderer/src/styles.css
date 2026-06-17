@@ -1,7 +1,60 @@
 @import "tailwindcss";
 
+/*
+ * Theme follows the OS light/dark preference (prefers-color-scheme).
+ *
+ * Neutral surfaces, borders and text are semantic tokens mapped to CSS
+ * variables via `@theme inline`, so a utility like `bg-surface` compiles to
+ * `background-color: var(--surface)`. The variables themselves are redefined
+ * per color-scheme below — flipping the whole UI with no per-element `dark:`.
+ *
+ * Accent colors (sky/red/emerald/amber/violet/orange) stay on Tailwind's
+ * palette; only their *text* shades get a `dark:` variant in the components,
+ * since the dark theme wants lighter shades (300) and light wants darker (700).
+ */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-elevated: var(--elevated);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-secondary: var(--fg-secondary);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-fg-faint: var(--fg-faint);
+}
+
+/* Light theme (default) — window bg slightly gray, cards pure white. */
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
+
+  --canvas: #f7f7f8;
+  --surface: #ffffff;
+  --elevated: #ececee;
+  --line: #e4e4e7;
+  --line-strong: #d4d4d8;
+  --fg: #18181b;
+  --fg-secondary: #27272a;
+  --fg-muted: #52525b;
+  --fg-subtle: #6b6b73;
+  --fg-faint: #9b9ba3;
+}
+
+/* Dark theme — the original zinc palette. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #09090b; /* zinc-950 */
+    --surface: #18181b; /* zinc-900 */
+    --elevated: #27272a; /* zinc-800 */
+    --line: #27272a; /* zinc-800 */
+    --line-strong: #3f3f46; /* zinc-700 */
+    --fg: #f4f4f5; /* zinc-100 */
+    --fg-secondary: #e4e4e7; /* zinc-200 */
+    --fg-muted: #a1a1aa; /* zinc-400 */
+    --fg-subtle: #71717a; /* zinc-500 */
+    --fg-faint: #52525b; /* zinc-600 */
+  }
 }
 
 html,
@@ -12,8 +65,8 @@ body,
 
 body {
   margin: 0;
-  background-color: #09090b; /* zinc-950 */
-  color: #fafafa;
+  background-color: var(--canvas);
+  color: var(--fg);
   font-family:
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }

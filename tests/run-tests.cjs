@@ -42,6 +42,7 @@ test("defaultSettings: empty + 60s + toggles", () => {
   assert.strictEqual(d.pollIntervalSeconds, 60);
   assert.strictEqual(d.launchAtLogin, false);
   assert.strictEqual(d.autoUpdate, true);
+  assert.strictEqual(d.theme, "system");
   assert.deepStrictEqual(d.hosts, []);
 });
 
@@ -60,6 +61,14 @@ test("validateSettings: toggles honored when present", () => {
   const s = cfg.validateSettings({ launchAtLogin: true, autoUpdate: false, hosts: [] });
   assert.strictEqual(s.launchAtLogin, true);
   assert.strictEqual(s.autoUpdate, false);
+});
+test("validateSettings: theme defaults to system when absent/invalid", () => {
+  assert.strictEqual(cfg.validateSettings({ hosts: [] }).theme, "system");
+  assert.strictEqual(cfg.validateSettings({ theme: "sepia", hosts: [] }).theme, "system");
+});
+test("validateSettings: theme honored when light/dark", () => {
+  assert.strictEqual(cfg.validateSettings({ theme: "light", hosts: [] }).theme, "light");
+  assert.strictEqual(cfg.validateSettings({ theme: "dark", hosts: [] }).theme, "dark");
 });
 test("validateSettings: sub-minimum interval falls back to 60", () => {
   assert.strictEqual(cfg.validateSettings({ pollIntervalSeconds: 2, hosts: [] }).pollIntervalSeconds, 60);
