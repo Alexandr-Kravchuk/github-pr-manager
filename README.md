@@ -85,10 +85,18 @@ prompts **Restart now / Later** once an update is downloaded.
 To cut a release:
 
 1. Bump `version` in `package.json`.
-2. Run the **Release** GitHub Action (`workflow_dispatch`). It runs the tests,
-   builds the **Windows** installer, and publishes a **draft** GitHub Release
-   `v<version>` with `PR Dashboard Setup <version>.exe` + `latest.yml` (the
-   Windows update feed).
+2. Build the **Windows** installer + `latest.yml` (the Windows update feed), either:
+   - **CI:** run the **Release** GitHub Action (`workflow_dispatch`) — builds on a
+     hosted runner and publishes to the `v<version>` release; or
+   - **On a Windows host** (e.g. ts1-core-dev04) over SSH:
+
+     ```powershell
+     powershell -ExecutionPolicy Bypass -File scripts\release-win.ps1 -Token <gh-token>
+     ```
+
+     `scripts/release-win.ps1` clones/updates the repo, builds the NSIS installer,
+     and uploads the `.exe` + `latest.yml` to the `v<version>` release via the
+     GitHub API (works even after the release is published).
 3. On a Mac with a **Developer ID Application** certificate, build, sign and
    notarize the macOS artifacts and upload them to the same release:
 
