@@ -14,6 +14,7 @@
     "test": "npm run build:main && node tests/run-tests.cjs",
     "dev": "node scripts/dev.mjs",
     "start": "npm run build && electron .",
+    "app": "electron .",
     "package": "npm run build && electron-builder",
     "package:dir": "npm run build && electron-builder --dir",
     "release:mac": "bash scripts/release-mac.sh"
