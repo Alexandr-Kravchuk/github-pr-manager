@@ -53,6 +53,10 @@ export interface SettingsHost {
 export interface Settings {
   /** Auto-refresh interval in seconds. */
   pollIntervalSeconds: number;
+  /** Start the app automatically at login (applied only in the packaged app). */
+  launchAtLogin: boolean;
+  /** Periodically check for and install updates (electron-updater). */
+  autoUpdate: boolean;
   hosts: SettingsHost[];
 }
 

@@ -37,9 +37,11 @@ test("ghHostnameFromUrl: invalid URL throws ConfigError", () =>
   assert.throws(() => cfg.ghHostnameFromUrl("not a url"), /Invalid graphqlUrl/));
 
 // --- defaultSettings ---------------------------------------------------------
-test("defaultSettings: empty + 60s", () => {
+test("defaultSettings: empty + 60s + toggles", () => {
   const d = cfg.defaultSettings();
   assert.strictEqual(d.pollIntervalSeconds, 60);
+  assert.strictEqual(d.launchAtLogin, false);
+  assert.strictEqual(d.autoUpdate, true);
   assert.deepStrictEqual(d.hosts, []);
 });
 
@@ -48,6 +50,16 @@ test("validateSettings: missing hosts is valid (unconfigured)", () => {
   const s = cfg.validateSettings({ pollIntervalSeconds: 30 });
   assert.strictEqual(s.pollIntervalSeconds, 30);
   assert.deepStrictEqual(s.hosts, []);
+});
+test("validateSettings: toggles default off/on when absent", () => {
+  const s = cfg.validateSettings({ hosts: [] });
+  assert.strictEqual(s.launchAtLogin, false);
+  assert.strictEqual(s.autoUpdate, true);
+});
+test("validateSettings: toggles honored when present", () => {
+  const s = cfg.validateSettings({ launchAtLogin: true, autoUpdate: false, hosts: [] });
+  assert.strictEqual(s.launchAtLogin, true);
+  assert.strictEqual(s.autoUpdate, false);
 });
 test("validateSettings: sub-minimum interval falls back to 60", () => {
   assert.strictEqual(cfg.validateSettings({ pollIntervalSeconds: 2, hosts: [] }).pollIntervalSeconds, 60);

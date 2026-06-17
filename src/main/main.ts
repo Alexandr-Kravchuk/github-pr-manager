@@ -1,7 +1,7 @@
 import path from "node:path";
 import { app, BrowserWindow, ipcMain, nativeImage, session, shell } from "electron";
 
-import { ConfigError, getGhStatus, toHostConfigs, toPublicConfig } from "../shared/config";
+import { ConfigError, defaultSettings, getGhStatus, toHostConfigs, toPublicConfig } from "../shared/config";
 import { markSeen } from "../shared/state";
 import type {
   ConfigResult,
@@ -14,7 +14,7 @@ import { ensureCliPath } from "./cli-path";
 import { validateExternalUrl, validateSeenItems } from "./ipc-validation";
 import { Poller } from "./poller";
 import { loadSettings, persistSettings, seenStatePath } from "./settings";
-import { initAutoUpdater } from "./updater";
+import { initAutoUpdater, setAutoUpdateEnabled } from "./updater";
 
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
@@ -23,6 +23,19 @@ function sendToRenderer(channel: string, payload: unknown): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+}
+
+/** Registers/unregisters the OS "open at login" item. Packaged app only — in dev
+ *  the item would point at the dev Electron binary. Not supported on Linux. */
+function applyLaunchAtLogin(enabled: boolean): void {
+  if (!app.isPackaged || process.platform === "linux") return;
+  app.setLoginItemSettings({ openAtLogin: enabled });
+}
+
+/** Applies user preferences (launch-at-login + auto-update) to the OS/updater. */
+function applyPreferences(settings: Settings): void {
+  applyLaunchAtLogin(settings.launchAtLogin);
+  setAutoUpdateEnabled(settings.autoUpdate);
 }
 
 /**
@@ -160,7 +173,8 @@ function registerIpc(): void {
 
   ipcMain.handle("settings:save", async (_event, raw: unknown): Promise<SaveSettingsResult> => {
     try {
-      persistSettings(raw);
+      const saved = persistSettings(raw);
+      applyPreferences(saved);
       // Apply immediately: a fresh poll re-resolves tokens and re-fetches, and
       // its snapshot/config-error is pushed to the renderer.
       await poller?.refresh();
@@ -176,7 +190,7 @@ function registerIpc(): void {
       return getGhStatus(loadSettings());
     } catch {
       // An invalid settings file shouldn't break the gh probe.
-      return { installed: getGhStatus({ pollIntervalSeconds: 60, hosts: [] }).installed, hosts: [] };
+      return { installed: getGhStatus(defaultSettings()).installed, hosts: [] };
     }
   });
 
@@ -219,6 +233,16 @@ void app.whenReady().then(() => {
 
   createWindow();
   initAutoUpdater(() => mainWindow);
+
+  // Apply saved prefs (launch-at-login + auto-update). Fall back to defaults if
+  // the settings file is invalid.
+  let prefs: Settings;
+  try {
+    prefs = loadSettings();
+  } catch {
+    prefs = defaultSettings();
+  }
+  applyPreferences(prefs);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

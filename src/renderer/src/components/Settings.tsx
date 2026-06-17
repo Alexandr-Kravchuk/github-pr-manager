@@ -41,6 +41,8 @@ function parseRepos(reposText: string): string[] {
 export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [loaded, setLoaded] = useState(false);
   const [pollIntervalSeconds, setPollIntervalSeconds] = useState(60);
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [autoUpdate, setAutoUpdate] = useState(true);
   const [hosts, setHosts] = useState<DraftHost[]>([]);
   const [gh, setGh] = useState<GhStatus | null>(null);
   const [saving, setSaving] = useState(false);
@@ -55,6 +57,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       .getSettings()
       .then((s) => {
         setPollIntervalSeconds(s.pollIntervalSeconds);
+        setLaunchAtLogin(s.launchAtLogin);
+        setAutoUpdate(s.autoUpdate);
         setHosts(
           s.hosts.map((h) => ({
             label: h.label,
@@ -80,6 +84,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
     try {
       const settings: Settings = {
         pollIntervalSeconds,
+        launchAtLogin,
+        autoUpdate,
         hosts: hosts.map((h) => ({
           label: h.label,
           graphqlUrl: h.graphqlUrl,
@@ -202,6 +208,38 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         <p className="mt-1 text-xs text-zinc-600">
           Minimum 10s. The app backs off automatically as a host&apos;s rate limit runs low.
         </p>
+      </section>
+
+      {/* General toggles */}
+      <section className="mb-6 space-y-3">
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={launchAtLogin}
+            onChange={(e) => setLaunchAtLogin(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-sky-500"
+          />
+          <span>
+            <span className="block text-sm text-zinc-200">Launch at login</span>
+            <span className="block text-xs text-zinc-600">
+              Start PR Dashboard automatically when you sign in.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={autoUpdate}
+            onChange={(e) => setAutoUpdate(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-sky-500"
+          />
+          <span>
+            <span className="block text-sm text-zinc-200">Automatically check for updates</span>
+            <span className="block text-xs text-zinc-600">
+              Download and install new versions in the background.
+            </span>
+          </span>
+        </label>
       </section>
 
       {/* Hosts */}

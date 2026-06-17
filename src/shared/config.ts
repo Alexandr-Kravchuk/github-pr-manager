@@ -80,6 +80,10 @@ export function validateSettings(raw: unknown): Settings {
       ? obj.pollIntervalSeconds
       : DEFAULT_POLL_INTERVAL_SECONDS;
 
+  // Launch-at-login defaults OFF (opt-in); auto-update defaults ON.
+  const launchAtLogin = typeof obj.launchAtLogin === "boolean" ? obj.launchAtLogin : false;
+  const autoUpdate = typeof obj.autoUpdate === "boolean" ? obj.autoUpdate : true;
+
   // An empty hosts list is valid — it's the first-run / unconfigured state, not
   // an error (the UI guides the user to add a host).
   const rawHosts = Array.isArray(obj.hosts) ? obj.hosts : [];
@@ -102,12 +106,17 @@ export function validateSettings(raw: unknown): Settings {
     return { label, graphqlUrl: host.graphqlUrl.trim(), repos };
   });
 
-  return { pollIntervalSeconds, hosts };
+  return { pollIntervalSeconds, launchAtLogin, autoUpdate, hosts };
 }
 
 /** A fresh, empty settings object (first run). */
 export function defaultSettings(): Settings {
-  return { pollIntervalSeconds: DEFAULT_POLL_INTERVAL_SECONDS, hosts: [] };
+  return {
+    pollIntervalSeconds: DEFAULT_POLL_INTERVAL_SECONDS,
+    launchAtLogin: false,
+    autoUpdate: true,
+    hosts: [],
+  };
 }
 
 /**
