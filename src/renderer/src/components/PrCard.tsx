@@ -1,3 +1,5 @@
+import { useCallback, useState } from "react";
+
 import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { CheckBadge } from "./CheckBadge";
@@ -104,12 +106,39 @@ function ReviewerBadge({ r }: { r: Reviewer }) {
   );
 }
 
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
 export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
   const review = reviewLabel(pr.reviewDecision);
   const passingCount = pr.checks.filter((c) => c.state === "success").length;
   // A review is being asked of you — tint the whole card violet so it stands
   // out from the rest. The tint fades to the plain surface on hover.
   const needsMyReview = pr.roles.includes("reviewer");
+  const [copied, setCopied] = useState(false);
+  const copyUrl = useCallback(() => {
+    window.api
+      .copyText(pr.url)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {});
+  }, [pr.url]);
 
   return (
     <div
@@ -136,9 +165,23 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
             <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">Draft</span>
           )}
         </div>
-        <span className="shrink-0" title={new Date(pr.updatedAt).toLocaleString()}>
-          {relativeTime(pr.updatedAt)}
-        </span>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={copyUrl}
+            title={copied ? "Copied" : "Copy PR link"}
+            aria-label="Copy PR link"
+            className={cn(
+              "rounded p-0.5 hover:bg-elevated",
+              copied
+                ? "text-emerald-600 dark:text-emerald-400"
+                : "text-fg-faint hover:text-fg-secondary",
+            )}
+          >
+            {copied ? <CheckIcon /> : <CopyIcon />}
+          </button>
+          <span title={new Date(pr.updatedAt).toLocaleString()}>{relativeTime(pr.updatedAt)}</span>
+        </div>
       </div>
 
       {/* Title — clicking opens the PR and marks it as seen */}

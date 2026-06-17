@@ -13,11 +13,22 @@ let initialized = false; // handlers wired (packaged builds only)
 let getWindowFn: () => BrowserWindow | null = () => null;
 let initialTimer: NodeJS.Timeout | null = null;
 let intervalTimer: NodeJS.Timeout | null = null;
+let autoUpdateEnabled = false; // mirrors the user's auto-update setting
 
 function check(): void {
   autoUpdater
     .checkForUpdates()
     .catch((e) => console.error("[updater] check failed:", e?.message ?? e));
+}
+
+/**
+ * Triggers an immediate update check on demand (e.g. from a manual Refresh) so
+ * the user needn't wait for the periodic timer. No-op in dev, when the updater
+ * isn't initialized, or when the user turned auto-update off.
+ */
+export function checkForUpdatesNow(): void {
+  if (!initialized || !autoUpdateEnabled) return;
+  check();
 }
 
 /**
@@ -67,6 +78,7 @@ export function initAutoUpdater(getWindow: () => BrowserWindow | null): void {
  * call repeatedly. No effect in dev / when the updater wasn't initialized.
  */
 export function setAutoUpdateEnabled(enabled: boolean): void {
+  autoUpdateEnabled = enabled;
   if (!initialized) return;
   if (enabled) {
     if (intervalTimer) return; // already running

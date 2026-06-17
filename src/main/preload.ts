@@ -13,6 +13,7 @@ const api: PrManagerApi = {
   setTheme: (theme) => ipcRenderer.invoke("theme:set", theme),
   getGhStatus: () => ipcRenderer.invoke("gh:status"),
   getAppVersion: () => ipcRenderer.invoke("app:getVersion"),
+  copyText: (text) => ipcRenderer.invoke("app:copyText", text),
   onSnapshot: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DashboardResponse) =>
       listener(payload);

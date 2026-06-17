@@ -1,5 +1,5 @@
 import path from "node:path";
-import { app, BrowserWindow, ipcMain, nativeImage, nativeTheme, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, toHostConfigs, toPublicConfig } from "../shared/config";
 import { markSeen } from "../shared/state";
@@ -11,10 +11,15 @@ import type {
   Settings,
 } from "../shared/types";
 import { ensureCliPath } from "./cli-path";
-import { validateExternalUrl, validateSeenItems, validateThemePreference } from "./ipc-validation";
+import {
+  validateClipboardText,
+  validateExternalUrl,
+  validateSeenItems,
+  validateThemePreference,
+} from "./ipc-validation";
 import { Poller } from "./poller";
 import { loadSettings, persistSettings, seenStatePath } from "./settings";
-import { initAutoUpdater, setAutoUpdateEnabled } from "./updater";
+import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./updater";
 
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
@@ -166,6 +171,9 @@ function registerIpc(): void {
   // Manual "Refresh": force an immediate poll, then return the fresh state.
   ipcMain.handle("dashboard:refresh", async (): Promise<DashboardResult> => {
     await poller?.refresh();
+    // Piggy-back an update check on the manual Refresh so the user isn't stuck
+    // waiting for the periodic timer. Fire-and-forget; no-op in dev / when off.
+    checkForUpdatesNow();
     return dashboardResult();
   });
 
@@ -225,6 +233,10 @@ function registerIpc(): void {
   });
 
   ipcMain.handle("app:getVersion", async (): Promise<string> => app.getVersion());
+
+  ipcMain.handle("app:copyText", async (_event, text: unknown): Promise<void> => {
+    clipboard.writeText(validateClipboardText(text));
+  });
 }
 
 void app.whenReady().then(() => {

@@ -46,3 +46,14 @@ export function validateThemePreference(value: unknown): ThemePreference {
   }
   throw new Error(`setTheme: invalid theme preference: ${String(value)}`);
 }
+
+/** Ensures clipboard text is a string of sane length before writing it. */
+export function validateClipboardText(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new Error("copyText: expected a string.");
+  }
+  if (value.length > 10_000) {
+    throw new Error("copyText: text too long.");
+  }
+  return value;
+}

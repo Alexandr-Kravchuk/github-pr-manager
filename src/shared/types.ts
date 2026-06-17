@@ -232,6 +232,8 @@ export interface PrManagerApi {
   getGhStatus(): Promise<GhStatus>;
   /** The running app version. */
   getAppVersion(): Promise<string>;
+  /** Copy text (e.g. a PR URL) to the system clipboard. */
+  copyText(text: string): Promise<void>;
   /** Subscribe to live snapshots. Returns an unsubscribe function. */
   onSnapshot(listener: (snapshot: DashboardResponse) => void): () => void;
   /** Subscribe to config-error messages. Returns an unsubscribe function. */

@@ -25,6 +25,7 @@ export function App() {
   const [failingOnly, setFailingOnly] = useState(false);
   const [newOnly, setNewOnly] = useState(false);
   const [groupByRepo, setGroupByRepo] = useState(true);
+  const [showDrafts, setShowDrafts] = useState(false);
 
   // Applies a snapshot received either from the initial fetch or a live event.
   const applySnapshot = useCallback((snapshot: DashboardResponse) => {
@@ -158,6 +159,7 @@ export function App() {
       attention: allPrs.filter((p) => p.needsAttention).length,
       failing: allPrs.filter((p) => p.failingChecks.length > 0).length,
       fresh: allPrs.filter((p) => p.hasNewActivity).length,
+      drafts: allPrs.filter((p) => p.isDraft).length,
     }),
     [allPrs],
   );
@@ -165,6 +167,7 @@ export function App() {
   const filtered = useMemo(
     () =>
       allPrs.filter((pr) => {
+        if (!showDrafts && pr.isDraft) return false;
         if (role !== "all" && !pr.roles.includes(role)) return false;
         if (host !== "all" && pr.hostLabel !== host) return false;
         if (attentionOnly && !pr.needsAttention) return false;
@@ -177,7 +180,7 @@ export function App() {
         }
         return true;
       }),
-    [allPrs, role, host, attentionOnly, failingOnly, newOnly, search],
+    [allPrs, role, host, attentionOnly, failingOnly, newOnly, search, showDrafts],
   );
 
   // Reviewer PRs (your turn to review) float to the top — in the flat list and
@@ -211,7 +214,6 @@ export function App() {
     [data, tick],
   );
 
-  const newInView = sorted.filter((p) => p.hasNewActivity);
   const noHosts = config !== null && config.hosts.length === 0;
 
   if (view === "settings") {
@@ -246,6 +248,11 @@ export function App() {
             </p>
           </div>
           <div className="flex items-center gap-2 text-xs text-fg-muted">
+            {data?.version && (
+              <span className="text-fg-faint" title="App version">
+                v{data.version}
+              </span>
+            )}
             {data?.rateLimits?.map((rl) => (
               <span
                 key={rl.hostLabel}
@@ -276,9 +283,10 @@ export function App() {
               type="button"
               onClick={() => setView("settings")}
               title="Settings"
-              className="rounded-md border border-line-strong px-3 py-1 font-medium text-fg-secondary hover:bg-elevated"
+              aria-label="Settings"
+              className="rounded-md border border-line-strong p-1.5 text-fg-secondary hover:bg-elevated"
             >
-              ⚙
+              <GearIcon />
             </button>
           </div>
         </div>
@@ -356,19 +364,14 @@ export function App() {
           <FilterChip active={newOnly} onClick={() => setNewOnly((v) => !v)}>
             ✦ New comments
           </FilterChip>
+          {counts.drafts > 0 && (
+            <FilterChip active={showDrafts} onClick={() => setShowDrafts((v) => !v)}>
+              Drafts ({counts.drafts})
+            </FilterChip>
+          )}
           <FilterChip active={groupByRepo} onClick={() => setGroupByRepo((v) => !v)}>
             Group by repo
           </FilterChip>
-
-          {newInView.length > 0 && (
-            <button
-              type="button"
-              onClick={() => postSeen(newInView)}
-              className="ml-auto rounded-md border border-line-strong px-3 py-1.5 text-sm text-fg-secondary hover:bg-elevated"
-            >
-              ✓ Mark all as seen ({newInView.length})
-            </button>
-          )}
         </div>
       )}
 
@@ -436,6 +439,15 @@ export function App() {
         </div>
       )}
     </div>
+  );
+}
+
+function GearIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
   );
 }
 
