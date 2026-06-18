@@ -14,8 +14,10 @@ interface Props {
 
 /**
  * Left-accent color of the card, by signal priority.
- *  - Red: your PR is blocked and needs your action — failing CI, or a change
- *    request you haven't re-requested review on. Only for PRs you authored.
+ *  - Red: your PR is blocked and needs your action — failing CI, a change
+ *    request you haven't re-requested review on, or a reviewer comment you
+ *    haven't answered (an unresolved thread whose last comment isn't yours,
+ *    even from a plain "Comment" review with green CI). Only for PRs you authored.
  *  - Violet: a review is being requested of you and you haven't submitted one
  *    yet — your turn to act. The `reviewer` role comes from GitHub's
  *    `review-requested:@me`, so it clears itself once you review. Ranked right
@@ -33,7 +35,10 @@ interface Props {
 function accentClass(pr: PullRequest): string {
   const isAuthor = pr.roles.includes("author");
 
-  if (isAuthor && (pr.failingChecks.length > 0 || pr.hasUnaddressedChangeRequest)) {
+  if (
+    isAuthor &&
+    (pr.failingChecks.length > 0 || pr.hasUnaddressedChangeRequest || pr.hasUnaddressedComments)
+  ) {
     return "border-l-red-500";
   }
   if (pr.roles.includes("reviewer")) {

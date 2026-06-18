@@ -114,6 +114,14 @@ export interface PullRequest {
 
   /** Number of unresolved review threads — "comments to fix". */
   unresolvedThreads: number;
+  /**
+   * Number of unresolved review threads whose latest comment is NOT by the PR
+   * author — i.e. someone left a comment and the author hasn't replied. This is
+   * the "comments without an answer" signal: narrower than `unresolvedThreads`
+   * (it excludes threads where the author already replied but didn't resolve,
+   * and threads the author opened that are now waiting on a reviewer).
+   */
+  unaddressedThreads: number;
   /** Total number of comments (issue + inline) — basis for new-comment detection. */
   totalComments: number;
 
@@ -137,6 +145,14 @@ export interface PullRequest {
    * false (we're waiting on them again, not on the author).
    */
   hasUnaddressedChangeRequest: boolean;
+  /**
+   * A reviewer (human or bot) left a comment the author has not answered — at
+   * least one unresolved review thread whose latest comment is not by the
+   * author. Marks the PR as needing the author's action even when the review
+   * was a plain "Comment" (not a formal "Request changes") and CI is green —
+   * the case the change-request/CI signals miss. Author-only on the card.
+   */
+  hasUnaddressedComments: boolean;
   /**
    * At least one non-bot reviewer's latest review is an approval. This is what
    * marks a PR "good to go" — a single human approve is enough, independent of

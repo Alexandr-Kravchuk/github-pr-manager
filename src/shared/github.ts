@@ -30,7 +30,10 @@ fragment PrFields on PullRequest {
   }
   comments { totalCount }
   reviewThreads(first: 50) {
-    nodes { isResolved comments { totalCount } }
+    nodes {
+      isResolved
+      comments(last: 1) { totalCount nodes { author { login } } }
+    }
   }
   commits(last: 1) {
     nodes {
@@ -116,7 +119,12 @@ interface RawPr {
     nodes: Array<{ author: { __typename: string; login: string; avatarUrl: string } | null; state: string }>;
   };
   comments: { totalCount: number };
-  reviewThreads: { nodes: Array<{ isResolved: boolean; comments: { totalCount: number } }> };
+  reviewThreads: {
+    nodes: Array<{
+      isResolved: boolean;
+      comments: { totalCount: number; nodes: Array<{ author: { login: string } | null }> };
+    }>;
+  };
   commits: {
     nodes: Array<{
       commit: {
@@ -255,6 +263,19 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
   const reviewCommentCount = threads.reduce((sum, t) => sum + t.comments.totalCount, 0);
   const totalComments = pr.comments.totalCount + reviewCommentCount;
 
+  // "Comments without an answer": an unresolved thread whose latest comment is
+  // not by the PR author. If the author already replied (last comment is theirs)
+  // the ball is back on the reviewer, so it does not count. A null author (PR
+  // with no resolvable author) makes every reviewer comment count, which is the
+  // safe side.
+  const authorLogin = pr.author?.login ?? null;
+  const unaddressedThreads = threads.filter((t) => {
+    if (t.isResolved) return false;
+    const lastCommentLogin = t.comments.nodes[t.comments.nodes.length - 1]?.author?.login ?? null;
+    return lastCommentLogin !== authorLogin;
+  }).length;
+  const hasUnaddressedComments = unaddressedThreads > 0;
+
   const checks = extractChecks(pr);
   const failingChecks = checks.filter((c) => c.state === "failure");
   const pendingChecks = checks.filter((c) => c.state === "pending");
@@ -319,6 +340,7 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
     reviewDecision: pr.reviewDecision,
     roles,
     unresolvedThreads,
+    unaddressedThreads,
     totalComments,
     checks,
     failingChecks,
@@ -327,6 +349,7 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
     reviewers,
     awaitingReview,
     hasUnaddressedChangeRequest,
+    hasUnaddressedComments,
     hasHumanApproval,
     // Activity fields are overwritten in state.ts:
     hasNewActivity: false,

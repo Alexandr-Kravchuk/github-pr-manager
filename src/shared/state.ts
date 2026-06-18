@@ -78,6 +78,7 @@ export async function applyActivity(prs: PullRequest[], statePath: string): Prom
       pr.roles.includes("reviewer") ||
       pr.failingChecks.length > 0 ||
       pr.hasUnaddressedChangeRequest ||
+      pr.hasUnaddressedComments ||
       pr.hasNewActivity ||
       (pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview));
   }
