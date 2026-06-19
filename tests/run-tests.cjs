@@ -6,6 +6,7 @@ const assert = require("node:assert");
 const path = require("node:path");
 
 const cfg = require(path.join(__dirname, "../dist/main/shared/config.js"));
+const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
 
 let passed = 0;
 let failed = 0;
@@ -103,6 +104,46 @@ test("toPublicConfig: strips graphqlUrl, keeps label + repos", () => {
     pollIntervalSeconds: 60,
     hosts: [{ label: "GH", repos: ["a/b"] }],
   });
+});
+
+// --- poller: hostIntervalMs --------------------------------------------------
+const future = (s) => new Date(Date.now() + s * 1000).toISOString();
+test("hostIntervalMs: no rate-limit reading uses base", () =>
+  assert.strictEqual(poller.hostIntervalMs(null, 60_000), 60_000));
+test("hostIntervalMs: cheap host (cost 1) stays at base", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs({ hostLabel: "GHE", remaining: 5000, cost: 1, resetAt: future(3600) }, 60_000),
+    60_000,
+  ));
+test("hostIntervalMs: expensive host (cost 35) gets the 5-min floor", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs({ hostLabel: "GH", remaining: 5000, cost: 35, resetAt: future(3600) }, 60_000),
+    300_000,
+  ));
+test("hostIntervalMs: a base above the floor wins for an expensive host", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs({ hostLabel: "GH", remaining: 5000, cost: 35, resetAt: future(3600) }, 600_000),
+    600_000,
+  ));
+test("hostIntervalMs: exhausted budget waits at least the minute floor", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs({ hostLabel: "GHE", remaining: 0, cost: 1, resetAt: future(5) }, 60_000),
+    60_000,
+  ));
+
+// --- poller: computeIdleFactor -----------------------------------------------
+test("computeIdleFactor: no backoff until the streak passes the threshold", () => {
+  assert.strictEqual(poller.computeIdleFactor(0), 1);
+  assert.strictEqual(poller.computeIdleFactor(2), 1);
+});
+test("computeIdleFactor: doubles per extra unchanged tick", () => {
+  assert.strictEqual(poller.computeIdleFactor(3), 2);
+  assert.strictEqual(poller.computeIdleFactor(4), 4);
+  assert.strictEqual(poller.computeIdleFactor(5), 8);
+});
+test("computeIdleFactor: capped", () => {
+  assert.strictEqual(poller.computeIdleFactor(6), 16);
+  assert.strictEqual(poller.computeIdleFactor(50), 16);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

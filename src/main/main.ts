@@ -1,5 +1,5 @@
 import path from "node:path";
-import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, powerMonitor, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, toHostConfigs, toPublicConfig } from "../shared/config";
 import { markSeen } from "../shared/state";
@@ -23,6 +23,29 @@ import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./upd
 
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
+let systemSuspended = false;
+
+/** Pause polling after this many seconds of user inactivity. */
+const IDLE_PAUSE_SECONDS = 300;
+
+/**
+ * The idle gate handed to the poller: true when a fetch would just waste the
+ * rate-limit budget — the machine is asleep, the window is minimized/hidden, or
+ * the user has been idle a while. No window yet (startup / dock activate) counts
+ * as active so the first fetch runs. `wake()` (focus/resume) forces a fetch back.
+ */
+function isDashboardPaused(): boolean {
+  if (systemSuspended) return true;
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return false;
+  if (win.isMinimized() || !win.isVisible()) return true;
+  try {
+    if (powerMonitor.getSystemIdleTime() > IDLE_PAUSE_SECONDS) return true;
+  } catch {
+    /* getSystemIdleTime can be unavailable on some platforms — treat as active */
+  }
+  return false;
+}
 
 function sendToRenderer(channel: string, payload: unknown): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -105,6 +128,13 @@ function createWindow(): void {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+
+  // Returning to the dashboard (focus / un-minimize / re-show) should refresh
+  // immediately rather than wait out the parked idle cadence.
+  const wakePoller = (): void => void poller?.wake();
+  mainWindow.on("focus", wakePoller);
+  mainWindow.on("show", wakePoller);
+  mainWindow.on("restore", wakePoller);
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     console.error("[main] render process gone:", details.reason);
@@ -270,8 +300,20 @@ void app.whenReady().then(() => {
       if (process.env.PRD_DEBUG) console.error("[config-error]", message);
       sendToRenderer("config-error", message);
     },
+    isPaused: isDashboardPaused,
   });
   poller.start();
+
+  // Pause polling across sleep; refresh on resume / unlock so the first thing
+  // the user sees on return is current rather than stale.
+  powerMonitor.on("suspend", () => {
+    systemSuspended = true;
+  });
+  powerMonitor.on("resume", () => {
+    systemSuspended = false;
+    void poller?.wake();
+  });
+  powerMonitor.on("unlock-screen", () => void poller?.wake());
 
   // Resolve the saved appearance before the first window so the initial paint
   // and the native window background already match (no dark flash in light mode).
