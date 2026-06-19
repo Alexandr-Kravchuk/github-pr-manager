@@ -72,6 +72,12 @@ Log "npm ci"
 npm ci; Check "npm ci"
 Log "npm run build"
 npm run build; Check "npm run build"
+# Clear stale artifacts first, so a previous build's installer (a different
+# version) can't be picked up when we select the .exe to upload below.
+Log "Cleaning previous build artifacts"
+Remove-Item -Force -ErrorAction SilentlyContinue "$RepoDir\dist\*.exe","$RepoDir\dist\*.exe.blockmap","$RepoDir\dist\latest.yml"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$RepoDir\dist\win-unpacked"
+
 Log "electron-builder --win nsis (no publish)"
 npx --no-install electron-builder --win nsis --publish never; Check "electron-builder"
 
@@ -98,8 +104,8 @@ $relId = $rel.id
 
 # --- upload assets by ID (idempotent) ---------------------------------------
 $dist = Join-Path $RepoDir "dist"
-$exe = Get-ChildItem "$dist\*.exe" -ErrorAction Stop | Select-Object -First 1
-if (-not $exe) { throw "No .exe found in $dist" }
+$exe = Get-ChildItem "$dist\*.exe" -ErrorAction Stop | Where-Object { $_.Name -like "*$version*" } | Select-Object -First 1
+if (-not $exe) { throw "No $version .exe found in $dist" }
 $exeName = $exe.Name -replace ' ', '-'   # matches latest.yml's url
 $uploads = @(
   @{ Path = $exe.FullName;                  Name = $exeName;            Type = "application/octet-stream" }
