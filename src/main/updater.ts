@@ -52,7 +52,8 @@ export function initAutoUpdater(): void {
     console.log("[updater] up to date");
   });
   autoUpdater.on("update-downloaded", (info) => {
-    console.log("[updater] v%s downloaded — will install on next quit", info.version);
+    console.log("[updater] v%s downloaded — restarting to apply", info.version);
+    setTimeout(() => autoUpdater.quitAndInstall(), 3_000);
   });
 }
 
