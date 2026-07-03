@@ -208,12 +208,6 @@ export function App() {
     );
   }, [sorted, groupByRepo]);
 
-  const fetchedAgo = useMemo(
-    // tick forces relative-time recomputation
-    () => (data ? relativeTime(data.fetchedAt) : ""),
-    [data, tick],
-  );
-
   const noHosts = config !== null && config.hosts.length === 0;
 
   if (view === "settings") {
@@ -252,19 +246,18 @@ export function App() {
               <span
                 key={rl.hostLabel}
                 title={`Resets: ${rl.resetAt ? new Date(rl.resetAt).toLocaleTimeString() : "—"}`}
-                className="rounded bg-elevated px-2 py-1"
+                className="flex items-center gap-1.5 rounded bg-elevated px-2 py-1"
               >
                 {rl.hostLabel}: {rl.remaining}
+                <span className="text-fg-faint">·</span>
+                {rl.fetchedAt && <span className="text-fg-subtle">{relativeTime(rl.fetchedAt)}</span>}
               </span>
             ))}
             {data && (
-              <span className="flex items-center gap-1.5 text-fg-subtle">
-                <span
-                  className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-500"
-                  title="Live — auto-refreshing"
-                />
-                updated {fetchedAgo}
-              </span>
+              <span
+                className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-500"
+                title="Live — auto-refreshing"
+              />
             )}
             <button
               type="button"

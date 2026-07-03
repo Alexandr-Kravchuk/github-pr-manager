@@ -120,10 +120,10 @@ test("hostIntervalMs: expensive host (cost 35) gets the 5-min floor", () =>
     poller.hostIntervalMs({ hostLabel: "GH", remaining: 5000, cost: 35, resetAt: future(3600) }, 60_000),
     300_000,
   ));
-test("hostIntervalMs: a base above the floor wins for an expensive host", () =>
+test("hostIntervalMs: backoff base does not stretch an expensive host beyond its floor", () =>
   assert.strictEqual(
     poller.hostIntervalMs({ hostLabel: "GH", remaining: 5000, cost: 35, resetAt: future(3600) }, 600_000),
-    600_000,
+    300_000,
   ));
 test("hostIntervalMs: exhausted budget waits at least the minute floor", () =>
   assert.strictEqual(

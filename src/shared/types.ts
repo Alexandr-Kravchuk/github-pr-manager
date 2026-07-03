@@ -181,6 +181,8 @@ export interface RateLimitInfo {
   remaining: number;
   cost: number;
   resetAt: string;
+  /** When this host's data was last actually fetched from the network (set by the poller). */
+  fetchedAt?: string;
 }
 
 /** The full dashboard snapshot. */

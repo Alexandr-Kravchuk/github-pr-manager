@@ -109,11 +109,16 @@ function hashSnapshot(s: DashboardResponse): string {
  * reading. Expensive hosts get a floor so the shared token keeps headroom for
  * other clients; otherwise the remaining safe ticks are spread across the window
  * to the reset. Never below the (possibly backed-off) base; capped at 1 h.
+ *
+ * Cheap hosts use `baseMs` (which may include the no-change backoff) as their
+ * floor. Expensive hosts use `EXPENSIVE_FLOOR_MS` as floor regardless of
+ * backoff — the 5-min cadence was chosen as the right budget/freshness trade-off
+ * and should not be stretched by the backoff multiplier.
  */
 export function hostIntervalMs(rl: RateLimitInfo | null, baseMs: number): number {
   // No reading yet (host not fetched, or no repos so no GraphQL spend): base.
   if (!rl || rl.cost <= 0 || !rl.resetAt) return Math.min(MAX_INTERVAL_MS, baseMs);
-  const floor = rl.cost >= EXPENSIVE_COST ? Math.max(baseMs, EXPENSIVE_FLOOR_MS) : baseMs;
+  const floor = rl.cost >= EXPENSIVE_COST ? EXPENSIVE_FLOOR_MS : baseMs;
   const secondsUntilReset = Math.max(0, (new Date(rl.resetAt).getTime() - Date.now()) / 1000);
   const safeTicks = Math.floor(rl.remaining / rl.cost);
   if (safeTicks <= 0) {
@@ -140,6 +145,8 @@ interface HostSlot {
   error: HostError | null;
   /** Epoch ms before which this host should not be fetched again. */
   nextDueAt: number;
+  /** When this host's data was last actually fetched from the network. */
+  fetchedAt: string;
 }
 
 export class Poller {
@@ -203,7 +210,7 @@ export class Poller {
       this.timer = null;
     }
     this.unchangedStreak = 0;
-    await this.runTickThenSchedule(false);
+    await this.runTickThenSchedule(false, true);
   }
 
   getSnapshot(): DashboardResponse | null {
@@ -219,9 +226,9 @@ export class Poller {
     return this.firstReady;
   }
 
-  private runTickThenSchedule(force = false): Promise<void> {
+  private runTickThenSchedule(force = false, skipIdleGate = false): Promise<void> {
     if (this.inFlight) return this.inFlight;
-    const run = this.tick(force)
+    const run = this.tick(force, skipIdleGate)
       .then((nextMs) => {
         this.schedule(nextMs);
       })
@@ -254,7 +261,7 @@ export class Poller {
     return this.intervalMs;
   }
 
-  private async tick(force: boolean): Promise<number> {
+  private async tick(force: boolean, skipIdleGate = false): Promise<number> {
     let settings: Settings;
     try {
       settings = this.options.loadSettings();
@@ -271,7 +278,7 @@ export class Poller {
 
     // Idle gate: skip all gh/network work while nobody is looking. A forced
     // tick (manual refresh) always runs. Cheap re-check cadence until we wake.
-    if (!force && this.options.isPaused?.()) {
+    if (!force && !skipIdleGate && this.options.isPaused?.()) {
       this.resolveFirst();
       return PARKED_INTERVAL_MS;
     }
@@ -308,6 +315,7 @@ export class Poller {
     });
 
     const results = await Promise.allSettled(due.map((h) => fetchHost(h)));
+    const fetchedNow = new Date().toISOString();
     results.forEach((result, i) => {
       const host = due[i];
       const prev = this.hostSlots.get(host.graphqlUrl);
@@ -318,11 +326,13 @@ export class Poller {
           rateLimit,
           error: null,
           nextDueAt: now + hostIntervalMs(rateLimit, effectiveBase),
+          fetchedAt: fetchedNow,
         });
       } else {
         // Keep the last good PRs (better than blanking the host) and surface the
         // error. Space the retry by the last reading so an erroring expensive
-        // host — e.g. rate-limited — isn't hammered.
+        // host — e.g. rate-limited — isn't hammered. Keep the old fetchedAt since
+        // the data didn't actually refresh.
         const message =
           result.reason instanceof Error ? result.reason.message : String(result.reason);
         this.hostSlots.set(host.graphqlUrl, {
@@ -330,6 +340,7 @@ export class Poller {
           rateLimit: prev?.rateLimit ?? null,
           error: { hostLabel: host.label, message },
           nextDueAt: now + hostIntervalMs(prev?.rateLimit ?? null, effectiveBase),
+          fetchedAt: prev?.fetchedAt ?? fetchedNow,
         });
       }
     });
@@ -341,7 +352,7 @@ export class Poller {
     for (const slot of this.hostSlots.values()) {
       allPrs.push(...slot.prs);
       if (slot.error) errors.push(slot.error);
-      if (slot.rateLimit) rateLimits.push(slot.rateLimit);
+      if (slot.rateLimit) rateLimits.push({ ...slot.rateLimit, fetchedAt: slot.fetchedAt });
     }
 
     try {
@@ -356,11 +367,21 @@ export class Poller {
       return b.updatedAt.localeCompare(a.updatedAt);
     });
 
+    // The dashboard is only as fresh as its stalest host — use the oldest
+    // per-host fetchedAt so "updated X ago" honestly reflects the least-recent
+    // data the user is looking at.
+    let oldestFetchedAt: string | undefined;
+    for (const slot of this.hostSlots.values()) {
+      if (!oldestFetchedAt || slot.fetchedAt < oldestFetchedAt) {
+        oldestFetchedAt = slot.fetchedAt;
+      }
+    }
+
     const snapshot: DashboardResponse = {
       pullRequests: allPrs,
       errors,
       rateLimits,
-      fetchedAt: new Date().toISOString(),
+      fetchedAt: oldestFetchedAt ?? new Date().toISOString(),
       version: this.options.appVersion,
     };
 

@@ -80,8 +80,15 @@ const pill = "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-
 const REVIEWER_RING: Record<Reviewer["reviewState"], string> = {
   approved: "ring-emerald-500",
   changes_requested: "ring-red-500",
-  pending: "ring-line-strong",
+  pending: "ring-amber-500",
 };
+
+function reviewerListLabel(reviewers: Reviewer[]): string {
+  if (reviewers.length === 0) return "";
+  const logins = reviewers.map((r) => r.login);
+  if (logins.length <= 2) return logins.join(", ");
+  return `${logins.slice(0, 2).join(", ")} +${logins.length - 2}`;
+}
 
 function ReviewerBadge({ r }: { r: Reviewer }) {
   const label = r.reviewState === "approved"
@@ -131,6 +138,8 @@ function CheckIcon() {
 export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
   const review = reviewLabel(pr.reviewDecision);
   const passingCount = pr.checks.filter((c) => c.state === "success").length;
+  const pendingReviewers = pr.reviewers.filter((r) => r.reviewState === "pending");
+  const pendingReviewerNames = reviewerListLabel(pendingReviewers);
   // A review is being asked of you — tint the whole card violet so it stands
   // out from the rest. The tint fades to the plain surface on hover.
   const needsMyReview = pr.roles.includes("reviewer");
@@ -266,11 +275,22 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
 
       {/* Reviewers */}
       {pr.reviewers.length > 0 && (
-        <div className="mb-2 flex items-center gap-1.5">
+        <div className="mb-2 flex flex-wrap items-center gap-1.5">
           <span className="text-xs text-fg-subtle">Reviewers:</span>
           {pr.reviewers.map((r) => (
             <ReviewerBadge key={r.login} r={r} />
           ))}
+          {pendingReviewers.length > 0 && (
+            <span
+              className={cn(
+                pill,
+                "max-w-full border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-200",
+              )}
+              title={`Waiting for review from: ${pendingReviewers.map((r) => r.login).join(", ")}`}
+            >
+              Waiting for: <span className="truncate">{pendingReviewerNames}</span>
+            </span>
+          )}
         </div>
       )}
 
