@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog } from "electron";
+import { app } from "electron";
 import { autoUpdater } from "electron-updater";
 
 // electron-updater reads the GitHub feed from app-update.yml (emitted by
@@ -10,7 +10,6 @@ const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
 const INITIAL_DELAY_MS = 10_000;
 
 let initialized = false; // handlers wired (packaged builds only)
-let getWindowFn: () => BrowserWindow | null = () => null;
 let initialTimer: NodeJS.Timeout | null = null;
 let intervalTimer: NodeJS.Timeout | null = null;
 let autoUpdateEnabled = false; // mirrors the user's auto-update setting
@@ -35,8 +34,7 @@ export function checkForUpdatesNow(): void {
  * Wires electron-updater once. No checks run until setAutoUpdateEnabled(true).
  * A no-op in dev / when PRD_DISABLE_UPDATER is set (so toggling later also no-ops).
  */
-export function initAutoUpdater(getWindow: () => BrowserWindow | null): void {
-  getWindowFn = getWindow;
+export function initAutoUpdater(): void {
   if (initialized) return;
   if (!app.isPackaged || process.env.PRD_DISABLE_UPDATER) return;
   initialized = true;
@@ -53,23 +51,8 @@ export function initAutoUpdater(getWindow: () => BrowserWindow | null): void {
   autoUpdater.on("update-not-available", () => {
     console.log("[updater] up to date");
   });
-  autoUpdater.on("update-downloaded", async (info) => {
-    const options = {
-      type: "info" as const,
-      buttons: ["Restart now", "Later"],
-      defaultId: 0,
-      cancelId: 1,
-      title: "Update ready",
-      message: `PR Dashboard ${info.version} has been downloaded.`,
-      detail: "Restart to apply the update. It will also install automatically next time you quit.",
-    };
-    const window = getWindowFn();
-    const { response } = window
-      ? await dialog.showMessageBox(window, options)
-      : await dialog.showMessageBox(options);
-    if (response === 0) {
-      setImmediate(() => autoUpdater.quitAndInstall());
-    }
+  autoUpdater.on("update-downloaded", (info) => {
+    console.log("[updater] v%s downloaded — will install on next quit", info.version);
   });
 }
 

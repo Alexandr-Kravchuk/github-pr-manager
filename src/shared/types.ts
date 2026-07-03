@@ -252,6 +252,10 @@ export interface PrManagerApi {
   getAppVersion(): Promise<string>;
   /** Copy text (e.g. a PR URL) to the system clipboard. */
   copyText(text: string): Promise<void>;
+  /** Returns release info if a new version was installed since last ack, or null. */
+  getWhatsNew(): Promise<{ version: string; url: string } | null>;
+  /** Acknowledges the current version (hides "What's new"). */
+  dismissWhatsNew(): Promise<void>;
   /** Subscribe to live snapshots. Returns an unsubscribe function. */
   onSnapshot(listener: (snapshot: DashboardResponse) => void): () => void;
   /** Subscribe to config-error messages. Returns an unsubscribe function. */

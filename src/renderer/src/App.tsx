@@ -16,6 +16,7 @@ export function App() {
   const [loading, setLoading] = useState(false);
   const [tick, setTick] = useState(0);
   const fetchingRef = useRef(false);
+  const [whatsNew, setWhatsNew] = useState<{ version: string; url: string } | null>(null);
 
   // Filters
   const [search, setSearch] = useState("");
@@ -89,6 +90,7 @@ export function App() {
         else setConfigError(r.error);
       })
       .catch(() => {});
+    window.api.getWhatsNew().then(setWhatsNew).catch(() => {});
   }, []);
 
   // Subscribe to live updates first (so we don't miss an early snapshot), then
@@ -427,11 +429,24 @@ export function App() {
         </div>
       )}
 
-      {data?.version && (
-        <div className="pointer-events-none fixed bottom-2 right-3 z-10 text-[11px] text-fg-faint">
-          v{data.version}
-        </div>
-      )}
+      <div className="pointer-events-none fixed bottom-2 right-3 z-10 flex items-center gap-2 text-[11px]">
+        {whatsNew && (
+          <button
+            type="button"
+            onClick={() => {
+              window.api.openExternal(whatsNew.url).catch(() => {});
+              window.api.dismissWhatsNew().catch(() => {});
+              setWhatsNew(null);
+            }}
+            className="pointer-events-auto rounded-md border border-sky-500/50 bg-sky-500/15 px-2 py-0.5 font-medium text-sky-600 transition-colors hover:bg-sky-500/25 dark:text-sky-300"
+          >
+            What&apos;s new in v{whatsNew.version}
+          </button>
+        )}
+        {data?.version && (
+          <span className="text-fg-faint">v{data.version}</span>
+        )}
+      </div>
     </div>
   );
 }

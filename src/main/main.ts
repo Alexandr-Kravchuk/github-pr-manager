@@ -18,7 +18,7 @@ import {
   validateThemePreference,
 } from "./ipc-validation";
 import { Poller } from "./poller";
-import { loadSettings, persistSettings, seenStatePath } from "./settings";
+import { acknowledgeVersion, loadAcknowledgedVersion, loadSettings, persistSettings, seenStatePath } from "./settings";
 import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./updater";
 
 let mainWindow: BrowserWindow | null = null;
@@ -264,6 +264,20 @@ function registerIpc(): void {
 
   ipcMain.handle("app:getVersion", async (): Promise<string> => app.getVersion());
 
+  ipcMain.handle("app:getWhatsNew", async () => {
+    const acked = loadAcknowledgedVersion();
+    const current = app.getVersion();
+    if (!acked || acked === current) return null;
+    return {
+      version: current,
+      url: `https://github.com/Alexandr-Kravchuk/github-pr-manager/releases/tag/v${current}`,
+    };
+  });
+
+  ipcMain.handle("app:dismissWhatsNew", async () => {
+    acknowledgeVersion(app.getVersion());
+  });
+
   ipcMain.handle("app:copyText", async (_event, text: unknown): Promise<void> => {
     clipboard.writeText(validateClipboardText(text));
   });
@@ -282,6 +296,12 @@ void app.whenReady().then(() => {
 
   applyCsp();
   registerIpc();
+
+  // Seed the acknowledged version on first run so "What's new" doesn't flash
+  // on a fresh install.
+  if (loadAcknowledgedVersion() === null) {
+    acknowledgeVersion(app.getVersion());
+  }
 
   poller = new Poller({
     loadSettings,
@@ -335,7 +355,7 @@ void app.whenReady().then(() => {
   });
 
   createWindow();
-  initAutoUpdater(() => mainWindow);
+  initAutoUpdater();
 
   // Apply the remaining prefs (launch-at-login + auto-update; theme re-applied
   // harmlessly). Runs after the updater is initialized.
