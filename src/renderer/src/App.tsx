@@ -392,7 +392,7 @@ export function App() {
           <FilterChip active={groupByRepo} onClick={() => setGroupByRepo((v) => !v)}>
             Group by repo
           </FilterChip>
-          {groups && groups.length > 1 && (
+          {groups && groups.length > 0 && (
             <button
               type="button"
               onClick={() =>
