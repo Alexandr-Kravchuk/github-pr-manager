@@ -12,48 +12,65 @@ interface Props {
   hideRepo?: boolean;
 }
 
+/** Card signal, in priority order — drives the left accent and the header buddy. */
+export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "approved" | "idle";
+
 /**
- * Left-accent color of the card, by signal priority.
- *  - Red: your PR is blocked and needs your action — failing CI, a change
- *    request you haven't re-requested review on, or a reviewer comment you
- *    haven't answered (an unresolved thread whose last comment isn't yours,
+ * Classify a PR by signal priority.
+ *  - blocked (red): your PR is blocked and needs your action — failing CI, a
+ *    change request you haven't re-requested review on, or a reviewer comment
+ *    you haven't answered (an unresolved thread whose last comment isn't yours,
  *    even from a plain "Comment" review with green CI). Only for PRs you authored.
- *  - Violet: a review is being requested of you and you haven't submitted one
- *    yet — your turn to act. The `reviewer` role comes from GitHub's
- *    `review-requested:@me`, so it clears itself once you review. Ranked right
- *    after your own blocked PRs so review requests never blend into the rest.
- *  - Gray (waiting): your PR is awaiting someone else's review and nobody has
+ *  - myReview (violet): a review is being requested of you and you haven't
+ *    submitted one yet — your turn to act. The `reviewer` role comes from
+ *    GitHub's `review-requested:@me`, so it clears itself once you review.
+ *    Ranked right after your own blocked PRs so review requests never blend
+ *    into the rest.
+ *  - waiting (gray): your PR is awaiting someone else's review and nobody has
  *    approved yet (ball in their court) — nothing required from you, even with
  *    open threads.
- *  - Amber: needs attention (new comments, open threads, CI running).
- *  - Green: at least one human approval, and CI isn't failing or running. A
- *    single human approve is enough — even if other reviewers are still pending,
- *    and even if the PR has no checks at all. We key off an actual approval
- *    rather than `reviewDecision`, which stays null/REVIEW_REQUIRED on repos
- *    without required-review rules.
+ *  - attention (amber): new comments, open threads, CI running.
+ *  - approved (green): at least one human approval, and CI isn't failing or
+ *    running. A single human approve is enough — even if other reviewers are
+ *    still pending, and even if the PR has no checks at all. We key off an
+ *    actual approval rather than `reviewDecision`, which stays
+ *    null/REVIEW_REQUIRED on repos without required-review rules.
  */
-function accentClass(pr: PullRequest): string {
+export function prSignal(pr: PullRequest): PrSignal {
   const isAuthor = pr.roles.includes("author");
 
   if (
     isAuthor &&
     (pr.failingChecks.length > 0 || pr.hasUnaddressedChangeRequest || pr.hasUnaddressedComments)
   ) {
-    return "border-l-red-500";
+    return "blocked";
   }
   if (pr.roles.includes("reviewer")) {
-    return "border-l-violet-500";
+    return "myReview";
   }
   if (isAuthor && pr.awaitingReview && !pr.hasNewActivity && !pr.hasHumanApproval) {
-    return "border-l-line-strong";
+    return "waiting";
   }
   if (pr.hasNewActivity || pr.unresolvedThreads > 0 || pr.pendingChecks.length > 0) {
-    return "border-l-amber-500";
+    return "attention";
   }
   if (pr.hasHumanApproval && pr.ciState !== "failure" && pr.ciState !== "pending") {
-    return "border-l-emerald-500";
+    return "approved";
   }
-  return "border-l-line-strong";
+  return "idle";
+}
+
+const ACCENT: Record<PrSignal, string> = {
+  blocked: "border-l-red-500",
+  myReview: "border-l-violet-500",
+  waiting: "border-l-line-strong",
+  attention: "border-l-amber-500",
+  approved: "border-l-emerald-500",
+  idle: "border-l-line-strong",
+};
+
+function accentClass(pr: PullRequest): string {
+  return ACCENT[prSignal(pr)];
 }
 
 function reviewLabel(decision: ReviewDecision): { text: string; cls: string } | null {

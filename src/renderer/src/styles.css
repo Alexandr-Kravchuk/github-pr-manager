@@ -57,6 +57,114 @@
   }
 }
 
+/* Header buddy (components/Buddy.tsx) — per-mood micro-animations. */
+.buddy :is(g, path, circle, text) {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.buddy-bob {
+  animation: buddy-bob 2.2s ease-in-out infinite;
+}
+.buddy-droop {
+  animation: buddy-droop 3.4s ease-in-out infinite;
+}
+.buddy-breathe {
+  animation: buddy-breathe 3.6s ease-in-out infinite;
+}
+.buddy-look {
+  animation: buddy-look 4s ease-in-out infinite;
+}
+.buddy-tear {
+  animation: buddy-tear 2.6s ease-in infinite;
+}
+.buddy-zzz {
+  animation: buddy-zzz 2.4s ease-out infinite;
+}
+.buddy-zzz-2 {
+  animation-delay: 0.5s;
+}
+.buddy-zzz-3 {
+  animation-delay: 1s;
+}
+
+@keyframes buddy-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+}
+@keyframes buddy-droop {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(1.5px);
+  }
+}
+@keyframes buddy-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+}
+@keyframes buddy-look {
+  0%,
+  25% {
+    transform: translateX(0);
+  }
+  40%,
+  60% {
+    transform: translateX(1.6px);
+  }
+  75%,
+  100% {
+    transform: translateX(0);
+  }
+}
+@keyframes buddy-tear {
+  0% {
+    opacity: 0;
+    transform: translateY(0);
+  }
+  15% {
+    opacity: 1;
+  }
+  70% {
+    opacity: 1;
+    transform: translateY(6px);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+@keyframes buddy-zzz {
+  0% {
+    opacity: 0;
+    transform: translate(0, 2px);
+  }
+  25% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(3px, -6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buddy :is(g, path, circle, text) {
+    animation: none !important;
+  }
+}
+
 html,
 body,
 #root {

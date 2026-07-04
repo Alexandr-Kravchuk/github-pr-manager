@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { PrCard } from "./components/PrCard";
+import { Buddy, type BuddyMood } from "./components/Buddy";
+import { PrCard, prSignal } from "./components/PrCard";
 import { SettingsScreen } from "./components/Settings";
 import { cn, relativeTime } from "./format";
 import type { DashboardResponse, PublicConfig, PullRequest } from "../../shared/types";
@@ -155,6 +156,15 @@ export function App() {
 
   const allPrs = useMemo(() => data?.pullRequests ?? [], [data]);
 
+  // Buddy mood mirrors the card accents (drafts excluded, like the default
+  // view): any red PR → sad, else a requested review → curious, else asleep.
+  const buddyMood = useMemo<BuddyMood>(() => {
+    const signals = allPrs.filter((p) => !p.isDraft).map(prSignal);
+    if (signals.includes("blocked")) return "sad";
+    if (signals.includes("myReview")) return "curious";
+    return "sleeping";
+  }, [allPrs]);
+
   const counts = useMemo(
     () => ({
       total: allPrs.length,
@@ -236,12 +246,15 @@ export function App() {
       {/* Header */}
       <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-line bg-canvas/85 px-4 pb-3 pt-1 backdrop-blur">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
-            <p className="text-xs text-fg-subtle">
-              {counts.total} PRs · {counts.attention} need attention · {counts.failing} failing CI ·{" "}
-              {counts.fresh} with new comments
-            </p>
+          <div className="flex items-center gap-3">
+            <Buddy mood={buddyMood} />
+            <div>
+              <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
+              <p className="text-xs text-fg-subtle">
+                {counts.total} PRs · {counts.attention} need attention · {counts.failing} failing CI
+                · {counts.fresh} with new comments
+              </p>
+            </div>
           </div>
           <div className="flex items-center gap-2 text-xs text-fg-muted">
             {data?.rateLimits?.map((rl) => (

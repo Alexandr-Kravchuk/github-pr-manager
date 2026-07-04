@@ -58,6 +58,8 @@ export interface PollerOptions {
    * budget while nobody is looking. `wake()` forces a fetch when the user returns.
    */
   isPaused?: () => boolean;
+  /** Host fetcher — defaults to the real GraphQL `fetchHost`; PRD_MOCK swaps in fixtures. */
+  fetchHostFn?: typeof fetchHost;
 }
 
 const MIN_INTERVAL_MS = 10_000;
@@ -314,7 +316,9 @@ export class Poller {
       return !slot || now >= slot.nextDueAt;
     });
 
-    const results = await Promise.allSettled(due.map((h) => fetchHost(h)));
+    const results = await Promise.allSettled(
+      due.map((h) => (this.options.fetchHostFn ?? fetchHost)(h)),
+    );
     const fetchedNow = new Date().toISOString();
     results.forEach((result, i) => {
       const host = due[i];

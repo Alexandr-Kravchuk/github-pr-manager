@@ -17,6 +17,7 @@ import {
   validateSeenItems,
   validateThemePreference,
 } from "./ipc-validation";
+import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
 import { acknowledgeVersion, loadAcknowledgedVersion, loadSettings, persistSettings, seenStatePath } from "./settings";
 import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./updater";
@@ -321,6 +322,8 @@ void app.whenReady().then(() => {
       sendToRenderer("config-error", message);
     },
     isPaused: isDashboardPaused,
+    // PRD_MOCK: canned PRs instead of gh/network — see mock.ts.
+    ...(isMockMode() ? mockPollerOverrides(app.getPath("userData")) : {}),
   });
   poller.start();
 

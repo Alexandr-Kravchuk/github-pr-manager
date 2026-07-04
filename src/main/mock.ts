@@ -1,0 +1,231 @@
+/**
+ * PRD_MOCK fixture mode — dev-only. When the env var is set, the poller's
+ * network layer is swapped for canned PRs so every downstream piece still runs
+ * for real: poller ticks, seen-state, IPC, renderer. The active case is
+ * re-read from `.prd-mock` in the project cwd on every tick (fallback: the
+ * PRD_MOCK value itself), so cases can be switched without a restart. The
+ * seen-state goes to a separate `.mock` file to keep the real one clean.
+ *
+ * Cases: sad-ci, sad-changes, sad-comments, curious, mixed, waiting, busy,
+ * approved, empty, draft-red.
+ */
+import fs from "node:fs";
+import path from "node:path";
+
+import { defaultSettings } from "../shared/config";
+import type { HostFetchResult } from "../shared/github";
+import type { CheckItem, HostConfig, PullRequest, Reviewer, Settings } from "../shared/types";
+
+export function isMockMode(): boolean {
+  return Boolean(process.env.PRD_MOCK);
+}
+
+const HOST_LABEL = "Mock";
+const CASE_FILE = path.resolve(process.cwd(), ".prd-mock");
+
+const OCTOCAT = "https://avatars.githubusercontent.com/u/583231?v=4";
+const TEAMMATE = "https://avatars.githubusercontent.com/u/9919?v=4";
+
+const failing: CheckItem = { name: "CI / build", kind: "check", state: "failure", url: null };
+const pending: CheckItem = { name: "CI / e2e", kind: "check", state: "pending", url: null };
+const passing: CheckItem = { name: "CI / build", kind: "check", state: "success", url: null };
+
+const reviewerPending: Reviewer = { login: "teammate", avatarUrl: TEAMMATE, reviewState: "pending" };
+const reviewerBlocking: Reviewer = {
+  login: "teammate",
+  avatarUrl: TEAMMATE,
+  reviewState: "changes_requested",
+};
+const reviewerApproved: Reviewer = {
+  login: "teammate",
+  avatarUrl: TEAMMATE,
+  reviewState: "approved",
+};
+
+function pr(overrides: Partial<PullRequest> & { id: string; number: number }): PullRequest {
+  return {
+    hostLabel: HOST_LABEL,
+    repo: "acme/widgets",
+    title: "Sample pull request",
+    url: "https://github.com/acme/widgets/pull/1",
+    isDraft: false,
+    author: { login: "me", avatarUrl: OCTOCAT },
+    createdAt: new Date(Date.now() - 2 * 864e5).toISOString(),
+    updatedAt: new Date(Date.now() - 36e5).toISOString(),
+    reviewDecision: null,
+    roles: ["author"],
+    unresolvedThreads: 0,
+    unaddressedThreads: 0,
+    totalComments: 0,
+    checks: [passing],
+    failingChecks: [],
+    pendingChecks: [],
+    ciState: "success",
+    reviewers: [],
+    awaitingReview: false,
+    hasUnaddressedChangeRequest: false,
+    hasUnaddressedComments: false,
+    hasHumanApproval: false,
+    // Overwritten by applyActivity:
+    hasNewActivity: false,
+    lastSeenAt: null,
+    needsAttention: false,
+    ...overrides,
+  };
+}
+
+/** Grows every tick so the "busy" case flips its NEW-comments badge on tick 2. */
+let tick = 0;
+
+const CASES: Record<string, () => PullRequest[]> = {
+  "sad-ci": () => [
+    pr({
+      id: "mock-sad-ci",
+      number: 101,
+      title: "My PR with failing CI",
+      checks: [failing, passing],
+      failingChecks: [failing],
+      ciState: "failure",
+      reviewers: [reviewerPending],
+      awaitingReview: true,
+    }),
+  ],
+  "sad-changes": () => [
+    pr({
+      id: "mock-sad-changes",
+      number: 102,
+      title: "My PR with changes requested",
+      reviewDecision: "CHANGES_REQUESTED",
+      hasUnaddressedChangeRequest: true,
+      unresolvedThreads: 2,
+      unaddressedThreads: 0,
+      totalComments: 6,
+      reviewers: [reviewerBlocking],
+    }),
+  ],
+  "sad-comments": () => [
+    pr({
+      id: "mock-sad-comments",
+      number: 103,
+      title: "My PR with an unanswered reviewer comment",
+      unresolvedThreads: 3,
+      unaddressedThreads: 2,
+      hasUnaddressedComments: true,
+      totalComments: 9,
+      reviewers: [reviewerPending],
+    }),
+  ],
+  curious: () => [
+    pr({
+      id: "mock-curious",
+      number: 201,
+      title: "Teammate's PR waiting for my review",
+      roles: ["reviewer"],
+      author: { login: "teammate", avatarUrl: TEAMMATE },
+      awaitingReview: true,
+    }),
+  ],
+  mixed: () => [
+    ...CASES["sad-ci"](),
+    ...CASES.curious(),
+    ...CASES.waiting(),
+    ...CASES.approved(),
+  ],
+  waiting: () => [
+    pr({
+      id: "mock-waiting",
+      number: 301,
+      title: "My PR waiting for someone's review",
+      awaitingReview: true,
+      reviewers: [reviewerPending],
+    }),
+  ],
+  busy: () => [
+    pr({
+      id: "mock-busy-pending",
+      number: 302,
+      title: "My PR with CI still running",
+      checks: [pending],
+      pendingChecks: [pending],
+      ciState: "pending",
+    }),
+    pr({
+      id: "mock-busy-comments",
+      number: 303,
+      title: "My PR where comments keep coming",
+      unresolvedThreads: 1,
+      totalComments: 5 + tick,
+    }),
+  ],
+  approved: () => [
+    pr({
+      id: "mock-approved",
+      number: 401,
+      title: "My approved PR, green CI",
+      reviewDecision: "APPROVED",
+      hasHumanApproval: true,
+      reviewers: [reviewerApproved],
+      totalComments: 4,
+    }),
+  ],
+  empty: () => [],
+  "draft-red": () => [
+    pr({
+      id: "mock-draft-red",
+      number: 501,
+      title: "Draft PR with failing CI (should not wake the buddy)",
+      isDraft: true,
+      checks: [failing],
+      failingChecks: [failing],
+      ciState: "failure",
+    }),
+  ],
+};
+
+function currentCase(): string {
+  try {
+    const fromFile = fs.readFileSync(CASE_FILE, "utf8").trim();
+    if (fromFile in CASES) return fromFile;
+    if (fromFile) console.warn(`[mock] unknown case "${fromFile}" in .prd-mock`);
+  } catch {
+    /* no case file — fall through to the env value */
+  }
+  const fromEnv = (process.env.PRD_MOCK ?? "").trim();
+  return fromEnv in CASES ? fromEnv : "empty";
+}
+
+export async function mockFetchHost(host: HostConfig): Promise<HostFetchResult> {
+  tick++;
+  const name = currentCase();
+  console.log(`[mock] tick=${tick} case=${name}`);
+  return {
+    pullRequests: CASES[name](),
+    rateLimit: {
+      hostLabel: host.label,
+      remaining: 5000,
+      cost: 1,
+      resetAt: new Date(Date.now() + 36e5).toISOString(),
+    },
+  };
+}
+
+/** Poller option overrides for mock mode — no gh, no network, fast cadence. */
+export function mockPollerOverrides(userDataPath: string): {
+  loadSettings: () => Settings;
+  toHostConfigs: () => HostConfig[];
+  fetchHostFn: typeof mockFetchHost;
+  statePath: string;
+} {
+  return {
+    loadSettings: () => ({
+      ...defaultSettings(),
+      pollIntervalSeconds: 10,
+      hosts: [{ label: HOST_LABEL, graphqlUrl: "https://mock.invalid/graphql", repos: ["acme/widgets"] }],
+    }),
+    toHostConfigs: () => [
+      { label: HOST_LABEL, graphqlUrl: "https://mock.invalid/graphql", token: "mock", repos: ["acme/widgets"] },
+    ],
+    fetchHostFn: mockFetchHost,
+    statePath: path.join(userDataPath, "seen-state.mock.json"),
+  };
+}

@@ -10,6 +10,9 @@
 .DS_Store
 *.pem
 
+# PRD_MOCK fixture-case selector (dev-only, see src/main/mock.ts)
+.prd-mock
+
 # debug
 npm-debug.log*
 yarn-debug.log*
