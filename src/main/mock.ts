@@ -7,7 +7,7 @@
  * seen-state goes to a separate `.mock` file to keep the real one clean.
  *
  * Cases: sad-ci, sad-changes, sad-comments, curious, mixed, waiting, busy,
- * approved, empty, draft-red.
+ * approved, empty, draft-red, grid-many, grid-repos, grid-tall.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -169,6 +169,55 @@ const CASES: Record<string, () => PullRequest[]> = {
     }),
   ],
   empty: () => [],
+  // Layout cases — exercise the grouped/ungrouped card grid, not the buddy.
+  "grid-many": () =>
+    Array.from({ length: 8 }, (_, i) =>
+      pr({
+        id: `mock-grid-many-${i}`,
+        number: 600 + i,
+        title: `PR #${600 + i} in the same repo`,
+        ...(i % 3 === 0 ? { unresolvedThreads: 2, totalComments: 5, reviewers: [reviewerPending] } : {}),
+        ...(i % 4 === 1 ? { checks: [failing], failingChecks: [failing], ciState: "failure" as const } : {}),
+      }),
+    ),
+  "grid-repos": () => [
+    ...Array.from({ length: 5 }, (_, i) =>
+      pr({ id: `mock-grid-widgets-${i}`, number: 700 + i, title: `Widgets PR ${i + 1}` }),
+    ),
+    ...Array.from({ length: 2 }, (_, i) =>
+      pr({ id: `mock-grid-gadgets-${i}`, number: 710 + i, repo: "acme/gadgets", title: `Gadgets PR ${i + 1}` }),
+    ),
+    pr({ id: "mock-grid-tools", number: 720, repo: "acme/tools", title: "Lonely tools PR" }),
+  ],
+  "grid-tall": () => [
+    pr({
+      id: "mock-grid-tall-long",
+      number: 801,
+      title:
+        "A very long pull request title that wraps onto multiple lines to make this card noticeably taller than its neighbours in the same grid row",
+      reviewDecision: "CHANGES_REQUESTED",
+      hasUnaddressedChangeRequest: true,
+      unresolvedThreads: 4,
+      unaddressedThreads: 2,
+      hasUnaddressedComments: true,
+      totalComments: 12,
+      checks: [failing, pending, passing],
+      failingChecks: [failing],
+      pendingChecks: [pending],
+      ciState: "failure",
+      reviewers: [reviewerBlocking, reviewerPending, reviewerApproved],
+      awaitingReview: true,
+    }),
+    pr({ id: "mock-grid-tall-short", number: 802, title: "Tiny one" }),
+    pr({
+      id: "mock-grid-tall-draft",
+      number: 803,
+      title: "Draft with a medium-length title that wraps once on narrow columns",
+      isDraft: true,
+      reviewers: [reviewerPending],
+    }),
+    pr({ id: "mock-grid-tall-short2", number: 804, title: "Another tiny one", repo: "acme/gadgets" }),
+  ],
   "draft-red": () => [
     pr({
       id: "mock-draft-red",

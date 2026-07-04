@@ -28,6 +28,9 @@ export function App() {
   const [newOnly, setNewOnly] = useState(false);
   const [groupByRepo, setGroupByRepo] = useState(true);
   const [showDrafts, setShowDrafts] = useState(false);
+  // Collapsed repo groups, keyed by `${hostLabel}/${repo}`. In-memory, like
+  // the filters: a fresh launch starts with everything expanded.
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
 
   // Applies a snapshot received either from the initial fetch or a live event.
   const applySnapshot = useCallback((snapshot: DashboardResponse) => {
@@ -220,6 +223,20 @@ export function App() {
     );
   }, [sorted, groupByRepo]);
 
+  const allCollapsed =
+    groups !== null &&
+    groups.length > 0 &&
+    groups.every((g) => collapsed.has(`${g.hostLabel}/${g.repo}`));
+
+  const toggleGroup = useCallback((key: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
   const noHosts = config !== null && config.hosts.length === 0;
 
   if (view === "settings") {
@@ -375,6 +392,23 @@ export function App() {
           <FilterChip active={groupByRepo} onClick={() => setGroupByRepo((v) => !v)}>
             Group by repo
           </FilterChip>
+          {groups && groups.length > 1 && (
+            <button
+              type="button"
+              onClick={() =>
+                setCollapsed(
+                  allCollapsed
+                    ? new Set()
+                    : new Set(groups.map((g) => `${g.hostLabel}/${g.repo}`)),
+                )
+              }
+              title={allCollapsed ? "Expand all groups" : "Collapse all groups"}
+              aria-label={allCollapsed ? "Expand all groups" : "Collapse all groups"}
+              className="inline-flex items-center rounded-md border border-line-strong bg-surface px-2.5 py-2 text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
+            >
+              <FoldIcon expand={allCollapsed} />
+            </button>
+          )}
         </div>
       )}
 
@@ -406,33 +440,54 @@ export function App() {
       )}
 
       {groups ? (
-        <div className="columns-1 gap-x-6 lg:columns-2 2xl:columns-3">
-          {groups.map((g) => (
-            <section key={`${g.hostLabel}/${g.repo}`} className="mb-8 break-inside-avoid">
-              <div className="mb-3 flex items-center gap-2 border-b border-line pb-2">
-                <span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
-                  {g.hostLabel}
-                </span>
-                <h2 className="truncate text-sm font-semibold text-fg-secondary" title={g.repo}>
-                  {g.repo}
-                </h2>
-                <span className="rounded-full border border-line-strong px-2 py-0.5 text-xs text-fg-muted">
-                  {g.prs.length}
-                </span>
-              </div>
-              <div className="grid gap-2.5 pl-2">
-                {g.prs.map((pr) => (
-                  <PrCard
-                    key={pr.id}
-                    pr={pr}
-                    hideRepo
-                    onOpen={openPr}
-                    onMarkSeen={(p) => postSeen([p])}
-                  />
-                ))}
-              </div>
-            </section>
-          ))}
+        <div>
+          {groups.map((g) => {
+            const key = `${g.hostLabel}/${g.repo}`;
+            const isCollapsed = collapsed.has(key);
+            const attention = g.prs.filter((p) => p.needsAttention).length;
+            return (
+              <section key={key} className={isCollapsed ? "mb-3" : "mb-8"}>
+                <button
+                  type="button"
+                  onClick={() => toggleGroup(key)}
+                  aria-expanded={!isCollapsed}
+                  className="-mt-2 flex w-full items-center gap-2 rounded-t-md border-b border-line py-2 text-left hover:bg-elevated/40"
+                >
+                  <ChevronIcon collapsed={isCollapsed} />
+                  <span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
+                    {g.hostLabel}
+                  </span>
+                  <h2 className="truncate text-sm font-semibold text-fg-secondary" title={g.repo}>
+                    {g.repo}
+                  </h2>
+                  <span className="rounded-full border border-line-strong px-2 py-0.5 text-xs text-fg-muted">
+                    {g.prs.length}
+                  </span>
+                  {isCollapsed && attention > 0 && (
+                    <span
+                      className="rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-medium text-red-600 dark:text-red-300"
+                      title={`${attention} PR(s) need attention`}
+                    >
+                      ⚠ {attention}
+                    </span>
+                  )}
+                </button>
+                {!isCollapsed && (
+                  <div className="mt-3 grid gap-2.5 pl-2 md:grid-cols-2 2xl:grid-cols-3">
+                    {g.prs.map((pr) => (
+                      <PrCard
+                        key={pr.id}
+                        pr={pr}
+                        hideRepo
+                        onOpen={openPr}
+                        onMarkSeen={(p) => postSeen([p])}
+                      />
+                    ))}
+                  </div>
+                )}
+              </section>
+            );
+          })}
         </div>
       ) : (
         <div className="grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3">
@@ -461,6 +516,57 @@ export function App() {
         )}
       </div>
     </div>
+  );
+}
+
+/** Chevrons pointing apart (expand) or toward the middle (collapse). */
+function FoldIcon({ expand }: { expand: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      {expand ? (
+        <>
+          <path d="m7 15 5 5 5-5" />
+          <path d="m7 9 5-5 5 5" />
+        </>
+      ) : (
+        <>
+          <path d="m7 20 5-5 5 5" />
+          <path d="m7 4 5 5 5-5" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function ChevronIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className={cn(
+        "shrink-0 text-fg-muted transition-transform",
+        collapsed ? "-rotate-90" : "rotate-0",
+      )}
+    >
+      <path d="m6 9 6 6 6-6" />
+    </svg>
   );
 }
 
