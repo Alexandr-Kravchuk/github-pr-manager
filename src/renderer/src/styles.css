@@ -12,6 +12,16 @@
  * palette; only their *text* shades get a `dark:` variant in the components,
  * since the dark theme wants lighter shades (300) and light wants darker (700).
  */
+/*
+ * Extra breakpoints for large displays (Tailwind stops at 2xl = 96rem).
+ * Declared in rem so Tailwind sorts them correctly against the built-ins —
+ * a px-based `min-[...]` variant sorts unpredictably next to rem breakpoints.
+ */
+@theme {
+  --breakpoint-3xl: 130rem; /* 2080px */
+  --breakpoint-4xl: 168rem; /* 2688px */
+}
+
 @theme inline {
   --color-canvas: var(--canvas);
   --color-surface: var(--surface);

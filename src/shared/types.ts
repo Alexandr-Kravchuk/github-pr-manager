@@ -105,6 +105,14 @@ export interface PullRequest {
   title: string;
   url: string;
   isDraft: boolean;
+  /** Name of the base branch this PR targets, e.g. "main" or "feature/x". */
+  baseRefName: string;
+  /**
+   * true when the PR targets the repository's default branch (main/master/
+   * trunk/…). false marks a stacked PR (based on another branch) — the card
+   * shows a green umbrella for it.
+   */
+  baseIsDefaultBranch: boolean;
   author: { login: string; avatarUrl: string } | null;
   createdAt: string;
   updatedAt: string;

@@ -49,6 +49,8 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     title: "Sample pull request",
     url: "https://github.com/acme/widgets/pull/1",
     isDraft: false,
+    baseRefName: "main",
+    baseIsDefaultBranch: true,
     author: { login: "me", avatarUrl: OCTOCAT },
     createdAt: new Date(Date.now() - 2 * 864e5).toISOString(),
     updatedAt: new Date(Date.now() - 36e5).toISOString(),
@@ -138,6 +140,9 @@ const CASES: Record<string, () => PullRequest[]> = {
       title: "My PR waiting for someone's review",
       awaitingReview: true,
       reviewers: [reviewerPending],
+      // Stacked PR — based on a feature branch, not main.
+      baseRefName: "feature/base-work",
+      baseIsDefaultBranch: false,
     }),
   ],
   busy: () => [

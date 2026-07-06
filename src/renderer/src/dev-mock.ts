@@ -23,6 +23,8 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     title: "Sample pull request",
     url: "https://github.com/acme/widgets/pull/42",
     isDraft: false,
+    baseRefName: "main",
+    baseIsDefaultBranch: true,
     author: { login: "octocat", avatarUrl: "https://avatars.githubusercontent.com/u/583231?v=4" },
     createdAt: new Date(Date.now() - 864e5).toISOString(),
     updatedAt: new Date(Date.now() - 36e5).toISOString(),
@@ -52,6 +54,8 @@ const FIXTURES: Record<string, PullRequest[]> = {
     pr({
       title: "Fix flaky poller test",
       number: 101,
+      baseRefName: "feature/base-work",
+      baseIsDefaultBranch: false,
       failingChecks: [{ name: "CI / build", kind: "check", state: "failure", url: null }],
       checks: [{ name: "CI / build", kind: "check", state: "failure", url: null }],
       ciState: "failure",

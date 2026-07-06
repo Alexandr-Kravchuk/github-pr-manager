@@ -18,8 +18,9 @@ fragment PrFields on PullRequest {
   isDraft
   createdAt
   updatedAt
+  baseRefName
   author { login avatarUrl }
-  repository { nameWithOwner }
+  repository { nameWithOwner defaultBranchRef { name } }
   reviewDecision
   reviewRequests(first: 15) {
     totalCount
@@ -107,8 +108,9 @@ interface RawPr {
   isDraft: boolean;
   createdAt: string;
   updatedAt: string;
+  baseRefName: string;
   author: { login: string; avatarUrl: string } | null;
-  repository: { nameWithOwner: string };
+  repository: { nameWithOwner: string; defaultBranchRef: { name: string } | null };
   reviewDecision: ReviewDecision;
   reviewRequests: {
     totalCount: number;
@@ -300,6 +302,11 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
   );
   const awaitingReview = pr.reviewRequests.totalCount > 0;
 
+  // defaultBranchRef is null only on an empty repository; treat that as
+  // "default" so the stacked-PR marker doesn't light up on every card.
+  const defaultBranch = pr.repository.defaultBranchRef?.name ?? null;
+  const baseIsDefaultBranch = defaultBranch === null || pr.baseRefName === defaultBranch;
+
   // Build reviewer list: pending first (requested but not yet reviewed, or re-requested),
   // then opinionated reviews that are still the "latest" state for that person.
   const reviewers: Reviewer[] = [];
@@ -334,6 +341,8 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
     title: pr.title,
     url: pr.url,
     isDraft: pr.isDraft,
+    baseRefName: pr.baseRefName,
+    baseIsDefaultBranch,
     author: pr.author,
     createdAt: pr.createdAt,
     updatedAt: pr.updatedAt,

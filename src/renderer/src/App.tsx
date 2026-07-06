@@ -259,7 +259,7 @@ export function App() {
   }
 
   return (
-    <div className="mx-auto max-w-[1800px] px-4 py-6">
+    <div className="px-4 py-6">
       {/* Header */}
       <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-line bg-canvas/85 px-4 pb-3 pt-1 backdrop-blur">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -473,7 +473,7 @@ export function App() {
                   )}
                 </button>
                 {!isCollapsed && (
-                  <div className="mt-3 grid gap-2.5 pl-2 md:grid-cols-2 2xl:grid-cols-3">
+                  <div className="mt-3 grid gap-2.5 pl-2 md:grid-cols-2 2xl:grid-cols-3 3xl:grid-cols-4 4xl:grid-cols-5">
                     {g.prs.map((pr) => (
                       <PrCard
                         key={pr.id}
@@ -490,7 +490,7 @@ export function App() {
           })}
         </div>
       ) : (
-        <div className="grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3">
+        <div className="grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3 3xl:grid-cols-4 4xl:grid-cols-5">
           {sorted.map((pr) => (
             <PrCard key={pr.id} pr={pr} onOpen={openPr} onMarkSeen={(p) => postSeen([p])} />
           ))}

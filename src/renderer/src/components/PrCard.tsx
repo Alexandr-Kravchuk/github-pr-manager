@@ -135,6 +135,17 @@ function ReviewerBadge({ r }: { r: Reviewer }) {
   );
 }
 
+/** Green umbrella — marks a stacked PR (base is not the repo's default branch). */
+function UmbrellaIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M22 12a10 10 0 0 0-20 0Z" />
+      <path d="M12 12v8a2 2 0 0 0 4 0" />
+      <path d="M12 2v1" />
+    </svg>
+  );
+}
+
 function CopyIcon() {
   return (
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -194,6 +205,15 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
           )}
           {pr.isDraft && (
             <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">Draft</span>
+          )}
+          {!pr.baseIsDefaultBranch && (
+            <span
+              title={`Based on ${pr.baseRefName}`}
+              aria-label={`Based on branch ${pr.baseRefName}`}
+              className="shrink-0 text-emerald-600 dark:text-emerald-400"
+            >
+              <UmbrellaIcon />
+            </span>
           )}
           <button
             type="button"
