@@ -378,16 +378,16 @@ export function App() {
             </select>
           )}
 
-          <FilterChip active={attentionOnly} onClick={() => setAttentionOnly((v) => !v)}>
+          <FilterChip active={attentionOnly} onClick={() => setAttentionOnly((v) => !v)} tone="amber">
             ⚠ Needs attention
           </FilterChip>
-          <FilterChip active={failingOnly} onClick={() => setFailingOnly((v) => !v)}>
+          <FilterChip active={failingOnly} onClick={() => setFailingOnly((v) => !v)} tone="red">
             ✗ Failing CI
           </FilterChip>
-          <FilterChip active={newOnly} onClick={() => setNewOnly((v) => !v)}>
+          <FilterChip active={newOnly} onClick={() => setNewOnly((v) => !v)} tone="violet">
             ✦ New comments
           </FilterChip>
-          <FilterChip active={mergeableOnly} onClick={() => setMergeableOnly((v) => !v)}>
+          <FilterChip active={mergeableOnly} onClick={() => setMergeableOnly((v) => !v)} tone="green">
             ✔ Ready to merge{counts.mergeable > 0 ? ` (${counts.mergeable})` : ""}
           </FilterChip>
           {counts.drafts > 0 && (
@@ -585,14 +585,27 @@ function GearIcon() {
   );
 }
 
+/** Active-state color per chip. Full literal class strings so Tailwind keeps them. */
+type ChipTone = "sky" | "amber" | "red" | "violet" | "green";
+
+const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
+  sky: "border-sky-500/60 bg-sky-500/15 text-sky-700 dark:text-sky-200",
+  amber: "border-amber-500/60 bg-amber-500/15 text-amber-700 dark:text-amber-200",
+  red: "border-red-500/60 bg-red-500/15 text-red-700 dark:text-red-200",
+  violet: "border-violet-500/60 bg-violet-500/15 text-violet-700 dark:text-violet-200",
+  green: "border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200",
+};
+
 function FilterChip({
   active,
   onClick,
   children,
+  tone = "sky",
 }: {
   active: boolean;
   onClick: () => void;
   children: React.ReactNode;
+  tone?: ChipTone;
 }) {
   return (
     <button
@@ -601,7 +614,7 @@ function FilterChip({
       className={cn(
         "rounded-md border px-3 py-1.5 text-sm transition-colors",
         active
-          ? "border-sky-500/60 bg-sky-500/15 text-sky-700 dark:text-sky-200"
+          ? CHIP_TONE_ACTIVE[tone]
           : "border-line-strong bg-surface text-fg-muted hover:bg-elevated",
       )}
     >
