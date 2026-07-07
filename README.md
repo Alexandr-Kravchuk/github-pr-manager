@@ -117,8 +117,11 @@ To cut a release:
    installs pick it up automatically.
 
 > Steps 2 and 3 may run in any order. To run them in **parallel**, pre-create the
-> release once first (`gh release create vX.Y.Z --draft --title vX.Y.Z`) so both
-> uploads target it instead of racing to create it.
+> release once first — **with real notes**, e.g.
+> `gh release create vX.Y.Z --draft --title vX.Y.Z --generate-notes` (auto-changelog
+> from commits/PRs since the last tag), or `--notes-file <file>` for hand-written
+> notes. Never pass `--notes ""` — an empty draft stays empty unless someone
+> remembers to edit it before publishing.
 
 > First-time setup the maintainer does once: create the App Store Connect API key
 > (Issuer ID + Key ID + `.p8`) and export the Developer ID Application `.p12`.

@@ -96,8 +96,8 @@ for ($i = 0; $i -lt 5; $i++) {
   Start-Sleep -Seconds 3
 }
 if (-not $rel) {
-  Log "Release $Tag not found - creating a draft"
-  $body = @{ tag_name = $Tag; name = $version; draft = $true } | ConvertTo-Json
+  Log "Release $Tag not found - creating a draft with auto-generated notes"
+  $body = @{ tag_name = $Tag; name = $version; draft = $true; generate_release_notes = $true } | ConvertTo-Json
   $rel = Invoke-RestMethod -Method Post -Headers $headers -Body $body -ContentType "application/json" "$apiBase/releases"
 }
 $relId = $rel.id

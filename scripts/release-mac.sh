@@ -129,8 +129,8 @@ if [[ "${UPLOAD_RELEASE:-}" == "1" ]]; then
     sleep 3
   done
   if [[ -z "$RELID" ]]; then
-    log "No release for $TAG yet - creating a draft"
-    RELID="$(gh api --method POST "repos/$REPO/releases" -f tag_name="$TAG" -f name="$VERSION" -F draft=true --jq '.id')"
+    log "No release for $TAG yet - creating a draft with auto-generated notes"
+    RELID="$(gh api --method POST "repos/$REPO/releases" -f tag_name="$TAG" -f name="$VERSION" -F draft=true -F generate_release_notes=true --jq '.id')"
   fi
   log "Uploading macOS assets to release $TAG (id $RELID)"
 
