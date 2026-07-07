@@ -26,6 +26,7 @@ export function App() {
   const [attentionOnly, setAttentionOnly] = useState(false);
   const [failingOnly, setFailingOnly] = useState(false);
   const [newOnly, setNewOnly] = useState(false);
+  const [mergeableOnly, setMergeableOnly] = useState(false);
   const [groupByRepo, setGroupByRepo] = useState(true);
   const [showDrafts, setShowDrafts] = useState(false);
   // Collapsed repo groups, keyed by `${hostLabel}/${repo}`. In-memory, like
@@ -175,6 +176,7 @@ export function App() {
       failing: allPrs.filter((p) => p.failingChecks.length > 0).length,
       fresh: allPrs.filter((p) => p.hasNewActivity).length,
       drafts: allPrs.filter((p) => p.isDraft).length,
+      mergeable: allPrs.filter((p) => p.canBeMerged).length,
     }),
     [allPrs],
   );
@@ -188,6 +190,7 @@ export function App() {
         if (attentionOnly && !pr.needsAttention) return false;
         if (failingOnly && pr.failingChecks.length === 0) return false;
         if (newOnly && !pr.hasNewActivity) return false;
+        if (mergeableOnly && !pr.canBeMerged) return false;
         if (search.trim()) {
           const q = search.toLowerCase();
           const hay = `${pr.title} ${pr.repo} ${pr.author?.login ?? ""} #${pr.number}`.toLowerCase();
@@ -195,7 +198,7 @@ export function App() {
         }
         return true;
       }),
-    [allPrs, role, host, attentionOnly, failingOnly, newOnly, search, showDrafts],
+    [allPrs, role, host, attentionOnly, failingOnly, newOnly, mergeableOnly, search, showDrafts],
   );
 
   // Reviewer PRs (your turn to review) float to the top — in the flat list and
@@ -383,6 +386,9 @@ export function App() {
           </FilterChip>
           <FilterChip active={newOnly} onClick={() => setNewOnly((v) => !v)}>
             ✦ New comments
+          </FilterChip>
+          <FilterChip active={mergeableOnly} onClick={() => setMergeableOnly((v) => !v)}>
+            ✔ Ready to merge{counts.mergeable > 0 ? ` (${counts.mergeable})` : ""}
           </FilterChip>
           {counts.drafts > 0 && (
             <FilterChip active={showDrafts} onClick={() => setShowDrafts((v) => !v)}>

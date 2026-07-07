@@ -8,6 +8,7 @@ const path = require("node:path");
 const cfg = require(path.join(__dirname, "../dist/main/shared/config.js"));
 const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
 const notif = require(path.join(__dirname, "../dist/main/shared/notifications.js"));
+const github = require(path.join(__dirname, "../dist/main/shared/github.js"));
 
 let passed = 0;
 let failed = 0;
@@ -201,6 +202,79 @@ test("computeIdleFactor: capped", () => {
   assert.strictEqual(poller.computeIdleFactor(6), 16);
   assert.strictEqual(poller.computeIdleFactor(50), 16);
 });
+
+// --- github: mapPr canBeMerged (merge-readiness roll-up) ---------------------
+// A ready-to-merge PR: not a draft, GitHub says MERGEABLE, one human approval,
+// no change request, and no checks (so nothing failing or pending). Each test
+// overrides exactly one dimension to prove it flips the flag off.
+const approvedReview = { author: { __typename: "User", login: "rev", avatarUrl: "" }, state: "APPROVED" };
+const rawPr = (overrides = {}) => ({
+  id: "PR_1",
+  number: 1,
+  title: "T",
+  url: "https://github.com/a/b/pull/1",
+  isDraft: false,
+  createdAt: "2026-07-07T00:00:00Z",
+  updatedAt: "2026-07-07T00:00:00Z",
+  baseRefName: "main",
+  mergeable: "MERGEABLE",
+  author: { login: "auth", avatarUrl: "" },
+  repository: { nameWithOwner: "a/b", defaultBranchRef: { name: "main" } },
+  reviewDecision: "APPROVED",
+  reviewRequests: { totalCount: 0, nodes: [] },
+  latestOpinionatedReviews: { nodes: [approvedReview] },
+  comments: { totalCount: 0 },
+  reviewThreads: { nodes: [] },
+  commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
+  ...overrides,
+});
+const canMerge = (overrides) => github.mapPr(rawPr(overrides), "GH", ["authored"]).canBeMerged;
+const failingRollup = {
+  nodes: [{ commit: { statusCheckRollup: { state: "FAILURE", contexts: {
+    nodes: [{ __typename: "CheckRun", name: "ci", conclusion: "FAILURE", status: "COMPLETED", detailsUrl: null }],
+  } } } }],
+};
+const pendingRollup = {
+  nodes: [{ commit: { statusCheckRollup: { state: "PENDING", contexts: {
+    nodes: [{ __typename: "CheckRun", name: "ci", conclusion: null, status: "IN_PROGRESS", detailsUrl: null }],
+  } } } }],
+};
+
+test("mapPr.canBeMerged: green + approved + mergeable is ready", () =>
+  assert.strictEqual(canMerge(), true));
+test("mapPr.canBeMerged: draft is never ready", () =>
+  assert.strictEqual(canMerge({ isDraft: true }), false));
+test("mapPr.canBeMerged: transient UNKNOWN mergeability stays false", () =>
+  assert.strictEqual(canMerge({ mergeable: "UNKNOWN" }), false));
+test("mapPr.canBeMerged: conflicting is not ready", () =>
+  assert.strictEqual(canMerge({ mergeable: "CONFLICTING" }), false));
+test("mapPr.canBeMerged: no human approval is not ready", () =>
+  assert.strictEqual(canMerge({ latestOpinionatedReviews: { nodes: [] } }), false));
+test("mapPr.canBeMerged: a bot approval does not count as human", () =>
+  assert.strictEqual(
+    canMerge({
+      latestOpinionatedReviews: {
+        nodes: [{ author: { __typename: "Bot", login: "dependabot", avatarUrl: "" }, state: "APPROVED" }],
+      },
+    }),
+    false,
+  ));
+test("mapPr.canBeMerged: unaddressed change request blocks readiness", () =>
+  assert.strictEqual(
+    canMerge({
+      latestOpinionatedReviews: {
+        nodes: [
+          approvedReview,
+          { author: { __typename: "User", login: "rev2", avatarUrl: "" }, state: "CHANGES_REQUESTED" },
+        ],
+      },
+    }),
+    false,
+  ));
+test("mapPr.canBeMerged: failing CI blocks readiness", () =>
+  assert.strictEqual(canMerge({ commits: failingRollup }), false));
+test("mapPr.canBeMerged: still-running CI blocks readiness", () =>
+  assert.strictEqual(canMerge({ commits: pendingRollup }), false));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

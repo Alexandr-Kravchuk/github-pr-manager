@@ -42,6 +42,7 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     hasUnaddressedChangeRequest: false,
     hasUnaddressedComments: false,
     hasHumanApproval: false,
+    canBeMerged: false,
     hasNewActivity: false,
     lastSeenAt: null,
     needsAttention: false,
@@ -61,7 +62,7 @@ const FIXTURES: Record<string, PullRequest[]> = {
       ciState: "failure",
       needsAttention: true,
     }),
-    pr({ title: "Quiet green one", number: 102, hasHumanApproval: true }),
+    pr({ title: "Quiet green one", number: 102, hasHumanApproval: true, canBeMerged: true }),
   ],
   curious: [
     pr({

@@ -68,6 +68,7 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     hasUnaddressedChangeRequest: false,
     hasUnaddressedComments: false,
     hasHumanApproval: false,
+    canBeMerged: false,
     // Overwritten by applyActivity:
     hasNewActivity: false,
     lastSeenAt: null,
@@ -169,6 +170,7 @@ const CASES: Record<string, () => PullRequest[]> = {
       title: "My approved PR, green CI",
       reviewDecision: "APPROVED",
       hasHumanApproval: true,
+      canBeMerged: true,
       reviewers: [reviewerApproved],
       totalComments: 4,
     }),

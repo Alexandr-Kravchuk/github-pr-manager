@@ -169,6 +169,17 @@ export interface PullRequest {
    */
   hasHumanApproval: boolean;
 
+  /**
+   * Roll-up flag: the PR is ready to merge. Composite of GitHub's mergeable
+   * signal plus the dashboard's own readiness checks — true when the PR is not a
+   * draft, has no merge conflicts (GitHub `mergeable === "MERGEABLE"`), has at
+   * least one human approval, has no unaddressed change request, and CI is not
+   * failing or still running. GitHub computes `mergeable` asynchronously and may
+   * report UNKNOWN right after a push; while it is UNKNOWN this stays false and
+   * flips true on a later poll once GitHub settles.
+   */
+  canBeMerged: boolean;
+
   /** true if new comments/activity appeared since the last time it was viewed. */
   hasNewActivity: boolean;
   /** ISO time of the last "mark seen", if any. */
