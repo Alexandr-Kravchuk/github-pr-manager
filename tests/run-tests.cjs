@@ -7,6 +7,7 @@ const path = require("node:path");
 
 const cfg = require(path.join(__dirname, "../dist/main/shared/config.js"));
 const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
+const notif = require(path.join(__dirname, "../dist/main/shared/notifications.js"));
 
 let passed = 0;
 let failed = 0;
@@ -130,6 +131,61 @@ test("hostIntervalMs: exhausted budget waits at least the minute floor", () =>
     poller.hostIntervalMs({ hostLabel: "GHE", remaining: 0, cost: 1, resetAt: future(5) }, 60_000),
     60_000,
   ));
+
+// --- poller: hotness floor ---------------------------------------------------
+const rl = (cost) => ({ hostLabel: "GH", remaining: 5000, cost, resetAt: future(3600) });
+test("hostIntervalMs: cold expensive host stretches the floor 4x", () =>
+  assert.strictEqual(poller.hostIntervalMs(rl(35), 60_000, false), 1_200_000));
+test("hostIntervalMs: hot expensive host keeps the tight 5-min floor", () =>
+  assert.strictEqual(poller.hostIntervalMs(rl(35), 60_000, true), 300_000));
+test("hostIntervalMs: hotness never stretches a cheap host below base", () =>
+  assert.strictEqual(poller.hostIntervalMs(rl(1), 60_000, false), 60_000));
+
+// --- poller: isHotPr / hostHasHotPr ------------------------------------------
+const NOW = Date.parse("2026-07-07T12:00:00Z");
+const basePr = { ciState: "success", unresolvedThreads: 0, updatedAt: "2026-07-07T00:00:00Z" };
+test("isHotPr: pending CI is hot", () =>
+  assert.strictEqual(poller.isHotPr({ ...basePr, ciState: "pending" }, NOW), true));
+test("isHotPr: failing CI is hot", () =>
+  assert.strictEqual(poller.isHotPr({ ...basePr, ciState: "failure" }, NOW), true));
+test("isHotPr: an open thread is hot", () =>
+  assert.strictEqual(poller.isHotPr({ ...basePr, unresolvedThreads: 1 }, NOW), true));
+test("isHotPr: recent activity is hot", () =>
+  assert.strictEqual(
+    poller.isHotPr({ ...basePr, updatedAt: new Date(NOW - 10 * 60 * 1000).toISOString() }, NOW),
+    true,
+  ));
+test("isHotPr: green + quiet + stale is cold", () =>
+  assert.strictEqual(poller.isHotPr(basePr, NOW), false));
+test("hostHasHotPr: false when all cold, true if any hot", () => {
+  assert.strictEqual(poller.hostHasHotPr([basePr, basePr], NOW), false);
+  assert.strictEqual(poller.hostHasHotPr([basePr, { ...basePr, ciState: "pending" }], NOW), true);
+});
+
+// --- notifications: parsePollIntervalMs --------------------------------------
+test("parsePollIntervalMs: honors the header, floored at 60s", () => {
+  assert.strictEqual(notif.parsePollIntervalMs("120"), 120_000);
+  assert.strictEqual(notif.parsePollIntervalMs("30"), 60_000);
+});
+test("parsePollIntervalMs: missing/garbage falls back to 60s", () => {
+  assert.strictEqual(notif.parsePollIntervalMs(null), 60_000);
+  assert.strictEqual(notif.parsePollIntervalMs("nope"), 60_000);
+});
+
+// --- notifications: newestTrackedActivity ------------------------------------
+const items = [
+  { updated_at: "2026-07-07T10:00:00Z", repository: { full_name: "acme/widgets" } },
+  { updated_at: "2026-07-07T11:00:00Z", repository: { full_name: "other/repo" } },
+  { updated_at: "2026-07-07T09:00:00Z", repository: { full_name: "ACME/Widgets" } },
+];
+test("newestTrackedActivity: newest updated_at among tracked repos (case-insensitive)", () =>
+  assert.strictEqual(notif.newestTrackedActivity(items, ["acme/widgets"]), "2026-07-07T10:00:00Z"));
+test("newestTrackedActivity: null when nothing tracked matches", () =>
+  assert.strictEqual(notif.newestTrackedActivity(items, ["nobody/here"]), null));
+test("newestTrackedActivity: null on empty inputs", () => {
+  assert.strictEqual(notif.newestTrackedActivity([], ["acme/widgets"]), null);
+  assert.strictEqual(notif.newestTrackedActivity(items, []), null);
+});
 
 // --- poller: computeIdleFactor -----------------------------------------------
 test("computeIdleFactor: no backoff until the streak passes the threshold", () => {

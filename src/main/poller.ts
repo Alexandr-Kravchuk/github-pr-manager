@@ -21,6 +21,13 @@
  *  - **No-change backoff** — after several consecutive unchanged ticks the base
  *    interval is stretched (capped), and reset on any change or an explicit
  *    refresh/wake.
+ *  - **Hotness floor** — an expensive host with no hot PRs (nothing red,
+ *    pending, unresolved or recently touched) gets its floor stretched; a quiet
+ *    dashboard costs far less than an active one.
+ *  - **Notifications detector** — a cheap REST `/notifications` probe on the
+ *    separate `core` budget gates the expensive GraphQL hydrate: human activity
+ *    on a tracked PR forces an immediate fetch, so the dashboard stays reactive
+ *    without polling GraphQL hard (see `shared/notifications.ts`).
  *
  * Deliberately free of Electron imports so it stays unit-testable; settings
  * loading, token resolution, the state-file path, the app version and the
@@ -29,6 +36,8 @@
 
 import { ConfigError } from "../shared/config";
 import { fetchHost } from "../shared/github";
+import { DEFAULT_POLL_INTERVAL_MS, probeNotifications } from "../shared/notifications";
+import type { NotifState } from "../shared/notifications";
 import { applyActivity } from "../shared/state";
 import type {
   DashboardResponse,
@@ -60,6 +69,13 @@ export interface PollerOptions {
   isPaused?: () => boolean;
   /** Host fetcher — defaults to the real GraphQL `fetchHost`; PRD_MOCK swaps in fixtures. */
   fetchHostFn?: typeof fetchHost;
+  /**
+   * Cheap REST notifications detector — defaults to the real `probeNotifications`.
+   * PRD_MOCK swaps in a no-op so mock mode never touches the network. Runs on the
+   * `core` REST budget (separate from GraphQL) to decide whether a host is worth
+   * an expensive hydrate this tick.
+   */
+  probeNotificationsFn?: typeof probeNotifications;
 }
 
 const MIN_INTERVAL_MS = 10_000;
@@ -73,8 +89,17 @@ const PARKED_INTERVAL_MS = 20_000;
  * spending the same budget.
  */
 const EXPENSIVE_COST = 5;
-/** Minimum spacing for an expensive host (github.com), regardless of base. */
+/** Minimum spacing for an expensive host (github.com) with hot PRs. */
 const EXPENSIVE_FLOOR_MS = 300_000; // 5 min
+/**
+ * When an expensive host has *no* hot PRs (nothing red, pending, unresolved or
+ * recently touched), its floor is stretched by this factor — the dashboard is
+ * quiet, so trade freshness for budget. Human activity still surfaces instantly
+ * via the notifications detector; this only governs the unforced GraphQL floor.
+ */
+const EXPENSIVE_COLD_FACTOR = 4; // 20 min
+/** A PR updated within this window counts as "hot" (worth a tight cadence). */
+const RECENT_ACTIVITY_MS = 30 * 60 * 1000;
 /** Stretch the base interval only after this many consecutive unchanged ticks. */
 const IDLE_BACKOFF_AFTER = 2;
 /** Cap on the no-change backoff multiplier. */
@@ -117,10 +142,13 @@ function hashSnapshot(s: DashboardResponse): string {
  * backoff — the 5-min cadence was chosen as the right budget/freshness trade-off
  * and should not be stretched by the backoff multiplier.
  */
-export function hostIntervalMs(rl: RateLimitInfo | null, baseMs: number): number {
+export function hostIntervalMs(rl: RateLimitInfo | null, baseMs: number, hot = true): number {
   // No reading yet (host not fetched, or no repos so no GraphQL spend): base.
   if (!rl || rl.cost <= 0 || !rl.resetAt) return Math.min(MAX_INTERVAL_MS, baseMs);
-  const floor = rl.cost >= EXPENSIVE_COST ? EXPENSIVE_FLOOR_MS : baseMs;
+  const expensiveFloor = hot
+    ? EXPENSIVE_FLOOR_MS
+    : Math.min(MAX_INTERVAL_MS, EXPENSIVE_FLOOR_MS * EXPENSIVE_COLD_FACTOR);
+  const floor = rl.cost >= EXPENSIVE_COST ? expensiveFloor : baseMs;
   const secondsUntilReset = Math.max(0, (new Date(rl.resetAt).getTime() - Date.now()) / 1000);
   const safeTicks = Math.floor(rl.remaining / rl.cost);
   if (safeTicks <= 0) {
@@ -140,6 +168,24 @@ export function computeIdleFactor(unchangedStreak: number): number {
   return Math.min(IDLE_BACKOFF_MAX_FACTOR, 2 ** (unchangedStreak - IDLE_BACKOFF_AFTER));
 }
 
+/**
+ * A PR is "hot" when it's worth a tight GraphQL cadence: CI in flight or red
+ * (you want to catch it going green — a change the notifications detector can't
+ * see), an open review thread, or recent activity. All fields are set at map
+ * time, so this is safe to evaluate before `applyActivity` runs.
+ */
+export function isHotPr(pr: PullRequest, now: number): boolean {
+  if (pr.ciState === "pending" || pr.ciState === "failure") return true;
+  if (pr.unresolvedThreads > 0) return true;
+  const updated = Date.parse(pr.updatedAt);
+  return Number.isFinite(updated) && now - updated <= RECENT_ACTIVITY_MS;
+}
+
+/** Whether a host has any hot PR — drives its expensive-floor cadence. */
+export function hostHasHotPr(prs: PullRequest[], now: number): boolean {
+  return prs.some((pr) => isHotPr(pr, now));
+}
+
 /** Last known result for one host, kept between its (spaced-out) fetches. */
 interface HostSlot {
   prs: PullRequest[];
@@ -149,6 +195,17 @@ interface HostSlot {
   nextDueAt: number;
   /** When this host's data was last actually fetched from the network. */
   fetchedAt: string;
+  /** Conditional-request + watermark state for the notifications detector. */
+  notif: NotifState;
+  /** Epoch ms before which the notifications detector should not probe again. */
+  notifNextProbeAt: number;
+  /** Detector turned off for this host (no scope / unsupported) — floor-poll only. */
+  notifDisabled: boolean;
+}
+
+/** Fresh per-host detector state (before the first probe). */
+function initialNotif(): NotifState {
+  return { lastModified: null, watermark: null };
 }
 
 export class Poller {
@@ -309,9 +366,56 @@ export class Poller {
       this.intervalMs * computeIdleFactor(this.unchangedStreak),
     );
 
-    // Due = never fetched, overdue, or forced. Others reuse their last result.
+    // Cheap REST detector, before the expensive GraphQL fetch: for each host that
+    // has been hydrated once, has the detector enabled and whose probe timer has
+    // elapsed, ask "did a tracked PR move?" on the separate `core` budget. A yes
+    // forces an immediate hydrate of that host this same tick. A forced tick
+    // (manual refresh) hydrates everything anyway, so skip probing then.
+    const forced = new Set<string>();
+    if (!force) {
+      const probeFn = this.options.probeNotificationsFn ?? probeNotifications;
+      const probeHosts = hosts.filter((h) => {
+        if (h.repos.length === 0) return false;
+        const slot = this.hostSlots.get(h.graphqlUrl);
+        return !!slot && !slot.notifDisabled && now >= slot.notifNextProbeAt;
+      });
+      const probes = await Promise.allSettled(
+        probeHosts.map((h) => probeFn(h, this.hostSlots.get(h.graphqlUrl)!.notif)),
+      );
+      probes.forEach((p, i) => {
+        const slot = this.hostSlots.get(probeHosts[i].graphqlUrl);
+        if (!slot) return;
+        if (p.status === "fulfilled") {
+          slot.notif = { lastModified: p.value.lastModified, watermark: p.value.watermark };
+          slot.notifNextProbeAt = now + p.value.pollIntervalMs;
+          if (p.value.status === "unavailable") slot.notifDisabled = true;
+          if (p.value.changed) forced.add(probeHosts[i].graphqlUrl);
+          if (process.env.PRD_DEBUG) {
+            console.log(
+              `[notif] ${probeHosts[i].label}: ${
+                p.value.status === "unavailable"
+                  ? "unavailable (detector off)"
+                  : p.value.changed
+                    ? "CHANGED -> forcing hydrate"
+                    : "no change"
+              } (next probe in ${Math.round(p.value.pollIntervalMs / 1000)}s)`,
+            );
+          }
+        } else {
+          // Probe failed (network): back off one interval, stay enabled.
+          slot.notifNextProbeAt = now + DEFAULT_POLL_INTERVAL_MS;
+          if (process.env.PRD_DEBUG) {
+            const msg = p.reason instanceof Error ? p.reason.message : String(p.reason);
+            console.log(`[notif] ${probeHosts[i].label}: probe failed (${msg})`);
+          }
+        }
+      });
+    }
+
+    // Due = never fetched, overdue, forced by the detector, or a forced tick.
+    // Others reuse their last result.
     const due = hosts.filter((h) => {
-      if (force) return true;
+      if (force || forced.has(h.graphqlUrl)) return true;
       const slot = this.hostSlots.get(h.graphqlUrl);
       return !slot || now >= slot.nextDueAt;
     });
@@ -324,13 +428,17 @@ export class Poller {
       const host = due[i];
       const prev = this.hostSlots.get(host.graphqlUrl);
       if (result.status === "fulfilled") {
+        const prs = result.value.pullRequests;
         const rateLimit = host.repos.length > 0 ? result.value.rateLimit : null;
         this.hostSlots.set(host.graphqlUrl, {
-          prs: result.value.pullRequests,
+          prs,
           rateLimit,
           error: null,
-          nextDueAt: now + hostIntervalMs(rateLimit, effectiveBase),
+          nextDueAt: now + hostIntervalMs(rateLimit, effectiveBase, hostHasHotPr(prs, now)),
           fetchedAt: fetchedNow,
+          notif: prev?.notif ?? initialNotif(),
+          notifNextProbeAt: prev?.notifNextProbeAt ?? now + DEFAULT_POLL_INTERVAL_MS,
+          notifDisabled: prev?.notifDisabled ?? false,
         });
       } else {
         // Keep the last good PRs (better than blanking the host) and surface the
@@ -339,12 +447,16 @@ export class Poller {
         // the data didn't actually refresh.
         const message =
           result.reason instanceof Error ? result.reason.message : String(result.reason);
+        const prs = prev?.prs ?? [];
         this.hostSlots.set(host.graphqlUrl, {
-          prs: prev?.prs ?? [],
+          prs,
           rateLimit: prev?.rateLimit ?? null,
           error: { hostLabel: host.label, message },
-          nextDueAt: now + hostIntervalMs(prev?.rateLimit ?? null, effectiveBase),
+          nextDueAt: now + hostIntervalMs(prev?.rateLimit ?? null, effectiveBase, hostHasHotPr(prs, now)),
           fetchedAt: prev?.fetchedAt ?? fetchedNow,
+          notif: prev?.notif ?? initialNotif(),
+          notifNextProbeAt: prev?.notifNextProbeAt ?? now + DEFAULT_POLL_INTERVAL_MS,
+          notifDisabled: prev?.notifDisabled ?? false,
         });
       }
     });

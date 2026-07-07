@@ -8,7 +8,8 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 import process from "node:process";
 
-const DEV_PORT = 5173;
+// Overridable via PRD_DEV_PORT so `npm run dev` can dodge a port already in use.
+const DEV_PORT = Number(process.env.PRD_DEV_PORT) || 5173;
 // Pin to IPv4 so the readiness probe and Electron hit the same address Vite
 // binds — Vite defaults to "localhost" which can resolve to IPv6 ::1, while a
 // 127.0.0.1 probe would then never connect.

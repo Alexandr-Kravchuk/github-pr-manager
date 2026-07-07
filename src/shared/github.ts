@@ -377,16 +377,24 @@ function buildSearchQuery(repos: string[], qualifier: string): string {
 }
 
 /**
- * Derives the REST `/user/teams` endpoint from a host's GraphQL URL:
- *  - https://api.github.com/graphql        -> https://api.github.com/user/teams
- *  - https://api.<tenant>.ghe.com/graphql  -> https://api.<tenant>.ghe.com/user/teams
- *  - https://github.company.com/api/graphql -> https://github.company.com/api/v3/user/teams
+ * Derives the REST API base from a host's GraphQL URL:
+ *  - https://api.github.com/graphql         -> https://api.github.com
+ *  - https://api.<tenant>.ghe.com/graphql   -> https://api.<tenant>.ghe.com
+ *  - https://github.company.com/api/graphql -> https://github.company.com/api/v3
+ *
+ * Enterprise Server keeps REST under `/api/v3`; Cloud (and GHE.com data
+ * residency) serves it from the origin. Shared by every REST caller on a host
+ * (team discovery, the notifications detector).
  */
-function userTeamsUrl(graphqlUrl: string): string {
+export function restBaseUrl(graphqlUrl: string): string {
   const url = new URL(graphqlUrl);
-  // Enterprise Server keeps REST under /api/v3; Cloud serves it from the root.
   const prefix = url.pathname.endsWith("/api/graphql") ? "/api/v3" : "";
-  return `${url.origin}${prefix}/user/teams`;
+  return `${url.origin}${prefix}`;
+}
+
+/** REST `/user/teams` endpoint for a host. */
+function userTeamsUrl(graphqlUrl: string): string {
+  return `${restBaseUrl(graphqlUrl)}/user/teams`;
 }
 
 interface RawTeam {

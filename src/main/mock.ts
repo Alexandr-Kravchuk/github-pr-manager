@@ -248,6 +248,17 @@ function currentCase(): string {
   return fromEnv in CASES ? fromEnv : "empty";
 }
 
+/** No-op notifications probe for mock mode — never touches the network. */
+export async function mockProbeNotifications(): Promise<{
+  changed: boolean;
+  lastModified: string | null;
+  watermark: string | null;
+  pollIntervalMs: number;
+  status: "ok" | "unavailable";
+}> {
+  return { changed: false, lastModified: null, watermark: null, pollIntervalMs: 60_000, status: "ok" };
+}
+
 export async function mockFetchHost(host: HostConfig): Promise<HostFetchResult> {
   tick++;
   const name = currentCase();
@@ -268,6 +279,7 @@ export function mockPollerOverrides(userDataPath: string): {
   loadSettings: () => Settings;
   toHostConfigs: () => HostConfig[];
   fetchHostFn: typeof mockFetchHost;
+  probeNotificationsFn: typeof mockProbeNotifications;
   statePath: string;
 } {
   return {
@@ -280,6 +292,7 @@ export function mockPollerOverrides(userDataPath: string): {
       { label: HOST_LABEL, graphqlUrl: "https://mock.invalid/graphql", token: "mock", repos: ["acme/widgets"] },
     ],
     fetchHostFn: mockFetchHost,
+    probeNotificationsFn: mockProbeNotifications,
     statePath: path.join(userDataPath, "seen-state.mock.json"),
   };
 }
