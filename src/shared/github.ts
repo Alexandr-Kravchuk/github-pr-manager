@@ -19,6 +19,7 @@ fragment PrFields on PullRequest {
   createdAt
   updatedAt
   baseRefName
+  mergeable
   author { login avatarUrl }
   repository { nameWithOwner defaultBranchRef { name } }
   reviewDecision
@@ -109,6 +110,9 @@ interface RawPr {
   createdAt: string;
   updatedAt: string;
   baseRefName: string;
+  // GitHub's mergeability enum: "MERGEABLE" | "CONFLICTING" | "UNKNOWN".
+  // Computed asynchronously — "UNKNOWN" right after a push, settles on a re-poll.
+  mergeable: string;
   author: { login: string; avatarUrl: string } | null;
   repository: { nameWithOwner: string; defaultBranchRef: { name: string } | null };
   reviewDecision: ReviewDecision;
@@ -259,7 +263,7 @@ function extractChecks(pr: RawPr): CheckItem[] {
 }
 
 /** Maps a raw PR into the domain model (without activity fields — those are added by state.ts). */
-function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
+export function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
   const threads = pr.reviewThreads.nodes;
   const unresolvedThreads = threads.filter((t) => !t.isResolved).length;
   const reviewCommentCount = threads.reduce((sum, t) => sum + t.comments.totalCount, 0);
@@ -333,6 +337,18 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
     seenLogins.add(r.author.login);
   }
 
+  // "Can be merged": the composite readiness signal behind the filter chip. Ready
+  // means no conflicts (GitHub says MERGEABLE — not CONFLICTING and not the
+  // transient UNKNOWN), a human has approved, no change request is waiting on the
+  // author, and CI is neither failing nor still running. Drafts are never ready.
+  const canBeMerged =
+    !pr.isDraft &&
+    pr.mergeable === "MERGEABLE" &&
+    hasHumanApproval &&
+    !hasUnaddressedChangeRequest &&
+    failingChecks.length === 0 &&
+    pendingChecks.length === 0;
+
   return {
     id: pr.id,
     hostLabel,
@@ -360,6 +376,7 @@ function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
     hasUnaddressedChangeRequest,
     hasUnaddressedComments,
     hasHumanApproval,
+    canBeMerged,
     // Activity fields are overwritten in state.ts:
     hasNewActivity: false,
     lastSeenAt: null,
