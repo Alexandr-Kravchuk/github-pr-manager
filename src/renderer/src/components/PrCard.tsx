@@ -168,9 +168,6 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
   const passingCount = pr.checks.filter((c) => c.state === "success").length;
   const pendingReviewers = pr.reviewers.filter((r) => r.reviewState === "pending");
   const pendingReviewerNames = reviewerListLabel(pendingReviewers);
-  // A review is being asked of you — tint the whole card violet so it stands
-  // out from the rest. The tint fades to the plain surface on hover.
-  const needsMyReview = pr.roles.includes("reviewer");
   const [copied, setCopied] = useState(false);
   const copyUrl = useCallback(() => {
     window.api
@@ -185,8 +182,7 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
   return (
     <div
       className={cn(
-        "rounded-lg border border-line border-l-4 p-4 transition-colors hover:bg-surface",
-        needsMyReview ? "bg-violet-500/10" : "bg-surface/60",
+        "rounded-lg border border-line border-l-4 p-4 transition-colors hover:bg-surface bg-surface/60",
         accentClass(pr),
       )}
     >

@@ -320,7 +320,7 @@ export function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullReques
   let hasHumanApproval = false;
   for (const n of pr.reviewRequests.nodes) {
     const r = n.requestedReviewer;
-    if (r?.__typename === "User" && r.login) {
+    if (r?.__typename === "User" && r.login && !seenLogins.has(r.login)) {
       reviewers.push({ login: r.login, avatarUrl: r.avatarUrl ?? "", reviewState: "pending" });
       seenLogins.add(r.login);
     }
