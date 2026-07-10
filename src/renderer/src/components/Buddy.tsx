@@ -1,3 +1,5 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+
 export type BuddyMood = "sad" | "curious" | "sleeping";
 
 const MOOD_META: Record<BuddyMood, { cls: string; label: string }> = {
@@ -22,18 +24,53 @@ const MOOD_META: Record<BuddyMood, { cls: string; label: string }> = {
  */
 export function Buddy({ mood }: { mood: BuddyMood }) {
   const meta = MOOD_META[mood];
+  const previousMood = useRef(mood);
+  const [animation, setAnimation] = useState<{ mood: BuddyMood; run: number } | null>(null);
+
+  const animate = useCallback(() => {
+    setAnimation((current) => ({ mood, run: (current?.run ?? 0) + 1 }));
+  }, [mood]);
+
+  // A mood change is the status event worth drawing attention to. Keeping the
+  // mood alongside the run counter prevents the previous mood's animation from
+  // briefly starting before this effect schedules the new one.
+  useEffect(() => {
+    if (previousMood.current !== mood) {
+      previousMood.current = mood;
+      animate();
+    }
+  }, [animate, mood]);
+
+  const isAnimating = animation?.mood === mood;
+  const animationRun = animation?.run ?? 0;
+  const bodyAnimation = isAnimating
+    ? mood === "sleeping"
+      ? "buddy-breathe"
+      : mood === "sad"
+        ? "buddy-droop"
+        : "buddy-bob"
+    : undefined;
+
   return (
     <svg
       viewBox="0 0 48 44"
       width={44}
       height={40}
-      role="img"
+      role="button"
+      tabIndex={0}
       aria-label={meta.label}
-      className={`buddy shrink-0 ${meta.cls}`}
+      onClick={animate}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          animate();
+        }
+      }}
+      className={`buddy shrink-0 cursor-pointer rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current ${meta.cls}`}
     >
       <title>{meta.label}</title>
 
-      <g className={mood === "sleeping" ? "buddy-breathe" : mood === "sad" ? "buddy-droop" : "buddy-bob"}>
+      <g key={`body-${animationRun}`} className={bodyAnimation}>
         {/* Body */}
         <circle cx="24" cy="26" r="15" fill="currentColor" opacity="0.14" />
         <circle cx="24" cy="26" r="15" fill="none" stroke="currentColor" strokeWidth="1.6" opacity="0.75" />
@@ -50,7 +87,7 @@ export function Buddy({ mood }: { mood: BuddyMood }) {
             <path d="M19 34 Q24 30.5 29 34" />
             {/* Tear */}
             <path
-              className="buddy-tear"
+              className={isAnimating ? "buddy-tear" : undefined}
               d="M32.5 28.5 q1.4 2 0 3 q-1.4 -1 0 -3"
               fill="#38bdf8"
               stroke="none"
@@ -66,8 +103,8 @@ export function Buddy({ mood }: { mood: BuddyMood }) {
             {/* Wide eyes with wandering pupils */}
             <circle cx="18.5" cy="25.5" r="3.4" />
             <circle cx="29.5" cy="25.5" r="3.4" />
-            <circle className="buddy-look" cx="18.5" cy="25.5" r="1.5" fill="currentColor" stroke="none" />
-            <circle className="buddy-look" cx="29.5" cy="25.5" r="1.5" fill="currentColor" stroke="none" />
+            <circle className={isAnimating ? "buddy-look" : undefined} cx="18.5" cy="25.5" r="1.5" fill="currentColor" stroke="none" />
+            <circle className={isAnimating ? "buddy-look" : undefined} cx="29.5" cy="25.5" r="1.5" fill="currentColor" stroke="none" />
             {/* Small "o" mouth */}
             <circle cx="24" cy="33.5" r="1.8" />
           </g>
@@ -85,10 +122,10 @@ export function Buddy({ mood }: { mood: BuddyMood }) {
       </g>
 
       {mood === "sleeping" && (
-        <g fill="currentColor" fontFamily="inherit" fontWeight="600">
-          <text className="buddy-zzz" x="33" y="15" fontSize="9">z</text>
-          <text className="buddy-zzz buddy-zzz-2" x="38" y="10" fontSize="7">z</text>
-          <text className="buddy-zzz buddy-zzz-3" x="43" y="6" fontSize="5">z</text>
+        <g key={`zzz-${animationRun}`} fill="currentColor" fontFamily="inherit" fontWeight="600">
+          <text className={isAnimating ? "buddy-zzz" : undefined} x="33" y="15" fontSize="9">z</text>
+          <text className={isAnimating ? "buddy-zzz buddy-zzz-2" : undefined} x="38" y="10" fontSize="7">z</text>
+          <text className={isAnimating ? "buddy-zzz buddy-zzz-3" : undefined} x="43" y="6" fontSize="5">z</text>
         </g>
       )}
     </svg>
