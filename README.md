@@ -10,10 +10,20 @@ attention:
 - 💬 **unresolved comments** — how many threads still need to be resolved;
 - review state (approved / changes requested / review required), drafts, author, last update.
 
+![PR Dashboard](assets/screenshot.png)
+
+Cards are grouped by repository and colour-coded down the left edge (red = needs
+attention, green = ready to merge, yellow = CI running, purple = your review is
+requested). One-click **filters** (needs attention, failing CI, new comments,
+ready to merge, drafts) and a search box narrow the list; a **status buddy** in
+the header reflects the overall mood at a glance, and any PR you don't care about
+can be **ignored** and tucked behind an "Ignored" filter. Light / dark / system
+**theme** follows the OS or can be pinned in Settings.
+
 It is **per-user and single-identity**: tokens are read from the
 [`gh` CLI](https://cli.github.com/) you're already signed into — there is no
 OAuth flow and **nothing is stored** by the app. Settings (hosts, repos, refresh
-interval) live in the OS user-data directory, never in the repo.
+interval, theme) live in the OS user-data directory, never in the repo.
 
 ## Tech stack
 
@@ -54,6 +64,12 @@ Electron · Vite + React 19 + Tailwind CSS v4 (renderer) · TypeScript · Node
 npm install
 npm run dev      # Vite dev server (HMR) + Electron
 ```
+
+To work on the UI without `gh` or the network, use the fixture mode: set
+`PRD_MOCK=1` (canned PRs in Electron — cases live in `src/main/mock.ts`, switched
+live via a `.prd-mock` file), or run the renderer alone in a browser and let
+`dev-mock.ts` stub `window.api` (`?buddy=sad|curious|sleeping|showcase` picks a
+fixture set). The screenshot above is the `showcase` set.
 
 On first launch the dashboard is empty — open **Settings (⚙)** and add a host:
 
@@ -138,16 +154,21 @@ src/
     settings.ts         # read/write userData/settings.json
     ipc-validation.ts   # validate renderer-supplied IPC arguments
     updater.ts          # electron-updater (check / download / restart)
+    cli-path.ts         # locate the gh binary across install layouts
+    mock.ts             # PRD_MOCK fixture mode (dev-only, no network)
   shared/               # Node domain logic (renderer imports types only)
     github.ts           # GraphQL query + mapping
     state.ts            # seen-state (new-comment baseline)
+    ignored.ts          # per-PR ignore state
+    notifications.ts    # cheap notifications probe (poll cadence hint)
     config.ts           # gh token resolution + settings validation + gh status
     types.ts            # domain types + the window.api contract
   renderer/             # Vite + React + Tailwind v4
     index.html
     src/
       App.tsx           # dashboard + settings routing
-      components/        # PrCard, CheckBadge, Settings
+      components/        # PrCard, CheckBadge, Buddy, Settings
+      dev-mock.ts       # browser-only window.api stub for renderer-alone dev
       format.ts         # client-side formatting helpers
 build/                  # icon.png + mac entitlements (electron-builder resources)
 scripts/                # dev launcher, mac release, icon generator
