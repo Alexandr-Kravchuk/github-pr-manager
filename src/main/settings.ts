@@ -15,6 +15,11 @@ export function seenStatePath(): string {
   return path.join(app.getPath("userData"), "seen-state.json");
 }
 
+/** Path of the "ignored" state store (hidden PRs) under userData. */
+export function ignoredStatePath(): string {
+  return path.join(app.getPath("userData"), "ignored-state.json");
+}
+
 /**
  * Reads and validates settings. A missing file is the first-run state and
  * yields empty (unconfigured) settings — not an error. A present-but-invalid

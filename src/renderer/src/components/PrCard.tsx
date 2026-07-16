@@ -8,6 +8,8 @@ interface Props {
   pr: PullRequest;
   onOpen: (pr: PullRequest) => void;
   onMarkSeen: (pr: PullRequest) => void;
+  /** Ignore (hide) the PR, or un-ignore it when already ignored. */
+  onToggleIgnore: (pr: PullRequest) => void;
   /** Hide the host/repo line (redundant inside a per-repo group). */
   hideRepo?: boolean;
 }
@@ -163,7 +165,29 @@ function CheckIcon() {
   );
 }
 
-export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
+/** Crossed-out eye — "ignore" (hide this PR from the dashboard). */
+function EyeOffIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M9.88 9.88a3 3 0 0 0 4.24 4.24" />
+      <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
+      <path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
+      <line x1="2" y1="2" x2="22" y2="22" />
+    </svg>
+  );
+}
+
+/** Open eye — "un-ignore" (bring this PR back to the dashboard). */
+function EyeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = false }: Props) {
   const review = reviewLabel(pr.reviewDecision);
   const passingCount = pr.checks.filter((c) => c.state === "success").length;
   const pendingReviewers = pr.reviewers.filter((r) => r.reviewState === "pending");
@@ -224,6 +248,20 @@ export function PrCard({ pr, onOpen, onMarkSeen, hideRepo = false }: Props) {
             )}
           >
             {copied ? <CheckIcon /> : <CopyIcon />}
+          </button>
+          <button
+            type="button"
+            onClick={() => onToggleIgnore(pr)}
+            title={pr.isIgnored ? "Un-ignore (show on the dashboard)" : "Ignore (hide from the dashboard)"}
+            aria-label={pr.isIgnored ? "Un-ignore PR" : "Ignore PR"}
+            className={cn(
+              "shrink-0 rounded p-0.5 hover:bg-elevated",
+              pr.isIgnored
+                ? "text-sky-600 dark:text-sky-400"
+                : "text-fg-faint hover:text-fg-secondary",
+            )}
+          >
+            {pr.isIgnored ? <EyeIcon /> : <EyeOffIcon />}
           </button>
         </div>
         <span className="shrink-0" title={new Date(pr.updatedAt).toLocaleString()}>

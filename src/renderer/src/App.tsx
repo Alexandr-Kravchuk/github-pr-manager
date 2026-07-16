@@ -29,6 +29,7 @@ export function App() {
   const [mergeableOnly, setMergeableOnly] = useState(false);
   const [groupByRepo, setGroupByRepo] = useState(true);
   const [showDrafts, setShowDrafts] = useState(false);
+  const [showIgnored, setShowIgnored] = useState(false);
   // Collapsed repo groups, keyed by `${hostLabel}/${repo}`. In-memory, like
   // the filters: a fresh launch starts with everything expanded.
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -158,32 +159,56 @@ export function App() {
     [postSeen],
   );
 
+  // Ignore / un-ignore a PR. Updates our own copy optimistically (the main
+  // process persists the change and re-applies it on the next tick).
+  const toggleIgnore = useCallback((pr: PullRequest) => {
+    const next = !pr.isIgnored;
+    setData((prev) =>
+      prev
+        ? {
+            ...prev,
+            pullRequests: prev.pullRequests.map((p) =>
+              p.id === pr.id ? { ...p, isIgnored: next } : p,
+            ),
+          }
+        : prev,
+    );
+    window.api.setIgnored(pr.id, next).catch(() => {});
+  }, []);
+
   const allPrs = useMemo(() => data?.pullRequests ?? [], [data]);
+
+  // Ignored PRs are excluded from everything (counts, buddy mood, the other
+  // filters) — they only surface via the "Ignored" chip. `active` is that
+  // ignored-free base the whole dashboard reasons about.
+  const active = useMemo(() => allPrs.filter((p) => !p.isIgnored), [allPrs]);
 
   // Buddy mood mirrors the card accents (drafts excluded, like the default
   // view): any red PR → sad, else a requested review → curious, else asleep.
   const buddyMood = useMemo<BuddyMood>(() => {
-    const signals = allPrs.filter((p) => !p.isDraft).map(prSignal);
+    const signals = active.filter((p) => !p.isDraft).map(prSignal);
     if (signals.includes("blocked")) return "sad";
     if (signals.includes("myReview")) return "curious";
     return "sleeping";
-  }, [allPrs]);
+  }, [active]);
 
   const counts = useMemo(
     () => ({
-      total: allPrs.length,
-      attention: allPrs.filter((p) => p.needsAttention).length,
-      failing: allPrs.filter((p) => p.failingChecks.length > 0).length,
-      fresh: allPrs.filter((p) => p.hasNewActivity).length,
-      drafts: allPrs.filter((p) => p.isDraft).length,
-      mergeable: allPrs.filter((p) => p.canBeMerged).length,
+      total: active.length,
+      attention: active.filter((p) => p.needsAttention).length,
+      failing: active.filter((p) => p.failingChecks.length > 0).length,
+      fresh: active.filter((p) => p.hasNewActivity).length,
+      drafts: active.filter((p) => p.isDraft).length,
+      mergeable: active.filter((p) => p.canBeMerged).length,
+      ignored: allPrs.filter((p) => p.isIgnored).length,
     }),
-    [allPrs],
+    [active, allPrs],
   );
 
   const filtered = useMemo(
     () =>
       allPrs.filter((pr) => {
+        if (!showIgnored && pr.isIgnored) return false;
         if (!showDrafts && pr.isDraft) return false;
         if (role !== "all" && !pr.roles.includes(role)) return false;
         if (host !== "all" && pr.hostLabel !== host) return false;
@@ -198,7 +223,7 @@ export function App() {
         }
         return true;
       }),
-    [allPrs, role, host, attentionOnly, failingOnly, newOnly, mergeableOnly, search, showDrafts],
+    [allPrs, role, host, attentionOnly, failingOnly, newOnly, mergeableOnly, search, showDrafts, showIgnored],
   );
 
   // Reviewer PRs (your turn to review) float to the top — in the flat list and
@@ -395,6 +420,11 @@ export function App() {
               Drafts ({counts.drafts})
             </FilterChip>
           )}
+          {counts.ignored > 0 && (
+            <FilterChip active={showIgnored} onClick={() => setShowIgnored((v) => !v)}>
+              Ignored ({counts.ignored})
+            </FilterChip>
+          )}
           <FilterChip active={groupByRepo} onClick={() => setGroupByRepo((v) => !v)}>
             Group by repo
           </FilterChip>
@@ -487,6 +517,7 @@ export function App() {
                         hideRepo
                         onOpen={openPr}
                         onMarkSeen={(p) => postSeen([p])}
+                        onToggleIgnore={toggleIgnore}
                       />
                     ))}
                   </div>
@@ -498,7 +529,13 @@ export function App() {
       ) : (
         <div className="grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3 3xl:grid-cols-4 4xl:grid-cols-5">
           {sorted.map((pr) => (
-            <PrCard key={pr.id} pr={pr} onOpen={openPr} onMarkSeen={(p) => postSeen([p])} />
+            <PrCard
+              key={pr.id}
+              pr={pr}
+              onOpen={openPr}
+              onMarkSeen={(p) => postSeen([p])}
+              onToggleIgnore={toggleIgnore}
+            />
           ))}
         </div>
       )}

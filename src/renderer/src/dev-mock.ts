@@ -46,6 +46,7 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     hasNewActivity: false,
     lastSeenAt: null,
     needsAttention: false,
+    isIgnored: false,
     ...overrides,
   };
 }
@@ -110,6 +111,7 @@ const api: PrManagerApi = {
     config: { pollIntervalSeconds: 60, hosts: [{ label: "GitHub", repos: ["acme/widgets"] }] },
   }),
   markSeen: async () => {},
+  setIgnored: async () => {},
   openExternal: async () => {},
   getSettings: async () => settings,
   saveSettings: async () => ({ ok: true }),

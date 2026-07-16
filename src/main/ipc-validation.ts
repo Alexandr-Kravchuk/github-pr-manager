@@ -22,6 +22,20 @@ export function validateSeenItems(value: unknown): SeenInput[] {
     .map((it) => ({ id: it.id, comments: it.comments, updatedAt: it.updatedAt }));
 }
 
+/** Validates the renderer's ignore/un-ignore payload. */
+export function validateIgnoredArgs(
+  id: unknown,
+  ignored: unknown,
+): { id: string; ignored: boolean } {
+  if (typeof id !== "string" || id.length === 0) {
+    throw new Error("setIgnored: id must be a non-empty string.");
+  }
+  if (typeof ignored !== "boolean") {
+    throw new Error("setIgnored: ignored must be a boolean.");
+  }
+  return { id, ignored };
+}
+
 /** Ensures a URL is a real http(s) URL before handing it to shell.openExternal. */
 export function validateExternalUrl(value: unknown): string {
   if (typeof value !== "string") {

@@ -36,6 +36,7 @@
 
 import { ConfigError } from "../shared/config";
 import { fetchHost } from "../shared/github";
+import { applyIgnored } from "../shared/ignored";
 import { DEFAULT_POLL_INTERVAL_MS, probeNotifications } from "../shared/notifications";
 import type { NotifState } from "../shared/notifications";
 import { applyActivity } from "../shared/state";
@@ -55,6 +56,8 @@ export interface PollerOptions {
   toHostConfigs: (settings: Settings) => HostConfig[];
   /** Path of the "seen" state store. */
   statePath: string;
+  /** Path of the "ignored" state store (hidden PRs). */
+  ignoredStatePath: string;
   /** Running app version, stamped into each snapshot. */
   appVersion: string;
   /** Called with each changed snapshot. */
@@ -127,6 +130,7 @@ function hashSnapshot(s: DashboardResponse): string {
     p.awaitingReview,
     p.hasUnaddressedChangeRequest,
     p.isDraft,
+    p.isIgnored,
   ]);
   return JSON.stringify({ prs: lite, errors: s.errors, version: s.version });
 }
@@ -475,6 +479,12 @@ export class Poller {
       await applyActivity(allPrs, this.options.statePath);
     } catch (e) {
       console.error("[poller] applyActivity failed:", e);
+    }
+
+    try {
+      await applyIgnored(allPrs, this.options.ignoredStatePath);
+    } catch (e) {
+      console.error("[poller] applyIgnored failed:", e);
     }
 
     // Attention-needing first; then by most recently updated.

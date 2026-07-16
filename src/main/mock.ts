@@ -73,6 +73,8 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     hasNewActivity: false,
     lastSeenAt: null,
     needsAttention: false,
+    // Overwritten by applyIgnored:
+    isIgnored: false,
     ...overrides,
   };
 }
@@ -283,6 +285,7 @@ export function mockPollerOverrides(userDataPath: string): {
   fetchHostFn: typeof mockFetchHost;
   probeNotificationsFn: typeof mockProbeNotifications;
   statePath: string;
+  ignoredStatePath: string;
 } {
   return {
     loadSettings: () => ({
@@ -296,5 +299,6 @@ export function mockPollerOverrides(userDataPath: string): {
     fetchHostFn: mockFetchHost,
     probeNotificationsFn: mockProbeNotifications,
     statePath: path.join(userDataPath, "seen-state.mock.json"),
+    ignoredStatePath: path.join(userDataPath, "ignored-state.mock.json"),
   };
 }

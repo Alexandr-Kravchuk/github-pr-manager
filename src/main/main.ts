@@ -2,6 +2,7 @@ import path from "node:path";
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, powerMonitor, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, toHostConfigs, toPublicConfig } from "../shared/config";
+import { setIgnored } from "../shared/ignored";
 import { markSeen } from "../shared/state";
 import type {
   ConfigResult,
@@ -14,12 +15,20 @@ import { ensureCliPath } from "./cli-path";
 import {
   validateClipboardText,
   validateExternalUrl,
+  validateIgnoredArgs,
   validateSeenItems,
   validateThemePreference,
 } from "./ipc-validation";
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
-import { acknowledgeVersion, loadAcknowledgedVersion, loadSettings, persistSettings, seenStatePath } from "./settings";
+import {
+  acknowledgeVersion,
+  ignoredStatePath,
+  loadAcknowledgedVersion,
+  loadSettings,
+  persistSettings,
+  seenStatePath,
+} from "./settings";
 import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./updater";
 
 let mainWindow: BrowserWindow | null = null;
@@ -221,6 +230,14 @@ function registerIpc(): void {
     await markSeen(validateSeenItems(items), seenStatePath());
   });
 
+  ipcMain.handle("ignored:set", async (_event, id: unknown, ignored: unknown) => {
+    const args = validateIgnoredArgs(id, ignored);
+    await setIgnored(args.id, args.ignored, ignoredStatePath());
+    // No forced poll: the renderer updates its own copy optimistically, and the
+    // next natural tick re-applies the persisted set — so this doesn't spend the
+    // rate-limit budget on every ignore click.
+  });
+
   ipcMain.handle("app:openExternal", async (_event, url: unknown) => {
     await shell.openExternal(validateExternalUrl(url));
   });
@@ -308,6 +325,7 @@ void app.whenReady().then(() => {
     loadSettings,
     toHostConfigs,
     statePath: seenStatePath(),
+    ignoredStatePath: ignoredStatePath(),
     appVersion: app.getVersion(),
     onSnapshot: (snapshot) => {
       if (process.env.PRD_DEBUG) {

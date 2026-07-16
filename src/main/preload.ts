@@ -7,6 +7,7 @@ const api: PrManagerApi = {
   refresh: () => ipcRenderer.invoke("dashboard:refresh"),
   getConfig: () => ipcRenderer.invoke("config:get"),
   markSeen: (items) => ipcRenderer.invoke("seen:mark", items),
+  setIgnored: (id, ignored) => ipcRenderer.invoke("ignored:set", id, ignored),
   openExternal: (url) => ipcRenderer.invoke("app:openExternal", url),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (settings) => ipcRenderer.invoke("settings:save", settings),

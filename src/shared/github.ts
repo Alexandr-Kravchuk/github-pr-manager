@@ -381,6 +381,8 @@ export function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullReques
     hasNewActivity: false,
     lastSeenAt: null,
     needsAttention: false,
+    // Overwritten in ignored.ts from the persistent ignored set:
+    isIgnored: false,
   };
 }
 

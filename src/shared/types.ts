@@ -186,6 +186,12 @@ export interface PullRequest {
   lastSeenAt: string | null;
   /** Roll-up flag: something needs attention (failing CI / new activity / changes requested). */
   needsAttention: boolean;
+  /**
+   * true if the user has ignored this PR. Ignored PRs are hidden from the
+   * dashboard and excluded from counts / buddy mood, surfacing only when the
+   * "Ignored" filter is on. Persisted across relaunches — see `ignored.ts`.
+   */
+  isIgnored: boolean;
 }
 
 /** A fetch error for a specific host. */
@@ -257,6 +263,8 @@ export interface PrManagerApi {
   getConfig(): Promise<ConfigResult>;
   /** Mark PRs as seen (clears the NEW badge). */
   markSeen(items: SeenInput[]): Promise<void>;
+  /** Ignore or un-ignore a PR (hides it from the dashboard when ignored). */
+  setIgnored(id: string, ignored: boolean): Promise<void>;
   /** Open a URL in the system browser. */
   openExternal(url: string): Promise<void>;
   /** Full settings (with graphqlUrl) for the settings screen. */

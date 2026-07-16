@@ -5,16 +5,31 @@
 const assert = require("node:assert");
 const path = require("node:path");
 
+const fs = require("node:fs/promises");
+const os = require("node:os");
+
 const cfg = require(path.join(__dirname, "../dist/main/shared/config.js"));
 const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
 const notif = require(path.join(__dirname, "../dist/main/shared/notifications.js"));
 const github = require(path.join(__dirname, "../dist/main/shared/github.js"));
+const ignored = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
 
 let passed = 0;
 let failed = 0;
 function test(name, fn) {
   try {
     fn();
+    passed++;
+    console.log("  ok   -", name);
+  } catch (e) {
+    failed++;
+    console.error("  FAIL -", name, "\n        ", e.message);
+  }
+}
+
+async function atest(name, fn) {
+  try {
+    await fn();
     passed++;
     console.log("  ok   -", name);
   } catch (e) {
@@ -276,5 +291,50 @@ test("mapPr.canBeMerged: failing CI blocks readiness", () =>
 test("mapPr.canBeMerged: still-running CI blocks readiness", () =>
   assert.strictEqual(canMerge({ commits: pendingRollup }), false));
 
-console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+// --- github: mapPr defaults isIgnored to false (set later by ignored.ts) -----
+test("mapPr.isIgnored: defaults to false", () =>
+  assert.strictEqual(github.mapPr(rawPr(), "GH", ["authored"]).isIgnored, false));
+
+// --- ignored: persistent ignore store ----------------------------------------
+async function withTempStore(fn) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "prd-ignored-"));
+  const file = path.join(dir, "ignored-state.json");
+  try {
+    await fn(file);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+(async () => {
+  await atest("applyIgnored: flags ignored PRs, leaves the rest false", () =>
+    withTempStore(async (file) => {
+      await ignored.setIgnored("PR_1", true, file);
+      const prs = [
+        { id: "PR_1", isIgnored: false },
+        { id: "PR_2", isIgnored: false },
+      ];
+      await ignored.applyIgnored(prs, file);
+      assert.strictEqual(prs[0].isIgnored, true);
+      assert.strictEqual(prs[1].isIgnored, false);
+    }));
+
+  await atest("applyIgnored: missing store file leaves everything un-ignored", () =>
+    withTempStore(async (file) => {
+      const prs = [{ id: "PR_1", isIgnored: true }];
+      await ignored.applyIgnored(prs, file);
+      assert.strictEqual(prs[0].isIgnored, false);
+    }));
+
+  await atest("setIgnored: un-ignore removes the entry", () =>
+    withTempStore(async (file) => {
+      await ignored.setIgnored("PR_1", true, file);
+      await ignored.setIgnored("PR_1", false, file);
+      const prs = [{ id: "PR_1", isIgnored: false }];
+      await ignored.applyIgnored(prs, file);
+      assert.strictEqual(prs[0].isIgnored, false);
+    }));
+
+  console.log(`\n${passed} passed, ${failed} failed`);
+  process.exit(failed ? 1 : 0);
+})();
