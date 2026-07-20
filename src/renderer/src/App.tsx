@@ -413,8 +413,9 @@ export function App() {
         arr.sort((a, b) => actionRank(a) - actionRank(b) || b.updatedAt.localeCompare(a.updatedAt));
         break;
       case "waiting":
-        // Longest-waiting first — oldest by creation time.
-        arr.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        // Longest-waiting first — the most stale, i.e. untouched the longest
+        // (oldest updatedAt). An actively-commented old PR is NOT "waiting".
+        arr.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
         break;
       case "active":
         arr.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
