@@ -4,13 +4,50 @@ import { Buddy, type BuddyMood } from "./components/Buddy";
 import { PrCard, prSignal } from "./components/PrCard";
 import { SettingsScreen } from "./components/Settings";
 import { cn, relativeTime } from "./format";
-import type { DashboardResponse, PublicConfig, PullRequest } from "../../shared/types";
+import type { DashboardResponse, JiraStatus, PublicConfig, PullRequest } from "../../shared/types";
 
 type RoleFilter = "all" | "author" | "reviewer";
+type SortKey = "action" | "waiting" | "active" | "newest";
+type GroupMode = "none" | "repo" | "issue" | "parent";
+
+const SORT_LABELS: Record<SortKey, string> = {
+  action: "Needs my action",
+  waiting: "Longest waiting",
+  active: "Recently active",
+  newest: "Newest",
+};
+
+/**
+ * Priority for the "Needs my action" sort — lower sorts higher. Ranks the PRs that
+ * need your action soonest: a review requested of you that you haven't opened,
+ * then PRs that came back to you after you engaged, then the rest.
+ */
+function actionRank(pr: PullRequest): number {
+  const isReviewer = pr.roles.includes("reviewer");
+  if (isReviewer && pr.lastSeenAt === null) return 0;
+  if (pr.returnedToMe) return 1;
+  if (isReviewer) return 2;
+  if (prSignal(pr) === "blocked") return 3;
+  return 4;
+}
+
+/** Group bucket key for PRs that don't belong to a multi-PR issue cluster. */
+const OTHER_GROUP_KEY = "￿__other";
+
+/** A rendered group of PR cards. `hostLabel` is null for issue groups (may span repos). */
+interface Group {
+  /** Stable identity used for the collapse state. */
+  key: string;
+  /** Heading text — the repo name, the issue key, or "Other". */
+  label: string;
+  hostLabel: string | null;
+  prs: PullRequest[];
+}
 
 export function App() {
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
   const [config, setConfig] = useState<PublicConfig | null>(null);
+  const [jiraStatus, setJiraStatus] = useState<JiraStatus | null>(null);
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
@@ -27,7 +64,10 @@ export function App() {
   const [failingOnly, setFailingOnly] = useState(false);
   const [newOnly, setNewOnly] = useState(false);
   const [mergeableOnly, setMergeableOnly] = useState(false);
-  const [groupByRepo, setGroupByRepo] = useState(true);
+  const [noReviewsOnly, setNoReviewsOnly] = useState(false);
+  const [unseenOnly, setUnseenOnly] = useState(false);
+  const [sortBy, setSortBy] = useState<SortKey>("action");
+  const [groupBy, setGroupBy] = useState<GroupMode>("repo");
   const [showDrafts, setShowDrafts] = useState(false);
   const [showIgnored, setShowIgnored] = useState(false);
   // Collapsed repo groups, keyed by `${hostLabel}/${repo}`. In-memory, like
@@ -97,6 +137,7 @@ export function App() {
       })
       .catch(() => {});
     window.api.getWhatsNew().then(setWhatsNew).catch(() => {});
+    window.api.getJiraStatus().then(setJiraStatus).catch(() => {});
   }, []);
 
   // Subscribe to live updates first (so we don't miss an early snapshot), then
@@ -135,7 +176,12 @@ export function App() {
   }, []);
 
   const postSeen = useCallback(async (prs: PullRequest[]) => {
-    const items = prs.map((p) => ({ id: p.id, comments: p.totalComments, updatedAt: p.updatedAt }));
+    const items = prs.map((p) => ({
+      id: p.id,
+      comments: p.totalComments,
+      updatedAt: p.updatedAt,
+      lastCommitPushedAt: p.lastCommitPushedAt,
+    }));
     if (items.length === 0) return;
     const ids = new Set(items.map((i) => i.id));
     setData((prev) =>
@@ -198,6 +244,9 @@ export function App() {
       attention: active.filter((p) => p.needsAttention).length,
       failing: active.filter((p) => p.failingChecks.length > 0).length,
       fresh: active.filter((p) => p.hasNewActivity).length,
+      returned: active.filter((p) => p.returnedToMe).length,
+      noReviews: active.filter((p) => p.hasNoReviews).length,
+      unseen: active.filter((p) => p.lastSeenAt === null).length,
       drafts: active.filter((p) => p.isDraft).length,
       mergeable: active.filter((p) => p.canBeMerged).length,
       ignored: allPrs.filter((p) => p.isIgnored).length,
@@ -216,6 +265,8 @@ export function App() {
         if (failingOnly && pr.failingChecks.length === 0) return false;
         if (newOnly && !pr.hasNewActivity) return false;
         if (mergeableOnly && !pr.canBeMerged) return false;
+        if (noReviewsOnly && !pr.hasNoReviews) return false;
+        if (unseenOnly && pr.lastSeenAt !== null) return false;
         if (search.trim()) {
           const q = search.toLowerCase();
           const hay = `${pr.title} ${pr.repo} ${pr.author?.login ?? ""} #${pr.number}`.toLowerCase();
@@ -223,38 +274,105 @@ export function App() {
         }
         return true;
       }),
-    [allPrs, role, host, attentionOnly, failingOnly, newOnly, mergeableOnly, search, showDrafts, showIgnored],
+    [
+      allPrs,
+      role,
+      host,
+      attentionOnly,
+      failingOnly,
+      newOnly,
+      mergeableOnly,
+      noReviewsOnly,
+      unseenOnly,
+      search,
+      showDrafts,
+      showIgnored,
+    ],
   );
 
-  // Reviewer PRs (your turn to review) float to the top — in the flat list and
-  // within each repo group. Array.prototype.sort is stable, so the rest of the
-  // order is preserved.
-  const sorted = useMemo(
-    () =>
-      [...filtered].sort(
-        (a, b) => Number(b.roles.includes("reviewer")) - Number(a.roles.includes("reviewer")),
-      ),
-    [filtered],
-  );
-
-  const groups = useMemo(() => {
-    if (!groupByRepo) return null;
-    const map = new Map<string, { hostLabel: string; repo: string; prs: PullRequest[] }>();
-    for (const pr of sorted) {
-      const key = `${pr.hostLabel}/${pr.repo}`;
-      const g = map.get(key);
-      if (g) g.prs.push(pr);
-      else map.set(key, { hostLabel: pr.hostLabel, repo: pr.repo, prs: [pr] });
+  // Ordering applies to the flat list and within each group alike.
+  const sorted = useMemo(() => {
+    const arr = [...filtered];
+    switch (sortBy) {
+      case "action":
+        // Needs my action first, ties broken by most recent activity.
+        arr.sort((a, b) => actionRank(a) - actionRank(b) || b.updatedAt.localeCompare(a.updatedAt));
+        break;
+      case "waiting":
+        // Longest-waiting first — oldest by creation time.
+        arr.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        break;
+      case "active":
+        arr.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+        break;
+      case "newest":
+        arr.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        break;
     }
-    return [...map.values()].sort((a, b) =>
-      `${a.hostLabel}/${a.repo}`.localeCompare(`${b.hostLabel}/${b.repo}`),
-    );
-  }, [sorted, groupByRepo]);
+    return arr;
+  }, [filtered, sortBy]);
+
+  const groups = useMemo<Group[] | null>(() => {
+    if (groupBy === "none") return null;
+    if (groupBy === "repo") {
+      const map = new Map<string, Group>();
+      for (const pr of sorted) {
+        const key = `${pr.hostLabel}/${pr.repo}`;
+        const g = map.get(key);
+        if (g) g.prs.push(pr);
+        else map.set(key, { key, label: pr.repo, hostLabel: pr.hostLabel, prs: [pr] });
+      }
+      // Map insertion order = order of each group's first (top-sorted) PR, so the
+      // group holding your most important PR under the active sort leads. Within
+      // a group, PRs already follow `sorted`.
+      return [...map.values()];
+    }
+    // Issue / parent modes cluster only keys that actually have 2+ related PRs —
+    // the point is to review related PRs together. Everything else (single-PR
+    // keys and PRs without one) collapses into one "Other" bucket instead of a
+    // forest of one-card groups.
+    //
+    //  - "issue"  groups by the PR's own issue key (ENG-93374).
+    //  - "parent" groups by the parent task resolved from Jira (ENG-93367), so
+    //    the subtasks of one task sit together; label shows the parent summary.
+    const keyOf = (p: PullRequest) => (groupBy === "parent" ? p.parentKey : p.issueKey);
+    const summaryOf = (key: string): string =>
+      groupBy === "parent"
+        ? (() => {
+            const summary = sorted.find((p) => p.parentKey === key)?.parentSummary;
+            return summary ? `${key} · ${summary}` : key;
+          })()
+        : key;
+
+    const byKey = new Map<string, PullRequest[]>();
+    for (const pr of sorted) {
+      const k = keyOf(pr);
+      if (!k) continue;
+      const list = byKey.get(k);
+      if (list) list.push(pr);
+      else byKey.set(k, [pr]);
+    }
+    // `byKey` preserves first-appearance order, so clusters lead with the one
+    // holding your most important PR under the active sort (not alphabetically).
+    const multi = new Set([...byKey].filter(([, prs]) => prs.length >= 2).map(([k]) => k));
+    const clusters: Group[] = [...multi].map((key) => ({
+      key,
+      label: summaryOf(key),
+      hostLabel: null,
+      prs: sorted.filter((p) => keyOf(p) === key),
+    }));
+    const other = sorted.filter((p) => {
+      const k = keyOf(p);
+      return !k || !multi.has(k);
+    });
+    if (other.length > 0) {
+      clusters.push({ key: OTHER_GROUP_KEY, label: "Other", hostLabel: null, prs: other });
+    }
+    return clusters;
+  }, [sorted, groupBy]);
 
   const allCollapsed =
-    groups !== null &&
-    groups.length > 0 &&
-    groups.every((g) => collapsed.has(`${g.hostLabel}/${g.repo}`));
+    groups !== null && groups.length > 0 && groups.every((g) => collapsed.has(g.key));
 
   const toggleGroup = useCallback((key: string) => {
     setCollapsed((prev) => {
@@ -280,6 +398,7 @@ export function App() {
               if (r.ok) setConfig(r.config);
             })
             .catch(() => {});
+          window.api.getJiraStatus().then(setJiraStatus).catch(() => {});
           loadInitial();
         }}
       />
@@ -298,6 +417,7 @@ export function App() {
               <p className="text-xs text-fg-subtle">
                 {counts.total} PRs · {counts.attention} need attention · {counts.failing} failing CI
                 · {counts.fresh} with new comments
+                {counts.returned > 0 && ` · ${counts.returned} back to you`}
               </p>
             </div>
           </div>
@@ -388,6 +508,33 @@ export function App() {
             <option value="reviewer">I&apos;m a reviewer</option>
           </select>
 
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as SortKey)}
+            title="Sort order"
+            aria-label="Sort order"
+            className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
+          >
+            {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
+              <option key={k} value={k}>
+                Sort: {SORT_LABELS[k]}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={groupBy}
+            onChange={(e) => setGroupBy(e.target.value as GroupMode)}
+            title="Grouping"
+            aria-label="Grouping"
+            className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
+          >
+            <option value="none">No grouping</option>
+            <option value="repo">Group by repo</option>
+            <option value="issue">Group by issue</option>
+            {jiraStatus?.configured && <option value="parent">Group by parent task</option>}
+          </select>
+
           {config && config.hosts.length > 1 && (
             <select
               value={host}
@@ -415,6 +562,12 @@ export function App() {
           <FilterChip active={mergeableOnly} onClick={() => setMergeableOnly((v) => !v)} tone="green">
             ✔ Ready to merge{counts.mergeable > 0 ? ` (${counts.mergeable})` : ""}
           </FilterChip>
+          <FilterChip active={noReviewsOnly} onClick={() => setNoReviewsOnly((v) => !v)}>
+            ◷ No reviews yet{counts.noReviews > 0 ? ` (${counts.noReviews})` : ""}
+          </FilterChip>
+          <FilterChip active={unseenOnly} onClick={() => setUnseenOnly((v) => !v)}>
+            ◎ Not yet seen{counts.unseen > 0 ? ` (${counts.unseen})` : ""}
+          </FilterChip>
           {counts.drafts > 0 && (
             <FilterChip active={showDrafts} onClick={() => setShowDrafts((v) => !v)}>
               Drafts ({counts.drafts})
@@ -425,17 +578,12 @@ export function App() {
               Ignored ({counts.ignored})
             </FilterChip>
           )}
-          <FilterChip active={groupByRepo} onClick={() => setGroupByRepo((v) => !v)}>
-            Group by repo
-          </FilterChip>
           {groups && groups.length > 0 && (
             <button
               type="button"
               onClick={() =>
                 setCollapsed(
-                  allCollapsed
-                    ? new Set()
-                    : new Set(groups.map((g) => `${g.hostLabel}/${g.repo}`)),
+                  allCollapsed ? new Set() : new Set(groups.map((g) => g.key)),
                 )
               }
               title={allCollapsed ? "Expand all groups" : "Collapse all groups"}
@@ -478,23 +626,24 @@ export function App() {
       {groups ? (
         <div>
           {groups.map((g) => {
-            const key = `${g.hostLabel}/${g.repo}`;
-            const isCollapsed = collapsed.has(key);
+            const isCollapsed = collapsed.has(g.key);
             const attention = g.prs.filter((p) => p.needsAttention).length;
             return (
-              <section key={key} className={isCollapsed ? "mb-3" : "mb-8"}>
+              <section key={g.key} className={isCollapsed ? "mb-3" : "mb-8"}>
                 <button
                   type="button"
-                  onClick={() => toggleGroup(key)}
+                  onClick={() => toggleGroup(g.key)}
                   aria-expanded={!isCollapsed}
                   className="-mt-2 flex w-full items-center gap-2 rounded-t-md border-b border-line py-2 text-left hover:bg-elevated/40"
                 >
                   <ChevronIcon collapsed={isCollapsed} />
-                  <span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
-                    {g.hostLabel}
-                  </span>
-                  <h2 className="truncate text-sm font-semibold text-fg-secondary" title={g.repo}>
-                    {g.repo}
+                  {g.hostLabel && (
+                    <span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
+                      {g.hostLabel}
+                    </span>
+                  )}
+                  <h2 className="truncate text-sm font-semibold text-fg-secondary" title={g.label}>
+                    {g.label}
                   </h2>
                   <span className="rounded-full border border-line-strong px-2 py-0.5 text-xs text-fg-muted">
                     {g.prs.length}
@@ -514,7 +663,7 @@ export function App() {
                       <PrCard
                         key={pr.id}
                         pr={pr}
-                        hideRepo
+                        hideRepo={groupBy === "repo"}
                         onOpen={openPr}
                         onMarkSeen={(p) => postSeen([p])}
                         onToggleIgnore={toggleIgnore}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-import type { GhStatus, Settings, ThemePreference } from "../../../shared/types";
+import type { GhStatus, JiraStatus, Settings, ThemePreference } from "../../../shared/types";
 import { cn } from "../format";
 
 const GITHUB_GRAPHQL = "https://api.github.com/graphql";
@@ -49,8 +49,19 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Jira (parent-task grouping). baseUrl/email persist in settings; the token is
+  // write-only here — stored encrypted in the main process, never read back.
+  const [jiraBaseUrl, setJiraBaseUrl] = useState("");
+  const [jiraEmail, setJiraEmail] = useState("");
+  const [jiraToken, setJiraToken] = useState("");
+  const [jira, setJira] = useState<JiraStatus | null>(null);
+
   const loadGh = useCallback(() => {
     window.api.getGhStatus().then(setGh).catch(() => {});
+  }, []);
+
+  const loadJira = useCallback(() => {
+    window.api.getJiraStatus().then(setJira).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -68,11 +79,14 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             reposText: h.repos.join("\n"),
           })),
         );
+        setJiraBaseUrl(s.jira?.baseUrl ?? "");
+        setJiraEmail(s.jira?.email ?? "");
         setLoaded(true);
       })
       .catch((e) => setError((e as Error).message));
     loadGh();
-  }, [loadGh]);
+    loadJira();
+  }, [loadGh, loadJira]);
 
   const updateHost = (i: number, patch: Partial<DraftHost>) =>
     setHosts((prev) => prev.map((h, j) => (j === i ? { ...h, ...patch } : h)));
@@ -86,10 +100,23 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
     window.api.setTheme(next).catch(() => {});
   };
 
+  const removeJiraToken = async () => {
+    setError(null);
+    try {
+      await window.api.setJiraToken("");
+      setJiraToken("");
+      loadJira();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const save = async () => {
     setSaving(true);
     setError(null);
     try {
+      const baseUrl = jiraBaseUrl.trim();
+      const email = jiraEmail.trim();
       const settings: Settings = {
         pollIntervalSeconds,
         launchAtLogin,
@@ -100,13 +127,23 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           graphqlUrl: h.graphqlUrl,
           repos: parseRepos(h.reposText),
         })),
+        // Only persist Jira when both fields are present; otherwise leave it off.
+        jira: baseUrl && email ? { baseUrl, email } : undefined,
       };
       const res = await window.api.saveSettings(settings);
-      if (res.ok) {
-        onClose();
-      } else {
+      if (!res.ok) {
         setError(res.error);
+        return;
       }
+      // Store the token separately (encrypted) only if the user entered one.
+      if (jiraToken.trim()) {
+        const t = await window.api.setJiraToken(jiraToken.trim());
+        if (!t.ok) {
+          setError(t.error ?? "Failed to store the Jira token.");
+          return;
+        }
+      }
+      onClose();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -210,6 +247,85 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             ))}
           </ul>
         )}
+      </section>
+
+      {/* Jira (optional) — parent-task grouping */}
+      <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-fg-secondary">Jira (optional)</h2>
+          {jira?.configured ? (
+            <span className="text-xs text-emerald-700 dark:text-emerald-400">connected ✓</span>
+          ) : jira?.hasConfig && !jira?.hasToken ? (
+            <span className="text-xs text-amber-700 dark:text-amber-400">token needed</span>
+          ) : (
+            <span className="text-xs text-fg-faint">not set up</span>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-fg-subtle">
+          Enables <span className="text-fg-muted">Group by parent task</span> — clusters review PRs
+          under their parent Jira issue. Create an API token at{" "}
+          <button
+            type="button"
+            onClick={() =>
+              window.api.openExternal("https://id.atlassian.com/manage-profile/security/api-tokens")
+            }
+            className="underline hover:text-fg-secondary"
+          >
+            id.atlassian.com
+          </button>
+          . The token is stored encrypted by your OS keychain — never in settings.
+        </p>
+
+        {jira && !jira.encryptionAvailable && (
+          <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
+            Your OS keychain is unavailable, so the token can&apos;t be stored securely. Jira
+            grouping is disabled on this machine.
+          </p>
+        )}
+
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div>
+            <label className={labelCls}>Site URL</label>
+            <input
+              value={jiraBaseUrl}
+              onChange={(e) => setJiraBaseUrl(e.target.value)}
+              placeholder="https://your-org.atlassian.net"
+              className={inputCls}
+            />
+          </div>
+          <div>
+            <label className={labelCls}>Account email</label>
+            <input
+              value={jiraEmail}
+              onChange={(e) => setJiraEmail(e.target.value)}
+              placeholder="you@company.com"
+              className={inputCls}
+            />
+          </div>
+        </div>
+        <div className="mt-3">
+          <label className={labelCls}>API token</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="password"
+              value={jiraToken}
+              onChange={(e) => setJiraToken(e.target.value)}
+              placeholder={jira?.hasToken ? "•••••••• stored — paste to replace" : "Paste API token"}
+              autoComplete="off"
+              className={inputCls}
+            />
+            {jira?.hasToken && (
+              <button
+                type="button"
+                onClick={removeJiraToken}
+                className="mt-1 shrink-0 rounded-md border border-line-strong px-2 py-1.5 text-xs text-fg-muted hover:bg-elevated hover:text-red-600 dark:hover:text-red-300"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-fg-faint">Saved with the Save button, encrypted at rest.</p>
+        </div>
       </section>
 
       {/* Poll interval */}

@@ -26,8 +26,10 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
  *  - myReview (violet): a review is being requested of you and you haven't
  *    submitted one yet — your turn to act. The `reviewer` role comes from
  *    GitHub's `review-requested:@me`, so it clears itself once you review.
- *    Ranked right after your own blocked PRs so review requests never blend
- *    into the rest.
+ *    Also covers a PR that came back to you (`returnedToMe`) after you reviewed
+ *    or opened it — GitHub drops the reviewer role once you review, so this is
+ *    what keeps a re-review on your radar. Ranked right after your own blocked
+ *    PRs so review requests never blend into the rest.
  *  - waiting (gray): your PR is awaiting someone else's review and nobody has
  *    approved yet (ball in their court) — nothing required from you, even with
  *    open threads.
@@ -47,7 +49,7 @@ export function prSignal(pr: PullRequest): PrSignal {
   ) {
     return "blocked";
   }
-  if (pr.roles.includes("reviewer")) {
+  if (pr.roles.includes("reviewer") || pr.returnedToMe) {
     return "myReview";
   }
   if (isAuthor && pr.awaitingReview && !pr.hasNewActivity && !pr.hasHumanApproval) {
@@ -95,6 +97,11 @@ function reviewLabel(decision: ReviewDecision): { text: string; cls: string } | 
 }
 
 const pill = "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium";
+
+/** Whole days since an ISO timestamp. */
+function daysSince(iso: string): number {
+  return Math.floor((Date.now() - new Date(iso).getTime()) / 864e5);
+}
 
 const REVIEWER_RING: Record<Reviewer["reviewState"], string> = {
   approved: "ring-emerald-500",
@@ -192,6 +199,10 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
   const passingCount = pr.checks.filter((c) => c.state === "success").length;
   const pendingReviewers = pr.reviewers.filter((r) => r.reviewState === "pending");
   const pendingReviewerNames = reviewerListLabel(pendingReviewers);
+  // Age badge: flag PRs that have been waiting a while without an approval — the
+  // "don't let reviews rot" cue. Suppressed for drafts and already-approved PRs.
+  const ageDays = daysSince(pr.createdAt);
+  const showAge = !pr.isDraft && !pr.hasHumanApproval && ageDays >= 3;
   const [copied, setCopied] = useState(false);
   const copyUrl = useCallback(() => {
     window.api
@@ -310,6 +321,27 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
         )}
 
         {review && <span className={cn(pill, review.cls)}>{review.text}</span>}
+
+        {pr.returnedToMe && (
+          <span
+            title="New changes since you last looked — back in your court to re-review"
+            className={cn(
+              pill,
+              "border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-300",
+            )}
+          >
+            ↩ Back to you
+          </span>
+        )}
+
+        {showAge && (
+          <span
+            title={`Opened ${ageDays} days ago, still unapproved`}
+            className={cn(pill, "border-line-strong bg-elevated text-fg-muted")}
+          >
+            ⏳ {ageDays}d
+          </span>
+        )}
 
         {pr.unresolvedThreads > 0 && (
           <span

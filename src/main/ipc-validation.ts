@@ -19,7 +19,14 @@ export function validateSeenItems(value: unknown): SeenInput[] {
         typeof (it as SeenInput).comments === "number" &&
         typeof (it as SeenInput).updatedAt === "string",
     )
-    .map((it) => ({ id: it.id, comments: it.comments, updatedAt: it.updatedAt }));
+    .map((it) => ({
+      id: it.id,
+      comments: it.comments,
+      updatedAt: it.updatedAt,
+      // Optional/nullable — normalize anything non-string to null.
+      lastCommitPushedAt:
+        typeof it.lastCommitPushedAt === "string" ? it.lastCommitPushedAt : null,
+    }));
 }
 
 /** Validates the renderer's ignore/un-ignore payload. */
@@ -59,6 +66,17 @@ export function validateThemePreference(value: unknown): ThemePreference {
     return value;
   }
   throw new Error(`setTheme: invalid theme preference: ${String(value)}`);
+}
+
+/** Ensures a Jira token is a string of sane length. Empty string clears it. */
+export function validateJiraToken(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new Error("setJiraToken: expected a string.");
+  }
+  if (value.length > 5_000) {
+    throw new Error("setJiraToken: token too long.");
+  }
+  return value.trim();
 }
 
 /** Ensures clipboard text is a string of sane length before writing it. */

@@ -19,6 +19,7 @@ fragment PrFields on PullRequest {
   createdAt
   updatedAt
   baseRefName
+  headRefName
   mergeable
   author { login avatarUrl }
   repository { nameWithOwner defaultBranchRef { name } }
@@ -40,6 +41,8 @@ fragment PrFields on PullRequest {
   commits(last: 1) {
     nodes {
       commit {
+        pushedDate
+        committedDate
         statusCheckRollup {
           state
           contexts(first: 30) {
@@ -77,6 +80,7 @@ function buildQuery(teamCount: number): string {
   return /* GraphQL */ `
 query ($authoredQuery: String!, $reviewingQuery: String!${teamVarDecls}) {
   rateLimit { remaining cost resetAt }
+  viewer { login }
   authored: search(query: $authoredQuery, type: ISSUE, first: 25) { nodes { ...PrFields } }
   reviewing: search(query: $reviewingQuery, type: ISSUE, first: 25) { nodes { ...PrFields } }
 ${teamSearches}
@@ -110,6 +114,7 @@ interface RawPr {
   createdAt: string;
   updatedAt: string;
   baseRefName: string;
+  headRefName: string;
   // GitHub's mergeability enum: "MERGEABLE" | "CONFLICTING" | "UNKNOWN".
   // Computed asynchronously — "UNKNOWN" right after a push, settles on a re-poll.
   mergeable: string;
@@ -134,6 +139,8 @@ interface RawPr {
   commits: {
     nodes: Array<{
       commit: {
+        pushedDate: string | null;
+        committedDate: string | null;
         statusCheckRollup: { state: string | null; contexts: { nodes: RawContext[] } } | null;
       };
     }>;
@@ -145,10 +152,14 @@ type SearchNodes = { nodes: Array<RawPr | Record<string, never>> };
 interface RawResponse {
   data?: {
     rateLimit: { remaining: number; cost: number; resetAt: string };
+    viewer: { login: string };
     authored: SearchNodes;
     reviewing: SearchNodes;
     // team0, team1, … — one per team-review-requested search.
-    [alias: string]: SearchNodes | { remaining: number; cost: number; resetAt: string };
+    [alias: string]:
+      | SearchNodes
+      | { remaining: number; cost: number; resetAt: string }
+      | { login: string };
   };
   errors?: Array<{ message: string }>;
 }
@@ -262,8 +273,28 @@ function extractChecks(pr: RawPr): CheckItem[] {
   return dedupeChecks(items);
 }
 
+/**
+ * Matches an issue-tracker key like "ENG-93374" — a Jira-style project key
+ * (two or more uppercase alphanumerics) plus a number. Used to group related PRs.
+ */
+const ISSUE_KEY_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/;
+
+/** Parses an issue key from the PR title, falling back to the head branch. */
+function parseIssueKey(title: string, headRefName: string): string | null {
+  const fromTitle = title.match(ISSUE_KEY_RE);
+  if (fromTitle) return fromTitle[1];
+  // Branches are often lowercase (feature/eng-93374-foo) — normalize before matching.
+  const fromBranch = (headRefName ?? "").toUpperCase().match(ISSUE_KEY_RE);
+  return fromBranch ? fromBranch[1] : null;
+}
+
 /** Maps a raw PR into the domain model (without activity fields — those are added by state.ts). */
-export function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullRequest {
+export function mapPr(
+  pr: RawPr,
+  hostLabel: string,
+  roles: PrRole[],
+  viewerLogin: string | null,
+): PullRequest {
   const threads = pr.reviewThreads.nodes;
   const unresolvedThreads = threads.filter((t) => !t.isResolved).length;
   const reviewCommentCount = threads.reduce((sum, t) => sum + t.comments.totalCount, 0);
@@ -310,6 +341,20 @@ export function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullReques
   // "default" so the stacked-PR marker doesn't light up on every card.
   const defaultBranch = pr.repository.defaultBranchRef?.name ?? null;
   const baseIsDefaultBranch = defaultBranch === null || pr.baseRefName === defaultBranch;
+
+  // Latest commit's push time — pushedDate can be null on some commits, so fall
+  // back to committedDate. Basis for detecting new pushes since a review.
+  const latestCommit = pr.commits.nodes[0]?.commit;
+  const lastCommitPushedAt = latestCommit?.pushedDate ?? latestCommit?.committedDate ?? null;
+
+  // The viewer's own opinionated review clears GitHub's `reviewer` role, so this
+  // is how a reviewed PR stays recognizable as "mine" for the returned-to-me signal.
+  const viewerHasReviewed =
+    viewerLogin != null &&
+    pr.latestOpinionatedReviews.nodes.some((r) => r.author?.login === viewerLogin);
+  const hasNoReviews = pr.latestOpinionatedReviews.nodes.length === 0;
+
+  const issueKey = parseIssueKey(pr.title, pr.headRefName);
 
   // Build reviewer list: pending first (requested but not yet reviewed, or re-requested),
   // then opinionated reviews that are still the "latest" state for that person.
@@ -362,8 +407,13 @@ export function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullReques
     author: pr.author,
     createdAt: pr.createdAt,
     updatedAt: pr.updatedAt,
+    lastCommitPushedAt,
+    headRefName: pr.headRefName,
+    issueKey,
     reviewDecision: pr.reviewDecision,
     roles,
+    viewerHasReviewed,
+    hasNoReviews,
     unresolvedThreads,
     unaddressedThreads,
     totalComments,
@@ -377,8 +427,12 @@ export function mapPr(pr: RawPr, hostLabel: string, roles: PrRole[]): PullReques
     hasUnaddressedComments,
     hasHumanApproval,
     canBeMerged,
+    // Resolved later by the poller's Jira parent enricher (null without Jira):
+    parentKey: null,
+    parentSummary: null,
     // Activity fields are overwritten in state.ts:
     hasNewActivity: false,
+    returnedToMe: false,
     lastSeenAt: null,
     needsAttention: false,
     // Overwritten in ignored.ts from the persistent ignored set:
@@ -522,6 +576,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
 
   // Merge authored + reviewing, unioning roles.
   const byId = new Map<string, PullRequest>();
+  const viewerLogin = json.data.viewer?.login ?? null;
 
   const addNodes = (nodes: Array<RawPr | Record<string, never>>, role: PrRole) => {
     for (const node of nodes) {
@@ -530,7 +585,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
       if (existing) {
         if (!existing.roles.includes(role)) existing.roles.push(role);
       } else {
-        byId.set(node.id, mapPr(node, host.label, [role]));
+        byId.set(node.id, mapPr(node, host.label, [role], viewerLogin));
       }
     }
   };

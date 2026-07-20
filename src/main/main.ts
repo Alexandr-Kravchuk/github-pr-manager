@@ -8,14 +8,17 @@ import type {
   ConfigResult,
   DashboardResult,
   GhStatus,
+  JiraStatus,
   SaveSettingsResult,
   Settings,
 } from "../shared/types";
 import { ensureCliPath } from "./cli-path";
+import { buildParentEnricher, getJiraStatus, setJiraToken } from "./jira-store";
 import {
   validateClipboardText,
   validateExternalUrl,
   validateIgnoredArgs,
+  validateJiraToken,
   validateSeenItems,
   validateThemePreference,
 } from "./ipc-validation";
@@ -280,6 +283,16 @@ function registerIpc(): void {
     }
   });
 
+  ipcMain.handle("jira:status", async (): Promise<JiraStatus> => getJiraStatus(loadSettings));
+
+  ipcMain.handle("jira:setToken", async (_event, raw: unknown) => {
+    const result = setJiraToken(validateJiraToken(raw));
+    // A token change can flip grouping availability — re-poll so parents resolve
+    // (or clear) without waiting for the next natural tick.
+    if (result.ok) await poller?.refresh();
+    return result;
+  });
+
   ipcMain.handle("app:getVersion", async (): Promise<string> => app.getVersion());
 
   ipcMain.handle("app:getWhatsNew", async () => {
@@ -327,6 +340,8 @@ void app.whenReady().then(() => {
     statePath: seenStatePath(),
     ignoredStatePath: ignoredStatePath(),
     appVersion: app.getVersion(),
+    // No real Jira calls in fixture mode; the mock overrides below win anyway.
+    enrichParents: isMockMode() ? undefined : buildParentEnricher(loadSettings),
     onSnapshot: (snapshot) => {
       if (process.env.PRD_DEBUG) {
         console.log(

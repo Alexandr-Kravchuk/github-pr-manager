@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 
-import type { GhStatus, HostConfig, PublicConfig, Settings, SettingsHost } from "./types";
+import type { GhStatus, HostConfig, JiraSettings, PublicConfig, Settings, SettingsHost } from "./types";
 
 /** Error with a friendly message — the UI surfaces its text. */
 export class ConfigError extends Error {}
@@ -109,7 +109,36 @@ export function validateSettings(raw: unknown): Settings {
     return { label, graphqlUrl: host.graphqlUrl.trim(), repos };
   });
 
-  return { pollIntervalSeconds, launchAtLogin, autoUpdate, theme, hosts };
+  return { pollIntervalSeconds, launchAtLogin, autoUpdate, theme, hosts, jira: validateJira(obj.jira) };
+}
+
+/**
+ * Validates the optional Jira connection. Returns undefined when absent or
+ * incomplete (missing baseUrl/email) — an incomplete config just means Jira
+ * grouping stays off, not a hard error. The baseUrl is normalized to an origin.
+ */
+function validateJira(raw: unknown): JiraSettings | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const obj = raw as Record<string, unknown>;
+  const email = typeof obj.email === "string" ? obj.email.trim() : "";
+  const rawUrl = typeof obj.baseUrl === "string" ? obj.baseUrl.trim() : "";
+  if (!email || !rawUrl) return undefined;
+  const baseUrl = normalizeJiraBaseUrl(rawUrl);
+  if (!baseUrl) throw new ConfigError(`settings: jira.baseUrl is not a valid URL: ${rawUrl}`);
+  return { baseUrl, email };
+}
+
+/**
+ * Normalizes a Jira site to its origin (https://host), tolerating input with no
+ * scheme ("org.atlassian.net") or a trailing path. Returns null if unparseable.
+ */
+export function normalizeJiraBaseUrl(input: string): string | null {
+  const withScheme = /^https?:\/\//i.test(input) ? input : `https://${input}`;
+  try {
+    return new URL(withScheme).origin;
+  } catch {
+    return null;
+  }
 }
 
 /** A fresh, empty settings object (first run). */
