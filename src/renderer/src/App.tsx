@@ -379,6 +379,33 @@ export function App() {
     });
   }, []);
 
+  // Active filters (what narrows the list) — sort/group are view controls, not
+  // filters, so they don't count and aren't cleared.
+  const activeFilterCount =
+    (search.trim() ? 1 : 0) +
+    (role !== "all" ? 1 : 0) +
+    (host !== "all" ? 1 : 0) +
+    (attentionOnly ? 1 : 0) +
+    (failingOnly ? 1 : 0) +
+    (newOnly ? 1 : 0) +
+    (mergeableOnly ? 1 : 0) +
+    (noReviewsOnly ? 1 : 0) +
+    (showDrafts ? 1 : 0) +
+    (showIgnored ? 1 : 0);
+
+  const clearFilters = useCallback(() => {
+    setSearch("");
+    setRole("all");
+    setHost("all");
+    setAttentionOnly(false);
+    setFailingOnly(false);
+    setNewOnly(false);
+    setMergeableOnly(false);
+    setNoReviewsOnly(false);
+    setShowDrafts(false);
+    setShowIgnored(false);
+  }, []);
+
   const noHosts = config !== null && config.hosts.length === 0;
 
   if (view === "settings") {
@@ -483,109 +510,126 @@ export function App() {
         </div>
       ))}
 
-      {/* Filter bar */}
+      {/* Toolbar: view controls (row 1) and filters (row 2), visually separated. */}
       {!configError && (
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by title, repo, author…"
-            className="min-w-[14rem] flex-1 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none"
-          />
+        <div className="mb-4 space-y-2">
+          {/* Row 1 — search + how the list is viewed (sort / group / scope). */}
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by title, repo, author…"
+              className="min-w-[14rem] flex-1 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none"
+            />
 
-          <select
-            value={role}
-            onChange={(e) => setRole(e.target.value as RoleFilter)}
-            className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
-          >
-            <option value="all">All roles</option>
-            <option value="author">I&apos;m the author</option>
-            <option value="reviewer">I&apos;m a reviewer</option>
-          </select>
-
-          <select
-            value={sortBy}
-            onChange={(e) => setSortBy(e.target.value as SortKey)}
-            title="Sort order"
-            aria-label="Sort order"
-            className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
-          >
-            {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
-              <option key={k} value={k}>
-                Sort: {SORT_LABELS[k]}
-              </option>
-            ))}
-          </select>
-
-          <select
-            value={groupBy}
-            onChange={(e) => setGroupBy(e.target.value as GroupMode)}
-            title="Grouping"
-            aria-label="Grouping"
-            className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
-          >
-            <option value="none">No grouping</option>
-            <option value="repo">Group by repo</option>
-            <option value="issue">Group by issue</option>
-            {jiraStatus?.configured && <option value="parent">Group by parent task</option>}
-          </select>
-
-          {config && config.hosts.length > 1 && (
             <select
-              value={host}
-              onChange={(e) => setHost(e.target.value)}
+              value={role}
+              onChange={(e) => setRole(e.target.value as RoleFilter)}
               className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
             >
-              <option value="all">All hosts</option>
-              {config.hosts.map((h) => (
-                <option key={h.label} value={h.label}>
-                  {h.label}
+              <option value="all">All roles</option>
+              <option value="author">I&apos;m the author</option>
+              <option value="reviewer">I&apos;m a reviewer</option>
+            </select>
+
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as SortKey)}
+              title="Sort order"
+              aria-label="Sort order"
+              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
+            >
+              {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
+                <option key={k} value={k}>
+                  Sort: {SORT_LABELS[k]}
                 </option>
               ))}
             </select>
-          )}
 
-          <FilterChip active={attentionOnly} onClick={() => setAttentionOnly((v) => !v)} tone="amber">
-            ⚠ Needs attention
-          </FilterChip>
-          <FilterChip active={failingOnly} onClick={() => setFailingOnly((v) => !v)} tone="red">
-            ✗ Failing CI
-          </FilterChip>
-          <FilterChip active={newOnly} onClick={() => setNewOnly((v) => !v)} tone="violet">
-            ✦ New comments
-          </FilterChip>
-          <FilterChip active={mergeableOnly} onClick={() => setMergeableOnly((v) => !v)} tone="green">
-            ✔ Ready to merge{counts.mergeable > 0 ? ` (${counts.mergeable})` : ""}
-          </FilterChip>
-          <FilterChip active={noReviewsOnly} onClick={() => setNoReviewsOnly((v) => !v)}>
-            ◷ No reviews yet{counts.noReviews > 0 ? ` (${counts.noReviews})` : ""}
-          </FilterChip>
-          {counts.drafts > 0 && (
-            <FilterChip active={showDrafts} onClick={() => setShowDrafts((v) => !v)}>
-              Drafts ({counts.drafts})
-            </FilterChip>
-          )}
-          {counts.ignored > 0 && (
-            <FilterChip active={showIgnored} onClick={() => setShowIgnored((v) => !v)}>
-              Ignored ({counts.ignored})
-            </FilterChip>
-          )}
-          {groups && groups.length > 0 && (
-            <button
-              type="button"
-              onClick={() =>
-                setCollapsed(
-                  allCollapsed ? new Set() : new Set(groups.map((g) => g.key)),
-                )
-              }
-              title={allCollapsed ? "Expand all groups" : "Collapse all groups"}
-              aria-label={allCollapsed ? "Expand all groups" : "Collapse all groups"}
-              className="inline-flex items-center rounded-md border border-line-strong bg-surface px-2.5 py-2 text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
+            <select
+              value={groupBy}
+              onChange={(e) => setGroupBy(e.target.value as GroupMode)}
+              title="Grouping"
+              aria-label="Grouping"
+              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
             >
-              <FoldIcon expand={allCollapsed} />
-            </button>
-          )}
+              <option value="none">No grouping</option>
+              <option value="repo">Group by repo</option>
+              <option value="issue">Group by issue</option>
+              {jiraStatus?.configured && <option value="parent">Group by parent task</option>}
+            </select>
+
+            {config && config.hosts.length > 1 && (
+              <select
+                value={host}
+                onChange={(e) => setHost(e.target.value)}
+                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
+              >
+                <option value="all">All hosts</option>
+                {config.hosts.map((h) => (
+                  <option key={h.label} value={h.label}>
+                    {h.label}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            {groups && groups.length > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  setCollapsed(allCollapsed ? new Set() : new Set(groups.map((g) => g.key)))
+                }
+                title={allCollapsed ? "Expand all groups" : "Collapse all groups"}
+                aria-label={allCollapsed ? "Expand all groups" : "Collapse all groups"}
+                className="inline-flex items-center rounded-md border border-line-strong bg-surface px-2.5 py-2 text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
+              >
+                <FoldIcon expand={allCollapsed} />
+              </button>
+            )}
+          </div>
+
+          {/* Row 2 — filters that narrow the list. */}
+          <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
+            <span className="mr-0.5 text-xs font-medium uppercase tracking-wide text-fg-faint">
+              Filters
+            </span>
+            <FilterChip active={attentionOnly} onClick={() => setAttentionOnly((v) => !v)} tone="amber">
+              ⚠ Needs attention
+            </FilterChip>
+            <FilterChip active={failingOnly} onClick={() => setFailingOnly((v) => !v)} tone="red">
+              ✗ Failing CI
+            </FilterChip>
+            <FilterChip active={newOnly} onClick={() => setNewOnly((v) => !v)} tone="violet">
+              ✦ New comments
+            </FilterChip>
+            <FilterChip active={mergeableOnly} onClick={() => setMergeableOnly((v) => !v)} tone="green">
+              ✔ Ready to merge{counts.mergeable > 0 ? ` (${counts.mergeable})` : ""}
+            </FilterChip>
+            <FilterChip active={noReviewsOnly} onClick={() => setNoReviewsOnly((v) => !v)}>
+              ◷ No reviews yet{counts.noReviews > 0 ? ` (${counts.noReviews})` : ""}
+            </FilterChip>
+            {counts.drafts > 0 && (
+              <FilterChip active={showDrafts} onClick={() => setShowDrafts((v) => !v)}>
+                Drafts ({counts.drafts})
+              </FilterChip>
+            )}
+            {counts.ignored > 0 && (
+              <FilterChip active={showIgnored} onClick={() => setShowIgnored((v) => !v)}>
+                Ignored ({counts.ignored})
+              </FilterChip>
+            )}
+            {activeFilterCount > 0 && (
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="ml-auto rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
+              >
+                ✕ Clear filters ({activeFilterCount})
+              </button>
+            )}
+          </div>
         </div>
       )}
 
