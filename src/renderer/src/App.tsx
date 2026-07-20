@@ -711,7 +711,7 @@ export function App() {
 
           {/* Row 2 — filters that narrow the list. */}
           <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
-            <span className="mr-0.5 text-xs font-medium uppercase tracking-wide text-fg-faint">
+            <span className="mr-0.5 text-xs font-medium uppercase tracking-wide text-fg-muted">
               Filters
             </span>
             <FilterChip active={attentionOnly} onClick={() => setAttentionOnly((v) => !v)} tone="amber">
