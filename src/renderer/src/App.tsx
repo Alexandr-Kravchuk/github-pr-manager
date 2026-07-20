@@ -65,7 +65,6 @@ export function App() {
   const [newOnly, setNewOnly] = useState(false);
   const [mergeableOnly, setMergeableOnly] = useState(false);
   const [noReviewsOnly, setNoReviewsOnly] = useState(false);
-  const [unseenOnly, setUnseenOnly] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey>("action");
   const [groupBy, setGroupBy] = useState<GroupMode>("repo");
   const [showDrafts, setShowDrafts] = useState(false);
@@ -246,7 +245,6 @@ export function App() {
       fresh: active.filter((p) => p.hasNewActivity).length,
       returned: active.filter((p) => p.returnedToMe).length,
       noReviews: active.filter((p) => p.hasNoReviews).length,
-      unseen: active.filter((p) => p.lastSeenAt === null).length,
       drafts: active.filter((p) => p.isDraft).length,
       mergeable: active.filter((p) => p.canBeMerged).length,
       ignored: allPrs.filter((p) => p.isIgnored).length,
@@ -266,7 +264,6 @@ export function App() {
         if (newOnly && !pr.hasNewActivity) return false;
         if (mergeableOnly && !pr.canBeMerged) return false;
         if (noReviewsOnly && !pr.hasNoReviews) return false;
-        if (unseenOnly && pr.lastSeenAt !== null) return false;
         if (search.trim()) {
           const q = search.toLowerCase();
           const hay = `${pr.title} ${pr.repo} ${pr.author?.login ?? ""} #${pr.number}`.toLowerCase();
@@ -283,7 +280,6 @@ export function App() {
       newOnly,
       mergeableOnly,
       noReviewsOnly,
-      unseenOnly,
       search,
       showDrafts,
       showIgnored,
@@ -564,9 +560,6 @@ export function App() {
           </FilterChip>
           <FilterChip active={noReviewsOnly} onClick={() => setNoReviewsOnly((v) => !v)}>
             ◷ No reviews yet{counts.noReviews > 0 ? ` (${counts.noReviews})` : ""}
-          </FilterChip>
-          <FilterChip active={unseenOnly} onClick={() => setUnseenOnly((v) => !v)}>
-            ◎ Not yet seen{counts.unseen > 0 ? ` (${counts.unseen})` : ""}
           </FilterChip>
           {counts.drafts > 0 && (
             <FilterChip active={showDrafts} onClick={() => setShowDrafts((v) => !v)}>
