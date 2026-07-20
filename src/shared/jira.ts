@@ -26,6 +26,12 @@ const parentCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 10 * 60 * 1000;
 /** JQL `key in (...)` handles many keys per request; chunk defensively. */
 const CHUNK_SIZE = 50;
+/**
+ * Hard cap per request. The enricher is awaited inside the poll tick, so an
+ * unbounded Jira call would stall dashboard refreshes — this optional feature
+ * must never hold the poll hostage.
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
 
 /** Clears the parent cache (tests / a config change). */
 export function clearParentCache(): void {
@@ -51,17 +57,25 @@ async function fetchChunk(
   now: number,
 ): Promise<void> {
   const jql = `key in (${keys.join(",")})`;
-  const res = await fetch(`${config.baseUrl}/rest/api/3/search/jql`, {
-    method: "POST",
-    headers: {
-      Authorization: authHeader(config.email, token),
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "User-Agent": "github-pr-manager",
-    },
-    body: JSON.stringify({ jql, fields: ["parent"], maxResults: 100 }),
-    cache: "no-store",
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`${config.baseUrl}/rest/api/3/search/jql`, {
+      method: "POST",
+      headers: {
+        Authorization: authHeader(config.email, token),
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "github-pr-manager",
+      },
+      body: JSON.stringify({ jql, fields: ["parent"], maxResults: 100 }),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(
