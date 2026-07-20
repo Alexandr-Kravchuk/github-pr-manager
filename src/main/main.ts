@@ -1,14 +1,16 @@
 import path from "node:path";
-import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, powerMonitor, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, toHostConfigs, toPublicConfig } from "../shared/config";
 import { setIgnored } from "../shared/ignored";
+import { diffNotifications } from "../shared/notify";
 import { markSeen } from "../shared/state";
 import type {
   ConfigResult,
   DashboardResult,
   GhStatus,
   JiraStatus,
+  PullRequest,
   SaveSettingsResult,
   Settings,
 } from "../shared/types";
@@ -39,8 +41,21 @@ let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
 let systemSuspended = false;
 
+/**
+ * Previous PR set seen by the notifier — for transition diffing. Null until the
+ * first snapshot, which only establishes the baseline (fires nothing).
+ */
+let prevNotifyPrs: PullRequest[] | null = null;
+
 /** Pause polling after this many seconds of user inactivity. */
 const IDLE_PAUSE_SECONDS = 300;
+
+/**
+ * Beyond this many events in one diff, collapse to a single summary
+ * notification so a burst (e.g. adding a host that surfaces many review
+ * requests at once) can't spew a stack of individual notifications.
+ */
+const MAX_INDIVIDUAL_NOTIFICATIONS = 4;
 
 /**
  * The idle gate handed to the poller: true when a fetch would just waste the
@@ -64,6 +79,111 @@ function isDashboardPaused(): boolean {
 function sendToRenderer(channel: string, payload: unknown): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
+  }
+}
+
+/** Brings the window back to the foreground (from minimized / hidden / behind). */
+function focusMainWindow(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+/**
+ * Shown notifications, retained until the OS is done with them. Electron can
+ * garbage-collect a `Notification` while its toast is still on screen, which
+ * drops the pending `click` event — so we hold a reference until it closes.
+ */
+const liveNotifications = new Set<Notification>();
+
+/** Shows one native OS notification; `onClick` runs when the user clicks it. */
+function showOsNotification(title: string, body: string, silent: boolean, onClick: () => void): void {
+  const n = new Notification({ title, body, silent });
+  n.on("click", onClick);
+  const release = () => liveNotifications.delete(n);
+  n.on("close", release);
+  n.on("failed", release);
+  liveNotifications.add(n);
+  n.show();
+}
+
+/**
+ * Diffs the new snapshot against the last, then delivers desktop notifications
+ * per the user's settings: a native OS notification (click opens the PR) and/or
+ * a sound. Best-effort — a failure here must never break the poll loop, and the
+ * baseline is kept current even when settings can't be read, so re-enabling
+ * notifications later doesn't replay a backlog.
+ */
+function handleNotifications(prs: PullRequest[]): void {
+  const dbg = (msg: string): void => {
+    if (process.env.PRD_DEBUG) console.log(`[notify] ${msg}`);
+  };
+
+  let settings: Settings;
+  try {
+    settings = loadSettings();
+  } catch {
+    prevNotifyPrs = prs;
+    dbg("settings unreadable — baseline only");
+    return;
+  }
+
+  const wasBaseline = prevNotifyPrs === null;
+  const events = diffNotifications(prevNotifyPrs, prs, settings.notifications);
+  prevNotifyPrs = prs;
+
+  if (!settings.notifications.enabled) {
+    dbg("disabled in Settings — nothing fires (enable it under Notifications)");
+    return;
+  }
+  if (events.length === 0) {
+    dbg(wasBaseline ? "baseline snapshot — no toasts on first tick" : "no notifiable transitions this tick");
+    return;
+  }
+
+  // Don't notify for the window the user is actively viewing: when our window is
+  // the focused one, the dashboard already shows the change, and a `wake()` tick
+  // on focus/restore would otherwise dump a burst of toasts for everything that
+  // moved while the app was away. The baseline is updated above, so these events
+  // won't re-fire once the window loses focus.
+  const win = mainWindow;
+  const kinds = events.map((e) => e.kind).join(", ");
+  if (win && !win.isDestroyed() && win.isFocused()) {
+    dbg(`suppressed ${events.length} event(s) — window focused: ${kinds}`);
+    return;
+  }
+
+  const { native, sound } = settings.notifications;
+  dbg(`delivering ${events.length} event(s) [native=${native} sound=${sound}]: ${kinds}`);
+
+  if (native && Notification.isSupported()) {
+    if (events.length > MAX_INDIVIDUAL_NOTIFICATIONS) {
+      showOsNotification(
+        "PR Dashboard",
+        `${events.length} pull requests need your attention`,
+        !sound,
+        focusMainWindow,
+      );
+    } else {
+      // Sound at most once (on the first) so a batch doesn't chime N times.
+      events.forEach((ev, i) => {
+        showOsNotification(ev.title, ev.body, !(sound && i === 0), () => {
+          // Validate before opening: the URL comes from a user-configured
+          // GraphQL host, so guard the scheme like every other openExternal
+          // call here. On a bad URL, fall back to surfacing the app.
+          try {
+            void shell.openExternal(validateExternalUrl(ev.url));
+          } catch {
+            focusMainWindow();
+          }
+        });
+      });
+    }
+  } else if (sound) {
+    // No native window, but the user still wants an audible ping.
+    sendToRenderer("notify-sound", undefined);
   }
 }
 
@@ -136,6 +256,9 @@ function createWindow(): void {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // Let the renderer play the notification sound without a prior click —
+      // pings fire on their own, never off a user gesture.
+      autoplayPolicy: "no-user-gesture-required",
     },
   });
 
@@ -337,6 +460,11 @@ void app.whenReady().then(() => {
   // resolution fails with a misleading "not signed in".
   ensureCliPath();
 
+  // Windows attributes toast notifications to an AppUserModelID; without this
+  // they can show under a generic name (or not at all). Must match the
+  // electron-builder `appId` so the packaged install's shortcut lines up.
+  if (process.platform === "win32") app.setAppUserModelId("com.creatio.prdashboard");
+
   if (process.env.PRD_DEBUG) {
     console.log("[main] userData:", app.getPath("userData"));
     console.log("[main] PATH:", process.env.PATH);
@@ -366,6 +494,7 @@ void app.whenReady().then(() => {
         );
       }
       sendToRenderer("snapshot", snapshot);
+      handleNotifications(snapshot.pullRequests);
     },
     onConfigError: (message) => {
       if (process.env.PRD_DEBUG) console.error("[config-error]", message);

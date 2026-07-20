@@ -1,6 +1,14 @@
 import { execFileSync } from "node:child_process";
 
-import type { GhStatus, HostConfig, JiraSettings, PublicConfig, Settings, SettingsHost } from "./types";
+import type {
+  GhStatus,
+  HostConfig,
+  JiraSettings,
+  NotificationSettings,
+  PublicConfig,
+  Settings,
+  SettingsHost,
+} from "./types";
 
 /** Error with a friendly message — the UI surfaces its text. */
 export class ConfigError extends Error {}
@@ -68,6 +76,45 @@ export function clearGhTokenCache(): void {
   ghTokenCache.clear();
 }
 
+/**
+ * Notification defaults: the whole feature is OFF (opt-in) so an existing user
+ * updating doesn't suddenly start getting OS toasts — they turn it on in
+ * Settings. Once enabled, native is on and sound is off, with all event groups on.
+ */
+export function defaultNotificationSettings(): NotificationSettings {
+  return {
+    enabled: false,
+    native: true,
+    sound: false,
+    events: { yourTurn: true, ciFailed: true, goodNews: true },
+  };
+}
+
+/**
+ * Coerces a raw `notifications` blob into a valid {@link NotificationSettings},
+ * filling any missing/garbage field from {@link defaultNotificationSettings}.
+ * Never throws — a bad shape falls back rather than blocking a settings save.
+ */
+export function validateNotifications(raw: unknown): NotificationSettings {
+  const d = defaultNotificationSettings();
+  const obj = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+  const bool = (v: unknown, dflt: boolean): boolean => (typeof v === "boolean" ? v : dflt);
+  const ev = (typeof obj.events === "object" && obj.events !== null ? obj.events : {}) as Record<
+    string,
+    unknown
+  >;
+  return {
+    enabled: bool(obj.enabled, d.enabled),
+    native: bool(obj.native, d.native),
+    sound: bool(obj.sound, d.sound),
+    events: {
+      yourTurn: bool(ev.yourTurn, d.events.yourTurn),
+      ciFailed: bool(ev.ciFailed, d.events.ciFailed),
+      goodNews: bool(ev.goodNews, d.events.goodNews),
+    },
+  };
+}
+
 /** Validates a raw settings object and throws ConfigError with a clear message. */
 export function validateSettings(raw: unknown): Settings {
   if (typeof raw !== "object" || raw === null) {
@@ -86,6 +133,8 @@ export function validateSettings(raw: unknown): Settings {
 
   // Appearance defaults to following the OS; anything unrecognized falls back.
   const theme = obj.theme === "light" || obj.theme === "dark" ? obj.theme : "system";
+
+  const notifications = validateNotifications(obj.notifications);
 
   // An empty hosts list is valid — it's the first-run / unconfigured state, not
   // an error (the UI guides the user to add a host).
@@ -109,7 +158,15 @@ export function validateSettings(raw: unknown): Settings {
     return { label, graphqlUrl: host.graphqlUrl.trim(), repos };
   });
 
-  return { pollIntervalSeconds, launchAtLogin, autoUpdate, theme, hosts, jira: validateJira(obj.jira) };
+  return {
+    pollIntervalSeconds,
+    launchAtLogin,
+    autoUpdate,
+    theme,
+    notifications,
+    hosts,
+    jira: validateJira(obj.jira),
+  };
 }
 
 /**
@@ -148,6 +205,7 @@ export function defaultSettings(): Settings {
     launchAtLogin: false,
     autoUpdate: true,
     theme: "system",
+    notifications: defaultNotificationSettings(),
     hosts: [],
   };
 }

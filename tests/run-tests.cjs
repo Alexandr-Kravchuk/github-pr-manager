@@ -11,6 +11,7 @@ const os = require("node:os");
 const cfg = require(path.join(__dirname, "../dist/main/shared/config.js"));
 const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
 const notif = require(path.join(__dirname, "../dist/main/shared/notifications.js"));
+const notify = require(path.join(__dirname, "../dist/main/shared/notify.js"));
 const github = require(path.join(__dirname, "../dist/main/shared/github.js"));
 const ignored = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
 const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
@@ -90,6 +91,24 @@ test("validateSettings: theme defaults to system when absent/invalid", () => {
 test("validateSettings: theme honored when light/dark", () => {
   assert.strictEqual(cfg.validateSettings({ theme: "light", hosts: [] }).theme, "light");
   assert.strictEqual(cfg.validateSettings({ theme: "dark", hosts: [] }).theme, "dark");
+});
+test("validateSettings: notifications default off (opt-in), native on, sound off, all events on", () => {
+  const n = cfg.validateSettings({ hosts: [] }).notifications;
+  assert.strictEqual(n.enabled, false);
+  assert.strictEqual(n.native, true);
+  assert.strictEqual(n.sound, false);
+  assert.deepStrictEqual(n.events, { yourTurn: true, ciFailed: true, goodNews: true });
+});
+test("validateSettings: notifications honored + garbage falls back per-field", () => {
+  const n = cfg.validateSettings({
+    hosts: [],
+    notifications: { enabled: false, sound: true, native: "nope", events: { ciFailed: false, extra: 1 } },
+  }).notifications;
+  assert.strictEqual(n.enabled, false);
+  assert.strictEqual(n.sound, true);
+  assert.strictEqual(n.native, true); // non-boolean falls back to default
+  assert.strictEqual(n.events.ciFailed, false);
+  assert.strictEqual(n.events.yourTurn, true); // absent falls back to default
 });
 test("validateSettings: sub-minimum interval falls back to 60", () => {
   assert.strictEqual(cfg.validateSettings({ pollIntervalSeconds: 2, hosts: [] }).pollIntervalSeconds, 60);
@@ -992,6 +1011,90 @@ test("healthFromError: stringifies a non-Error rejection", () =>
       poller.stableJiraMessage("Jira HTTP 500 Server Error — x"),
     );
   });
+
+  // --- notify: diffNotifications ---------------------------------------------
+  const N_ON = { enabled: true, native: true, sound: false, events: { yourTurn: true, ciFailed: true, goodNews: true } };
+  const npr = (o = {}) => ({
+    id: "1",
+    repo: "a/b",
+    number: 1,
+    title: "T",
+    url: "https://x/1",
+    roles: ["author"],
+    hasUnaddressedChangeRequest: false,
+    hasUnaddressedComments: false,
+    ciState: "success",
+    hasHumanApproval: false,
+    ...o,
+  });
+  const kinds = (evs) => evs.map((e) => e.kind);
+
+  test("diffNotifications: first snapshot (null prev) is a silent baseline", () =>
+    assert.deepStrictEqual(notify.diffNotifications(null, [npr()], N_ON), []));
+  test("diffNotifications: disabled fires nothing", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([npr()], [npr({ ciState: "failure" })], { ...N_ON, enabled: false }),
+      [],
+    ));
+  test("diffNotifications: newly-appeared reviewer PR fires review_requested", () =>
+    assert.deepStrictEqual(
+      kinds(notify.diffNotifications([], [npr({ id: "2", roles: ["reviewer"] })], N_ON)),
+      ["review_requested"],
+    ));
+  test("diffNotifications: opening your own PR (no prior) fires nothing", () =>
+    assert.deepStrictEqual(notify.diffNotifications([], [npr({ id: "9" })], N_ON), []));
+  test("diffNotifications: change request on your PR", () =>
+    assert.deepStrictEqual(
+      kinds(notify.diffNotifications([npr()], [npr({ hasUnaddressedChangeRequest: true })], N_ON)),
+      ["changes_requested"],
+    ));
+  test("diffNotifications: CI failing transition on your PR", () =>
+    assert.deepStrictEqual(
+      kinds(notify.diffNotifications([npr()], [npr({ ciState: "failure" })], N_ON)),
+      ["ci_failed"],
+    ));
+  test("diffNotifications: first human approval on your PR", () =>
+    assert.deepStrictEqual(
+      kinds(notify.diffNotifications([npr()], [npr({ hasHumanApproval: true })], N_ON)),
+      ["approved"],
+    ));
+  test("diffNotifications: CI failing on a PR you only review does not fire (author-scoped)", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications(
+        [npr({ id: "3", roles: ["reviewer"] })],
+        [npr({ id: "3", roles: ["reviewer"], ciState: "failure" })],
+        N_ON,
+      ),
+      [],
+    ));
+  test("diffNotifications: one event per PR — highest priority wins", () =>
+    assert.deepStrictEqual(
+      kinds(
+        notify.diffNotifications(
+          [npr()],
+          [npr({ hasUnaddressedChangeRequest: true, ciState: "failure" })],
+          N_ON,
+        ),
+      ),
+      ["changes_requested"],
+    ));
+  test("diffNotifications: a group toggle off suppresses its events", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([npr()], [npr({ ciState: "failure" })], {
+        ...N_ON,
+        events: { ...N_ON.events, ciFailed: false },
+      }),
+      [],
+    ));
+  test("diffNotifications: no re-fire while a state persists (needs a transition)", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications(
+        [npr({ ciState: "failure" })],
+        [npr({ ciState: "failure" })],
+        N_ON,
+      ),
+      [],
+    ));
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
