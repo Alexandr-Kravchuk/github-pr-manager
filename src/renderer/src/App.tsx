@@ -44,6 +44,76 @@ interface Group {
   prs: PullRequest[];
 }
 
+/**
+ * View preferences persisted across launches (renderer-side, in localStorage —
+ * these are ephemeral UI choices, not app settings, so they don't belong in the
+ * main-process settings file). The search box is deliberately NOT persisted: a
+ * stale query on relaunch is more surprising than useful.
+ */
+interface ViewPrefs {
+  role: RoleFilter;
+  host: string;
+  sortBy: SortKey;
+  groupBy: GroupMode;
+  attentionOnly: boolean;
+  failingOnly: boolean;
+  newOnly: boolean;
+  mergeableOnly: boolean;
+  noReviewsOnly: boolean;
+  showDrafts: boolean;
+  showIgnored: boolean;
+}
+
+const PREFS_KEY = "prd:view-prefs:v1";
+
+const DEFAULT_PREFS: ViewPrefs = {
+  role: "all",
+  host: "all",
+  sortBy: "action",
+  groupBy: "repo",
+  attentionOnly: false,
+  failingOnly: false,
+  newOnly: false,
+  mergeableOnly: false,
+  noReviewsOnly: false,
+  showDrafts: false,
+  showIgnored: false,
+};
+
+/** Reads + validates persisted prefs, falling back to defaults on anything odd. */
+function loadPrefs(): ViewPrefs {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) return DEFAULT_PREFS;
+    const p = JSON.parse(raw) as Record<string, unknown>;
+    const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
+      allowed.includes(v as T) ? (v as T) : fallback;
+    return {
+      role: oneOf(p.role, ["all", "author", "reviewer"] as const, "all"),
+      host: typeof p.host === "string" ? p.host : "all",
+      sortBy: oneOf(p.sortBy, ["action", "waiting", "active", "newest"] as const, "action"),
+      groupBy: oneOf(p.groupBy, ["none", "repo", "issue", "parent"] as const, "repo"),
+      attentionOnly: Boolean(p.attentionOnly),
+      failingOnly: Boolean(p.failingOnly),
+      newOnly: Boolean(p.newOnly),
+      mergeableOnly: Boolean(p.mergeableOnly),
+      noReviewsOnly: Boolean(p.noReviewsOnly),
+      showDrafts: Boolean(p.showDrafts),
+      showIgnored: Boolean(p.showIgnored),
+    };
+  } catch {
+    return DEFAULT_PREFS;
+  }
+}
+
+function savePrefs(prefs: ViewPrefs): void {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    /* private mode / quota — preferences just won't persist */
+  }
+}
+
 export function App() {
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
   const [config, setConfig] = useState<PublicConfig | null>(null);
@@ -56,19 +126,22 @@ export function App() {
   const fetchingRef = useRef(false);
   const [whatsNew, setWhatsNew] = useState<{ version: string; url: string } | null>(null);
 
+  // Persisted view preferences, read once at mount (search stays transient).
+  const [boot] = useState(loadPrefs);
+
   // Filters
   const [search, setSearch] = useState("");
-  const [role, setRole] = useState<RoleFilter>("all");
-  const [host, setHost] = useState("all");
-  const [attentionOnly, setAttentionOnly] = useState(false);
-  const [failingOnly, setFailingOnly] = useState(false);
-  const [newOnly, setNewOnly] = useState(false);
-  const [mergeableOnly, setMergeableOnly] = useState(false);
-  const [noReviewsOnly, setNoReviewsOnly] = useState(false);
-  const [sortBy, setSortBy] = useState<SortKey>("action");
-  const [groupBy, setGroupBy] = useState<GroupMode>("repo");
-  const [showDrafts, setShowDrafts] = useState(false);
-  const [showIgnored, setShowIgnored] = useState(false);
+  const [role, setRole] = useState<RoleFilter>(boot.role);
+  const [host, setHost] = useState(boot.host);
+  const [attentionOnly, setAttentionOnly] = useState(boot.attentionOnly);
+  const [failingOnly, setFailingOnly] = useState(boot.failingOnly);
+  const [newOnly, setNewOnly] = useState(boot.newOnly);
+  const [mergeableOnly, setMergeableOnly] = useState(boot.mergeableOnly);
+  const [noReviewsOnly, setNoReviewsOnly] = useState(boot.noReviewsOnly);
+  const [sortBy, setSortBy] = useState<SortKey>(boot.sortBy);
+  const [groupBy, setGroupBy] = useState<GroupMode>(boot.groupBy);
+  const [showDrafts, setShowDrafts] = useState(boot.showDrafts);
+  const [showIgnored, setShowIgnored] = useState(boot.showIgnored);
   // Collapsed repo groups, keyed by `${hostLabel}/${repo}`. In-memory, like
   // the filters: a fresh launch starts with everything expanded.
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -173,6 +246,51 @@ export function App() {
     const id = setInterval(() => setTick((t) => t + 1), 10000);
     return () => clearInterval(id);
   }, []);
+
+  // Persist view preferences whenever any of them change (search excluded).
+  useEffect(() => {
+    savePrefs({
+      role,
+      host,
+      sortBy,
+      groupBy,
+      attentionOnly,
+      failingOnly,
+      newOnly,
+      mergeableOnly,
+      noReviewsOnly,
+      showDrafts,
+      showIgnored,
+    });
+  }, [
+    role,
+    host,
+    sortBy,
+    groupBy,
+    attentionOnly,
+    failingOnly,
+    newOnly,
+    mergeableOnly,
+    noReviewsOnly,
+    showDrafts,
+    showIgnored,
+  ]);
+
+  // Drop a persisted host filter that no longer exists in the current config,
+  // so we don't silently hide every PR against a stale host.
+  useEffect(() => {
+    if (config && host !== "all" && !config.hosts.some((h) => h.label === host)) {
+      setHost("all");
+    }
+  }, [config, host]);
+
+  // A persisted "parent" grouping is meaningless once Jira is disconnected —
+  // fall back to grouping by repo.
+  useEffect(() => {
+    if (groupBy === "parent" && jiraStatus && !jiraStatus.configured) {
+      setGroupBy("repo");
+    }
+  }, [jiraStatus, groupBy]);
 
   const postSeen = useCallback(async (prs: PullRequest[]) => {
     const items = prs.map((p) => ({
