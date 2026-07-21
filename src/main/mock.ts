@@ -54,8 +54,15 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     author: { login: "me", avatarUrl: OCTOCAT },
     createdAt: new Date(Date.now() - 2 * 864e5).toISOString(),
     updatedAt: new Date(Date.now() - 36e5).toISOString(),
+    lastCommitPushedAt: new Date(Date.now() - 36e5).toISOString(),
+    headRefName: "feature/sample",
+    issueKey: null,
+    parentKey: null,
+    parentSummary: null,
     reviewDecision: null,
     roles: ["author"],
+    viewerHasReviewed: false,
+    hasNoReviews: true,
     unresolvedThreads: 0,
     unaddressedThreads: 0,
     totalComments: 0,
@@ -71,6 +78,7 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     canBeMerged: false,
     // Overwritten by applyActivity:
     hasNewActivity: false,
+    returnedToMe: false,
     lastSeenAt: null,
     needsAttention: false,
     // Overwritten by applyIgnored:

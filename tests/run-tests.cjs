@@ -13,6 +13,8 @@ const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
 const notif = require(path.join(__dirname, "../dist/main/shared/notifications.js"));
 const github = require(path.join(__dirname, "../dist/main/shared/github.js"));
 const ignored = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
+const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
+const jira = require(path.join(__dirname, "../dist/main/shared/jira.js"));
 
 let passed = 0;
 let failed = 0;
@@ -110,6 +112,32 @@ test("validateSettings: host with invalid graphqlUrl throws", () =>
   ));
 test("validateSettings: non-object throws", () =>
   assert.throws(() => cfg.validateSettings(42), /expected an object/));
+
+// --- normalizeJiraBaseUrl ----------------------------------------------------
+test("normalizeJiraBaseUrl: adds https:// when the scheme is missing", () =>
+  assert.strictEqual(cfg.normalizeJiraBaseUrl("org.atlassian.net"), "https://org.atlassian.net"));
+test("normalizeJiraBaseUrl: strips path/trailing slash to origin", () =>
+  assert.strictEqual(cfg.normalizeJiraBaseUrl("https://org.atlassian.net/jira/"), "https://org.atlassian.net"));
+test("normalizeJiraBaseUrl: null on garbage", () =>
+  assert.strictEqual(cfg.normalizeJiraBaseUrl("http://"), null));
+
+// --- validateSettings: jira --------------------------------------------------
+test("validateSettings: valid jira normalized", () => {
+  const s = cfg.validateSettings({
+    hosts: [],
+    jira: { baseUrl: "org.atlassian.net", email: " me@x.com " },
+  });
+  assert.deepStrictEqual(s.jira, { baseUrl: "https://org.atlassian.net", email: "me@x.com" });
+});
+test("validateSettings: incomplete jira (no email) is dropped", () =>
+  assert.strictEqual(cfg.validateSettings({ hosts: [], jira: { baseUrl: "org.atlassian.net" } }).jira, undefined));
+test("validateSettings: absent jira is undefined", () =>
+  assert.strictEqual(cfg.validateSettings({ hosts: [] }).jira, undefined));
+test("validateSettings: jira with invalid baseUrl throws", () =>
+  assert.throws(
+    () => cfg.validateSettings({ hosts: [], jira: { baseUrl: "http://", email: "me@x.com" } }),
+    /jira\.baseUrl/,
+  ));
 
 // --- toPublicConfig ----------------------------------------------------------
 test("toPublicConfig: strips graphqlUrl, keeps label + repos", () => {
@@ -232,6 +260,7 @@ const rawPr = (overrides = {}) => ({
   createdAt: "2026-07-07T00:00:00Z",
   updatedAt: "2026-07-07T00:00:00Z",
   baseRefName: "main",
+  headRefName: "feature/x",
   mergeable: "MERGEABLE",
   author: { login: "auth", avatarUrl: "" },
   repository: { nameWithOwner: "a/b", defaultBranchRef: { name: "main" } },
@@ -240,10 +269,10 @@ const rawPr = (overrides = {}) => ({
   latestOpinionatedReviews: { nodes: [approvedReview] },
   comments: { totalCount: 0 },
   reviewThreads: { nodes: [] },
-  commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
+  commits: { nodes: [{ commit: { pushedDate: "2026-07-07T00:00:00Z", committedDate: "2026-07-07T00:00:00Z", statusCheckRollup: null } }] },
   ...overrides,
 });
-const canMerge = (overrides) => github.mapPr(rawPr(overrides), "GH", ["authored"]).canBeMerged;
+const canMerge = (overrides) => github.mapPr(rawPr(overrides), "GH", ["authored"], null).canBeMerged;
 const failingRollup = {
   nodes: [{ commit: { statusCheckRollup: { state: "FAILURE", contexts: {
     nodes: [{ __typename: "CheckRun", name: "ci", conclusion: "FAILURE", status: "COMPLETED", detailsUrl: null }],
@@ -293,7 +322,40 @@ test("mapPr.canBeMerged: still-running CI blocks readiness", () =>
 
 // --- github: mapPr defaults isIgnored to false (set later by ignored.ts) -----
 test("mapPr.isIgnored: defaults to false", () =>
-  assert.strictEqual(github.mapPr(rawPr(), "GH", ["authored"]).isIgnored, false));
+  assert.strictEqual(github.mapPr(rawPr(), "GH", ["authored"], null).isIgnored, false));
+
+// --- github: mapPr issue key parsing -----------------------------------------
+test("mapPr.issueKey: parsed from the title", () =>
+  assert.strictEqual(
+    github.mapPr(rawPr({ title: "ENG-93374 sync schemas" }), "GH", [], null).issueKey,
+    "ENG-93374",
+  ));
+test("mapPr.issueKey: falls back to the head branch (case-insensitive)", () =>
+  assert.strictEqual(
+    github.mapPr(rawPr({ title: "no key here", headRefName: "feature/eng-93373-foo" }), "GH", [], null)
+      .issueKey,
+    "ENG-93373",
+  ));
+test("mapPr.issueKey: null when neither title nor branch has one", () =>
+  assert.strictEqual(
+    github.mapPr(rawPr({ title: "just words", headRefName: "wip" }), "GH", [], null).issueKey,
+    null,
+  ));
+
+// --- github: mapPr viewer/no-review signals ----------------------------------
+test("mapPr.hasNoReviews: true when no opinionated reviews", () =>
+  assert.strictEqual(
+    github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [] } }), "GH", [], null).hasNoReviews,
+    true,
+  ));
+test("mapPr.hasNoReviews: false when someone reviewed", () =>
+  assert.strictEqual(github.mapPr(rawPr(), "GH", [], null).hasNoReviews, false));
+test("mapPr.viewerHasReviewed: true when the viewer authored a review", () =>
+  assert.strictEqual(github.mapPr(rawPr(), "GH", [], "rev").viewerHasReviewed, true));
+test("mapPr.viewerHasReviewed: false for a different viewer", () =>
+  assert.strictEqual(github.mapPr(rawPr(), "GH", [], "someone-else").viewerHasReviewed, false));
+test("mapPr.viewerHasReviewed: false when the viewer is unknown", () =>
+  assert.strictEqual(github.mapPr(rawPr(), "GH", [], null).viewerHasReviewed, false));
 
 // --- ignored: persistent ignore store ----------------------------------------
 async function withTempStore(fn) {
@@ -334,6 +396,132 @@ async function withTempStore(fn) {
       await ignored.applyIgnored(prs, file);
       assert.strictEqual(prs[0].isIgnored, false);
     }));
+
+  // --- state: returnedToMe (re-review signal) --------------------------------
+  const reviewPr = (o = {}) => ({
+    id: "PR_state_1",
+    totalComments: 2,
+    updatedAt: "2026-07-07T00:00:00Z",
+    lastCommitPushedAt: "2026-07-07T00:00:00Z",
+    roles: ["reviewer"],
+    viewerHasReviewed: true,
+    failingChecks: [],
+    hasUnaddressedChangeRequest: false,
+    hasUnaddressedComments: false,
+    unresolvedThreads: 0,
+    awaitingReview: false,
+    ...o,
+  });
+
+  await atest("applyActivity.returnedToMe: false on the first-seen baseline", () =>
+    withTempStore(async (file) => {
+      const p = reviewPr();
+      await state.applyActivity([p], file);
+      assert.strictEqual(p.returnedToMe, false);
+      assert.strictEqual(p.lastSeenAt, null);
+    }));
+
+  await atest("applyActivity.returnedToMe: a new push after a review flips it on", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewPr()], file); // baseline at 07-07
+      const later = reviewPr({ lastCommitPushedAt: "2026-07-08T00:00:00Z" });
+      await state.applyActivity([later], file);
+      assert.strictEqual(later.returnedToMe, true);
+    }));
+
+  await atest("applyActivity.returnedToMe: new comments flip it on too", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewPr()], file);
+      const more = reviewPr({ totalComments: 5 });
+      await state.applyActivity([more], file);
+      assert.strictEqual(more.returnedToMe, true);
+      assert.strictEqual(more.hasNewActivity, true);
+    }));
+
+  await atest("applyActivity.returnedToMe: never set on your own PR", () =>
+    withTempStore(async (file) => {
+      // Author who somehow also reviewed + pushed — the !author guard must win.
+      await state.applyActivity([reviewPr({ roles: ["author"] })], file);
+      const pushed = reviewPr({ roles: ["author"], lastCommitPushedAt: "2026-07-08T00:00:00Z" });
+      await state.applyActivity([pushed], file);
+      assert.strictEqual(pushed.returnedToMe, false);
+    }));
+
+  await atest("applyActivity.returnedToMe: not set for an un-engaged reviewer request", () =>
+    withTempStore(async (file) => {
+      // Requested but never reviewed and never opened: a new push is not "back to me".
+      await state.applyActivity([reviewPr({ viewerHasReviewed: false })], file);
+      const pushed = reviewPr({ viewerHasReviewed: false, lastCommitPushedAt: "2026-07-08T00:00:00Z" });
+      await state.applyActivity([pushed], file);
+      assert.strictEqual(pushed.returnedToMe, false);
+    }));
+
+  await atest("markSeen then applyActivity: viewing sets lastSeenAt and re-arms the baseline", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewPr({ viewerHasReviewed: false })], file); // baseline
+      await state.markSeen(
+        [{ id: "PR_state_1", comments: 2, updatedAt: "2026-07-07T00:00:00Z", lastCommitPushedAt: "2026-07-07T00:00:00Z" }],
+        file,
+      );
+      const pushed = reviewPr({ viewerHasReviewed: false, lastCommitPushedAt: "2026-07-08T00:00:00Z" });
+      await state.applyActivity([pushed], file);
+      assert.strictEqual(typeof pushed.lastSeenAt, "string"); // viewed → set
+      assert.strictEqual(pushed.returnedToMe, true); // engaged via a view, new push
+    }));
+
+  // --- jira: fetchParents ----------------------------------------------------
+  const JIRA_CFG = { baseUrl: "https://org.atlassian.net", email: "me@x.com" };
+  const jiraResponse = (issues) => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({ issues }),
+    text: async () => "",
+  });
+  // Restore the real fetch after these tests.
+  const realFetch = global.fetch;
+
+  await atest("fetchParents: maps each key to its parent (key + summary)", async () => {
+    jira.clearParentCache();
+    global.fetch = async () =>
+      jiraResponse([
+        { key: "ENG-93373", fields: { parent: { key: "ENG-93367", fields: { summary: "Analyze long app creating" } } } },
+        { key: "ENG-93374", fields: { parent: { key: "ENG-93367", fields: { summary: "Analyze long app creating" } } } },
+      ]);
+    const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-93373", "ENG-93374"]);
+    assert.strictEqual(map.get("ENG-93373").parentKey, "ENG-93367");
+    assert.strictEqual(map.get("ENG-93374").parentSummary, "Analyze long app creating");
+  });
+
+  await atest("fetchParents: a key with no parent is absent from the map", async () => {
+    jira.clearParentCache();
+    global.fetch = async () => jiraResponse([{ key: "ENG-1", fields: {} }]);
+    const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    assert.strictEqual(map.has("ENG-1"), false);
+  });
+
+  await atest("fetchParents: caches — a second call makes no request", async () => {
+    jira.clearParentCache();
+    let calls = 0;
+    global.fetch = async () => {
+      calls++;
+      return jiraResponse([
+        { key: "ENG-100", fields: { parent: { key: "ENG-1", fields: { summary: "P" } } } },
+      ]);
+    };
+    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-100"]);
+    const again = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-100"]);
+    assert.strictEqual(calls, 1);
+    assert.strictEqual(again.get("ENG-100").parentKey, "ENG-1");
+  });
+
+  await atest("fetchParents: throws on an HTTP error", async () => {
+    jira.clearParentCache();
+    global.fetch = async () => ({ ok: false, status: 401, statusText: "Unauthorized", text: async () => "nope", json: async () => ({}) });
+    await assert.rejects(() => jira.fetchParents(JIRA_CFG, "tok", ["ENG-5"]), /Jira HTTP 401/);
+  });
+
+  global.fetch = realFetch;
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

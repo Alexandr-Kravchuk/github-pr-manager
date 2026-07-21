@@ -73,6 +73,12 @@ export interface PollerOptions {
   /** Host fetcher — defaults to the real GraphQL `fetchHost`; PRD_MOCK swaps in fixtures. */
   fetchHostFn?: typeof fetchHost;
   /**
+   * Optional enricher run over the assembled PRs each tick — used to resolve Jira
+   * parent keys for grouping. Best-effort: it must not throw (the poller calls it
+   * inside a try/catch regardless). No-op when omitted.
+   */
+  enrichParents?: (prs: PullRequest[]) => Promise<void>;
+  /**
    * Cheap REST notifications detector — defaults to the real `probeNotifications`.
    * PRD_MOCK swaps in a no-op so mock mode never touches the network. Runs on the
    * `core` REST budget (separate from GraphQL) to decide whether a host is worth
@@ -131,6 +137,7 @@ function hashSnapshot(s: DashboardResponse): string {
     p.hasUnaddressedChangeRequest,
     p.isDraft,
     p.isIgnored,
+    p.parentKey,
   ]);
   return JSON.stringify({ prs: lite, errors: s.errors, version: s.version });
 }
@@ -485,6 +492,15 @@ export class Poller {
       await applyIgnored(allPrs, this.options.ignoredStatePath);
     } catch (e) {
       console.error("[poller] applyIgnored failed:", e);
+    }
+
+    // Resolve Jira parent keys for grouping (best-effort; no-op without Jira).
+    if (this.options.enrichParents) {
+      try {
+        await this.options.enrichParents(allPrs);
+      } catch (e) {
+        console.error("[poller] enrichParents failed:", e);
+      }
     }
 
     // Attention-needing first; then by most recently updated.

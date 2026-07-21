@@ -57,6 +57,18 @@ export interface SettingsHost {
  */
 export type ThemePreference = "system" | "light" | "dark";
 
+/**
+ * Jira connection for parent-task grouping — credential-free, like the rest of
+ * settings. The API token is stored separately (encrypted via Electron
+ * `safeStorage`), never here. `undefined` means Jira grouping is not set up.
+ */
+export interface JiraSettings {
+  /** Site base URL, e.g. "https://your-org.atlassian.net". */
+  baseUrl: string;
+  /** Atlassian account email — the username half of the API-token Basic auth. */
+  email: string;
+}
+
 /** Persisted application settings (userData/settings.json) — no tokens. */
 export interface Settings {
   /** Auto-refresh interval in seconds. */
@@ -68,6 +80,20 @@ export interface Settings {
   /** Light/dark appearance, or follow the OS. */
   theme: ThemePreference;
   hosts: SettingsHost[];
+  /** Optional Jira connection for parent-task grouping (token stored separately). */
+  jira?: JiraSettings;
+}
+
+/** Jira setup state for the UI, from the main process. */
+export interface JiraStatus {
+  /** true when baseUrl + email are set AND an encrypted token is stored. */
+  configured: boolean;
+  /** baseUrl + email are set (token may still be missing). */
+  hasConfig: boolean;
+  /** An encrypted token is stored. */
+  hasToken: boolean;
+  /** false when the OS keychain / safeStorage is unavailable (can't store a token). */
+  encryptionAvailable: boolean;
 }
 
 /** Sanitized config for the dashboard filters — host labels + repos only. */
@@ -116,9 +142,40 @@ export interface PullRequest {
   author: { login: string; avatarUrl: string } | null;
   createdAt: string;
   updatedAt: string;
+  /** ISO time the latest commit was pushed — the basis for new-push detection. */
+  lastCommitPushedAt: string | null;
+  /** Name of the head branch, e.g. "feature/ENG-93374-foo" — used as a fallback issue-key source. */
+  headRefName: string;
+  /**
+   * Issue-tracker key parsed from the title (falling back to the head branch),
+   * e.g. "ENG-93374", or null when none is found. Used to group related PRs.
+   */
+  issueKey: string | null;
+  /**
+   * Parent issue key resolved from Jira for this PR's {@link issueKey}, e.g. the
+   * task "ENG-93367" that "ENG-93374" is a subtask of — null when Jira isn't
+   * configured, the key has no parent, or resolution failed. Set by the poller's
+   * parent enricher, not by `github.ts`.
+   */
+  parentKey: string | null;
+  /** Summary (title) of {@link parentKey}, for the group heading. */
+  parentSummary: string | null;
   reviewDecision: ReviewDecision;
   /** The current user's roles on this PR (author / reviewer). */
   roles: PrRole[];
+  /**
+   * true when the current user has already submitted an opinionated review
+   * (approve / request-changes) on this PR. Note: GitHub clears the `reviewer`
+   * role once you review, so this is how a reviewed PR is still recognized as
+   * "mine" for the returned-to-me signal.
+   */
+  viewerHasReviewed: boolean;
+  /**
+   * true when nobody has submitted an opinionated review yet — the "nobody has
+   * looked at it" pile. Keys off opinionated reviews (approve / request-changes);
+   * a plain "Comment" review does not clear it.
+   */
+  hasNoReviews: boolean;
 
   /** Number of unresolved review threads — "comments to fix". */
   unresolvedThreads: number;
@@ -182,6 +239,13 @@ export interface PullRequest {
 
   /** true if new comments/activity appeared since the last time it was viewed. */
   hasNewActivity: boolean;
+  /**
+   * true when a PR you've already engaged with (reviewed, or opened from the
+   * dashboard) got new comments OR new commits pushed since you last saw it —
+   * i.e. the ball is back in your court to re-review. Author's own pushes don't
+   * count (never set on a PR you authored). Set in `state.ts`.
+   */
+  returnedToMe: boolean;
   /** ISO time of the last "mark seen", if any. */
   lastSeenAt: string | null;
   /** Roll-up flag: something needs attention (failing CI / new activity / changes requested). */
@@ -225,6 +289,8 @@ export interface SeenInput {
   id: string;
   comments: number;
   updatedAt: string;
+  /** The latest commit's push time at the moment of viewing (for new-push detection). */
+  lastCommitPushedAt: string | null;
 }
 
 // --- IPC result shapes (cross the preload boundary) -------------------------
@@ -275,6 +341,13 @@ export interface PrManagerApi {
   setTheme(theme: ThemePreference): Promise<void>;
   /** `gh` CLI install + auth status for the configured hosts. */
   getGhStatus(): Promise<GhStatus>;
+  /** Jira setup state (config + stored token presence) for the settings UI and grouping. */
+  getJiraStatus(): Promise<JiraStatus>;
+  /**
+   * Store (or clear, when given an empty string) the Jira API token, encrypted
+   * via the OS keychain. Returns whether it was persisted.
+   */
+  setJiraToken(token: string): Promise<{ ok: boolean; error?: string }>;
   /** The running app version. */
   getAppVersion(): Promise<string>;
   /** Copy text (e.g. a PR URL) to the system clipboard. */

@@ -3,14 +3,25 @@ import path from "node:path";
 
 import type { PullRequest, SeenInput } from "./types";
 
-/** A stored "snapshot" of a PR at the time it was last viewed. */
+/** A stored "snapshot" of a PR at the time it was last recorded. */
 interface SeenEntry {
-  /** Number of comments the user saw last time. */
+  /** Number of comments in the recorded snapshot. */
   comments: number;
-  /** The PR's updatedAt at the time it was last viewed. */
+  /** The PR's updatedAt in the recorded snapshot. */
   updatedAt: string;
-  /** When the user last marked the PR as seen. */
+  /** When this snapshot was recorded (baseline creation OR an explicit view). */
   seenAt: string;
+  /**
+   * The latest commit's push time in the recorded snapshot — basis for detecting
+   * a new push since. Optional: older state files predate it.
+   */
+  lastCommitPushedAt?: string | null;
+  /**
+   * When the user actually opened / marked the PR seen. Distinct from `seenAt`,
+   * which is also written when the auto-baseline is created on first encounter.
+   * Absent means the user has never opened this PR ("not yet opened").
+   */
+  viewedAt?: string;
 }
 
 type StateFile = Record<string, SeenEntry>;
@@ -58,16 +69,32 @@ export async function applyActivity(prs: PullRequest[], statePath: string): Prom
         comments: pr.totalComments,
         updatedAt: pr.updatedAt,
         seenAt: new Date().toISOString(),
+        lastCommitPushedAt: pr.lastCommitPushedAt,
       };
       mutated = true;
       pr.hasNewActivity = false;
+      pr.returnedToMe = false;
       pr.lastSeenAt = null;
     } else {
       // Signal specifically NEW COMMENTS: a change in updatedAt (your own commit
       // push, labels, reviewer changes) does not count as new activity —
       // otherwise it drowns out the signal on your own PRs, where pushes are frequent.
       pr.hasNewActivity = pr.totalComments > entry.comments;
-      pr.lastSeenAt = entry.seenAt;
+      // lastSeenAt reflects an ACTUAL view (viewedAt), not the auto-baseline —
+      // so a PR the user has never opened reports null.
+      pr.lastSeenAt = entry.viewedAt ?? null;
+
+      // "Returned to me": a PR you've engaged with (reviewed, or opened from the
+      // dashboard) that has new comments OR a newer push than the recorded
+      // snapshot — the ball is back in your court. Your own PRs are excluded so
+      // your pushes never trigger it.
+      const isAuthor = pr.roles.includes("author");
+      const engaged = pr.viewerHasReviewed || entry.viewedAt != null;
+      const newPush =
+        pr.lastCommitPushedAt != null &&
+        entry.lastCommitPushedAt != null &&
+        pr.lastCommitPushedAt > entry.lastCommitPushedAt;
+      pr.returnedToMe = !isAuthor && engaged && (pr.hasNewActivity || newPush);
     }
 
     // Mirrors the card accent: a review requested of you needs attention (your
@@ -76,6 +103,7 @@ export async function applyActivity(prs: PullRequest[], statePath: string): Prom
     const isAuthor = pr.roles.includes("author");
     pr.needsAttention =
       pr.roles.includes("reviewer") ||
+      pr.returnedToMe ||
       pr.failingChecks.length > 0 ||
       pr.hasUnaddressedChangeRequest ||
       pr.hasUnaddressedComments ||
@@ -96,6 +124,8 @@ export async function markSeen(items: SeenInput[], statePath: string): Promise<v
       comments: item.comments,
       updatedAt: item.updatedAt,
       seenAt: now,
+      viewedAt: now,
+      lastCommitPushedAt: item.lastCommitPushedAt,
     };
   }
   await writeState(statePath, state);
