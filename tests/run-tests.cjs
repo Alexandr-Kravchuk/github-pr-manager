@@ -15,6 +15,7 @@ const github = require(path.join(__dirname, "../dist/main/shared/github.js"));
 const ignored = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
 const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
 const jira = require(path.join(__dirname, "../dist/main/shared/jira.js"));
+const jiraHealth = require(path.join(__dirname, "../dist/main/shared/jira-health.js"));
 
 let passed = 0;
 let failed = 0;
@@ -368,6 +369,38 @@ async function withTempStore(fn) {
   }
 }
 
+// --- jira-health: pure enrichment classification -----------------------------
+const JH_CFG = { baseUrl: "https://org.atlassian.net", email: "me@x.com" };
+test("enrichmentSkipReason: no-config when baseUrl/email missing", () => {
+  assert.strictEqual(jiraHealth.enrichmentSkipReason(undefined, true, 3), "no-config");
+  assert.strictEqual(jiraHealth.enrichmentSkipReason({ baseUrl: "https://org.atlassian.net" }, true, 3), "no-config");
+  assert.strictEqual(jiraHealth.enrichmentSkipReason({ email: "me@x.com" }, true, 3), "no-config");
+});
+test("enrichmentSkipReason: no-token when config present but token absent", () =>
+  assert.strictEqual(jiraHealth.enrichmentSkipReason(JH_CFG, false, 3), "no-token"));
+test("enrichmentSkipReason: no-keys when config+token present but zero keys", () =>
+  assert.strictEqual(jiraHealth.enrichmentSkipReason(JH_CFG, true, 0), "no-keys"));
+test("enrichmentSkipReason: null (run) when config+token+keys all present", () =>
+  assert.strictEqual(jiraHealth.enrichmentSkipReason(JH_CFG, true, 2), null));
+test("healthFromResolution: ok when >=1 parent resolved", () =>
+  assert.deepStrictEqual(jiraHealth.healthFromResolution(3, 2), { state: "ok", queried: 3, resolved: 2 }));
+test("healthFromResolution: empty when nothing resolved", () =>
+  assert.deepStrictEqual(jiraHealth.healthFromResolution(3, 0), { state: "empty", queried: 3, resolved: 0 }));
+test("healthFromError: error state carries the Error message", () =>
+  assert.deepStrictEqual(jiraHealth.healthFromError(4, new Error("boom")), {
+    state: "error",
+    message: "boom",
+    queried: 4,
+    resolved: 0,
+  }));
+test("healthFromError: stringifies a non-Error rejection", () =>
+  assert.deepStrictEqual(jiraHealth.healthFromError(1, "nope"), {
+    state: "error",
+    message: "nope",
+    queried: 1,
+    resolved: 0,
+  }));
+
 (async () => {
   await atest("applyIgnored: flags ignored PRs, leaves the rest false", () =>
     withTempStore(async (file) => {
@@ -556,11 +589,13 @@ async function withTempStore(fn) {
     await assert.rejects(() => jira.fetchParents(JIRA_CFG, "tok", ["ENG-5"]), /Jira HTTP 401/);
   });
 
-  await atest("fetchParents: a transient cloudId blip doesn't pin the site base (gateway recovers)", async () => {
-    // Regression: a single transient tenant_info failure must not disable the
-    // gateway path for the process lifetime. The failed cloudId is cached only
-    // briefly, and the site-only base (chosen while cloudId was unknown) is left
-    // uncached — so a later tick re-probes and the scoped token reaches the gateway.
+  await atest("fetchParents: recovers within the cloudId TTL after a transient blip (no 10-min negative poisoning)", async () => {
+    // Regression: a transient tenant_info blip must not keep the banner 'empty'
+    // for the full CACHE_TTL_MS. The failed cloudId is cached only ~60s, the
+    // site-only base is left uncached, AND the untrusted 200-but-empty writes no
+    // negative parentCache entries — so the first pass after the 60s TTL re-probes
+    // and the scoped token reaches the gateway, long before the 10-min TTL. This
+    // advances the clock only 61s to exercise that intervening window.
     jira.clearParentCache();
     const realNow = Date.now;
     let clock = 1_000_000;
@@ -585,19 +620,104 @@ async function withTempStore(fn) {
       const first = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-9"]);
       assert.strictEqual(first.has("ENG-9"), false);
       assert.strictEqual(gatewayHits, 0);
-      // Advance past both the negative-cloudId TTL and the parent-cache TTL.
-      clock += 11 * 60 * 1000;
-      // Second pass: cloudId resolves, gateway is re-probed and wins (not pinned to site).
+      // Advance just past the 60s cloudId TTL — far short of the 10-min parentCache TTL.
+      clock += 61 * 1000;
+      // Second pass: cloudId re-resolves, the gateway wins (site base not pinned,
+      // no negatives cached), so recovery happens inside the 60s window.
       const second = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-9"]);
       assert.strictEqual(second.get("ENG-9").parentKey, "ENG-0");
-      assert.ok(gatewayHits >= 1); // gateway reached again → site base was not pinned
+      assert.ok(gatewayHits >= 1);
     } finally {
       Date.now = realNow;
       global.fetch = realFetch;
     }
   });
 
+  await atest("fetchParents: a 5xx/429 on the gateway throws and does NOT fall back to the site", async () => {
+    // The 401/403-only fallback is deliberate: a scoped token on the site URL
+    // answers 200-but-empty, so silently retrying there on a 429/500 would mask a
+    // real gateway error as "no parents found". Lock the invariant in.
+    for (const status of [429, 500]) {
+      jira.clearParentCache();
+      let hitSite = false;
+      global.fetch = async (url) => {
+        if (isTenant(url)) return tenantOk();
+        if (url === GATEWAY) return errRes(status);
+        if (url === SITE) { hitSite = true; return okJson({ issues: [] }); }
+        throw new Error("unexpected url " + url);
+      };
+      await assert.rejects(
+        () => jira.fetchParents(JIRA_CFG, "tok", ["ENG-7"]),
+        new RegExp(`Jira HTTP ${status}`),
+      );
+      assert.strictEqual(hitSite, false);
+    }
+  });
+
+  await atest("fetchParents: a network throw on the gateway still falls back to the site", async () => {
+    // A thrown fetch (timeout/DNS, or a proxy blocking the gateway host while
+    // allowing the site) must advance to the site like a 401 would, so a classic
+    // token behind such a proxy isn't stranded on a hard error.
+    jira.clearParentCache();
+    let hitSite = false;
+    global.fetch = async (url) => {
+      if (isTenant(url)) return tenantOk();
+      if (url === GATEWAY) throw new Error("ECONNREFUSED api.atlassian.com");
+      if (url === SITE) {
+        hitSite = true;
+        return okJson({ issues: [{ key: "ENG-2", fields: { parent: { key: "ENG-1", fields: { summary: "P" } } } }] });
+      }
+      throw new Error("unexpected url " + url);
+    };
+    const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-2"]);
+    assert.strictEqual(hitSite, true);
+    assert.strictEqual(map.get("ENG-2").parentKey, "ENG-1");
+  });
+
   global.fetch = realFetch;
+
+  // --- poller: tick folds jiraHealth into the snapshot + change detection ----
+  await atest("Poller.tick: enrichParents throw → error health; message change re-emits, no-change dedups", async () => {
+    const snapshots = [];
+    let enrichError = "boom A";
+    const p = new poller.Poller({
+      loadSettings: () => ({
+        pollIntervalSeconds: 60,
+        launchAtLogin: false,
+        autoUpdate: false,
+        theme: "system",
+        hosts: [],
+      }),
+      toHostConfigs: () => [],
+      // Bogus paths: the poller wraps applyActivity/applyIgnored in try/catch.
+      statePath: path.join(os.tmpdir(), "prd-poller-state-missing.json"),
+      ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),
+      appVersion: "test",
+      onSnapshot: (s) => snapshots.push(s),
+      onConfigError: () => {},
+      enrichParents: async () => {
+        throw new Error(enrichError);
+      },
+    });
+
+    // Tick 1: enrichParents throws → jiraHealth defaults to the error state.
+    await p.refresh();
+    assert.strictEqual(snapshots.length, 1);
+    assert.strictEqual(snapshots[0].jiraHealth.state, "error");
+    assert.strictEqual(snapshots[0].jiraHealth.message, "boom A");
+
+    // Tick 2: same state, different message → hash must change → re-emit.
+    enrichError = "boom B";
+    await p.refresh();
+    assert.strictEqual(snapshots.length, 2);
+    assert.strictEqual(snapshots[1].jiraHealth.message, "boom B");
+
+    // Tick 3: nothing changed → hash identical → no re-emit.
+    await p.refresh();
+    assert.strictEqual(snapshots.length, 2);
+
+    p.stop();
+  });
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

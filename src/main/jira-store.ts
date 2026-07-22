@@ -10,6 +10,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, safeStorage } from "electron";
 
+import {
+  enrichmentSkipReason,
+  healthFromError,
+  healthFromResolution,
+} from "../shared/jira-health";
 import { clearParentCache, fetchParents } from "../shared/jira";
 import type { JiraHealth, JiraStatus, PullRequest, Settings } from "../shared/types";
 
@@ -113,40 +118,32 @@ export function buildParentEnricher(
       debug(`skip: loadSettings threw - ${(e as Error).message}`);
       return undefined;
     }
-    if (!jira?.baseUrl || !jira.email) {
-      debug(`skip: incomplete config - baseUrl=${Boolean(jira?.baseUrl)} email=${Boolean(jira?.email)}`);
-      return undefined;
-    }
-    const token = getJiraToken();
-    if (!token) {
-      debug(`skip: no token - hasFile=${hasJiraToken()} encryptionAvailable=${encryptionAvailable()}`);
-      return undefined;
-    }
 
+    // Resolve the token only when the connection is configured (avoid a needless
+    // keychain decrypt). The skip decision itself lives in the pure, tested
+    // `enrichmentSkipReason` so its ordering can't drift untested.
+    const hasConfig = Boolean(jira?.baseUrl && jira?.email);
+    const token = hasConfig ? getJiraToken() : null;
     const keys = [...new Set(prs.map((p) => p.issueKey).filter((k): k is string => Boolean(k)))];
-    if (keys.length === 0) {
-      debug(`skip: 0 issue keys parsed from ${prs.length} PRs`);
+    const skip = enrichmentSkipReason(jira, Boolean(token), keys.length);
+    if (skip) {
+      debug(`skip: ${skip} (hasFile=${hasJiraToken()} encryptionAvailable=${encryptionAvailable()} prs=${prs.length})`);
       return undefined;
     }
 
     debug(`resolving parents for ${keys.length} keys: ${keys.join(", ")}`);
     try {
-      const parents = await fetchParents(jira, token, keys);
+      const parents = await fetchParents(jira!, token!, keys);
       debug(`resolved ${parents.size} parents: ${[...parents.entries()].map(([k, p]) => `${k}->${p.parentKey}`).join(", ") || "(none)"}`);
       for (const pr of prs) {
         const parent = pr.issueKey ? parents.get(pr.issueKey) : undefined;
         pr.parentKey = parent?.parentKey ?? null;
         pr.parentSummary = parent?.parentSummary ?? null;
       }
-      return {
-        state: parents.size > 0 ? "ok" : "empty",
-        queried: keys.length,
-        resolved: parents.size,
-      };
+      return healthFromResolution(keys.length, parents.size);
     } catch (e) {
-      const message = (e as Error).message;
-      if (process.env.PRD_DEBUG) console.warn("[jira] parent resolution failed:", message);
-      return { state: "error", message, queried: keys.length, resolved: 0 };
+      if (process.env.PRD_DEBUG) console.warn("[jira] parent resolution failed:", (e as Error).message);
+      return healthFromError(keys.length, e);
     }
   };
 }

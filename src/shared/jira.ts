@@ -144,6 +144,25 @@ async function apiBasesFor(config: JiraSettings): Promise<string[]> {
   return bases;
 }
 
+/**
+ * Whether a chunk result is trustworthy enough to *cache* — governs both pinning
+ * the winning base (`apiBaseCache`) and writing negative per-key entries. Both
+ * are only safe once the token type was settled by clean HTTP responses:
+ *
+ *  - the gateway was a candidate (`bases.length > 1`), so a win means scoped and
+ *    a 401/403 means classic; a lone site base (cloudId unresolved) can't tell a
+ *    scoped token's masked 200-but-empty from a genuine no-match; and
+ *  - no candidate was skipped via a *thrown* network error (`cleanFallback`),
+ *    which tells us nothing about that base's verdict.
+ *
+ * Caching an untrusted 200-but-empty would strand the dashboard on the wrong
+ * base and keep false negatives alive for `CACHE_TTL_MS` after the gateway
+ * recovers — the exact "silent empty" this module exists to prevent.
+ */
+function resultIsTrustworthy(bases: string[], cleanFallback: boolean): boolean {
+  return cleanFallback && bases.length > 1;
+}
+
 interface RawSearchResponse {
   issues?: Array<{
     key: string;
@@ -171,38 +190,57 @@ async function fetchChunk(
     cache: "no-store",
   };
 
-  // Try each candidate base. Only 401/403 triggers a fallback: those mean "wrong
-  // token type for this base" (e.g. a classic token on the gateway), so the next
-  // base is worth trying. Any other status (429/500/…) means the base is right
-  // but the call genuinely failed — deliberately surfaced rather than retried on
-  // the site URL, where a scoped token would answer 200-but-empty and mask the
-  // real error as "no parents found".
+  // Walk the candidate bases. Two things advance to the next base:
+  //   - a clean 401/403 response ("wrong token type for this base", e.g. a
+  //     classic token on the gateway) — a *trusted* fallback; and
+  //   - a thrown network error (timeout/abort, DNS, or a proxy blocking the
+  //     gateway host while allowing the site) — we still try the next base so a
+  //     classic token behind such a proxy isn't stranded, but the fallback is
+  //     *untrusted*: we never learned this base's verdict (see resultIsTrustworthy).
+  // Any other status (429/500/…) means the base answered but the call genuinely
+  // failed: surfaced as an error, never retried on the site URL where a scoped
+  // token would answer 200-but-empty and mask it as "no parents found".
   const bases = await apiBasesFor(config);
   debug(`bases to try: ${bases.join(" , ")}`);
   let res: Response | null = null;
+  let winner: string | null = null;
+  let cleanFallback = true;
+  let lastError: unknown = null;
   for (let i = 0; i < bases.length; i++) {
-    const candidate = await fetchWithTimeout(`${bases[i]}/search/jql`, init);
+    const isLast = i === bases.length - 1;
+    let candidate: Response;
+    try {
+      candidate = await fetchWithTimeout(`${bases[i]}/search/jql`, init);
+    } catch (e) {
+      debug(`${bases[i]} -> threw ${(e as Error).message}`);
+      lastError = e;
+      cleanFallback = false; // reached the next base without learning this one's verdict
+      if (isLast) break;
+      continue;
+    }
     debug(`${bases[i]} -> HTTP ${candidate.status}`);
-    if ((candidate.status === 401 || candidate.status === 403) && i < bases.length - 1) {
+    if ((candidate.status === 401 || candidate.status === 403) && !isLast) {
       continue;
     }
     res = candidate;
-    // Cache the winner only once the token type is settled — the gateway was a
-    // candidate (`bases.length > 1`), so either it won or it was tried and
-    // rejected. A lone site base (cloudId unresolved) is NOT cached: a scoped
-    // token's 200-but-empty there is indistinguishable from success, and pinning
-    // it would permanently hide the gateway. Leaving it uncached lets a later
-    // tick re-probe the cloudId and recover.
-    if (candidate.ok && bases.length > 1) apiBaseCache.set(config.baseUrl, bases[i]);
+    winner = bases[i];
     break;
   }
-  if (!res) throw new Error("Jira: no reachable API base");
+  if (!res) {
+    // Every base failed. Surface a thrown network error if we saw one.
+    if (lastError) throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    throw new Error("Jira: no reachable API base");
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(
       `Jira HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 200)}` : ""}`,
     );
   }
+  // Cache the winning base only when the result is trustworthy (token type
+  // cleanly settled) — otherwise a masked 200-but-empty could pin the wrong base.
+  const trusted = resultIsTrustworthy(bases, cleanFallback);
+  if (winner && trusted) apiBaseCache.set(config.baseUrl, winner);
   const json = (await res.json()) as RawSearchResponse;
   const returned = new Set<string>();
   for (const issue of json.issues ?? []) {
@@ -213,9 +251,16 @@ async function fetchChunk(
       fetchedAt: now,
     });
   }
-  // Keys Jira didn't return (unknown/no access) get a negative entry too.
-  for (const key of keys) {
-    if (!returned.has(key)) parentCache.set(key, { parent: null, fetchedAt: now });
+  // Keys Jira didn't return get a negative entry — but only from a trusted base.
+  // A 200-but-empty reached via an unverified base (cloudId unresolved, or past a
+  // thrown error) might be a scoped token that should have used the gateway;
+  // caching those negatives for CACHE_TTL_MS would keep the banner "empty" for up
+  // to 10 min after the gateway recovers. Skip them so the keys are re-queried on
+  // the next tick, once the gateway is reachable again.
+  if (trusted) {
+    for (const key of keys) {
+      if (!returned.has(key)) parentCache.set(key, { parent: null, fetchedAt: now });
+    }
   }
 }
 
