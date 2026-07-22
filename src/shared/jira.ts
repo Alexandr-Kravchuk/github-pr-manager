@@ -65,6 +65,10 @@ function authHeader(email: string, token: string): string {
   return `Basic ${Buffer.from(`${email}:${token}`).toString("base64")}`;
 }
 
+function debug(msg: string): void {
+  if (process.env.PRD_DEBUG) console.log("[jira]", msg);
+}
+
 /** `fetch` with the shared per-request timeout applied via an AbortController. */
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
   const controller = new AbortController();
@@ -93,10 +97,14 @@ async function resolveCloudId(baseUrl: string): Promise<string | null> {
     if (res.ok) {
       const json = (await res.json()) as { cloudId?: string };
       id = json.cloudId ?? null;
+    } else {
+      debug(`tenant_info ${res.status} for ${baseUrl}`);
     }
-  } catch {
+  } catch (e) {
+    debug(`tenant_info failed for ${baseUrl}: ${(e as Error).message}`);
     id = null;
   }
+  debug(`cloudId for ${baseUrl}: ${id ?? "(none)"}`);
   cloudIdCache.set(baseUrl, id);
   return id;
 }
@@ -149,9 +157,11 @@ async function fetchChunk(
   // Try each candidate base; a wrong-token-type URL answers 401/403, so fall
   // back to the next base rather than surfacing it as an error.
   const bases = await apiBasesFor(config);
+  debug(`bases to try: ${bases.join(" , ")}`);
   let res: Response | null = null;
   for (let i = 0; i < bases.length; i++) {
     const candidate = await fetchWithTimeout(`${bases[i]}/search/jql`, init);
+    debug(`${bases[i]} -> HTTP ${candidate.status}`);
     if ((candidate.status === 401 || candidate.status === 403) && i < bases.length - 1) {
       continue;
     }

@@ -10,7 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, safeStorage } from "electron";
 
-import { fetchParents } from "../shared/jira";
+import { clearParentCache, fetchParents } from "../shared/jira";
 import type { JiraHealth, JiraStatus, PullRequest, Settings } from "../shared/types";
 
 function jiraTokenPath(): string {
@@ -37,9 +37,14 @@ export function hasJiraToken(): boolean {
  */
 export function setJiraToken(token: string): { ok: boolean; error?: string } {
   const file = jiraTokenPath();
+  // A token change invalidates every token-dependent cache: which API base works
+  // (a scoped vs classic token needs a different URL) and the resolved parents.
+  // Without this, switching token types in a running app keeps a stale/poisoned
+  // base cached and the next lookup silently returns nothing.
   if (!token) {
     try {
       fs.rmSync(file, { force: true });
+      clearParentCache();
       return { ok: true };
     } catch (e) {
       return { ok: false, error: (e as Error).message };
@@ -51,6 +56,7 @@ export function setJiraToken(token: string): { ok: boolean; error?: string } {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, safeStorage.encryptString(token));
+    clearParentCache();
     return { ok: true };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
@@ -104,16 +110,16 @@ export function buildParentEnricher(
     try {
       jira = loadSettings().jira;
     } catch (e) {
-      debug(`skip: loadSettings threw — ${(e as Error).message}`);
+      debug(`skip: loadSettings threw - ${(e as Error).message}`);
       return undefined;
     }
     if (!jira?.baseUrl || !jira.email) {
-      debug(`skip: incomplete config — baseUrl=${Boolean(jira?.baseUrl)} email=${Boolean(jira?.email)}`);
+      debug(`skip: incomplete config - baseUrl=${Boolean(jira?.baseUrl)} email=${Boolean(jira?.email)}`);
       return undefined;
     }
     const token = getJiraToken();
     if (!token) {
-      debug(`skip: no token — hasFile=${hasJiraToken()} encryptionAvailable=${encryptionAvailable()}`);
+      debug(`skip: no token - hasFile=${hasJiraToken()} encryptionAvailable=${encryptionAvailable()}`);
       return undefined;
     }
 
