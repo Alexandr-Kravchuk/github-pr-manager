@@ -13,6 +13,7 @@ import type {
   Settings,
 } from "../shared/types";
 import { ensureCliPath } from "./cli-path";
+import { clearParentCache } from "../shared/jira";
 import { buildParentEnricher, getJiraStatus, setJiraToken } from "./jira-store";
 import {
   validateClipboardText,
@@ -249,7 +250,23 @@ function registerIpc(): void {
 
   ipcMain.handle("settings:save", async (_event, raw: unknown): Promise<SaveSettingsResult> => {
     try {
+      let previousJira: Settings["jira"];
+      try {
+        previousJira = loadSettings().jira;
+      } catch {
+        previousJira = undefined;
+      }
       const saved = persistSettings(raw);
+      // The site URL / account identify what the Jira caches describe: the
+      // parent cache is keyed by issue key alone, so entries resolved against
+      // the old site would otherwise be served for the new one for up to its
+      // TTL. A connection change invalidates them exactly like a token change.
+      if (
+        saved.jira?.baseUrl !== previousJira?.baseUrl ||
+        saved.jira?.email !== previousJira?.email
+      ) {
+        clearParentCache();
+      }
       applyPreferences(saved);
       // Apply immediately: a fresh poll re-resolves tokens and re-fetches, and
       // its snapshot/config-error is pushed to the renderer.

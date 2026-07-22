@@ -10,6 +10,15 @@ import type { JiraHealth, JiraSettings } from "./types";
 export type EnrichmentSkipReason = "no-config" | "no-token" | "no-keys";
 
 /**
+ * The one "Jira connection is configured" predicate, shared by the settings
+ * status, the skip decision, and the enricher — a type guard so callers get
+ * compiler-checked narrowing instead of `!` assertions that can drift.
+ */
+export function hasJiraConfig(jira: JiraSettings | undefined): jira is JiraSettings {
+  return Boolean(jira?.baseUrl && jira.email);
+}
+
+/**
  * Decides whether enrichment is applicable, returning the skip reason if not.
  * Checked in order: connection config, then a stored token, then any issue keys.
  */
@@ -18,7 +27,7 @@ export function enrichmentSkipReason(
   hasToken: boolean,
   keyCount: number,
 ): EnrichmentSkipReason | null {
-  if (!jira?.baseUrl || !jira.email) return "no-config";
+  if (!hasJiraConfig(jira)) return "no-config";
   if (!hasToken) return "no-token";
   if (keyCount === 0) return "no-keys";
   return null;

@@ -13,6 +13,7 @@ import { app, safeStorage } from "electron";
 import { makeDebug } from "../shared/debug";
 import {
   enrichmentSkipReason,
+  hasJiraConfig,
   healthFromError,
   healthFromResolution,
 } from "../shared/jira-health";
@@ -84,8 +85,7 @@ export function getJiraToken(): string | null {
 export function getJiraStatus(loadSettings: () => Settings): JiraStatus {
   let hasConfig = false;
   try {
-    const jira = loadSettings().jira;
-    hasConfig = Boolean(jira?.baseUrl && jira?.email);
+    hasConfig = hasJiraConfig(loadSettings().jira);
   } catch {
     hasConfig = false;
   }
@@ -120,20 +120,21 @@ export function buildParentEnricher(
 
     // Resolve the token only when the connection is configured (avoid a needless
     // keychain decrypt). The skip decision itself lives in the pure, tested
-    // `enrichmentSkipReason` so its ordering can't drift untested.
-    const hasConfig = Boolean(jira?.baseUrl && jira?.email);
-    const token = hasConfig ? getJiraToken() : null;
+    // `enrichmentSkipReason` so its ordering can't drift untested; the re-checks
+    // in the `if` are redundant at runtime but let the compiler narrow
+    // `jira`/`token` instead of trusting `!` assertions.
+    const token = hasJiraConfig(jira) ? getJiraToken() : null;
     const keys = [...new Set(prs.map((p) => p.issueKey).filter((k): k is string => Boolean(k)))];
     const skip = enrichmentSkipReason(jira, Boolean(token), keys.length);
-    if (skip) {
-      debug(`skip: ${skip} (hasFile=${hasJiraToken()} encryptionAvailable=${encryptionAvailable()} prs=${prs.length})`);
+    if (skip || !hasJiraConfig(jira) || !token) {
+      debug(() => `skip: ${skip} (hasFile=${hasJiraToken()} encryptionAvailable=${encryptionAvailable()} prs=${prs.length})`);
       return undefined;
     }
 
-    debug(`resolving parents for ${keys.length} keys: ${keys.join(", ")}`);
+    debug(() => `resolving parents for ${keys.length} keys: ${keys.join(", ")}`);
     try {
-      const parents = await fetchParents(jira!, token!, keys);
-      debug(`resolved ${parents.size} parents: ${[...parents.entries()].map(([k, p]) => `${k}->${p.parentKey}`).join(", ") || "(none)"}`);
+      const parents = await fetchParents(jira, token, keys);
+      debug(() => `resolved ${parents.size} parents: ${[...parents.entries()].map(([k, p]) => `${k}->${p.parentKey}`).join(", ") || "(none)"}`);
       for (const pr of prs) {
         const parent = pr.issueKey ? parents.get(pr.issueKey) : undefined;
         pr.parentKey = parent?.parentKey ?? null;

@@ -504,7 +504,8 @@ test("healthFromError: stringifies a non-Error rejection", () =>
 
   // --- jira: fetchParents ----------------------------------------------------
   const JIRA_CFG = { baseUrl: "https://org.atlassian.net", email: "me@x.com" };
-  const CLOUD_ID = "cloud-abc-123";
+  // Must be UUID-shaped: resolveCloudId rejects anything else (URL-injection guard).
+  const CLOUD_ID = "158d8f10-2fb5-4b9b-9d0f-6a1c3f4b5e6d";
   const GATEWAY = `https://api.atlassian.com/ex/jira/${CLOUD_ID}/rest/api/3/search/jql`;
   const SITE = `${JIRA_CFG.baseUrl}/rest/api/3/search/jql`;
   const okJson = (body) => ({ ok: true, status: 200, statusText: "OK", json: async () => body, text: async () => "" });
@@ -533,17 +534,38 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     assert.strictEqual(hitSite, false); // scoped path must never touch the site URL
   });
 
-  await atest("fetchParents: falls back to the site URL on 401 (classic token)", async () => {
+  await atest("fetchParents: falls back to the site URL on 401/403 (classic token)", async () => {
+    // Both statuses are "wrong token type for this base" — a regression narrowing
+    // the condition to 401-only must fail here.
+    for (const status of [401, 403]) {
+      jira.clearParentCache();
+      global.fetch = async (url) => {
+        if (isTenant(url)) return tenantOk();
+        if (url === GATEWAY) return errRes(status); // classic token → gateway rejects
+        if (url === SITE)
+          return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0", fields: { summary: "P" } } } }] });
+        throw new Error("unexpected url " + url);
+      };
+      const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+      assert.strictEqual(map.get("ENG-1").parentKey, "ENG-0");
+    }
+  });
+
+  await atest("fetchParents: a non-UUID cloudId is rejected — site only, no gateway", async () => {
+    // tenant_info lives on a user-configured host; a malformed cloudId must not
+    // be interpolated into the api.atlassian.com URL path.
     jira.clearParentCache();
+    let hitGateway = false;
     global.fetch = async (url) => {
-      if (isTenant(url)) return tenantOk();
-      if (url === GATEWAY) return errRes(401); // classic token → gateway rejects
+      if (isTenant(url)) return okJson({ cloudId: "../../oauth/token#" });
+      if (url.startsWith("https://api.atlassian.com/")) { hitGateway = true; return errRes(401); }
       if (url === SITE)
-        return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0", fields: { summary: "P" } } } }] });
+        return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0" } } }] });
       throw new Error("unexpected url " + url);
     };
     const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
     assert.strictEqual(map.get("ENG-1").parentKey, "ENG-0");
+    assert.strictEqual(hitGateway, false);
   });
 
   await atest("fetchParents: uses site only when cloudId can't be resolved", async () => {
@@ -677,6 +699,108 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-2"]);
     assert.strictEqual(hitSite, true);
     assert.strictEqual(map.get("ENG-2").parentKey, "ENG-1");
+  });
+
+  await atest("fetchParents: a thrown-gateway fallback neither pins the site nor caches negatives", async () => {
+    // The untrusted-fallback guard (`cleanFallback`): a 200-but-empty reached
+    // past a thrown gateway might be a scoped token that belongs on the gateway.
+    // If the site base got pinned or negatives written here, the dashboard would
+    // stay silently empty long after the gateway recovers. Mutation guard:
+    // replacing resultIsTrustworthy with `bases.length > 1` must fail this test.
+    jira.clearParentCache();
+    const realNow = Date.now;
+    let clock = 5_000_000;
+    Date.now = () => clock;
+    let gatewayCalls = 0;
+    try {
+      global.fetch = async (url) => {
+        if (isTenant(url)) return tenantOk();
+        if (url === GATEWAY) {
+          gatewayCalls++;
+          if (gatewayCalls === 1) throw new Error("proxy reset"); // transient outage
+          return okJson({ issues: [{ key: "ENG-11", fields: { parent: { key: "ENG-10", fields: { summary: "P" } } } }] });
+        }
+        if (url === SITE) return okJson({ issues: [] }); // scoped token → 200-but-empty
+        throw new Error("unexpected url " + url);
+      };
+      // Pass 1: gateway throws, site answers empty → untrusted; nothing may be cached.
+      const first = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-11"]);
+      assert.strictEqual(first.has("ENG-11"), false);
+      // Past the 60s gateway backoff but far inside the 10-min parentCache TTL: a
+      // poisoning negative from pass 1 would still be fresh and keep the key out
+      // of the stale set; a pinned site base would never retry the gateway.
+      // Either regression leaves the map empty here.
+      clock += 61 * 1000;
+      const second = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-11"]);
+      assert.strictEqual(second.get("ENG-11").parentKey, "ENG-10");
+      assert.strictEqual(gatewayCalls, 2);
+    } finally {
+      Date.now = realNow;
+      global.fetch = realFetch;
+    }
+  });
+
+  await atest("fetchParents: a thrown gateway is backed off, not re-probed on every pass", async () => {
+    // Recurring-timeout guard: after the gateway throws (proxy blocking
+    // api.atlassian.com while allowing the site), later passes inside the backoff
+    // window must go straight to the site — no repeated 10s timeout per chunk per
+    // tick — and the gateway is re-attempted once the window lapses.
+    jira.clearParentCache();
+    const realNow = Date.now;
+    let clock = 9_000_000;
+    Date.now = () => clock;
+    let gatewayAttempts = 0;
+    try {
+      global.fetch = async (url, init) => {
+        if (isTenant(url)) return tenantOk();
+        if (url === GATEWAY) { gatewayAttempts++; throw new Error("blocked by proxy"); }
+        if (url === SITE) {
+          // Answer only the keys actually queried, so each pass must fetch.
+          const queried = (JSON.parse(init.body).jql.match(/ENG-\d+/g)) || [];
+          return okJson({ issues: queried.map((k) => ({ key: k, fields: { parent: { key: "ENG-20", fields: { summary: "P" } } } })) });
+        }
+        throw new Error("unexpected url " + url);
+      };
+      const first = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-21"]);
+      assert.strictEqual(first.get("ENG-21").parentKey, "ENG-20");
+      assert.strictEqual(gatewayAttempts, 1);
+      // Inside the backoff window: the gateway must not be attempted again.
+      const second = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-22"]);
+      assert.strictEqual(second.get("ENG-22").parentKey, "ENG-20");
+      assert.strictEqual(gatewayAttempts, 1);
+      // Past the window: the gateway candidate is back (and may throw again).
+      clock += 61 * 1000;
+      const third = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-23"]);
+      assert.strictEqual(third.get("ENG-23").parentKey, "ENG-20");
+      assert.strictEqual(gatewayAttempts, 2);
+    } finally {
+      Date.now = realNow;
+      global.fetch = realFetch;
+    }
+  });
+
+  await atest("fetchParents: a clearParentCache during an in-flight pass discards that pass's cache writes", async () => {
+    // Token-change race: the user saves a new token while a pass built with the
+    // old token is awaiting its fetch. When that pass resolves it must not re-pin
+    // the base or repopulate the caches that were just cleared — otherwise the
+    // new token would be sent to the old token's pinned base forever.
+    jira.clearParentCache();
+    let tenantCalls = 0;
+    let searchCalls = 0;
+    global.fetch = async (url) => {
+      if (isTenant(url)) { tenantCalls++; return tenantOk(); }
+      searchCalls++;
+      if (searchCalls === 1) jira.clearParentCache(); // the token save lands mid-flight
+      return okJson({ issues: [{ key: "ENG-31", fields: { parent: { key: "ENG-30", fields: { summary: "P" } } } }] });
+    };
+    // The raced pass reports empty — its result belongs to the pre-clear world.
+    const first = await jira.fetchParents(JIRA_CFG, "old-token", ["ENG-31"]);
+    assert.strictEqual(first.has("ENG-31"), false);
+    // The next pass must re-probe everything: nothing from the raced pass survived.
+    const second = await jira.fetchParents(JIRA_CFG, "new-token", ["ENG-31"]);
+    assert.strictEqual(second.get("ENG-31").parentKey, "ENG-30");
+    assert.strictEqual(tenantCalls, 2); // cloudId re-resolved → cleared cache stayed cleared
+    assert.strictEqual(searchCalls, 2); // parent re-fetched → no stale positive/pin survived
   });
 
   await atest("fetchParents: negatives are still cached after the base is pinned (no per-tick re-query)", async () => {

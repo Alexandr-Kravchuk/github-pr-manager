@@ -66,12 +66,35 @@ const NEGATIVE_CLOUDID_TTL_MS = 60_000;
  * uncached so a later tick can still discover the gateway.
  */
 const apiBaseCache = new Map<string, string>();
+/**
+ * Gateway bases that recently *threw* (proxy blocking api.atlassian.com, DNS,
+ * timeout), per site base URL: epoch ms until which the gateway candidate is
+ * skipped. Without this, an untrusted thrown fallback — which deliberately never
+ * pins a base — would re-probe the gateway and re-pay its 10 s timeout on every
+ * chunk of every tick, forever. The backoff only skips the *attempt*; it never
+ * pins the site base or marks its results trusted, so the poisoning guarantees
+ * around 200-but-empty are unchanged.
+ */
+const gatewayBackoff = new Map<string, number>();
+const GATEWAY_BACKOFF_MS = 60_000;
+const GATEWAY_ORIGIN = "https://api.atlassian.com/";
 
-/** Clears all caches (tests / a config change). */
+/**
+ * Bumped by `clearParentCache()` so an enrichment pass that was already in
+ * flight when the caches were cleared (e.g. the user saved a new token mid-tick)
+ * can tell that its data belongs to the pre-clear world and must not be written
+ * back — otherwise the resolving pass would silently re-pin the stale base and
+ * repopulate the just-cleared caches with old-token results.
+ */
+let cacheEpoch = 0;
+
+/** Clears all caches (tests / a config change) and invalidates in-flight passes. */
 export function clearParentCache(): void {
+  cacheEpoch++;
   parentCache.clear();
   cloudIdCache.clear();
   apiBaseCache.clear();
+  gatewayBackoff.clear();
 }
 
 function authHeader(email: string, token: string): string {
@@ -79,6 +102,9 @@ function authHeader(email: string, token: string): string {
 }
 
 const debug = makeDebug("[jira]");
+
+/** Atlassian cloudIds are UUIDs; anything else is treated as unresolved. */
+const CLOUD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** `fetch` with the shared per-request timeout applied via an AbortController. */
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
@@ -108,8 +134,11 @@ async function resolveCloudId(baseUrl: string): Promise<string | null> {
       cache: "no-store",
     });
     if (res.ok) {
-      const json = (await res.json()) as { cloudId?: string };
-      id = json.cloudId ?? null;
+      const json = (await res.json()) as { cloudId?: unknown };
+      // Accept only a UUID-shaped id: the value is interpolated into the gateway
+      // URL path, and tenant_info lives on a user-configured host — a malformed
+      // (or hostile) value must degrade to "unresolved", not rewrite the URL.
+      id = typeof json.cloudId === "string" && CLOUD_ID_RE.test(json.cloudId) ? json.cloudId : null;
     } else {
       debug(`tenant_info ${res.status} for ${baseUrl}`);
     }
@@ -143,7 +172,12 @@ async function apiBasesFor(
   if (cached) return { bases: [cached], pinned: true };
   const bases: string[] = [];
   const cloudId = await resolveCloudId(config.baseUrl);
-  if (cloudId) bases.push(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3`);
+  const backedOffUntil = gatewayBackoff.get(config.baseUrl) ?? 0;
+  if (cloudId && Date.now() >= backedOffUntil) {
+    bases.push(`${GATEWAY_ORIGIN}ex/jira/${cloudId}/rest/api/3`);
+  } else if (cloudId) {
+    debug(`gateway in backoff for ${config.baseUrl} (threw recently) — site only this pass`);
+  }
   bases.push(`${config.baseUrl}/rest/api/3`);
   return { bases, pinned: false };
 }
@@ -210,8 +244,12 @@ async function fetchChunk(
   // Any other status (429/500/…) means the base answered but the call genuinely
   // failed: surfaced as an error, never retried on the site URL where a scoped
   // token would answer 200-but-empty and mask it as "no parents found".
+  // Snapshot the epoch first: if clearParentCache() runs while a fetch below is
+  // awaited (a token/config change mid-tick), everything this pass learned is
+  // about the old token and must not touch the caches.
+  const epoch = cacheEpoch;
   const { bases, pinned } = await apiBasesFor(config);
-  debug(`bases to try: ${bases.join(" , ")}${pinned ? " (pinned)" : ""}`);
+  debug(() => `bases to try: ${bases.join(" , ")}${pinned ? " (pinned)" : ""}`);
   let res: Response | null = null;
   let winner: string | null = null;
   let cleanFallback = true;
@@ -225,6 +263,12 @@ async function fetchChunk(
       debug(`${bases[i]} -> threw ${(e as Error).message}`);
       lastError = e;
       cleanFallback = false; // reached the next base without learning this one's verdict
+      if (bases[i].startsWith(GATEWAY_ORIGIN) && epoch === cacheEpoch) {
+        // Skip the gateway candidate for a while: the throw says nothing about
+        // the token type, but re-attempting an unreachable host on every chunk
+        // of every tick would stall each poll by the 10 s timeout indefinitely.
+        gatewayBackoff.set(config.baseUrl, Date.now() + GATEWAY_BACKOFF_MS);
+      }
       if (isLast) break;
       continue;
     }
@@ -253,12 +297,19 @@ async function fetchChunk(
   // array returned for a pinned base would make every steady-state call look
   // untrusted and silently stop negative caching after the first resolution.
   const trusted = pinned || resultIsTrustworthy(bases, cleanFallback);
-  if (winner && trusted) apiBaseCache.set(config.baseUrl, winner);
+  // A pass that raced a clearParentCache() (epoch moved while a fetch was
+  // awaited) fetched with the old token: writing it back would re-pin the stale
+  // base and repopulate the just-cleared caches, so it must not touch them.
+  // fetchParents then reports this pass as empty — a one-tick blip; the refresh
+  // the token/settings change triggers re-resolves immediately with fresh state.
+  const writable = epoch === cacheEpoch;
+  if (winner && trusted && writable) apiBaseCache.set(config.baseUrl, winner);
   const json = (await res.json()) as RawSearchResponse;
   const returned = new Set<string>();
   for (const issue of json.issues ?? []) {
     returned.add(issue.key);
     const p = issue.fields?.parent;
+    if (!writable) continue;
     parentCache.set(issue.key, {
       parent: p ? { parentKey: p.key, parentSummary: p.fields?.summary ?? null } : null,
       fetchedAt: now,
@@ -270,7 +321,7 @@ async function fetchChunk(
   // caching those negatives for CACHE_TTL_MS would keep the banner "empty" for up
   // to 10 min after the gateway recovers. Skip them so the keys are re-queried on
   // the next tick, once the gateway is reachable again.
-  if (trusted) {
+  if (trusted && writable) {
     for (const key of keys) {
       if (!returned.has(key)) parentCache.set(key, { parent: null, fetchedAt: now });
     }

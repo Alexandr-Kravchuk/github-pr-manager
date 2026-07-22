@@ -139,6 +139,9 @@ function hashSnapshot(s: DashboardResponse): string {
     p.isDraft,
     p.isIgnored,
     p.parentKey,
+    // The group heading renders "key · summary" — a renamed parent task must
+    // re-emit or the heading goes stale until an unrelated field changes.
+    p.parentSummary,
   ]);
   return JSON.stringify({
     prs: lite,
@@ -146,8 +149,20 @@ function hashSnapshot(s: DashboardResponse): string {
     version: s.version,
     // Include the message, not just the state: an "error" whose text changes
     // between ticks must still push a fresh snapshot so the banner isn't stale.
-    jira: { state: s.jiraHealth?.state, message: s.jiraHealth?.message },
+    jira: { state: s.jiraHealth?.state, message: stableJiraMessage(s.jiraHealth?.message) },
   });
+}
+
+/**
+ * Change-detection view of the Jira health message. Jira HTTP errors append up
+ * to 200 chars of response body after an " — " separator (see fetchChunk), and
+ * that body can vary per response (request ids, retry hints). Hashing the raw
+ * text would re-emit a snapshot every tick and permanently reset the idle
+ * backoff — Jira noise dictating the GitHub poll cadence. Keep the stable
+ * prefix ("Jira HTTP 429 …"); genuinely different failures still differ there.
+ */
+function stableJiraMessage(message: string | undefined): string | undefined {
+  return message?.split(" — ")[0];
 }
 
 /**
