@@ -273,7 +273,9 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           >
             id.atlassian.com
           </button>
-          . The token is stored encrypted by your OS keychain — never in settings.
+          {" "}— a read-only token with the{" "}
+          <code className="text-fg-muted">read:jira-work</code> scope is enough (a classic token works
+          too). The token is stored encrypted by your OS keychain — never in settings.
         </p>
 
         {jira && !jira.encryptionAvailable && (
