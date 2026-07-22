@@ -556,6 +556,47 @@ async function withTempStore(fn) {
     await assert.rejects(() => jira.fetchParents(JIRA_CFG, "tok", ["ENG-5"]), /Jira HTTP 401/);
   });
 
+  await atest("fetchParents: a transient cloudId blip doesn't pin the site base (gateway recovers)", async () => {
+    // Regression: a single transient tenant_info failure must not disable the
+    // gateway path for the process lifetime. The failed cloudId is cached only
+    // briefly, and the site-only base (chosen while cloudId was unknown) is left
+    // uncached — so a later tick re-probes and the scoped token reaches the gateway.
+    jira.clearParentCache();
+    const realNow = Date.now;
+    let clock = 1_000_000;
+    Date.now = () => clock;
+    let tenantCalls = 0;
+    let gatewayHits = 0;
+    try {
+      global.fetch = async (url) => {
+        if (isTenant(url)) {
+          tenantCalls++;
+          if (tenantCalls === 1) throw new Error("network blip"); // transient
+          return tenantOk(); // recovers on the next probe
+        }
+        if (url === GATEWAY) {
+          gatewayHits++;
+          return okJson({ issues: [{ key: "ENG-9", fields: { parent: { key: "ENG-0", fields: { summary: "P" } } } }] });
+        }
+        if (url === SITE) return okJson({ issues: [] }); // scoped token → 200-but-empty
+        throw new Error("unexpected url " + url);
+      };
+      // First pass: cloudId lookup fails → site only → empty, gateway never tried.
+      const first = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-9"]);
+      assert.strictEqual(first.has("ENG-9"), false);
+      assert.strictEqual(gatewayHits, 0);
+      // Advance past both the negative-cloudId TTL and the parent-cache TTL.
+      clock += 11 * 60 * 1000;
+      // Second pass: cloudId resolves, gateway is re-probed and wins (not pinned to site).
+      const second = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-9"]);
+      assert.strictEqual(second.get("ENG-9").parentKey, "ENG-0");
+      assert.ok(gatewayHits >= 1); // gateway reached again → site base was not pinned
+    } finally {
+      Date.now = realNow;
+      global.fetch = realFetch;
+    }
+  });
+
   global.fetch = realFetch;
 
   console.log(`\n${passed} passed, ${failed} failed`);

@@ -631,7 +631,7 @@ export function App() {
 
       {/* Jira parent-enrichment health — explain a failed/empty pass rather than
           leaving "Group by parent task" silently empty. */}
-      {data?.jiraHealth?.state === "error" && (
+      {data?.jiraHealth?.state === "error" && groupBy === "parent" && (
         <div className="mb-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/30 dark:text-red-200">
           <span className="font-semibold">Jira:</span> couldn&apos;t resolve parent tasks
           {data.jiraHealth.message ? ` — ${data.jiraHealth.message}` : ""}. Parent grouping may be incomplete.

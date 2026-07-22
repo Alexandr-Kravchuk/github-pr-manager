@@ -44,13 +44,25 @@ const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
  * Resolved Atlassian cloudId per site base URL — needed to build the API-gateway
- * URL scoped tokens require. The `_edge/tenant_info` endpoint is public, so this
- * is cached for the process lifetime (null = couldn't determine it).
+ * URL scoped tokens require. The `_edge/tenant_info` endpoint is public. A
+ * *resolved* id is cached for the process lifetime; a *failed* lookup (null) is
+ * cached only briefly, so a transient network blip on `_edge/tenant_info` can't
+ * disable the gateway path until the app restarts.
  */
-const cloudIdCache = new Map<string, string | null>();
+interface CloudIdEntry {
+  id: string | null;
+  /** Epoch ms after which a null (failed) result is re-probed; Infinity for a resolved id. */
+  expiresAt: number;
+}
+const cloudIdCache = new Map<string, CloudIdEntry>();
+/** A failed cloudId lookup is re-probed after this long; a resolved id never expires. */
+const NEGATIVE_CLOUDID_TTL_MS = 60_000;
 /**
  * The REST base that actually worked for a site, remembered after the first
  * success so later ticks don't re-probe the gateway (and pay its fallback cost).
+ * Only a base whose token type is *settled* is cached (see `fetchChunk`) — a
+ * site-only base chosen because the cloudId couldn't be resolved is left
+ * uncached so a later tick can still discover the gateway.
  */
 const apiBaseCache = new Map<string, string>();
 
@@ -87,7 +99,9 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
  */
 async function resolveCloudId(baseUrl: string): Promise<string | null> {
   const cached = cloudIdCache.get(baseUrl);
-  if (cached !== undefined) return cached;
+  // A resolved id is good for the process lifetime; a null result only until its
+  // short TTL lapses, so a transient tenant_info failure self-heals on a later tick.
+  if (cached && (cached.id !== null || Date.now() < cached.expiresAt)) return cached.id;
   let id: string | null = null;
   try {
     const res = await fetchWithTimeout(`${baseUrl}/_edge/tenant_info`, {
@@ -105,7 +119,10 @@ async function resolveCloudId(baseUrl: string): Promise<string | null> {
     id = null;
   }
   debug(`cloudId for ${baseUrl}: ${id ?? "(none)"}`);
-  cloudIdCache.set(baseUrl, id);
+  cloudIdCache.set(baseUrl, {
+    id,
+    expiresAt: id === null ? Date.now() + NEGATIVE_CLOUDID_TTL_MS : Infinity,
+  });
   return id;
 }
 
@@ -154,8 +171,12 @@ async function fetchChunk(
     cache: "no-store",
   };
 
-  // Try each candidate base; a wrong-token-type URL answers 401/403, so fall
-  // back to the next base rather than surfacing it as an error.
+  // Try each candidate base. Only 401/403 triggers a fallback: those mean "wrong
+  // token type for this base" (e.g. a classic token on the gateway), so the next
+  // base is worth trying. Any other status (429/500/…) means the base is right
+  // but the call genuinely failed — deliberately surfaced rather than retried on
+  // the site URL, where a scoped token would answer 200-but-empty and mask the
+  // real error as "no parents found".
   const bases = await apiBasesFor(config);
   debug(`bases to try: ${bases.join(" , ")}`);
   let res: Response | null = null;
@@ -166,7 +187,13 @@ async function fetchChunk(
       continue;
     }
     res = candidate;
-    if (candidate.ok) apiBaseCache.set(config.baseUrl, bases[i]);
+    // Cache the winner only once the token type is settled — the gateway was a
+    // candidate (`bases.length > 1`), so either it won or it was tried and
+    // rejected. A lone site base (cloudId unresolved) is NOT cached: a scoped
+    // token's 200-but-empty there is indistinguishable from success, and pinning
+    // it would permanently hide the gateway. Leaving it uncached lets a later
+    // tick re-probe the cloudId and recover.
+    if (candidate.ok && bases.length > 1) apiBaseCache.set(config.baseUrl, bases[i]);
     break;
   }
   if (!res) throw new Error("Jira: no reachable API base");

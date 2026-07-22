@@ -140,7 +140,14 @@ function hashSnapshot(s: DashboardResponse): string {
     p.isIgnored,
     p.parentKey,
   ]);
-  return JSON.stringify({ prs: lite, errors: s.errors, version: s.version, jira: s.jiraHealth?.state });
+  return JSON.stringify({
+    prs: lite,
+    errors: s.errors,
+    version: s.version,
+    // Include the message, not just the state: an "error" whose text changes
+    // between ticks must still push a fresh snapshot so the banner isn't stale.
+    jira: { state: s.jiraHealth?.state, message: s.jiraHealth?.message },
+  });
 }
 
 /**
