@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, safeStorage } from "electron";
 
+import { makeDebug } from "../shared/debug";
 import {
   enrichmentSkipReason,
   healthFromError,
@@ -107,9 +108,7 @@ export function getJiraStatus(loadSettings: () => Settings): JiraStatus {
 export function buildParentEnricher(
   loadSettings: () => Settings,
 ): (prs: PullRequest[]) => Promise<JiraHealth | undefined> {
-  const debug = (msg: string) => {
-    if (process.env.PRD_DEBUG) console.log("[jira]", msg);
-  };
+  const debug = makeDebug("[jira]");
   return async (prs: PullRequest[]) => {
     let jira: Settings["jira"];
     try {

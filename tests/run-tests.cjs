@@ -616,14 +616,19 @@ test("healthFromError: stringifies a non-Error rejection", () =>
         if (url === SITE) return okJson({ issues: [] }); // scoped token → 200-but-empty
         throw new Error("unexpected url " + url);
       };
-      // First pass: cloudId lookup fails → site only → empty, gateway never tried.
+      // First pass IS the in-blip fetch: cloudId lookup fails → site only → empty,
+      // gateway never tried. This is where a negative WOULD be written if the
+      // untrusted-base guard regressed.
       const first = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-9"]);
       assert.strictEqual(first.has("ENG-9"), false);
       assert.strictEqual(gatewayHits, 0);
       // Advance just past the 60s cloudId TTL — far short of the 10-min parentCache TTL.
       clock += 61 * 1000;
       // Second pass: cloudId re-resolves, the gateway wins (site base not pinned,
-      // no negatives cached), so recovery happens inside the 60s window.
+      // no negatives cached), so recovery happens inside the 60s window. Recovering
+      // here — well before CACHE_TTL_MS — is the proof that the blip wrote no
+      // poisoning negative: a cached negative would still be fresh at +61s, keep
+      // ENG-9 out of the stale set, and leave the map empty (failing the assert).
       const second = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-9"]);
       assert.strictEqual(second.get("ENG-9").parentKey, "ENG-0");
       assert.ok(gatewayHits >= 1);
@@ -672,6 +677,54 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-2"]);
     assert.strictEqual(hitSite, true);
     assert.strictEqual(map.get("ENG-2").parentKey, "ENG-1");
+  });
+
+  await atest("fetchParents: negatives are still cached after the base is pinned (no per-tick re-query)", async () => {
+    // Regression: once the base is pinned, apiBasesFor returns a single-element
+    // array. A `bases.length > 1` trust check alone would then treat every
+    // steady-state call as untrusted and stop caching negatives, re-querying
+    // no-parent keys on every tick. A pinned base must stay trusted.
+    jira.clearParentCache();
+    let searchCalls = 0;
+    global.fetch = async (url) => {
+      if (isTenant(url)) return tenantOk();
+      searchCalls++; // gateway search — returns a parent only for ENG-A, never ENG-B
+      return okJson({ issues: [{ key: "ENG-A", fields: { parent: { key: "ENG-P", fields: { summary: "P" } } } }] });
+    };
+    // Call 1 pins the gateway (bases.length === 2 here).
+    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-A"]);
+    // Call 2 runs with the base already pinned (bases === [gateway]); ENG-B is not
+    // returned, so its negative must still be written despite the single-element set.
+    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-B"]);
+    const callsBefore = searchCalls;
+    // Call 3 for the same no-parent key must make no new request — proving the
+    // negative from call 2 was cached.
+    const again = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-B"]);
+    assert.strictEqual(again.has("ENG-B"), false);
+    assert.strictEqual(searchCalls, callsBefore);
+  });
+
+  await atest("clearParentCache: wipes parent + cloudId + apiBase caches (token change forces a full re-probe)", async () => {
+    jira.clearParentCache();
+    let tenantCalls = 0;
+    let searchCalls = 0;
+    global.fetch = async (url) => {
+      if (isTenant(url)) { tenantCalls++; return tenantOk(); }
+      searchCalls++;
+      return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0", fields: { summary: "P" } } } }] });
+    };
+    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    assert.strictEqual(tenantCalls, 1); // cloudId resolved once
+    assert.strictEqual(searchCalls, 1);
+    // A repeat with everything cached hits the network for neither.
+    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    assert.strictEqual(tenantCalls, 1);
+    assert.strictEqual(searchCalls, 1);
+    // Clearing (as setJiraToken does on a token change) forces a full re-probe.
+    jira.clearParentCache();
+    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    assert.strictEqual(tenantCalls, 2); // cloudIdCache cleared → tenant_info re-probed
+    assert.strictEqual(searchCalls, 2); // parentCache + apiBaseCache cleared → re-queried
   });
 
   global.fetch = realFetch;

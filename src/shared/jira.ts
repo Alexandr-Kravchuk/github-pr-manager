@@ -16,6 +16,7 @@
  * We try the gateway first and fall back to the site on a 401/403, then cache the
  * winner. A scoped token's recommended scope is just `read:jira-work`.
  */
+import { makeDebug } from "./debug";
 import type { JiraSettings } from "./types";
 
 /** A resolved parent for one issue key. */
@@ -77,9 +78,7 @@ function authHeader(email: string, token: string): string {
   return `Basic ${Buffer.from(`${email}:${token}`).toString("base64")}`;
 }
 
-function debug(msg: string): void {
-  if (process.env.PRD_DEBUG) console.log("[jira]", msg);
-}
+const debug = makeDebug("[jira]");
 
 /** `fetch` with the shared per-request timeout applied via an AbortController. */
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
@@ -134,26 +133,37 @@ async function resolveCloudId(baseUrl: string): Promise<string | null> {
  * reach the site URL — whereas a classic token on the gateway answers a clean
  * 401, which `fetchChunk` uses as its fallback trigger.
  */
-async function apiBasesFor(config: JiraSettings): Promise<string[]> {
+async function apiBasesFor(
+  config: JiraSettings,
+): Promise<{ bases: string[]; pinned: boolean }> {
   const cached = apiBaseCache.get(config.baseUrl);
-  if (cached) return [cached];
+  // A pinned base was already vetted when it was cached (only trusted results are
+  // pinned), so flag it: the caller must treat it as trustworthy even though the
+  // gateway is no longer in the (now single-element) candidate list.
+  if (cached) return { bases: [cached], pinned: true };
   const bases: string[] = [];
   const cloudId = await resolveCloudId(config.baseUrl);
   if (cloudId) bases.push(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3`);
   bases.push(`${config.baseUrl}/rest/api/3`);
-  return bases;
+  return { bases, pinned: false };
 }
 
 /**
- * Whether a chunk result is trustworthy enough to *cache* — governs both pinning
- * the winning base (`apiBaseCache`) and writing negative per-key entries. Both
- * are only safe once the token type was settled by clean HTTP responses:
+ * Whether a *freshly-resolved* candidate set is trustworthy enough to *cache* —
+ * governs both pinning the winning base (`apiBaseCache`) and writing negative
+ * per-key entries. Both are only safe once the token type was settled by clean
+ * HTTP responses:
  *
  *  - the gateway was a candidate (`bases.length > 1`), so a win means scoped and
  *    a 401/403 means classic; a lone site base (cloudId unresolved) can't tell a
  *    scoped token's masked 200-but-empty from a genuine no-match; and
  *  - no candidate was skipped via a *thrown* network error (`cleanFallback`),
  *    which tells us nothing about that base's verdict.
+ *
+ * An already-*pinned* base is trusted separately by the caller (it was vetted
+ * when first pinned) — this predicate covers only a fresh candidate set, so it
+ * must not be used alone once a base is pinned (the array is then single-element
+ * and this would wrongly return false for the steady-state case).
  *
  * Caching an untrusted 200-but-empty would strand the dashboard on the wrong
  * base and keep false negatives alive for `CACHE_TTL_MS` after the gateway
@@ -200,8 +210,8 @@ async function fetchChunk(
   // Any other status (429/500/…) means the base answered but the call genuinely
   // failed: surfaced as an error, never retried on the site URL where a scoped
   // token would answer 200-but-empty and mask it as "no parents found".
-  const bases = await apiBasesFor(config);
-  debug(`bases to try: ${bases.join(" , ")}`);
+  const { bases, pinned } = await apiBasesFor(config);
+  debug(`bases to try: ${bases.join(" , ")}${pinned ? " (pinned)" : ""}`);
   let res: Response | null = null;
   let winner: string | null = null;
   let cleanFallback = true;
@@ -237,9 +247,12 @@ async function fetchChunk(
       `Jira HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 200)}` : ""}`,
     );
   }
-  // Cache the winning base only when the result is trustworthy (token type
-  // cleanly settled) — otherwise a masked 200-but-empty could pin the wrong base.
-  const trusted = resultIsTrustworthy(bases, cleanFallback);
+  // Trust a result enough to cache (pin the base + write negatives) when the base
+  // was already vetted and pinned on an earlier call, OR the fresh candidate set
+  // settled the token type cleanly. Without the `pinned` term the single-element
+  // array returned for a pinned base would make every steady-state call look
+  // untrusted and silently stop negative caching after the first resolution.
+  const trusted = pinned || resultIsTrustworthy(bases, cleanFallback);
   if (winner && trusted) apiBaseCache.set(config.baseUrl, winner);
   const json = (await res.json()) as RawSearchResponse;
   const returned = new Set<string>();
