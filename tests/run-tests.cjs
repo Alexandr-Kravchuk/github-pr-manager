@@ -471,53 +471,88 @@ async function withTempStore(fn) {
 
   // --- jira: fetchParents ----------------------------------------------------
   const JIRA_CFG = { baseUrl: "https://org.atlassian.net", email: "me@x.com" };
-  const jiraResponse = (issues) => ({
-    ok: true,
-    status: 200,
-    statusText: "OK",
-    json: async () => ({ issues }),
-    text: async () => "",
-  });
+  const CLOUD_ID = "cloud-abc-123";
+  const GATEWAY = `https://api.atlassian.com/ex/jira/${CLOUD_ID}/rest/api/3/search/jql`;
+  const SITE = `${JIRA_CFG.baseUrl}/rest/api/3/search/jql`;
+  const okJson = (body) => ({ ok: true, status: 200, statusText: "OK", json: async () => body, text: async () => "" });
+  const errRes = (status) => ({ ok: false, status, statusText: "ERR", json: async () => ({}), text: async () => "err" });
+  const tenantOk = () => okJson({ cloudId: CLOUD_ID });
+  const isTenant = (url) => url.endsWith("/_edge/tenant_info");
   // Restore the real fetch after these tests.
   const realFetch = global.fetch;
 
-  await atest("fetchParents: maps each key to its parent (key + summary)", async () => {
+  await atest("fetchParents: resolves via the API gateway (scoped token)", async () => {
     jira.clearParentCache();
-    global.fetch = async () =>
-      jiraResponse([
-        { key: "ENG-93373", fields: { parent: { key: "ENG-93367", fields: { summary: "Analyze long app creating" } } } },
-        { key: "ENG-93374", fields: { parent: { key: "ENG-93367", fields: { summary: "Analyze long app creating" } } } },
-      ]);
+    let hitSite = false;
+    global.fetch = async (url) => {
+      if (isTenant(url)) return tenantOk();
+      if (url === GATEWAY)
+        return okJson({ issues: [
+          { key: "ENG-93373", fields: { parent: { key: "ENG-93367", fields: { summary: "Analyze long app creating" } } } },
+          { key: "ENG-93374", fields: { parent: { key: "ENG-93367", fields: { summary: "Analyze long app creating" } } } },
+        ] });
+      if (url === SITE) { hitSite = true; return okJson({ issues: [] }); }
+      throw new Error("unexpected url " + url);
+    };
     const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-93373", "ENG-93374"]);
     assert.strictEqual(map.get("ENG-93373").parentKey, "ENG-93367");
     assert.strictEqual(map.get("ENG-93374").parentSummary, "Analyze long app creating");
+    assert.strictEqual(hitSite, false); // scoped path must never touch the site URL
+  });
+
+  await atest("fetchParents: falls back to the site URL on 401 (classic token)", async () => {
+    jira.clearParentCache();
+    global.fetch = async (url) => {
+      if (isTenant(url)) return tenantOk();
+      if (url === GATEWAY) return errRes(401); // classic token → gateway rejects
+      if (url === SITE)
+        return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0", fields: { summary: "P" } } } }] });
+      throw new Error("unexpected url " + url);
+    };
+    const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    assert.strictEqual(map.get("ENG-1").parentKey, "ENG-0");
+  });
+
+  await atest("fetchParents: uses site only when cloudId can't be resolved", async () => {
+    jira.clearParentCache();
+    let hitGateway = false;
+    global.fetch = async (url) => {
+      if (isTenant(url)) return errRes(404);
+      if (url === GATEWAY) { hitGateway = true; return errRes(401); }
+      if (url === SITE)
+        return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0" } } }] });
+      throw new Error("unexpected url " + url);
+    };
+    const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    assert.strictEqual(map.get("ENG-1").parentKey, "ENG-0");
+    assert.strictEqual(hitGateway, false); // no cloudId → gateway never attempted
   });
 
   await atest("fetchParents: a key with no parent is absent from the map", async () => {
     jira.clearParentCache();
-    global.fetch = async () => jiraResponse([{ key: "ENG-1", fields: {} }]);
+    global.fetch = async (url) =>
+      isTenant(url) ? tenantOk() : okJson({ issues: [{ key: "ENG-1", fields: {} }] });
     const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
     assert.strictEqual(map.has("ENG-1"), false);
   });
 
   await atest("fetchParents: caches — a second call makes no request", async () => {
     jira.clearParentCache();
-    let calls = 0;
-    global.fetch = async () => {
-      calls++;
-      return jiraResponse([
-        { key: "ENG-100", fields: { parent: { key: "ENG-1", fields: { summary: "P" } } } },
-      ]);
+    let searchCalls = 0;
+    global.fetch = async (url) => {
+      if (isTenant(url)) return tenantOk();
+      searchCalls++;
+      return okJson({ issues: [{ key: "ENG-100", fields: { parent: { key: "ENG-1", fields: { summary: "P" } } } }] });
     };
     await jira.fetchParents(JIRA_CFG, "tok", ["ENG-100"]);
     const again = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-100"]);
-    assert.strictEqual(calls, 1);
+    assert.strictEqual(searchCalls, 1);
     assert.strictEqual(again.get("ENG-100").parentKey, "ENG-1");
   });
 
-  await atest("fetchParents: throws on an HTTP error", async () => {
+  await atest("fetchParents: throws when every base rejects (401)", async () => {
     jira.clearParentCache();
-    global.fetch = async () => ({ ok: false, status: 401, statusText: "Unauthorized", text: async () => "nope", json: async () => ({}) });
+    global.fetch = async (url) => (isTenant(url) ? tenantOk() : errRes(401));
     await assert.rejects(() => jira.fetchParents(JIRA_CFG, "tok", ["ENG-5"]), /Jira HTTP 401/);
   });
 

@@ -44,6 +44,7 @@ import type {
   DashboardResponse,
   HostConfig,
   HostError,
+  JiraHealth,
   PullRequest,
   RateLimitInfo,
   Settings,
@@ -77,7 +78,7 @@ export interface PollerOptions {
    * parent keys for grouping. Best-effort: it must not throw (the poller calls it
    * inside a try/catch regardless). No-op when omitted.
    */
-  enrichParents?: (prs: PullRequest[]) => Promise<void>;
+  enrichParents?: (prs: PullRequest[]) => Promise<JiraHealth | undefined | void>;
   /**
    * Cheap REST notifications detector — defaults to the real `probeNotifications`.
    * PRD_MOCK swaps in a no-op so mock mode never touches the network. Runs on the
@@ -139,7 +140,7 @@ function hashSnapshot(s: DashboardResponse): string {
     p.isIgnored,
     p.parentKey,
   ]);
-  return JSON.stringify({ prs: lite, errors: s.errors, version: s.version });
+  return JSON.stringify({ prs: lite, errors: s.errors, version: s.version, jira: s.jiraHealth?.state });
 }
 
 /**
@@ -495,11 +496,14 @@ export class Poller {
     }
 
     // Resolve Jira parent keys for grouping (best-effort; no-op without Jira).
+    let jiraHealth: JiraHealth | undefined;
     if (this.options.enrichParents) {
       try {
-        await this.options.enrichParents(allPrs);
+        jiraHealth = (await this.options.enrichParents(allPrs)) ?? undefined;
       } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
         console.error("[poller] enrichParents failed:", e);
+        jiraHealth = { state: "error", message, queried: 0, resolved: 0 };
       }
     }
 
@@ -525,6 +529,7 @@ export class Poller {
       rateLimits,
       fetchedAt: oldestFetchedAt ?? new Date().toISOString(),
       version: this.options.appVersion,
+      jiraHealth,
     };
 
     const hash = hashSnapshot(snapshot);

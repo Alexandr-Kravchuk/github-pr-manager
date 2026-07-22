@@ -6,6 +6,15 @@
  * Deliberately Electron-free (Node `fetch` + `Buffer`) so it stays testable and
  * runs in the poller. Auth is HTTP Basic with the user's Atlassian email + API
  * token — the token is supplied by the caller (stored encrypted, never here).
+ *
+ * Supports both Atlassian API-token types transparently, because the token is
+ * opaque and the two types need *different* URLs (see `apiBasesFor`):
+ *   - a **scoped** (least-privilege, read-only) token only works through the API
+ *     gateway `https://api.atlassian.com/ex/jira/<cloudId>/rest/api/3`;
+ *   - a **classic** (unscoped) token only works against the site URL
+ *     `<baseUrl>/rest/api/3`.
+ * We try the gateway first and fall back to the site on a 401/403, then cache the
+ * winner. A scoped token's recommended scope is just `read:jira-work`.
  */
 import type { JiraSettings } from "./types";
 
@@ -33,13 +42,81 @@ const CHUNK_SIZE = 50;
  */
 const REQUEST_TIMEOUT_MS = 10_000;
 
-/** Clears the parent cache (tests / a config change). */
+/**
+ * Resolved Atlassian cloudId per site base URL — needed to build the API-gateway
+ * URL scoped tokens require. The `_edge/tenant_info` endpoint is public, so this
+ * is cached for the process lifetime (null = couldn't determine it).
+ */
+const cloudIdCache = new Map<string, string | null>();
+/**
+ * The REST base that actually worked for a site, remembered after the first
+ * success so later ticks don't re-probe the gateway (and pay its fallback cost).
+ */
+const apiBaseCache = new Map<string, string>();
+
+/** Clears all caches (tests / a config change). */
 export function clearParentCache(): void {
   parentCache.clear();
+  cloudIdCache.clear();
+  apiBaseCache.clear();
 }
 
 function authHeader(email: string, token: string): string {
   return `Basic ${Buffer.from(`${email}:${token}`).toString("base64")}`;
+}
+
+/** `fetch` with the shared per-request timeout applied via an AbortController. */
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Resolves the site's Atlassian cloudId from the public `_edge/tenant_info`
+ * endpoint (no auth). Cached per base URL; null if it can't be determined, in
+ * which case we simply skip the gateway and try the site URL only.
+ */
+async function resolveCloudId(baseUrl: string): Promise<string | null> {
+  const cached = cloudIdCache.get(baseUrl);
+  if (cached !== undefined) return cached;
+  let id: string | null = null;
+  try {
+    const res = await fetchWithTimeout(`${baseUrl}/_edge/tenant_info`, {
+      headers: { Accept: "application/json", "User-Agent": "github-pr-manager" },
+      cache: "no-store",
+    });
+    if (res.ok) {
+      const json = (await res.json()) as { cloudId?: string };
+      id = json.cloudId ?? null;
+    }
+  } catch {
+    id = null;
+  }
+  cloudIdCache.set(baseUrl, id);
+  return id;
+}
+
+/**
+ * Ordered REST bases to try for this site. Gateway first (scoped tokens), site
+ * second (classic tokens); once one succeeds it is cached and returned alone.
+ * The order matters: a scoped token on the site URL answers 200-but-empty, which
+ * is indistinguishable from a genuine "no matches", so a scoped token must never
+ * reach the site URL — whereas a classic token on the gateway answers a clean
+ * 401, which `fetchChunk` uses as its fallback trigger.
+ */
+async function apiBasesFor(config: JiraSettings): Promise<string[]> {
+  const cached = apiBaseCache.get(config.baseUrl);
+  if (cached) return [cached];
+  const bases: string[] = [];
+  const cloudId = await resolveCloudId(config.baseUrl);
+  if (cloudId) bases.push(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3`);
+  bases.push(`${config.baseUrl}/rest/api/3`);
+  return bases;
 }
 
 interface RawSearchResponse {
@@ -57,25 +134,32 @@ async function fetchChunk(
   now: number,
 ): Promise<void> {
   const jql = `key in (${keys.join(",")})`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  let res: Response;
-  try {
-    res = await fetch(`${config.baseUrl}/rest/api/3/search/jql`, {
-      method: "POST",
-      headers: {
-        Authorization: authHeader(config.email, token),
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "github-pr-manager",
-      },
-      body: JSON.stringify({ jql, fields: ["parent"], maxResults: 100 }),
-      cache: "no-store",
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
+  const init: RequestInit = {
+    method: "POST",
+    headers: {
+      Authorization: authHeader(config.email, token),
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": "github-pr-manager",
+    },
+    body: JSON.stringify({ jql, fields: ["parent"], maxResults: 100 }),
+    cache: "no-store",
+  };
+
+  // Try each candidate base; a wrong-token-type URL answers 401/403, so fall
+  // back to the next base rather than surfacing it as an error.
+  const bases = await apiBasesFor(config);
+  let res: Response | null = null;
+  for (let i = 0; i < bases.length; i++) {
+    const candidate = await fetchWithTimeout(`${bases[i]}/search/jql`, init);
+    if ((candidate.status === 401 || candidate.status === 403) && i < bases.length - 1) {
+      continue;
+    }
+    res = candidate;
+    if (candidate.ok) apiBaseCache.set(config.baseUrl, bases[i]);
+    break;
   }
+  if (!res) throw new Error("Jira: no reachable API base");
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(
