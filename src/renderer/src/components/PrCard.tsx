@@ -33,12 +33,16 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
  *  - waiting (gray): your PR is awaiting someone else's review and nobody has
  *    approved yet (ball in their court) — nothing required from you, even with
  *    open threads.
+ *  - approved (green): at least one human approval, CI isn't failing or
+ *    running, and there are no open threads. A single human approve is enough —
+ *    even if other reviewers are still pending, and even if the PR has no checks
+ *    at all. We key off an actual approval rather than `reviewDecision`, which
+ *    stays null/REVIEW_REQUIRED on repos without required-review rules. Ranked
+ *    ABOVE attention: an approved, green PR stays green even when it has unread
+ *    comments, so opening it (which clears `hasNewActivity`) doesn't flip the
+ *    accent from amber to green. Open threads and running CI still demote it,
+ *    since those are unfinished work.
  *  - attention (amber): new comments, open threads, CI running.
- *  - approved (green): at least one human approval, and CI isn't failing or
- *    running. A single human approve is enough — even if other reviewers are
- *    still pending, and even if the PR has no checks at all. We key off an
- *    actual approval rather than `reviewDecision`, which stays
- *    null/REVIEW_REQUIRED on repos without required-review rules.
  */
 export function prSignal(pr: PullRequest): PrSignal {
   const isAuthor = pr.roles.includes("author");
@@ -55,11 +59,16 @@ export function prSignal(pr: PullRequest): PrSignal {
   if (isAuthor && pr.awaitingReview && !pr.hasNewActivity && !pr.hasHumanApproval) {
     return "waiting";
   }
+  if (
+    pr.hasHumanApproval &&
+    pr.ciState !== "failure" &&
+    pr.ciState !== "pending" &&
+    pr.unresolvedThreads === 0
+  ) {
+    return "approved";
+  }
   if (pr.hasNewActivity || pr.unresolvedThreads > 0 || pr.pendingChecks.length > 0) {
     return "attention";
-  }
-  if (pr.hasHumanApproval && pr.ciState !== "failure" && pr.ciState !== "pending") {
-    return "approved";
   }
   return "idle";
 }
