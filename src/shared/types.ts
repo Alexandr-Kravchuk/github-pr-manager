@@ -227,6 +227,16 @@ export interface PullRequest {
   hasHumanApproval: boolean;
 
   /**
+   * GitHub reports a real merge conflict (`mergeable === "CONFLICTING"`) — the
+   * branch cannot merge until the author integrates the base. Only the hard
+   * CONFLICTING verdict counts; the transient UNKNOWN that GitHub returns right
+   * after a push (while it recomputes mergeability) stays false, so a freshly
+   * pushed PR is not flagged as conflicting until GitHub settles. Author-only
+   * signal on the card: only the author can resolve their own conflict.
+   */
+  hasConflicts: boolean;
+
+  /**
    * Roll-up flag: the PR is ready to merge. Composite of GitHub's mergeable
    * signal plus the dashboard's own readiness checks — true when the PR is not a
    * draft, has no merge conflicts (GitHub `mergeable === "MERGEABLE"`), has at

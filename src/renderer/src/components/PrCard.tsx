@@ -20,9 +20,12 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
 /**
  * Classify a PR by signal priority.
  *  - blocked (red): your PR is blocked and needs your action — failing CI, a
- *    change request you haven't re-requested review on, or a reviewer comment
+ *    change request you haven't re-requested review on, a reviewer comment
  *    you haven't answered (an unresolved thread whose last comment isn't yours,
- *    even from a plain "Comment" review with green CI). Only for PRs you authored.
+ *    even from a plain "Comment" review with green CI), or a merge conflict you
+ *    must resolve (`hasConflicts`) — the latter blocks merge even when CI is
+ *    green and the PR is approved, so it belongs here, not in `approved`. Only
+ *    for PRs you authored.
  *  - myReview (violet): a review is being requested of you and you haven't
  *    submitted one yet — your turn to act. The `reviewer` role comes from
  *    GitHub's `review-requested:@me`, so it clears itself once you review.
@@ -49,7 +52,10 @@ export function prSignal(pr: PullRequest): PrSignal {
 
   if (
     isAuthor &&
-    (pr.failingChecks.length > 0 || pr.hasUnaddressedChangeRequest || pr.hasUnaddressedComments)
+    (pr.failingChecks.length > 0 ||
+      pr.hasUnaddressedChangeRequest ||
+      pr.hasUnaddressedComments ||
+      pr.hasConflicts)
   ) {
     return "blocked";
   }

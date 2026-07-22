@@ -394,6 +394,11 @@ export function mapPr(
     failingChecks.length === 0 &&
     pendingChecks.length === 0;
 
+  // Hard conflict only. GitHub reports UNKNOWN while it recomputes mergeability
+  // right after a push; treating that as a conflict would falsely flag a PR the
+  // instant it is pushed, so key strictly off CONFLICTING.
+  const hasConflicts = pr.mergeable === "CONFLICTING";
+
   return {
     id: pr.id,
     hostLabel,
@@ -426,6 +431,7 @@ export function mapPr(
     hasUnaddressedChangeRequest,
     hasUnaddressedComments,
     hasHumanApproval,
+    hasConflicts,
     canBeMerged,
     // Resolved later by the poller's Jira parent enricher (null without Jira):
     parentKey: null,

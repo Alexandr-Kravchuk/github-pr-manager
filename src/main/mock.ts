@@ -75,6 +75,7 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     hasUnaddressedChangeRequest: false,
     hasUnaddressedComments: false,
     hasHumanApproval: false,
+    hasConflicts: false,
     canBeMerged: false,
     // Overwritten by applyActivity:
     hasNewActivity: false,

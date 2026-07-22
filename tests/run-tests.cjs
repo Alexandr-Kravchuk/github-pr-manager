@@ -320,6 +320,20 @@ test("mapPr.canBeMerged: failing CI blocks readiness", () =>
 test("mapPr.canBeMerged: still-running CI blocks readiness", () =>
   assert.strictEqual(canMerge({ commits: pendingRollup }), false));
 
+// --- github: mapPr hasConflicts (merge-conflict flag) ------------------------
+// Keys strictly off GitHub's CONFLICTING verdict. UNKNOWN (recomputing right
+// after a push) must NOT count, or a freshly pushed PR would be flagged the
+// instant it lands. This flag is what promotes an approved+green PR to the red
+// "blocked" signal so drive-pr-green picks it up instead of it stalling in
+// drive-green-prs-close.
+const conflicting = (overrides) => github.mapPr(rawPr(overrides), "GH", ["authored"], null).hasConflicts;
+test("mapPr.hasConflicts: CONFLICTING mergeability is true", () =>
+  assert.strictEqual(conflicting({ mergeable: "CONFLICTING" }), true));
+test("mapPr.hasConflicts: MERGEABLE is false", () =>
+  assert.strictEqual(conflicting({ mergeable: "MERGEABLE" }), false));
+test("mapPr.hasConflicts: transient UNKNOWN stays false", () =>
+  assert.strictEqual(conflicting({ mergeable: "UNKNOWN" }), false));
+
 // --- github: mapPr defaults isIgnored to false (set later by ignored.ts) -----
 test("mapPr.isIgnored: defaults to false", () =>
   assert.strictEqual(github.mapPr(rawPr(), "GH", ["authored"], null).isIgnored, false));

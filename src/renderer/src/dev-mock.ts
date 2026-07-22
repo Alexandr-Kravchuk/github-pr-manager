@@ -49,6 +49,7 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     hasUnaddressedChangeRequest: false,
     hasUnaddressedComments: false,
     hasHumanApproval: false,
+    hasConflicts: false,
     canBeMerged: false,
     hasNewActivity: false,
     returnedToMe: false,
