@@ -335,6 +335,15 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
           </span>
         )}
 
+        {pr.roles.includes("author") && pr.hasConflicts && (
+          <span
+            title="GitHub reports a merge conflict with the base branch — resolve it before this can merge"
+            className={cn(pill, "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300")}
+          >
+            ⚠ Merge conflict
+          </span>
+        )}
+
         {review && <span className={cn(pill, review.cls)}>{review.text}</span>}
 
         {pr.returnedToMe && (
