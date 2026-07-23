@@ -96,6 +96,22 @@ export interface JiraStatus {
   encryptionAvailable: boolean;
 }
 
+/**
+ * Outcome of the last Jira parent-enrichment pass, so the UI can explain why
+ * parent grouping is empty instead of failing silently. Absent when Jira is off
+ * or there were no issue keys to resolve.
+ */
+export interface JiraHealth {
+  /** "ok" resolved ≥1 parent; "empty" the call succeeded but nothing resolved
+   * (token may not see the issues, or none are subtasks); "error" the call failed. */
+  state: "ok" | "empty" | "error";
+  /** Failure detail for `state: "error"`. */
+  message?: string;
+  /** Diagnostics: issue keys queried and parents resolved this pass. */
+  queried: number;
+  resolved: number;
+}
+
 /** Sanitized config for the dashboard filters — host labels + repos only. */
 export interface PublicConfig {
   pollIntervalSeconds: number;
@@ -292,6 +308,8 @@ export interface DashboardResponse {
   fetchedAt: string;
   /** Running app version (app.getVersion()) — for display/diagnostics. */
   version: string;
+  /** Health of the last Jira parent-enrichment pass (absent when Jira is off). */
+  jiraHealth?: JiraHealth;
 }
 
 /** Data for marking a PR as seen (sent by the renderer from its own copy). */

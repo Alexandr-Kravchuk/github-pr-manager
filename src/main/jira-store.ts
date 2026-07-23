@@ -10,8 +10,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, safeStorage } from "electron";
 
-import { fetchParents } from "../shared/jira";
-import type { JiraStatus, PullRequest, Settings } from "../shared/types";
+import { makeDebug } from "../shared/debug";
+import {
+  enrichmentSkipReason,
+  hasJiraConfig,
+  healthFromError,
+  healthFromResolution,
+} from "../shared/jira-health";
+import { clearParentCache, fetchParents } from "../shared/jira";
+import type { JiraHealth, JiraStatus, PullRequest, Settings } from "../shared/types";
 
 function jiraTokenPath(): string {
   return path.join(app.getPath("userData"), "jira-token.enc");
@@ -37,9 +44,14 @@ export function hasJiraToken(): boolean {
  */
 export function setJiraToken(token: string): { ok: boolean; error?: string } {
   const file = jiraTokenPath();
+  // A token change invalidates every token-dependent cache: which API base works
+  // (a scoped vs classic token needs a different URL) and the resolved parents.
+  // Without this, switching token types in a running app keeps a stale/poisoned
+  // base cached and the next lookup silently returns nothing.
   if (!token) {
     try {
       fs.rmSync(file, { force: true });
+      clearParentCache();
       return { ok: true };
     } catch (e) {
       return { ok: false, error: (e as Error).message };
@@ -51,6 +63,7 @@ export function setJiraToken(token: string): { ok: boolean; error?: string } {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, safeStorage.encryptString(token));
+    clearParentCache();
     return { ok: true };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
@@ -72,8 +85,7 @@ export function getJiraToken(): string | null {
 export function getJiraStatus(loadSettings: () => Settings): JiraStatus {
   let hasConfig = false;
   try {
-    const jira = loadSettings().jira;
-    hasConfig = Boolean(jira?.baseUrl && jira?.email);
+    hasConfig = hasJiraConfig(loadSettings().jira);
   } catch {
     hasConfig = false;
   }
@@ -88,36 +100,50 @@ export function getJiraStatus(loadSettings: () => Settings): JiraStatus {
 
 /**
  * Builds the poller's parent enricher: resolves Jira parents for the PRs' issue
- * keys and sets `parentKey` / `parentSummary` on each. A no-op (leaving them
- * null) when Jira isn't configured or the token is missing. Best-effort — a
- * failure logs and leaves the fields null rather than breaking the poll.
+ * keys and sets `parentKey` / `parentSummary` on each. Returns a `JiraHealth`
+ * describing the pass so the UI can explain an empty/failed result instead of
+ * showing silent empty groups; returns `undefined` when there was nothing to do
+ * (Jira off, no token, or no issue keys). Best-effort — never throws.
  */
 export function buildParentEnricher(
   loadSettings: () => Settings,
-): (prs: PullRequest[]) => Promise<void> {
+): (prs: PullRequest[]) => Promise<JiraHealth | undefined> {
+  const debug = makeDebug("[jira]");
   return async (prs: PullRequest[]) => {
     let jira: Settings["jira"];
     try {
       jira = loadSettings().jira;
-    } catch {
-      return;
+    } catch (e) {
+      debug(`skip: loadSettings threw - ${(e as Error).message}`);
+      return undefined;
     }
-    if (!jira?.baseUrl || !jira.email) return;
-    const token = getJiraToken();
-    if (!token) return;
 
+    // Resolve the token only when the connection is configured (avoid a needless
+    // keychain decrypt). The skip decision itself lives in the pure, tested
+    // `enrichmentSkipReason` so its ordering can't drift untested; the re-checks
+    // in the `if` are redundant at runtime but let the compiler narrow
+    // `jira`/`token` instead of trusting `!` assertions.
+    const token = hasJiraConfig(jira) ? getJiraToken() : null;
     const keys = [...new Set(prs.map((p) => p.issueKey).filter((k): k is string => Boolean(k)))];
-    if (keys.length === 0) return;
+    const skip = enrichmentSkipReason(jira, Boolean(token), keys.length);
+    if (skip || !hasJiraConfig(jira) || !token) {
+      debug(() => `skip: ${skip} (hasFile=${hasJiraToken()} encryptionAvailable=${encryptionAvailable()} prs=${prs.length})`);
+      return undefined;
+    }
 
+    debug(() => `resolving parents for ${keys.length} keys: ${keys.join(", ")}`);
     try {
       const parents = await fetchParents(jira, token, keys);
+      debug(() => `resolved ${parents.size} parents: ${[...parents.entries()].map(([k, p]) => `${k}->${p.parentKey}`).join(", ") || "(none)"}`);
       for (const pr of prs) {
         const parent = pr.issueKey ? parents.get(pr.issueKey) : undefined;
         pr.parentKey = parent?.parentKey ?? null;
         pr.parentSummary = parent?.parentSummary ?? null;
       }
+      return healthFromResolution(keys.length, parents.size);
     } catch (e) {
       if (process.env.PRD_DEBUG) console.warn("[jira] parent resolution failed:", (e as Error).message);
+      return healthFromError(keys.length, e);
     }
   };
 }

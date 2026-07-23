@@ -6,7 +6,17 @@
  * Deliberately Electron-free (Node `fetch` + `Buffer`) so it stays testable and
  * runs in the poller. Auth is HTTP Basic with the user's Atlassian email + API
  * token — the token is supplied by the caller (stored encrypted, never here).
+ *
+ * Supports both Atlassian API-token types transparently, because the token is
+ * opaque and the two types need *different* URLs (see `apiBasesFor`):
+ *   - a **scoped** (least-privilege, read-only) token only works through the API
+ *     gateway `https://api.atlassian.com/ex/jira/<cloudId>/rest/api/3`;
+ *   - a **classic** (unscoped) token only works against the site URL
+ *     `<baseUrl>/rest/api/3`.
+ * We try the gateway first and fall back to the site on a 401/403, then cache the
+ * winner. A scoped token's recommended scope is just `read:jira-work`.
  */
+import { makeDebug } from "./debug";
 import type { JiraSettings } from "./types";
 
 /** A resolved parent for one issue key. */
@@ -32,14 +42,195 @@ const CHUNK_SIZE = 50;
  * must never hold the poll hostage.
  */
 const REQUEST_TIMEOUT_MS = 10_000;
+/**
+ * A shorter cap for the lightweight, unauthenticated `_edge/tenant_info` probe.
+ * On a cold cache during a full Jira outage the enricher pays two *sequential*
+ * timeouts in one tick — the cloudId probe, then the site search — so giving the
+ * probe the full 10 s doubled the worst-case stall to ~20 s. A tenant_info that
+ * hasn't answered in a few seconds is down; capping the probe keeps the cold
+ * outage close to the single-request budget the poll expects.
+ */
+const TENANT_INFO_TIMEOUT_MS = 4_000;
 
-/** Clears the parent cache (tests / a config change). */
+/**
+ * Resolved Atlassian cloudId per site base URL — needed to build the API-gateway
+ * URL scoped tokens require. The `_edge/tenant_info` endpoint is public. A
+ * *resolved* id is cached for the process lifetime; a *failed* lookup (null) is
+ * cached only briefly, so a transient network blip on `_edge/tenant_info` can't
+ * disable the gateway path until the app restarts.
+ */
+interface CloudIdEntry {
+  id: string | null;
+  /** Epoch ms after which a null (failed) result is re-probed; Infinity for a resolved id. */
+  expiresAt: number;
+}
+const cloudIdCache = new Map<string, CloudIdEntry>();
+/** A failed cloudId lookup is re-probed after this long; a resolved id never expires. */
+const NEGATIVE_CLOUDID_TTL_MS = 60_000;
+/**
+ * The REST base that actually worked for a site, remembered after the first
+ * success so later ticks don't re-probe the gateway (and pay its fallback cost).
+ * Only a base whose token type is *settled* is cached (see `fetchChunk`) — a
+ * site-only base chosen because the cloudId couldn't be resolved is left
+ * uncached so a later tick can still discover the gateway.
+ */
+const apiBaseCache = new Map<string, string>();
+/**
+ * Gateway bases that recently *threw* (proxy blocking api.atlassian.com, DNS,
+ * timeout), per site base URL: epoch ms until which the gateway candidate is
+ * skipped. Without this, an untrusted thrown fallback — which deliberately never
+ * pins a base — would re-probe the gateway and re-pay its 10 s timeout on every
+ * chunk of every tick, forever. The backoff only skips the *attempt*; it never
+ * pins the site base or marks its results trusted, so the poisoning guarantees
+ * around 200-but-empty are unchanged.
+ */
+const gatewayBackoff = new Map<string, number>();
+const GATEWAY_BACKOFF_MS = 60_000;
+const GATEWAY_ORIGIN = "https://api.atlassian.com/";
+/**
+ * Separator between a Jira HTTP error's stable prefix ("Jira HTTP 429 …") and the
+ * variable response body appended after it. The poller's change-detection
+ * (`stableJiraMessage`) splits on this to keep a per-response-varying body from
+ * re-emitting a snapshot every tick — so both sides must use the same token.
+ */
+export const JIRA_ERROR_DETAIL_SEP = " — ";
+
+/**
+ * Bumped by `clearParentCache()` so an enrichment pass that was already in
+ * flight when the caches were cleared (e.g. the user saved a new token mid-tick)
+ * can tell that its data belongs to the pre-clear world and must not be written
+ * back — otherwise the resolving pass would silently re-pin the stale base and
+ * repopulate the just-cleared caches with old-token results.
+ */
+let cacheEpoch = 0;
+
+/** Clears all caches (tests / a config change) and invalidates in-flight passes. */
 export function clearParentCache(): void {
+  cacheEpoch++;
   parentCache.clear();
+  cloudIdCache.clear();
+  apiBaseCache.clear();
+  gatewayBackoff.clear();
 }
 
 function authHeader(email: string, token: string): string {
   return `Basic ${Buffer.from(`${email}:${token}`).toString("base64")}`;
+}
+
+const debug = makeDebug("[jira]");
+
+/** Atlassian cloudIds are UUIDs; anything else is treated as unresolved. */
+const CLOUD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** `fetch` with a per-request timeout applied via an AbortController. */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Resolves the site's Atlassian cloudId from the public `_edge/tenant_info`
+ * endpoint (no auth). Cached per base URL; null if it can't be determined, in
+ * which case we simply skip the gateway and try the site URL only.
+ */
+async function resolveCloudId(baseUrl: string): Promise<string | null> {
+  const cached = cloudIdCache.get(baseUrl);
+  // A resolved id is good for the process lifetime; a null result only until its
+  // short TTL lapses, so a transient tenant_info failure self-heals on a later tick.
+  if (cached && (cached.id !== null || Date.now() < cached.expiresAt)) return cached.id;
+  let id: string | null = null;
+  try {
+    const res = await fetchWithTimeout(
+      `${baseUrl}/_edge/tenant_info`,
+      {
+        headers: { Accept: "application/json", "User-Agent": "github-pr-manager" },
+        cache: "no-store",
+      },
+      TENANT_INFO_TIMEOUT_MS,
+    );
+    if (res.ok) {
+      const json = (await res.json()) as { cloudId?: unknown };
+      // Accept only a UUID-shaped id: the value is interpolated into the gateway
+      // URL path, and tenant_info lives on a user-configured host — a malformed
+      // (or hostile) value must degrade to "unresolved", not rewrite the URL.
+      id = typeof json.cloudId === "string" && CLOUD_ID_RE.test(json.cloudId) ? json.cloudId : null;
+    } else {
+      debug(`tenant_info ${res.status} for ${baseUrl}`);
+    }
+  } catch (e) {
+    debug(`tenant_info failed for ${baseUrl}: ${(e as Error).message}`);
+    id = null;
+  }
+  debug(`cloudId for ${baseUrl}: ${id ?? "(none)"}`);
+  cloudIdCache.set(baseUrl, {
+    id,
+    expiresAt: id === null ? Date.now() + NEGATIVE_CLOUDID_TTL_MS : Infinity,
+  });
+  return id;
+}
+
+/**
+ * Ordered REST bases to try for this site. Gateway first (scoped tokens), site
+ * second (classic tokens); once one succeeds it is cached and returned alone.
+ * The order matters: a scoped token on the site URL answers 200-but-empty, which
+ * is indistinguishable from a genuine "no matches", so a scoped token must never
+ * reach the site URL — whereas a classic token on the gateway answers a clean
+ * 401, which `fetchChunk` uses as its fallback trigger.
+ */
+async function apiBasesFor(
+  config: JiraSettings,
+): Promise<{ bases: string[]; pinned: boolean }> {
+  const cached = apiBaseCache.get(config.baseUrl);
+  // A pinned base was already vetted when it was cached (only trusted results are
+  // pinned), so flag it: the caller must treat it as trustworthy even though the
+  // gateway is no longer in the (now single-element) candidate list.
+  if (cached) return { bases: [cached], pinned: true };
+  const bases: string[] = [];
+  const cloudId = await resolveCloudId(config.baseUrl);
+  const backedOffUntil = gatewayBackoff.get(config.baseUrl) ?? 0;
+  if (cloudId && Date.now() >= backedOffUntil) {
+    bases.push(`${GATEWAY_ORIGIN}ex/jira/${cloudId}/rest/api/3`);
+  } else if (cloudId) {
+    debug(`gateway in backoff for ${config.baseUrl} (threw recently) — site only this pass`);
+  }
+  bases.push(`${config.baseUrl}/rest/api/3`);
+  return { bases, pinned: false };
+}
+
+/**
+ * Whether a result is trustworthy enough to *cache* — governs both pinning the
+ * winning base (`apiBaseCache`) and writing negative per-key entries.
+ *
+ * Two ways to be trustworthy:
+ *  - `pinned`: the base was already vetted when it was first pinned, so it stays
+ *    trusted even though `apiBasesFor` now returns it as a single-element array.
+ *    This term must live inside the predicate: a bare `bases.length > 1` check
+ *    once treated every steady-state (pinned) call as untrusted and silently
+ *    stopped negative caching after the first resolution (a round-3 regression);
+ *    folding `pinned` in here keeps that impossible to reintroduce at the (sole)
+ *    call site.
+ *  - a fresh candidate set that settled the token type cleanly: the gateway was
+ *    a candidate (`bases.length > 1`), so a win means scoped and a 401/403 means
+ *    classic — and no candidate was skipped via a *thrown* network error
+ *    (`cleanFallback`), which tells us nothing about that base's verdict. A lone
+ *    site base (cloudId unresolved) can't tell a scoped token's masked
+ *    200-but-empty from a genuine no-match, so it is never trusted on its own.
+ *
+ * Caching an untrusted 200-but-empty would strand the dashboard on the wrong
+ * base and keep false negatives alive for `CACHE_TTL_MS` after the gateway
+ * recovers — the exact "silent empty" this module exists to prevent.
+ */
+function resultIsTrustworthy(bases: string[], cleanFallback: boolean, pinned: boolean): boolean {
+  return pinned || (cleanFallback && bases.length > 1);
 }
 
 interface RawSearchResponse {
@@ -57,44 +248,108 @@ async function fetchChunk(
   now: number,
 ): Promise<void> {
   const jql = `key in (${keys.join(",")})`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  let res: Response;
-  try {
-    res = await fetch(`${config.baseUrl}/rest/api/3/search/jql`, {
-      method: "POST",
-      headers: {
-        Authorization: authHeader(config.email, token),
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "github-pr-manager",
-      },
-      body: JSON.stringify({ jql, fields: ["parent"], maxResults: 100 }),
-      cache: "no-store",
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
+  const init: RequestInit = {
+    method: "POST",
+    headers: {
+      Authorization: authHeader(config.email, token),
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": "github-pr-manager",
+    },
+    body: JSON.stringify({ jql, fields: ["parent"], maxResults: 100 }),
+    cache: "no-store",
+  };
+
+  // Walk the candidate bases. Two things advance to the next base:
+  //   - a clean 401/403 response ("wrong token type for this base", e.g. a
+  //     classic token on the gateway) — a *trusted* fallback; and
+  //   - a thrown network error (timeout/abort, DNS, or a proxy blocking the
+  //     gateway host while allowing the site) — we still try the next base so a
+  //     classic token behind such a proxy isn't stranded, but the fallback is
+  //     *untrusted*: we never learned this base's verdict (see resultIsTrustworthy).
+  // Any other status (429/500/…) means the base answered but the call genuinely
+  // failed: surfaced as an error, never retried on the site URL where a scoped
+  // token would answer 200-but-empty and mask it as "no parents found".
+  // Snapshot the epoch first: if clearParentCache() runs while a fetch below is
+  // awaited (a token/config change mid-tick), everything this pass learned is
+  // about the old token and must not touch the caches.
+  const epoch = cacheEpoch;
+  const { bases, pinned } = await apiBasesFor(config);
+  debug(() => `bases to try: ${bases.join(" , ")}${pinned ? " (pinned)" : ""}`);
+  let res: Response | null = null;
+  let winner: string | null = null;
+  let cleanFallback = true;
+  let lastError: unknown = null;
+  for (let i = 0; i < bases.length; i++) {
+    const isLast = i === bases.length - 1;
+    let candidate: Response;
+    try {
+      candidate = await fetchWithTimeout(`${bases[i]}/search/jql`, init);
+    } catch (e) {
+      debug(`${bases[i]} -> threw ${(e as Error).message}`);
+      lastError = e;
+      cleanFallback = false; // reached the next base without learning this one's verdict
+      if (bases[i].startsWith(GATEWAY_ORIGIN) && epoch === cacheEpoch) {
+        // Skip the gateway candidate for a while: the throw says nothing about
+        // the token type, but re-attempting an unreachable host on every chunk
+        // of every tick would stall each poll by the 10 s timeout indefinitely.
+        gatewayBackoff.set(config.baseUrl, Date.now() + GATEWAY_BACKOFF_MS);
+      }
+      if (isLast) break;
+      continue;
+    }
+    debug(`${bases[i]} -> HTTP ${candidate.status}`);
+    if ((candidate.status === 401 || candidate.status === 403) && !isLast) {
+      continue;
+    }
+    res = candidate;
+    winner = bases[i];
+    break;
+  }
+  if (!res) {
+    // Every base failed. Surface a thrown network error if we saw one.
+    if (lastError) throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    throw new Error("Jira: no reachable API base");
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(
-      `Jira HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 200)}` : ""}`,
+      `Jira HTTP ${res.status} ${res.statusText}${text ? `${JIRA_ERROR_DETAIL_SEP}${text.slice(0, 200)}` : ""}`,
     );
   }
+  // Trust a result enough to cache (pin the base + write negatives) when the base
+  // was already vetted and pinned on an earlier call, OR the fresh candidate set
+  // settled the token type cleanly. Both cases live inside resultIsTrustworthy so
+  // the pinned steady-state can't silently fall through to "untrusted".
+  const trusted = resultIsTrustworthy(bases, cleanFallback, pinned);
+  // A pass that raced a clearParentCache() (epoch moved while a fetch was
+  // awaited) fetched with the old token: writing it back would re-pin the stale
+  // base and repopulate the just-cleared caches, so it must not touch them.
+  // fetchParents then reports this pass as empty — a one-tick blip; the refresh
+  // the token/settings change triggers re-resolves immediately with fresh state.
+  const writable = epoch === cacheEpoch;
+  if (winner && trusted && writable) apiBaseCache.set(config.baseUrl, winner);
   const json = (await res.json()) as RawSearchResponse;
   const returned = new Set<string>();
   for (const issue of json.issues ?? []) {
     returned.add(issue.key);
     const p = issue.fields?.parent;
+    if (!writable) continue;
     parentCache.set(issue.key, {
       parent: p ? { parentKey: p.key, parentSummary: p.fields?.summary ?? null } : null,
       fetchedAt: now,
     });
   }
-  // Keys Jira didn't return (unknown/no access) get a negative entry too.
-  for (const key of keys) {
-    if (!returned.has(key)) parentCache.set(key, { parent: null, fetchedAt: now });
+  // Keys Jira didn't return get a negative entry — but only from a trusted base.
+  // A 200-but-empty reached via an unverified base (cloudId unresolved, or past a
+  // thrown error) might be a scoped token that should have used the gateway;
+  // caching those negatives for CACHE_TTL_MS would keep the banner "empty" for up
+  // to 10 min after the gateway recovers. Skip them so the keys are re-queried on
+  // the next tick, once the gateway is reachable again.
+  if (trusted && writable) {
+    for (const key of keys) {
+      if (!returned.has(key)) parentCache.set(key, { parent: null, fetchedAt: now });
+    }
   }
 }
 

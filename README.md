@@ -12,9 +12,10 @@ attention:
 
 ![PR Dashboard](assets/screenshot.png)
 
-Cards are grouped by repository and colour-coded down the left edge (red = needs
-attention, green = ready to merge, yellow = CI running, purple = your review is
-requested). One-click **filters** (needs attention, failing CI, new comments,
+Cards can be grouped by repository, by issue, or by **parent Jira task** (see
+[Jira](#jira-optional--parent-task-grouping) below), and are colour-coded down the
+left edge (red = needs attention, green = ready to merge, yellow = CI running,
+purple = your review is requested). One-click **filters** (needs attention, failing CI, new comments,
 ready to merge, drafts) and a search box narrow the list; a **status buddy** in
 the header reflects the overall mood at a glance, and any PR you don't care about
 can be **ignored** and tucked behind an "Ignored" filter. Light / dark / system
@@ -57,6 +58,24 @@ Electron · Vite + React 19 + Tailwind CSS v4 (renderer) · TypeScript · Node
    ```
 
    The token needs the **`repo` scope** (for private repositories).
+
+## Jira (optional — parent-task grouping)
+
+The **Group by parent task** view clusters your review PRs under the Jira issue
+they belong to (e.g. subtasks `ENG-1234`, `ENG-1235` sit under their parent task).
+To enable it:
+
+1. Create a **read-only API token** at
+   [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens).
+   A scoped token with just the **`read:jira-work`** scope is enough; a classic
+   (unscoped) token also works. (Scoped tokens are routed through the
+   `api.atlassian.com` gateway automatically; classic tokens use the site URL.)
+2. Open **Settings → Jira** and enter the **Site URL**
+   (`https://your-org.atlassian.net`), your **account email**, and the token.
+
+The token is encrypted by your OS keychain and kept out of `settings.json`. Issue
+keys are parsed from PR titles/branches; if grouping stays empty the dashboard
+shows why (the token can't read the issues, or the PRs aren't subtasks).
 
 ## Develop
 
