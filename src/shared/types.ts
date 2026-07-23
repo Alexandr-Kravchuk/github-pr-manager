@@ -388,4 +388,11 @@ export interface PrManagerApi {
   onSnapshot(listener: (snapshot: DashboardResponse) => void): () => void;
   /** Subscribe to config-error messages. Returns an unsubscribe function. */
   onConfigError(listener: (message: string) => void): () => void;
+  /** Subscribe to auto-update progress. Returns an unsubscribe function. */
+  onUpdateStatus(listener: (status: UpdateStatus) => void): () => void;
 }
+
+/** Auto-update lifecycle, pushed from main as electron-updater progresses. */
+export type UpdateStatus =
+  | { state: "downloading"; version: string; percent: number }
+  | { state: "downloaded"; version: string };

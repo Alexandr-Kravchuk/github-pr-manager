@@ -4,7 +4,7 @@ import { Buddy, type BuddyMood } from "./components/Buddy";
 import { PrCard, prSignal } from "./components/PrCard";
 import { SettingsScreen } from "./components/Settings";
 import { cn, relativeTime } from "./format";
-import type { DashboardResponse, JiraStatus, PublicConfig, PullRequest } from "../../shared/types";
+import type { DashboardResponse, JiraStatus, PublicConfig, PullRequest, UpdateStatus } from "../../shared/types";
 
 type RoleFilter = "all" | "author" | "reviewer";
 type SortKey = "action" | "waiting" | "active" | "newest";
@@ -125,6 +125,7 @@ export function App() {
   const [tick, setTick] = useState(0);
   const fetchingRef = useRef(false);
   const [whatsNew, setWhatsNew] = useState<{ version: string; url: string } | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
 
   // Persisted view preferences, read once at mount (search stays transient).
   const [boot] = useState(loadPrefs);
@@ -221,10 +222,12 @@ export function App() {
       setConfigError(message);
       setData(null);
     });
+    const offUpdateStatus = window.api.onUpdateStatus(setUpdateStatus);
     loadInitial();
     return () => {
       offSnapshot();
       offConfigError();
+      offUpdateStatus();
     };
   }, [loadInitial, applySnapshot]);
 
@@ -873,6 +876,14 @@ export function App() {
           >
             What&apos;s new in v{whatsNew.version}
           </button>
+        )}
+        {updateStatus?.state === "downloading" && (
+          <span className="text-fg-faint">
+            Downloading v{updateStatus.version}… {updateStatus.percent}%
+          </span>
+        )}
+        {updateStatus?.state === "downloaded" && (
+          <span className="text-fg-faint">Restarting to install v{updateStatus.version}…</span>
         )}
         {data?.version && (
           <span className="text-fg-faint">v{data.version}</span>

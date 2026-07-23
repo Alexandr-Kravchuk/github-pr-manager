@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-import type { DashboardResponse, PrManagerApi } from "../shared/types";
+import type { DashboardResponse, PrManagerApi, UpdateStatus } from "../shared/types";
 
 const api: PrManagerApi = {
   getDashboard: () => ipcRenderer.invoke("dashboard:get"),
@@ -32,6 +32,13 @@ const api: PrManagerApi = {
     ipcRenderer.on("config-error", handler);
     return () => {
       ipcRenderer.removeListener("config-error", handler);
+    };
+  },
+  onUpdateStatus: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, status: UpdateStatus) => listener(status);
+    ipcRenderer.on("update-status", handler);
+    return () => {
+      ipcRenderer.removeListener("update-status", handler);
     };
   },
 };

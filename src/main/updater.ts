@@ -1,6 +1,8 @@
 import { app } from "electron";
 import { autoUpdater } from "electron-updater";
 
+import type { UpdateStatus } from "../shared/types";
+
 // electron-updater reads the GitHub feed from app-update.yml (emitted by
 // electron-builder from the `publish` config). That file only exists in a
 // packaged build, so updates are a no-op in dev. macOS additionally requires a
@@ -13,6 +15,7 @@ let initialized = false; // handlers wired (packaged builds only)
 let initialTimer: NodeJS.Timeout | null = null;
 let intervalTimer: NodeJS.Timeout | null = null;
 let autoUpdateEnabled = false; // mirrors the user's auto-update setting
+let downloadingVersion = ""; // set on update-available, read by download-progress
 
 function check(): void {
   autoUpdater
@@ -33,8 +36,9 @@ export function checkForUpdatesNow(): void {
 /**
  * Wires electron-updater once. No checks run until setAutoUpdateEnabled(true).
  * A no-op in dev / when PRD_DISABLE_UPDATER is set (so toggling later also no-ops).
+ * `onStatus` is pushed to the renderer so it can show download progress.
  */
-export function initAutoUpdater(): void {
+export function initAutoUpdater(onStatus: (status: UpdateStatus) => void): void {
   if (initialized) return;
   if (!app.isPackaged || process.env.PRD_DISABLE_UPDATER) return;
   initialized = true;
@@ -47,12 +51,18 @@ export function initAutoUpdater(): void {
   });
   autoUpdater.on("update-available", (info) => {
     console.log("[updater] update available:", info.version);
+    downloadingVersion = info.version;
+    onStatus({ state: "downloading", version: info.version, percent: 0 });
+  });
+  autoUpdater.on("download-progress", (progress) => {
+    onStatus({ state: "downloading", version: downloadingVersion, percent: Math.round(progress.percent) });
   });
   autoUpdater.on("update-not-available", () => {
     console.log("[updater] up to date");
   });
   autoUpdater.on("update-downloaded", (info) => {
     console.log("[updater] v%s downloaded — restarting to apply", info.version);
+    onStatus({ state: "downloaded", version: info.version });
     setTimeout(() => autoUpdater.quitAndInstall(), 3_000);
   });
 }

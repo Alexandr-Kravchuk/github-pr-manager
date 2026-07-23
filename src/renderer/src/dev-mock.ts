@@ -269,6 +269,7 @@ const api: PrManagerApi = {
   dismissWhatsNew: async () => {},
   onSnapshot: () => () => {},
   onConfigError: () => () => {},
+  onUpdateStatus: () => () => {},
 };
 
 (window as unknown as { api: PrManagerApi }).api = api;

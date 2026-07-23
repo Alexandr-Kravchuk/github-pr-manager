@@ -408,7 +408,7 @@ void app.whenReady().then(() => {
   });
 
   createWindow();
-  initAutoUpdater();
+  initAutoUpdater((status) => sendToRenderer("update-status", status));
 
   // Apply the remaining prefs (launch-at-login + auto-update; theme re-applied
   // harmlessly). Runs after the updater is initialized.
