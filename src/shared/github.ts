@@ -386,11 +386,17 @@ export function mapPr(
   // means no conflicts (GitHub says MERGEABLE — not CONFLICTING and not the
   // transient UNKNOWN), a human has approved, no change request is waiting on the
   // author, and CI is neither failing nor still running. Drafts are never ready.
+  // The `reviewDecision !== "CHANGES_REQUESTED"` guard catches the case
+  // `hasUnaddressedChangeRequest` deliberately misses: a second reviewer's
+  // change request that was re-requested (so the ball looks like it's on them)
+  // still gates the merge under branch protection. It's a disqualifier, not a
+  // requirement — null/REVIEW_REQUIRED (unprotected repos) still pass.
   const canBeMerged =
     !pr.isDraft &&
     pr.mergeable === "MERGEABLE" &&
     hasHumanApproval &&
     !hasUnaddressedChangeRequest &&
+    pr.reviewDecision !== "CHANGES_REQUESTED" &&
     failingChecks.length === 0 &&
     pendingChecks.length === 0;
 

@@ -316,6 +316,26 @@ test("mapPr.canBeMerged: unaddressed change request blocks readiness", () =>
     }),
     false,
   ));
+test("mapPr.canBeMerged: re-requested CHANGES_REQUESTED still blocks via reviewDecision", () =>
+  assert.strictEqual(
+    canMerge({
+      // A human approve is present and the change-requester was re-requested
+      // (so hasUnaddressedChangeRequest is false), but branch protection's
+      // reviewDecision still says CHANGES_REQUESTED — not mergeable.
+      reviewDecision: "CHANGES_REQUESTED",
+      reviewRequests: {
+        totalCount: 1,
+        nodes: [{ requestedReviewer: { __typename: "User", login: "rev2", avatarUrl: "" } }],
+      },
+      latestOpinionatedReviews: {
+        nodes: [
+          approvedReview,
+          { author: { __typename: "User", login: "rev2", avatarUrl: "" }, state: "CHANGES_REQUESTED" },
+        ],
+      },
+    }),
+    false,
+  ));
 test("mapPr.canBeMerged: failing CI blocks readiness", () =>
   assert.strictEqual(canMerge({ commits: failingRollup }), false));
 test("mapPr.canBeMerged: still-running CI blocks readiness", () =>

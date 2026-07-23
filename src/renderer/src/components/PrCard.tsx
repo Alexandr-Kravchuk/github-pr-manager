@@ -39,8 +39,12 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
  *  - approved (green): at least one human approval, CI isn't failing or
  *    running, and there are no open threads. A single human approve is enough —
  *    even if other reviewers are still pending, and even if the PR has no checks
- *    at all. We key off an actual approval rather than `reviewDecision`, which
- *    stays null/REVIEW_REQUIRED on repos without required-review rules. Ranked
+ *    at all. We key off an actual approval rather than requiring
+ *    `reviewDecision === "APPROVED"`, which stays null/REVIEW_REQUIRED on repos
+ *    without required-review rules — but we still consult `reviewDecision` as a
+ *    disqualifier: a live `CHANGES_REQUESTED` (e.g. a second reviewer whose
+ *    change request gates the merge even after being re-requested) keeps the PR
+ *    out of green, since it isn't actually mergeable. Ranked
  *    ABOVE attention: an approved, green PR stays green even when it has unread
  *    comments, so opening it (which clears `hasNewActivity`) doesn't flip the
  *    accent from amber to green. Open threads and running CI still demote it,
@@ -67,6 +71,7 @@ export function prSignal(pr: PullRequest): PrSignal {
   }
   if (
     pr.hasHumanApproval &&
+    pr.reviewDecision !== "CHANGES_REQUESTED" &&
     pr.ciState !== "failure" &&
     pr.ciState !== "pending" &&
     pr.unresolvedThreads === 0
