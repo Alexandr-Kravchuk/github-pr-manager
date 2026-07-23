@@ -36,6 +36,7 @@
 
 import { ConfigError } from "../shared/config";
 import { fetchHost } from "../shared/github";
+import { JIRA_ERROR_DETAIL_SEP } from "../shared/jira";
 import { applyIgnored } from "../shared/ignored";
 import { DEFAULT_POLL_INTERVAL_MS, probeNotifications } from "../shared/notifications";
 import type { NotifState } from "../shared/notifications";
@@ -161,8 +162,8 @@ function hashSnapshot(s: DashboardResponse): string {
  * backoff — Jira noise dictating the GitHub poll cadence. Keep the stable
  * prefix ("Jira HTTP 429 …"); genuinely different failures still differ there.
  */
-function stableJiraMessage(message: string | undefined): string | undefined {
-  return message?.split(" — ")[0];
+export function stableJiraMessage(message: string | undefined): string | undefined {
+  return message?.split(JIRA_ERROR_DETAIL_SEP)[0];
 }
 
 /**

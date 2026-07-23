@@ -851,6 +851,44 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     assert.strictEqual(searchCalls, 2); // parentCache + apiBaseCache cleared → re-queried
   });
 
+  await atest("fetchParents: the tenant_info probe uses a shorter timeout than the search", async () => {
+    // Cold-cache + full-outage guard: the enricher pays the cloudId probe and
+    // the search as two sequential timeouts in one tick, so the lightweight
+    // unauthenticated tenant_info probe must not hold the full per-request
+    // budget — otherwise a total Jira outage doubles the worst-case poll stall.
+    // Capture the AbortController deadline each fetch arms and assert the probe's
+    // is materially shorter than the search's. Reverting the probe to the full
+    // REQUEST_TIMEOUT_MS must fail here.
+    jira.clearParentCache();
+    const realSetTimeout = global.setTimeout;
+    const realClearTimeout = global.clearTimeout;
+    const delays = [];
+    global.setTimeout = (_fn, ms) => {
+      delays.push(ms);
+      return 0;
+    };
+    global.clearTimeout = () => {};
+    try {
+      global.fetch = async (url) => {
+        if (isTenant(url)) return tenantOk();
+        if (url === GATEWAY)
+          return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0", fields: { summary: "P" } } } }] });
+        throw new Error("unexpected url " + url);
+      };
+      await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    } finally {
+      global.setTimeout = realSetTimeout;
+      global.clearTimeout = realClearTimeout;
+      global.fetch = realFetch;
+    }
+    // First timer armed is the tenant_info probe; the last is the search request.
+    assert.ok(delays.length >= 2, `expected >=2 timeouts, saw ${delays.length}`);
+    const probe = delays[0];
+    const search = delays[delays.length - 1];
+    assert.ok(probe < search, `probe timeout (${probe}ms) must be shorter than the search (${search}ms)`);
+    assert.ok(probe * 2 <= search, `probe timeout (${probe}ms) should be materially shorter than the search (${search}ms)`);
+  });
+
   global.fetch = realFetch;
 
   // --- poller: tick folds jiraHealth into the snapshot + change detection ----
@@ -894,6 +932,31 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     assert.strictEqual(snapshots.length, 2);
 
     p.stop();
+  });
+
+  await atest("stableJiraMessage: strips the variable detail after the error separator", () => {
+    // Change-detection view of jiraHealth.message: a Jira HTTP error appends a
+    // per-response-varying body (request ids, retry hints) after the separator.
+    // Hashing the raw text would re-emit every tick and reset the idle backoff,
+    // so only the stable prefix is kept.
+    assert.strictEqual(poller.stableJiraMessage(undefined), undefined);
+    // No separator → passed through unchanged.
+    assert.strictEqual(poller.stableJiraMessage("Jira HTTP 401 Unauthorized"), "Jira HTTP 401 Unauthorized");
+    // Separator present → truncated at the boundary.
+    assert.strictEqual(
+      poller.stableJiraMessage("Jira HTTP 429 Too Many Requests — retry after 42s; reqId=abc"),
+      "Jira HTTP 429 Too Many Requests",
+    );
+    // Same status, different variable tail → identical stable prefix (no re-emit).
+    assert.strictEqual(
+      poller.stableJiraMessage("Jira HTTP 429 Too Many Requests — reqId=aaa"),
+      poller.stableJiraMessage("Jira HTTP 429 Too Many Requests — reqId=bbb"),
+    );
+    // Genuinely different failure still differs in the prefix (still re-emits).
+    assert.notStrictEqual(
+      poller.stableJiraMessage("Jira HTTP 429 Too Many Requests — x"),
+      poller.stableJiraMessage("Jira HTTP 500 Server Error — x"),
+    );
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

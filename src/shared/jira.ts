@@ -42,6 +42,15 @@ const CHUNK_SIZE = 50;
  * must never hold the poll hostage.
  */
 const REQUEST_TIMEOUT_MS = 10_000;
+/**
+ * A shorter cap for the lightweight, unauthenticated `_edge/tenant_info` probe.
+ * On a cold cache during a full Jira outage the enricher pays two *sequential*
+ * timeouts in one tick — the cloudId probe, then the site search — so giving the
+ * probe the full 10 s doubled the worst-case stall to ~20 s. A tenant_info that
+ * hasn't answered in a few seconds is down; capping the probe keeps the cold
+ * outage close to the single-request budget the poll expects.
+ */
+const TENANT_INFO_TIMEOUT_MS = 4_000;
 
 /**
  * Resolved Atlassian cloudId per site base URL — needed to build the API-gateway
@@ -78,6 +87,13 @@ const apiBaseCache = new Map<string, string>();
 const gatewayBackoff = new Map<string, number>();
 const GATEWAY_BACKOFF_MS = 60_000;
 const GATEWAY_ORIGIN = "https://api.atlassian.com/";
+/**
+ * Separator between a Jira HTTP error's stable prefix ("Jira HTTP 429 …") and the
+ * variable response body appended after it. The poller's change-detection
+ * (`stableJiraMessage`) splits on this to keep a per-response-varying body from
+ * re-emitting a snapshot every tick — so both sides must use the same token.
+ */
+export const JIRA_ERROR_DETAIL_SEP = " — ";
 
 /**
  * Bumped by `clearParentCache()` so an enrichment pass that was already in
@@ -106,10 +122,14 @@ const debug = makeDebug("[jira]");
 /** Atlassian cloudIds are UUIDs; anything else is treated as unresolved. */
 const CLOUD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** `fetch` with the shared per-request timeout applied via an AbortController. */
-async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+/** `fetch` with a per-request timeout applied via an AbortController. */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
@@ -129,10 +149,14 @@ async function resolveCloudId(baseUrl: string): Promise<string | null> {
   if (cached && (cached.id !== null || Date.now() < cached.expiresAt)) return cached.id;
   let id: string | null = null;
   try {
-    const res = await fetchWithTimeout(`${baseUrl}/_edge/tenant_info`, {
-      headers: { Accept: "application/json", "User-Agent": "github-pr-manager" },
-      cache: "no-store",
-    });
+    const res = await fetchWithTimeout(
+      `${baseUrl}/_edge/tenant_info`,
+      {
+        headers: { Accept: "application/json", "User-Agent": "github-pr-manager" },
+        cache: "no-store",
+      },
+      TENANT_INFO_TIMEOUT_MS,
+    );
     if (res.ok) {
       const json = (await res.json()) as { cloudId?: unknown };
       // Accept only a UUID-shaped id: the value is interpolated into the gateway
@@ -183,28 +207,30 @@ async function apiBasesFor(
 }
 
 /**
- * Whether a *freshly-resolved* candidate set is trustworthy enough to *cache* —
- * governs both pinning the winning base (`apiBaseCache`) and writing negative
- * per-key entries. Both are only safe once the token type was settled by clean
- * HTTP responses:
+ * Whether a result is trustworthy enough to *cache* — governs both pinning the
+ * winning base (`apiBaseCache`) and writing negative per-key entries.
  *
- *  - the gateway was a candidate (`bases.length > 1`), so a win means scoped and
- *    a 401/403 means classic; a lone site base (cloudId unresolved) can't tell a
- *    scoped token's masked 200-but-empty from a genuine no-match; and
- *  - no candidate was skipped via a *thrown* network error (`cleanFallback`),
- *    which tells us nothing about that base's verdict.
- *
- * An already-*pinned* base is trusted separately by the caller (it was vetted
- * when first pinned) — this predicate covers only a fresh candidate set, so it
- * must not be used alone once a base is pinned (the array is then single-element
- * and this would wrongly return false for the steady-state case).
+ * Two ways to be trustworthy:
+ *  - `pinned`: the base was already vetted when it was first pinned, so it stays
+ *    trusted even though `apiBasesFor` now returns it as a single-element array.
+ *    This term must live inside the predicate: a bare `bases.length > 1` check
+ *    once treated every steady-state (pinned) call as untrusted and silently
+ *    stopped negative caching after the first resolution (a round-3 regression);
+ *    folding `pinned` in here keeps that impossible to reintroduce at the (sole)
+ *    call site.
+ *  - a fresh candidate set that settled the token type cleanly: the gateway was
+ *    a candidate (`bases.length > 1`), so a win means scoped and a 401/403 means
+ *    classic — and no candidate was skipped via a *thrown* network error
+ *    (`cleanFallback`), which tells us nothing about that base's verdict. A lone
+ *    site base (cloudId unresolved) can't tell a scoped token's masked
+ *    200-but-empty from a genuine no-match, so it is never trusted on its own.
  *
  * Caching an untrusted 200-but-empty would strand the dashboard on the wrong
  * base and keep false negatives alive for `CACHE_TTL_MS` after the gateway
  * recovers — the exact "silent empty" this module exists to prevent.
  */
-function resultIsTrustworthy(bases: string[], cleanFallback: boolean): boolean {
-  return cleanFallback && bases.length > 1;
+function resultIsTrustworthy(bases: string[], cleanFallback: boolean, pinned: boolean): boolean {
+  return pinned || (cleanFallback && bases.length > 1);
 }
 
 interface RawSearchResponse {
@@ -288,15 +314,14 @@ async function fetchChunk(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(
-      `Jira HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 200)}` : ""}`,
+      `Jira HTTP ${res.status} ${res.statusText}${text ? `${JIRA_ERROR_DETAIL_SEP}${text.slice(0, 200)}` : ""}`,
     );
   }
   // Trust a result enough to cache (pin the base + write negatives) when the base
   // was already vetted and pinned on an earlier call, OR the fresh candidate set
-  // settled the token type cleanly. Without the `pinned` term the single-element
-  // array returned for a pinned base would make every steady-state call look
-  // untrusted and silently stop negative caching after the first resolution.
-  const trusted = pinned || resultIsTrustworthy(bases, cleanFallback);
+  // settled the token type cleanly. Both cases live inside resultIsTrustworthy so
+  // the pinned steady-state can't silently fall through to "untrusted".
+  const trusted = resultIsTrustworthy(bases, cleanFallback, pinned);
   // A pass that raced a clearParentCache() (epoch moved while a fetch was
   // awaited) fetched with the old token: writing it back would re-pin the stale
   // base and repopulate the just-cleared caches, so it must not touch them.
