@@ -376,8 +376,12 @@ export function App() {
   const filtered = useMemo(
     () =>
       allPrs.filter((pr) => {
-        if (!showIgnored && pr.isIgnored) return false;
-        if (!showDrafts && pr.isDraft) return false;
+        // "Ignored" is a reveal toggle, not a narrowing one: an ignored PR that
+        // is also a draft must surface on that chip alone, or the ignore list
+        // stays invisible until Drafts is enabled too.
+        if (pr.isIgnored) {
+          if (!showIgnored) return false;
+        } else if (!showDrafts && pr.isDraft) return false;
         if (role !== "all" && !pr.roles.includes(role)) return false;
         if (host !== "all" && pr.hostLabel !== host) return false;
         if (attentionOnly && !pr.needsAttention) return false;
