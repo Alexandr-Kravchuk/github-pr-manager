@@ -1,6 +1,6 @@
 {
   "name": "github-pr-manager",
-  "version": "1.11.3",
+  "version": "1.11.4",
   "private": true,
   "description": "Desktop dashboard for pull requests across GitHub and GitHub Enterprise.",
   "productName": "PR Dashboard",
