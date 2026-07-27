@@ -366,7 +366,11 @@ export function App() {
       fresh: active.filter((p) => p.hasNewActivity).length,
       returned: active.filter((p) => p.returnedToMe).length,
       noReviews: active.filter((p) => p.hasNoReviews).length,
-      drafts: active.filter((p) => p.isDraft).length,
+      // Drafts and Ignored are the two reveal chips, so each counts what its own
+      // chip governs across ALL PRs — an ignored draft is counted by both. If
+      // drafts were counted over `active`, an ignored draft would show up in
+      // neither count while still being hidden by the drafts guard.
+      drafts: allPrs.filter((p) => p.isDraft).length,
       mergeable: active.filter((p) => p.canBeMerged).length,
       ignored: allPrs.filter((p) => p.isIgnored).length,
     }),
@@ -376,12 +380,9 @@ export function App() {
   const filtered = useMemo(
     () =>
       allPrs.filter((pr) => {
-        // "Ignored" is a reveal toggle, not a narrowing one: an ignored PR that
-        // is also a draft must surface on that chip alone, or the ignore list
-        // stays invisible until Drafts is enabled too.
-        if (pr.isIgnored) {
-          if (!showIgnored) return false;
-        } else if (!showDrafts && pr.isDraft) return false;
+        // Two independent reveal dimensions: an ignored draft needs BOTH chips.
+        if (!showIgnored && pr.isIgnored) return false;
+        if (!showDrafts && pr.isDraft) return false;
         if (role !== "all" && !pr.roles.includes(role)) return false;
         if (host !== "all" && pr.hostLabel !== host) return false;
         if (attentionOnly && !pr.needsAttention) return false;
