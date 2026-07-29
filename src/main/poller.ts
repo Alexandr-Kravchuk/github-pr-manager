@@ -121,7 +121,7 @@ const IDLE_BACKOFF_MAX_FACTOR = 16;
  * `fetchedAt` so that "nothing actually changed" ticks don't push a fresh
  * payload to the renderer.
  */
-function hashSnapshot(s: DashboardResponse): string {
+export function hashSnapshot(s: DashboardResponse): string {
   const lite = s.pullRequests.map((p) => [
     p.id,
     p.updatedAt,

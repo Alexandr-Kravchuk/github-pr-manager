@@ -1012,6 +1012,42 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     );
   });
 
+  // --- poller: hashSnapshot re-emit coupling ---------------------------------
+  // hashSnapshot gates snapshot re-emit, and handleNotifications runs only on
+  // re-emit — so every field the notifier (notify.ts) reads MUST be hashed here,
+  // or a tick whose only delta is that field silently never fires. These lock
+  // the hasUnaddressedComments field in (sibling of hasUnaddressedChangeRequest).
+  const hsnap = (prOverrides = {}, top = {}) => ({
+    pullRequests: [
+      {
+        id: "PR_1",
+        updatedAt: "2026-01-01T00:00:00Z",
+        hasUnaddressedChangeRequest: false,
+        hasUnaddressedComments: false,
+        // hashSnapshot reads .length on these three arrays.
+        failingChecks: [],
+        pendingChecks: [],
+        checks: [],
+        ...prOverrides,
+      },
+    ],
+    errors: [],
+    rateLimits: [],
+    fetchedAt: "2026-01-01T00:00:00Z",
+    version: "1.0.0",
+    ...top,
+  });
+  test("hashSnapshot: a hasUnaddressedComments-only delta changes the hash (so the notification fires)", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap()),
+      poller.hashSnapshot(hsnap({ hasUnaddressedComments: true })),
+    ));
+  test("hashSnapshot: identical PR fields hash equal, ignoring fetchedAt (no spurious re-emit)", () =>
+    assert.strictEqual(
+      poller.hashSnapshot(hsnap({}, { fetchedAt: "2026-01-01T00:00:00Z" })),
+      poller.hashSnapshot(hsnap({}, { fetchedAt: "2026-06-06T12:34:56Z" })),
+    ));
+
   // --- notify: diffNotifications ---------------------------------------------
   const N_ON = { enabled: true, native: true, sound: false, events: { yourTurn: true, ciFailed: true, goodNews: true } };
   const npr = (o = {}) => ({
