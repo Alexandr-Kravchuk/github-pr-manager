@@ -97,6 +97,80 @@ function accentClass(pr: PullRequest): string {
   return ACCENT[prSignal(pr)];
 }
 
+/** Tone of the status chip / action button — mirrors the priority-lane colors. */
+export type SituationTone = "violet" | "red" | "emerald" | "neutral";
+
+/**
+ * The card's headline classification: a short status chip plus the single most
+ * useful next action. Derived from the same signals that drive the priority
+ * lanes, so the chip on a card always agrees with the lane it sits in:
+ *  - reviewer, not yet opened → "Review req" / "Give your review"
+ *  - came back to you         → "Back to you" / "Re-review"
+ *  - still reviewing          → "Reviewing"  / "Review"
+ *  - your PR is blocked       → "Blocked"    / the specific unblock action
+ *  - approved & green         → "Ready"      / "Ready to merge"
+ *  - awaiting others          → "Waiting"    / "Waiting on reviewers" (calm)
+ */
+export interface PrSituation {
+  chipLabel: string;
+  tone: SituationTone;
+  /** Action button label (includes the "→" cue when it's your move). */
+  actionLabel: string;
+  /** Filled + colored (your move) vs. calm outline (nothing required of you). */
+  actionable: boolean;
+}
+
+export function prSituation(pr: PullRequest): PrSituation {
+  const isReviewer = pr.roles.includes("reviewer");
+
+  // Reviewer-side lanes take precedence — others may be blocked on you.
+  if (isReviewer && pr.lastSeenAt === null) {
+    return { chipLabel: "Review req", tone: "violet", actionLabel: "→ Give your review", actionable: true };
+  }
+  if (pr.returnedToMe) {
+    return { chipLabel: "Back to you", tone: "violet", actionLabel: "→ Re-review", actionable: true };
+  }
+  if (isReviewer) {
+    return { chipLabel: "Reviewing", tone: "violet", actionLabel: "→ Review", actionable: true };
+  }
+
+  const signal = prSignal(pr);
+  if (signal === "blocked") {
+    const conflict = pr.hasConflicts;
+    const failingCi = pr.failingChecks.length > 0;
+    let actionLabel: string;
+    if (conflict && failingCi) actionLabel = "→ Resolve conflict & fix CI";
+    else if (conflict) actionLabel = "→ Resolve merge conflict";
+    else if (failingCi) actionLabel = "→ Fix failing CI";
+    else if (pr.hasUnaddressedChangeRequest) actionLabel = "→ Address change requests";
+    else actionLabel = "→ Address comments";
+    return { chipLabel: "Blocked", tone: "red", actionLabel, actionable: true };
+  }
+  if (signal === "approved" || pr.canBeMerged) {
+    return { chipLabel: "Ready", tone: "emerald", actionLabel: "→ Ready to merge", actionable: true };
+  }
+  if (signal === "waiting") {
+    return { chipLabel: "Waiting", tone: "neutral", actionLabel: "Waiting on reviewers", actionable: false };
+  }
+  return { chipLabel: "Open", tone: "neutral", actionLabel: "→ Open PR", actionable: false };
+}
+
+/** Status-chip classes per tone (bold, uppercase — the card's headline badge). */
+const SITUATION_CHIP: Record<SituationTone, string> = {
+  violet: "border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-300",
+  red: "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300",
+  emerald: "border-emerald-500/40 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+  neutral: "border-line-strong bg-elevated text-fg-muted",
+};
+
+/** Action-button classes: filled + colored when it's your move, calm outline otherwise. */
+const ACTION_STYLE: Record<SituationTone, string> = {
+  violet: "bg-violet-600 text-white hover:bg-violet-700",
+  red: "bg-red-600 text-white hover:bg-red-700",
+  emerald: "bg-emerald-600 text-white hover:bg-emerald-700",
+  neutral: "border border-line-strong bg-elevated text-fg-secondary hover:bg-line-strong/40",
+};
+
 function reviewLabel(decision: ReviewDecision): { text: string; cls: string } | null {
   switch (decision) {
     case "APPROVED":
@@ -215,6 +289,7 @@ function EyeIcon() {
 }
 
 export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = false }: Props) {
+  const situation = prSituation(pr);
   const review = reviewLabel(pr.reviewDecision);
   const passingCount = pr.checks.filter((c) => c.state === "success").length;
   const pendingReviewers = pr.reviewers.filter((r) => r.reviewState === "pending");
@@ -300,6 +375,18 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
         </span>
       </div>
 
+      {/* Status chip — the card's headline classification (matches its lane) */}
+      <div className="mb-1.5">
+        <span
+          className={cn(
+            "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide",
+            SITUATION_CHIP[situation.tone],
+          )}
+        >
+          {situation.chipLabel}
+        </span>
+      </div>
+
       {/* Title — clicking opens the PR and marks it as seen */}
       <button
         type="button"
@@ -350,18 +437,6 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
         )}
 
         {review && <span className={cn(pill, review.cls)}>{review.text}</span>}
-
-        {pr.returnedToMe && (
-          <span
-            title="New changes since you last looked — back in your court to re-review"
-            className={cn(
-              pill,
-              "border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-300",
-            )}
-          >
-            ↩ Back to you
-          </span>
-        )}
 
         {showAge && (
           <span
@@ -444,6 +519,24 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
                 : "CI: no failures"}
           </span>
         )}
+      </div>
+
+      {/* Contextual action — the single most useful next step for this PR.
+          Opening the PR is what every step boils down to, so it routes through
+          onOpen (which also clears the new-comment badge). */}
+      <div className="mt-3 flex justify-end">
+        <button
+          type="button"
+          onClick={() => onOpen(pr)}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-semibold transition-colors",
+            situation.actionable
+              ? ACTION_STYLE[situation.tone]
+              : ACTION_STYLE.neutral,
+          )}
+        >
+          {situation.actionLabel}
+        </button>
       </div>
     </div>
   );

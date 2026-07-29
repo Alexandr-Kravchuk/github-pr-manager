@@ -31,6 +31,86 @@ function actionRank(pr: PullRequest): number {
   return 4;
 }
 
+/**
+ * A priority lane in the flat ("No grouping") view: a named section that PRs
+ * fall into by their {@link actionRank}, so the list reads as a triaged queue
+ * rather than one undifferentiated column. The set of lanes depends on the
+ * selected role — a reviewer and an author care about different things.
+ */
+interface LaneDef {
+  key: string;
+  label: string;
+  /** Short caption explaining what belongs here. */
+  meaning: string;
+  /** Tailwind bg-* class for the lane's leading dot. */
+  dot: string;
+  match: (pr: PullRequest) => boolean;
+}
+
+function laneDefsFor(role: RoleFilter): LaneDef[] {
+  if (role === "reviewer") {
+    return [
+      { key: "rev-requested", label: "Review requested — you haven't opened these", meaning: "most urgent, ball is on your side", dot: "bg-violet-500", match: (p) => actionRank(p) === 0 },
+      { key: "rev-back", label: "Back to you — re-review", meaning: "author pushed new changes / comments", dot: "bg-violet-500", match: (p) => actionRank(p) === 1 },
+      { key: "rev-ing", label: "Reviewing", meaning: "everything else you're reviewing", dot: "bg-violet-500", match: (p) => actionRank(p) === 2 },
+    ];
+  }
+  if (role === "author") {
+    return [
+      { key: "auth-blocked", label: "Blocked — needs your action", meaning: "failing CI, unaddressed changes or comments", dot: "bg-red-500", match: (p) => prSignal(p) === "blocked" },
+      { key: "auth-rest", label: "Nothing to do — waiting or ready", meaning: "waiting on reviewers, or ready to merge", dot: "bg-line-strong", match: (p) => prSignal(p) !== "blocked" },
+    ];
+  }
+  // "Everyone": reviewer work outranks your own PRs, then your blocked PRs, then the rest.
+  return [
+    { key: "all-review", label: "Your review — top priority", meaning: "others are blocked on you", dot: "bg-violet-500", match: (p) => actionRank(p) <= 2 },
+    { key: "all-blocked", label: "Your blocked PRs", meaning: "your turn to unblock them", dot: "bg-red-500", match: (p) => actionRank(p) === 3 },
+    { key: "all-rest", label: "Everything else", meaning: "waiting on others or ready to merge", dot: "bg-line-strong", match: (p) => actionRank(p) === 4 },
+  ];
+}
+
+/** Header priority legend — the ranked buckets, keyed to the selected role. */
+type LegendTone = "violet" | "red" | "neutral";
+interface LegendItem {
+  n: number;
+  label: string;
+  tone: LegendTone;
+}
+const LEGEND_TONE: Record<LegendTone, string> = {
+  violet: "border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-300",
+  red: "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300",
+  neutral: "border-line-strong bg-elevated text-fg-muted",
+};
+function priorityLegend(role: RoleFilter): { intro: string; items: LegendItem[] } {
+  if (role === "reviewer") {
+    return {
+      intro: "Priority when reviewing:",
+      items: [
+        { n: 1, label: "Review requested", tone: "violet" },
+        { n: 2, label: "Back to you", tone: "violet" },
+        { n: 3, label: "Reviewing", tone: "violet" },
+      ],
+    };
+  }
+  if (role === "author") {
+    return {
+      intro: "Priority for your PRs:",
+      items: [
+        { n: 1, label: "Blocked", tone: "red" },
+        { n: 2, label: "Waiting / ready", tone: "neutral" },
+      ],
+    };
+  }
+  return {
+    intro: "Reviewer work outranks your own PRs:",
+    items: [
+      { n: 1, label: "Your review", tone: "violet" },
+      { n: 2, label: "Blocked PRs", tone: "red" },
+      { n: 3, label: "Everything else", tone: "neutral" },
+    ],
+  };
+}
+
 /** Group bucket key for PRs that don't belong to a multi-PR issue cluster. */
 const OTHER_GROUP_KEY = "￿__other";
 
@@ -64,13 +144,22 @@ interface ViewPrefs {
   showIgnored: boolean;
 }
 
+/** Role switch segments — reviewer / author first, "everyone" last (mockup order). */
+const ROLE_SEGMENTS: { value: RoleFilter; label: string }[] = [
+  { value: "reviewer", label: "I'm a reviewer" },
+  { value: "author", label: "I'm the author" },
+  { value: "all", label: "Everyone" },
+];
+
 const PREFS_KEY = "prd:view-prefs:v1";
 
 const DEFAULT_PREFS: ViewPrefs = {
   role: "all",
   host: "all",
   sortBy: "action",
-  groupBy: "repo",
+  // Default to the flat priority-lane view (grouping is opt-in) so the
+  // "what needs me now" ordering is the first thing you see.
+  groupBy: "none",
   attentionOnly: false,
   failingOnly: false,
   newOnly: false,
@@ -435,6 +524,23 @@ export function App() {
     return arr;
   }, [filtered, sortBy]);
 
+  // Priority lanes: only in the flat, priority-sorted view. Other sorts
+  // (waiting / active / newest) aren't priority-ranked, so lanes wouldn't mean
+  // anything — those fall back to a plain single list.
+  const lanesActive = groupBy === "none" && sortBy === "action";
+  const lanes = useMemo(() => {
+    if (!lanesActive) return null;
+    const buckets = laneDefsFor(role).map((d) => ({ ...d, prs: [] as PullRequest[] }));
+    // `sorted` is already in priority order, so bucketing preserves it.
+    for (const pr of sorted) {
+      const lane = buckets.find((b) => b.match(pr));
+      if (lane) lane.prs.push(pr);
+    }
+    return buckets.filter((b) => b.prs.length > 0);
+  }, [lanesActive, role, sorted]);
+
+  const legend = priorityLegend(role);
+
   const groups = useMemo<Group[] | null>(() => {
     if (groupBy === "none") return null;
     if (groupBy === "repo") {
@@ -652,6 +758,49 @@ export function App() {
         </div>
       )}
 
+      {/* Hero: the role switch is the primary control — it reframes the whole
+          board around "as a reviewer" vs "as an author" and drives the priority
+          lanes. A compact legend on the right explains the ranking. */}
+      {!configError && !noHosts && (
+        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-3 rounded-xl border border-line bg-surface px-4 py-3 shadow-sm">
+          <span className="text-[11px] font-extrabold uppercase tracking-wider text-fg-faint">
+            Show me
+          </span>
+          <div className="inline-flex gap-1 rounded-xl border border-line-strong bg-canvas p-1">
+            {ROLE_SEGMENTS.map((seg) => (
+              <button
+                key={seg.value}
+                type="button"
+                onClick={() => setRole(seg.value)}
+                className={cn(
+                  "rounded-lg px-3.5 py-1.5 text-sm font-bold transition-colors",
+                  role === seg.value
+                    ? "bg-fg text-canvas shadow-sm"
+                    : "text-fg-muted hover:text-fg-secondary",
+                )}
+              >
+                {seg.label}
+              </button>
+            ))}
+          </div>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <span className="text-xs text-fg-subtle">{legend.intro}</span>
+            {legend.items.map((item) => (
+              <span
+                key={item.n}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-semibold",
+                  LEGEND_TONE[item.tone],
+                )}
+              >
+                <span className="font-extrabold opacity-70">{item.n}</span>
+                {item.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Toolbar: view controls (row 1) and filters (row 2), visually separated. */}
       {!configError && (
         <div className="mb-4 space-y-2">
@@ -664,16 +813,6 @@ export function App() {
               placeholder="Search by title, repo, author…"
               className="min-w-[14rem] flex-1 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none"
             />
-
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value as RoleFilter)}
-              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
-            >
-              <option value="all">All roles</option>
-              <option value="author">I&apos;m the author</option>
-              <option value="reviewer">I&apos;m a reviewer</option>
-            </select>
 
             <select
               value={sortBy}
@@ -853,6 +992,33 @@ export function App() {
               </section>
             );
           })}
+        </div>
+      ) : lanes ? (
+        <div className="flex flex-col gap-6">
+          {lanes.map((lane) => (
+            <section key={lane.key}>
+              <div className="mb-3 flex items-center gap-2.5">
+                <span className={cn("h-2.5 w-2.5 shrink-0 rounded-full", lane.dot)} />
+                <h2 className="text-sm font-extrabold text-fg">{lane.label}</h2>
+                <span className="rounded-full bg-elevated px-2 py-0.5 text-xs font-bold text-fg-muted">
+                  {lane.prs.length}
+                </span>
+                <span className="truncate text-xs text-fg-subtle">· {lane.meaning}</span>
+                <span className="ml-1 h-px flex-1 bg-line" />
+              </div>
+              <div className="flex flex-col gap-2.5">
+                {lane.prs.map((pr) => (
+                  <PrCard
+                    key={pr.id}
+                    pr={pr}
+                    onOpen={openPr}
+                    onMarkSeen={(p) => postSeen([p])}
+                    onToggleIgnore={toggleIgnore}
+                  />
+                ))}
+              </div>
+            </section>
+          ))}
         </div>
       ) : (
         <div className="grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3 3xl:grid-cols-4 4xl:grid-cols-5">
