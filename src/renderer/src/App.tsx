@@ -536,7 +536,11 @@ export function App() {
       const lane = buckets.find((b) => b.match(pr));
       if (lane) lane.prs.push(pr);
     }
-    return buckets.filter((b) => b.prs.length > 0);
+    // Number the whole queue continuously across lanes (1, 2, 3 … top to bottom).
+    let pos = 0;
+    return buckets
+      .filter((b) => b.prs.length > 0)
+      .map((b) => ({ ...b, prs: b.prs.map((pr) => ({ pr, pos: ++pos })) }));
   }, [lanesActive, role, sorted]);
 
   const legend = priorityLegend(role);
@@ -976,7 +980,7 @@ export function App() {
                   )}
                 </button>
                 {!isCollapsed && (
-                  <div className="mt-3 grid gap-2.5 pl-2 md:grid-cols-2 2xl:grid-cols-3 3xl:grid-cols-4 4xl:grid-cols-5">
+                  <div className="mt-3 flex flex-col gap-2.5 pl-2">
                     {g.prs.map((pr) => (
                       <PrCard
                         key={pr.id}
@@ -1007,10 +1011,11 @@ export function App() {
                 <span className="ml-1 h-px flex-1 bg-line" />
               </div>
               <div className="flex flex-col gap-2.5">
-                {lane.prs.map((pr) => (
+                {lane.prs.map(({ pr, pos }) => (
                   <PrCard
                     key={pr.id}
                     pr={pr}
+                    queuePos={pos}
                     onOpen={openPr}
                     onMarkSeen={(p) => postSeen([p])}
                     onToggleIgnore={toggleIgnore}
@@ -1021,7 +1026,7 @@ export function App() {
           ))}
         </div>
       ) : (
-        <div className="grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3 3xl:grid-cols-4 4xl:grid-cols-5">
+        <div className="flex flex-col gap-2.5">
           {sorted.map((pr) => (
             <PrCard
               key={pr.id}

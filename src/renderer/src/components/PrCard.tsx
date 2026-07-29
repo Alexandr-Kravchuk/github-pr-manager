@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 
-import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
+import type { PullRequest, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { CheckBadge } from "./CheckBadge";
 
@@ -12,6 +12,8 @@ interface Props {
   onToggleIgnore: (pr: PullRequest) => void;
   /** Hide the host/repo line (redundant inside a per-repo group). */
   hideRepo?: boolean;
+  /** 1-based position in the priority queue (shown only in the flat lane view). */
+  queuePos?: number;
 }
 
 /** Card signal, in priority order — drives the left accent and the header buddy. */
@@ -97,41 +99,37 @@ function accentClass(pr: PullRequest): string {
   return ACCENT[prSignal(pr)];
 }
 
-/** Tone of the status chip / action button — mirrors the priority-lane colors. */
+/** Tone of the contextual action / queue dot — mirrors the priority-lane colors. */
 export type SituationTone = "violet" | "red" | "emerald" | "neutral";
 
+/** Visual weight of the CTA: your move (filled), good-to-go (green), or nothing required (calm). */
+export type ActionLevel = "urgent" | "positive" | "calm";
+
 /**
- * The card's headline classification: a short status chip plus the single most
- * useful next action. Derived from the same signals that drive the priority
- * lanes, so the chip on a card always agrees with the lane it sits in:
- *  - reviewer, not yet opened → "Review req" / "Give your review"
- *  - came back to you         → "Back to you" / "Re-review"
- *  - still reviewing          → "Reviewing"  / "Review"
- *  - your PR is blocked       → "Blocked"    / the specific unblock action
- *  - approved & green         → "Ready"      / "Ready to merge"
- *  - awaiting others          → "Waiting"    / "Waiting on reviewers" (calm)
+ * The card's single call-to-action: the one most useful next step, plus how
+ * loudly to show it. Derived from the same signals that drive the priority
+ * lanes, so the CTA on a card always agrees with the lane it sits in. The label
+ * carries the specific action ("→ Resolve merge conflict"), so that fact is NOT
+ * repeated as a separate status pill (see the card body).
  */
 export interface PrSituation {
-  chipLabel: string;
-  tone: SituationTone;
-  /** Action button label (includes the "→" cue when it's your move). */
   actionLabel: string;
-  /** Filled + colored (your move) vs. calm outline (nothing required of you). */
-  actionable: boolean;
+  tone: SituationTone;
+  level: ActionLevel;
 }
 
 export function prSituation(pr: PullRequest): PrSituation {
   const isReviewer = pr.roles.includes("reviewer");
 
-  // Reviewer-side lanes take precedence — others may be blocked on you.
+  // Reviewer-side actions take precedence — others may be blocked on you.
   if (isReviewer && pr.lastSeenAt === null) {
-    return { chipLabel: "Review req", tone: "violet", actionLabel: "→ Give your review", actionable: true };
+    return { actionLabel: "→ Give your review", tone: "violet", level: "urgent" };
   }
   if (pr.returnedToMe) {
-    return { chipLabel: "Back to you", tone: "violet", actionLabel: "→ Re-review", actionable: true };
+    return { actionLabel: "→ Re-review", tone: "violet", level: "urgent" };
   }
   if (isReviewer) {
-    return { chipLabel: "Reviewing", tone: "violet", actionLabel: "→ Review", actionable: true };
+    return { actionLabel: "→ Review", tone: "violet", level: "calm" };
   }
 
   const signal = prSignal(pr);
@@ -144,53 +142,35 @@ export function prSituation(pr: PullRequest): PrSituation {
     else if (failingCi) actionLabel = "→ Fix failing CI";
     else if (pr.hasUnaddressedChangeRequest) actionLabel = "→ Address change requests";
     else actionLabel = "→ Address comments";
-    return { chipLabel: "Blocked", tone: "red", actionLabel, actionable: true };
+    return { actionLabel, tone: "red", level: "urgent" };
   }
   if (signal === "approved" || pr.canBeMerged) {
-    return { chipLabel: "Ready", tone: "emerald", actionLabel: "→ Ready to merge", actionable: true };
+    return { actionLabel: "→ Ready to merge", tone: "emerald", level: "positive" };
   }
   if (signal === "waiting") {
-    return { chipLabel: "Waiting", tone: "neutral", actionLabel: "Waiting on reviewers", actionable: false };
+    return { actionLabel: "Waiting on reviewers", tone: "neutral", level: "calm" };
   }
-  return { chipLabel: "Open", tone: "neutral", actionLabel: "→ Open PR", actionable: false };
+  return { actionLabel: "→ Open PR", tone: "neutral", level: "calm" };
 }
 
-/** Status-chip classes per tone (bold, uppercase — the card's headline badge). */
-const SITUATION_CHIP: Record<SituationTone, string> = {
-  violet: "border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-300",
-  red: "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300",
-  emerald: "border-emerald-500/40 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
-  neutral: "border-line-strong bg-elevated text-fg-muted",
-};
-
-/** Action-button classes: filled + colored when it's your move, calm outline otherwise. */
-const ACTION_STYLE: Record<SituationTone, string> = {
-  violet: "bg-violet-600 text-white hover:bg-violet-700",
-  red: "bg-red-600 text-white hover:bg-red-700",
-  emerald: "bg-emerald-600 text-white hover:bg-emerald-700",
-  neutral: "border border-line-strong bg-elevated text-fg-secondary hover:bg-line-strong/40",
-};
-
-function reviewLabel(decision: ReviewDecision): { text: string; cls: string } | null {
-  switch (decision) {
-    case "APPROVED":
-      return {
-        text: "Approved",
-        cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40",
-      };
-    case "CHANGES_REQUESTED":
-      return {
-        text: "Changes requested",
-        cls: "bg-red-500/15 text-red-700 dark:text-red-300 border-red-500/40",
-      };
-    case "REVIEW_REQUIRED":
-      return { text: "Review required", cls: "bg-elevated text-fg-muted border-line-strong" };
-    default:
-      return null;
+/** CTA button classes: filled + colored when it's your move, calm outline otherwise. */
+function ctaClasses(s: PrSituation): string {
+  if (s.level === "urgent") {
+    return s.tone === "red"
+      ? "bg-red-600 text-white hover:bg-red-700"
+      : "bg-violet-600 text-white hover:bg-violet-700";
   }
+  if (s.level === "positive") return "bg-emerald-600 text-white hover:bg-emerald-700";
+  return "border border-line-strong bg-elevated text-fg-secondary hover:bg-line-strong/40";
 }
 
-const pill = "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium";
+/** Queue-dot background per tone (the pulsing urgency marker under the queue number). */
+const DOT_BG: Record<SituationTone, string> = {
+  violet: "bg-violet-500",
+  red: "bg-red-500",
+  emerald: "bg-emerald-500",
+  neutral: "bg-line-strong",
+};
 
 /** Whole days since an ISO timestamp. */
 function daysSince(iso: string): number {
@@ -203,13 +183,6 @@ const REVIEWER_RING: Record<Reviewer["reviewState"], string> = {
   pending: "ring-amber-500",
 };
 
-function reviewerListLabel(reviewers: Reviewer[]): string {
-  if (reviewers.length === 0) return "";
-  const logins = reviewers.map((r) => r.login);
-  if (logins.length <= 2) return logins.join(", ");
-  return `${logins.slice(0, 2).join(", ")} +${logins.length - 2}`;
-}
-
 function ReviewerBadge({ r }: { r: Reviewer }) {
   const label = r.reviewState === "approved"
     ? "approved"
@@ -220,8 +193,8 @@ function ReviewerBadge({ r }: { r: Reviewer }) {
     <img
       src={r.avatarUrl}
       alt=""
-      width={18}
-      height={18}
+      width={20}
+      height={20}
       title={`${r.login}: ${label}`}
       className={cn("rounded-full ring-2", REVIEWER_RING[r.reviewState])}
     />
@@ -229,7 +202,7 @@ function ReviewerBadge({ r }: { r: Reviewer }) {
     <span
       title={`${r.login}: ${label}`}
       className={cn(
-        "inline-flex h-[18px] w-[18px] items-center justify-center rounded-full ring-2 bg-elevated text-[9px] text-fg-muted uppercase",
+        "inline-flex h-5 w-5 items-center justify-center rounded-full ring-2 bg-elevated text-[9px] text-fg-muted uppercase",
         REVIEWER_RING[r.reviewState],
       )}
     >
@@ -288,16 +261,32 @@ function EyeIcon() {
   );
 }
 
-export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = false }: Props) {
+/** Ghost outline tag for a role — muted, so it reads even when repo grouping mixes roles. */
+const roleTag =
+  "inline-flex items-center rounded border border-line-strong px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-fg-muted";
+
+export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = false, queuePos }: Props) {
+  const signal = prSignal(pr);
   const situation = prSituation(pr);
-  const review = reviewLabel(pr.reviewDecision);
   const passingCount = pr.checks.filter((c) => c.state === "success").length;
-  const pendingReviewers = pr.reviewers.filter((r) => r.reviewState === "pending");
-  const pendingReviewerNames = reviewerListLabel(pendingReviewers);
   // Age badge: flag PRs that have been waiting a while without an approval — the
   // "don't let reviews rot" cue. Suppressed for drafts and already-approved PRs.
   const ageDays = daysSince(pr.createdAt);
   const showAge = !pr.isDraft && !pr.hasHumanApproval && ageDays >= 3;
+
+  // Status pill — only when it says something the CTA doesn't. For a reviewer,
+  // "Review" doesn't reveal that changes were already requested, so surface that
+  // (neutral). For your own blocked PRs the CTA already names the problem, so no
+  // pill (no dedup with the button).
+  const isReviewerSide = pr.roles.includes("reviewer") || pr.returnedToMe;
+  const statusPill =
+    isReviewerSide && pr.reviewDecision === "CHANGES_REQUESTED" ? "Changes requested" : null;
+
+  // "✓ CI passed (N)" and "✓ Approved" are calm confirmations — useful on a
+  // ready/waiting card, pure noise on a blocked one, so suppress them there.
+  const showCiPassed =
+    signal !== "blocked" && pr.failingChecks.length === 0 && pr.pendingChecks.length === 0;
+
   const [copied, setCopied] = useState(false);
   const copyUrl = useCallback(() => {
     window.api
@@ -312,22 +301,32 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
   return (
     <div
       className={cn(
-        "rounded-lg border border-line border-l-4 p-4 transition-colors hover:bg-surface bg-surface/60",
+        "flex items-stretch gap-3.5 rounded-xl border border-line border-l-4 bg-surface/60 p-4 transition-colors hover:bg-surface",
         accentClass(pr),
       )}
     >
-      {/* Top row: repo/number + updated time */}
-      <div className="mb-1 flex items-center justify-between gap-2 text-xs text-fg-subtle">
-        <div className="flex min-w-0 items-center gap-2">
+      {/* Queue position (flat priority view only) + pulsing urgency dot */}
+      {queuePos != null && (
+        <div className="flex w-7 shrink-0 flex-col items-center gap-1.5 pt-0.5">
+          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-elevated text-[13px] font-extrabold text-fg-muted">
+            {queuePos}
+          </span>
+          {situation.level === "urgent" && (
+            <span className={cn("prd-pulse h-2 w-2 rounded-full", DOT_BG[situation.tone])} aria-hidden />
+          )}
+        </div>
+      )}
+
+      {/* Main content */}
+      <div className="min-w-0 flex-1">
+        {/* Meta: repo #number · time (no host badge — a host filter covers that) */}
+        <div className="mb-1 flex items-center gap-2 text-xs text-fg-subtle">
           {hideRepo ? (
             <span className="text-fg-faint">#{pr.number}</span>
           ) : (
-            <>
-              <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">{pr.hostLabel}</span>
-              <span className="truncate" title={pr.repo}>
-                {pr.repo} <span className="text-fg-faint">#{pr.number}</span>
-              </span>
-            </>
+            <span className="truncate" title={pr.repo}>
+              {pr.repo} <span className="text-fg-faint">#{pr.number}</span>
+            </span>
           )}
           {pr.isDraft && (
             <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">Draft</span>
@@ -341,198 +340,134 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
               <UmbrellaIcon />
             </span>
           )}
-          <button
-            type="button"
-            onClick={copyUrl}
-            title={copied ? "Copied" : "Copy PR link"}
-            aria-label="Copy PR link"
-            className={cn(
-              "shrink-0 rounded p-0.5 hover:bg-elevated",
-              copied
-                ? "text-emerald-600 dark:text-emerald-400"
-                : "text-fg-faint hover:text-fg-secondary",
-            )}
-          >
-            {copied ? <CheckIcon /> : <CopyIcon />}
-          </button>
-          <button
-            type="button"
-            onClick={() => onToggleIgnore(pr)}
-            title={pr.isIgnored ? "Un-ignore (show on the dashboard)" : "Ignore (hide from the dashboard)"}
-            aria-label={pr.isIgnored ? "Un-ignore PR" : "Ignore PR"}
-            className={cn(
-              "shrink-0 rounded p-0.5 hover:bg-elevated",
-              pr.isIgnored
-                ? "text-sky-600 dark:text-sky-400"
-                : "text-fg-faint hover:text-fg-secondary",
-            )}
-          >
-            {pr.isIgnored ? <EyeIcon /> : <EyeOffIcon />}
-          </button>
-        </div>
-        <span className="shrink-0" title={new Date(pr.updatedAt).toLocaleString()}>
-          {relativeTime(pr.updatedAt)}
-        </span>
-      </div>
-
-      {/* Status chip — the card's headline classification (matches its lane) */}
-      <div className="mb-1.5">
-        <span
-          className={cn(
-            "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide",
-            SITUATION_CHIP[situation.tone],
-          )}
-        >
-          {situation.chipLabel}
-        </span>
-      </div>
-
-      {/* Title — clicking opens the PR and marks it as seen */}
-      <button
-        type="button"
-        onClick={() => onOpen(pr)}
-        className="mb-2 block text-left text-[15px] font-semibold leading-snug text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300"
-      >
-        {pr.title}
-      </button>
-
-      {/* Meta: author, roles, review decision, comments, new activity */}
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        {pr.author && (
-          <span className="inline-flex items-center gap-1.5 text-xs text-fg-muted">
-            <img
-              src={pr.author.avatarUrl}
-              alt=""
-              width={18}
-              height={18}
-              className="rounded-full"
-            />
-            {pr.author.login}
+          <span className="shrink-0 text-fg-faint" title={new Date(pr.updatedAt).toLocaleString()}>
+            · {relativeTime(pr.updatedAt)}
           </span>
-        )}
-
-        {pr.roles.includes("author") && (
-          <span className={cn(pill, "border-sky-500/40 bg-sky-500/15 text-sky-700 dark:text-sky-300")}>
-            Author
-          </span>
-        )}
-        {pr.roles.includes("reviewer") && (
-          <span
-            className={cn(
-              pill,
-              "border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-300",
-            )}
-          >
-            Reviewer
-          </span>
-        )}
-
-        {pr.roles.includes("author") && pr.hasConflicts && (
-          <span
-            title="GitHub reports a merge conflict with the base branch — resolve it before this can merge"
-            className={cn(pill, "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300")}
-          >
-            ⚠ Merge conflict
-          </span>
-        )}
-
-        {review && <span className={cn(pill, review.cls)}>{review.text}</span>}
-
-        {showAge && (
-          <span
-            title={`Opened ${ageDays} days ago, still unapproved`}
-            className={cn(pill, "border-line-strong bg-elevated text-fg-muted")}
-          >
-            ⏳ {ageDays}d
-          </span>
-        )}
-
-        {pr.unresolvedThreads > 0 && (
-          <span
-            className={cn(
-              pill,
-              "border-orange-500/40 bg-orange-500/15 text-orange-700 dark:text-orange-300",
-            )}
-          >
-            💬 {pr.unresolvedThreads} to resolve
-          </span>
-        )}
-
-        {pr.hasNewActivity && (
-          <span className="inline-flex items-center gap-1">
-            <span
-              className={cn(
-                pill,
-                "border-amber-400/50 bg-amber-400/20 text-amber-700 dark:text-amber-200",
-              )}
-            >
-              ✦ New comments
-            </span>
+          <span className="ml-auto flex shrink-0 items-center gap-0.5">
             <button
               type="button"
-              onClick={() => onMarkSeen(pr)}
-              title="Mark as seen"
-              className="rounded-md border border-line-strong px-1.5 py-0.5 text-xs text-fg-muted hover:bg-elevated hover:text-fg"
+              onClick={copyUrl}
+              title={copied ? "Copied" : "Copy PR link"}
+              aria-label="Copy PR link"
+              className={cn(
+                "rounded p-0.5 hover:bg-elevated",
+                copied ? "text-emerald-600 dark:text-emerald-400" : "text-fg-faint hover:text-fg-secondary",
+              )}
             >
-              ✓
+              {copied ? <CheckIcon /> : <CopyIcon />}
+            </button>
+            <button
+              type="button"
+              onClick={() => onToggleIgnore(pr)}
+              title={pr.isIgnored ? "Un-ignore (show on the dashboard)" : "Ignore (hide from the dashboard)"}
+              aria-label={pr.isIgnored ? "Un-ignore PR" : "Ignore PR"}
+              className={cn(
+                "rounded p-0.5 hover:bg-elevated",
+                pr.isIgnored ? "text-sky-600 dark:text-sky-400" : "text-fg-faint hover:text-fg-secondary",
+              )}
+            >
+              {pr.isIgnored ? <EyeIcon /> : <EyeOffIcon />}
             </button>
           </span>
-        )}
-      </div>
+        </div>
 
-      {/* Reviewers */}
-      {pr.reviewers.length > 0 && (
-        <div className="mb-2 flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-fg-subtle">Reviewers:</span>
-          {pr.reviewers.map((r) => (
-            <ReviewerBadge key={r.login} r={r} />
-          ))}
-          {pendingReviewers.length > 0 && (
-            <span
-              className={cn(
-                pill,
-                "max-w-full border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-200",
-              )}
-              title={`Waiting for review from: ${pendingReviewers.map((r) => r.login).join(", ")}`}
-            >
-              Waiting for: <span className="truncate">{pendingReviewerNames}</span>
+        {/* Title — clicking opens the PR and marks it as seen */}
+        <button
+          type="button"
+          onClick={() => onOpen(pr)}
+          className="mb-2 block text-left text-[15px] font-semibold leading-snug text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300"
+        >
+          {pr.title}
+        </button>
+
+        {/* Footer: author, role, (conditional) status, muted stats, reviewers, CI */}
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+          {pr.author && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-fg-muted">
+              <img src={pr.author.avatarUrl} alt="" width={18} height={18} className="rounded-full" />
+              {pr.author.login}
             </span>
           )}
+
+          {pr.roles.includes("author") && <span className={roleTag}>Author</span>}
+          {pr.roles.includes("reviewer") && <span className={roleTag}>Reviewer</span>}
+
+          {statusPill && (
+            <span className="inline-flex items-center rounded-md border border-line-strong bg-elevated px-2 py-0.5 text-[11px] font-semibold text-fg-muted">
+              {statusPill}
+            </span>
+          )}
+
+          {pr.unresolvedThreads > 0 && (
+            <span className="inline-flex items-center gap-1 text-xs text-fg-subtle">
+              💬 {pr.unresolvedThreads} unresolved
+            </span>
+          )}
+
+          {pr.hasNewActivity && (
+            <span className="inline-flex items-center gap-1 text-xs text-fg-subtle">
+              ✦ New comments
+              <button
+                type="button"
+                onClick={() => onMarkSeen(pr)}
+                title="Mark as seen"
+                className="rounded border border-line-strong px-1 leading-none text-fg-muted hover:bg-elevated hover:text-fg"
+              >
+                ✓
+              </button>
+            </span>
+          )}
+
+          {showAge && (
+            <span
+              title={`Opened ${ageDays} days ago, still unapproved`}
+              className="inline-flex items-center gap-1 text-xs text-fg-subtle"
+            >
+              ⏳ {ageDays}d
+            </span>
+          )}
+
+          {pr.reviewers.length > 0 && (
+            <span className="inline-flex items-center gap-1">
+              {pr.reviewers.map((r) => (
+                <ReviewerBadge key={r.login} r={r} />
+              ))}
+            </span>
+          )}
+
+          {/* CI: failures first (always shown), then pending; the passed/approved
+              confirmations only when they aren't noise (see showCiPassed). */}
+          {pr.failingChecks.map((c) => (
+            <CheckBadge key={`f-${c.name}`} check={c} />
+          ))}
+          {pr.pendingChecks.map((c) => (
+            <CheckBadge key={`p-${c.name}`} check={c} />
+          ))}
+          {showCiPassed && (
+            <span className="text-xs text-fg-subtle">
+              {pr.ciState === "success" && passingCount > 0
+                ? `✓ CI passed (${passingCount})`
+                : pr.checks.length === 0
+                  ? "No checks"
+                  : "CI: no failures"}
+            </span>
+          )}
+          {signal === "approved" && pr.hasHumanApproval && (
+            <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-400">✓ Approved</span>
+          )}
         </div>
-      )}
-
-      {/* CI: failures first, then pending; otherwise a summary */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        {pr.failingChecks.map((c) => (
-          <CheckBadge key={`f-${c.name}`} check={c} />
-        ))}
-        {pr.pendingChecks.map((c) => (
-          <CheckBadge key={`p-${c.name}`} check={c} />
-        ))}
-
-        {pr.failingChecks.length === 0 && pr.pendingChecks.length === 0 && (
-          <span className="text-xs text-fg-subtle">
-            {pr.ciState === "success" && passingCount > 0
-              ? `✓ CI passed (${passingCount})`
-              : pr.checks.length === 0
-                ? "No checks"
-                : "CI: no failures"}
-          </span>
-        )}
       </div>
 
-      {/* Contextual action — the single most useful next step for this PR.
-          Opening the PR is what every step boils down to, so it routes through
-          onOpen (which also clears the new-comment badge). */}
-      <div className="mt-3 flex justify-end">
+      {/* Contextual action — the single most useful next step, vertically
+          centered. Opening the PR is what every step boils down to, so it routes
+          through onOpen (which also clears the new-comment badge). */}
+      <div className="flex shrink-0 items-center">
         <button
           type="button"
           onClick={() => onOpen(pr)}
           className={cn(
-            "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-semibold transition-colors",
-            situation.actionable
-              ? ACTION_STYLE[situation.tone]
-              : ACTION_STYLE.neutral,
+            "inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-2 text-[13px] font-semibold transition-colors",
+            ctaClasses(situation),
           )}
         >
           {situation.actionLabel}

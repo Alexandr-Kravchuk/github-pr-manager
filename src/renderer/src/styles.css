@@ -67,6 +67,28 @@
   }
 }
 
+/* Pulsing urgency dot under a queue number (components/PrCard.tsx). The dot's
+ * own background carries the accent color; this just breathes it. */
+.prd-pulse {
+  animation: prd-pulse 1.6s ease-in-out infinite;
+}
+@keyframes prd-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(1.35);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prd-pulse {
+    animation: none;
+  }
+}
+
 /* Header buddy (components/Buddy.tsx) — per-mood micro-animations. */
 .buddy :is(g, path, circle, text) {
   transform-box: fill-box;
