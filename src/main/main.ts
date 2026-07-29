@@ -3,7 +3,7 @@ import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, Notif
 
 import { ConfigError, defaultSettings, getGhStatus, toHostConfigs, toPublicConfig } from "../shared/config";
 import { setIgnored } from "../shared/ignored";
-import { diffNotifications } from "../shared/notify";
+import { diffNotifications, planDelivery } from "../shared/notify";
 import { markSeen } from "../shared/state";
 import type {
   ConfigResult,
@@ -51,13 +51,6 @@ let prevNotifyPrs: PullRequest[] | null = null;
 const IDLE_PAUSE_SECONDS = 300;
 
 /**
- * Beyond this many events in one diff, collapse to a single summary
- * notification so a burst (e.g. adding a host that surfaces many review
- * requests at once) can't spew a stack of individual notifications.
- */
-const MAX_INDIVIDUAL_NOTIFICATIONS = 4;
-
-/**
  * The idle gate handed to the poller: true when a fetch would just waste the
  * rate-limit budget — the machine is asleep, the window is minimized/hidden, or
  * the user has been idle a while. No window yet (startup / dock activate) counts
@@ -101,8 +94,16 @@ const liveNotifications = new Set<Notification>();
 /** Shows one native OS notification; `onClick` runs when the user clicks it. */
 function showOsNotification(title: string, body: string, silent: boolean, onClick: () => void): void {
   const n = new Notification({ title, body, silent });
-  n.on("click", onClick);
   const release = () => liveNotifications.delete(n);
+  // Release on click too: some OS/versions fire `click` without a later `close`,
+  // which would otherwise retain every clicked toast for the process lifetime.
+  n.on("click", () => {
+    try {
+      onClick();
+    } finally {
+      release();
+    }
+  });
   n.on("close", release);
   n.on("failed", release);
   liveNotifications.add(n);
@@ -143,46 +144,48 @@ function handleNotifications(prs: PullRequest[]): void {
     return;
   }
 
-  // Don't notify for the window the user is actively viewing: when our window is
-  // the focused one, the dashboard already shows the change, and a `wake()` tick
-  // on focus/restore would otherwise dump a burst of toasts for everything that
-  // moved while the app was away. The baseline is updated above, so these events
-  // won't re-fire once the window loses focus.
+  // Decide delivery with the pure planner (focus suppression, summary-vs-
+  // individual split, chime-once, native-off sound fallback all live there and
+  // are unit-tested); this process only executes the descriptor. The baseline is
+  // updated above, so a suppressed batch won't re-fire once focus is lost.
   const win = mainWindow;
+  const focused = Boolean(win && !win.isDestroyed() && win.isFocused());
   const kinds = events.map((e) => e.kind).join(", ");
-  if (win && !win.isDestroyed() && win.isFocused()) {
-    dbg(`suppressed ${events.length} event(s) — window focused: ${kinds}`);
+  const plan = planDelivery(events, settings.notifications, {
+    focused,
+    nativeSupported: Notification.isSupported(),
+  });
+
+  if (plan.mode === "none") {
+    dbg(focused ? `suppressed ${events.length} event(s) — window focused: ${kinds}` : `no delivery channel: ${kinds}`);
     return;
   }
 
   const { native, sound } = settings.notifications;
-  dbg(`delivering ${events.length} event(s) [native=${native} sound=${sound}]: ${kinds}`);
+  dbg(`delivering ${events.length} event(s) [native=${native} sound=${sound} mode=${plan.mode}]: ${kinds}`);
 
-  if (native && Notification.isSupported()) {
-    if (events.length > MAX_INDIVIDUAL_NOTIFICATIONS) {
-      showOsNotification(
-        "PR Dashboard",
-        `${events.length} pull requests need your attention`,
-        !sound,
-        focusMainWindow,
-      );
-    } else {
-      // Sound at most once (on the first) so a batch doesn't chime N times.
-      events.forEach((ev, i) => {
-        showOsNotification(ev.title, ev.body, !(sound && i === 0), () => {
-          // Validate before opening: the URL comes from a user-configured
-          // GraphQL host, so guard the scheme like every other openExternal
-          // call here. On a bad URL, fall back to surfacing the app.
-          try {
-            void shell.openExternal(validateExternalUrl(ev.url));
-          } catch {
-            focusMainWindow();
-          }
-        });
+  if (plan.mode === "summary") {
+    showOsNotification(
+      "PR Dashboard",
+      `${events.length} pull requests need your attention`,
+      plan.summarySilent,
+      focusMainWindow,
+    );
+  } else if (plan.mode === "individual") {
+    events.forEach((ev, i) => {
+      showOsNotification(ev.title, ev.body, plan.silent[i], () => {
+        // Validate before opening: the URL comes from a user-configured
+        // GraphQL host, so guard the scheme like every other openExternal
+        // call here. On a bad URL, fall back to surfacing the app.
+        try {
+          void shell.openExternal(validateExternalUrl(ev.url));
+        } catch {
+          focusMainWindow();
+        }
       });
-    }
-  } else if (sound) {
-    // No native window, but the user still wants an audible ping.
+    });
+  } else {
+    // sound-only: no native window, but the user still wants an audible ping.
     sendToRenderer("notify-sound", undefined);
   }
 }

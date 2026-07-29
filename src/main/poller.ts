@@ -137,6 +137,10 @@ function hashSnapshot(s: DashboardResponse): string {
     p.checks.length,
     p.awaitingReview,
     p.hasUnaddressedChangeRequest,
+    // Sibling of hasUnaddressedChangeRequest and read by the notifier
+    // (notify.ts) — hash it too, so a tick whose only delta is a new
+    // unanswered comment still pushes a snapshot and fires the notification.
+    p.hasUnaddressedComments,
     p.isDraft,
     p.isIgnored,
     p.parentKey,

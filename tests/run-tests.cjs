@@ -1095,6 +1095,70 @@ test("healthFromError: stringifies a non-Error rejection", () =>
       ),
       [],
     ));
+  test("diffNotifications: ignored PR fires nothing (muted everywhere)", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([npr()], [npr({ ciState: "failure", isIgnored: true })], N_ON),
+      [],
+    ));
+  test("diffNotifications: new unanswered comment on your PR fires unanswered_comment", () =>
+    assert.deepStrictEqual(
+      kinds(notify.diffNotifications([npr()], [npr({ hasUnaddressedComments: true })], N_ON)),
+      ["unanswered_comment"],
+    ));
+  test("diffNotifications: unanswered_comment suppressed when yourTurn is off", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([npr()], [npr({ hasUnaddressedComments: true })], {
+        ...N_ON,
+        events: { ...N_ON.events, yourTurn: false },
+      }),
+      [],
+    ));
+
+  // --- notify: planDelivery (pure delivery decision) -------------------------
+  const evs = (n) =>
+    Array.from({ length: n }, (_, i) => ({ prId: String(i), kind: "ci_failed", title: "t", body: "b", url: "u" }));
+  const CTX = { focused: false, nativeSupported: true };
+  const NP = (o = {}) => ({ enabled: true, native: true, sound: false, ...o });
+  const CAP = notify.MAX_INDIVIDUAL_NOTIFICATIONS;
+
+  test("planDelivery: no events -> none", () =>
+    assert.strictEqual(notify.planDelivery([], NP(), CTX).mode, "none"));
+  test("planDelivery: disabled -> none", () =>
+    assert.strictEqual(notify.planDelivery(evs(2), NP({ enabled: false }), CTX).mode, "none"));
+  test("planDelivery: focused window -> none (suppressed)", () =>
+    assert.strictEqual(notify.planDelivery(evs(1), NP(), { ...CTX, focused: true }).mode, "none"));
+  test("planDelivery: burst over the cap -> silent summary (no sound)", () => {
+    const p = notify.planDelivery(evs(CAP + 1), NP(), CTX);
+    assert.strictEqual(p.mode, "summary");
+    assert.strictEqual(p.summarySilent, true);
+  });
+  test("planDelivery: burst over the cap with sound -> audible summary", () =>
+    assert.strictEqual(notify.planDelivery(evs(CAP + 1), NP({ sound: true }), CTX).summarySilent, false));
+  test("planDelivery: at the cap -> individual, chime only on the first", () => {
+    const p = notify.planDelivery(evs(CAP), NP({ sound: true }), CTX);
+    assert.strictEqual(p.mode, "individual");
+    // silent[i] === true means no chime; only index 0 should chime.
+    assert.deepStrictEqual(p.silent, [false, true, true, true]);
+  });
+  test("planDelivery: individual with sound off -> every toast silent", () =>
+    assert.deepStrictEqual(notify.planDelivery(evs(2), NP({ sound: false }), CTX).silent, [true, true]));
+  test("planDelivery: native off but sound on -> sound-only", () =>
+    assert.strictEqual(notify.planDelivery(evs(2), NP({ native: false, sound: true }), CTX).mode, "sound-only"));
+  test("planDelivery: native unsupported but sound on -> sound-only", () =>
+    assert.strictEqual(
+      notify.planDelivery(evs(2), NP({ sound: true }), { ...CTX, nativeSupported: false }).mode,
+      "sound-only",
+    ));
+  test("planDelivery: native off and sound off -> none", () =>
+    assert.strictEqual(notify.planDelivery(evs(2), NP({ native: false, sound: false }), CTX).mode, "none"));
+
+  // --- notify defaults: single source of truth -------------------------------
+  test("defaultNotificationSettings equals the shared default and is a fresh clone", () => {
+    assert.deepStrictEqual(cfg.defaultNotificationSettings(), notify.DEFAULT_NOTIFICATION_SETTINGS);
+    const a = cfg.defaultNotificationSettings();
+    a.events.yourTurn = false;
+    assert.strictEqual(notify.DEFAULT_NOTIFICATION_SETTINGS.events.yourTurn, true); // shared const not mutated
+  });
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

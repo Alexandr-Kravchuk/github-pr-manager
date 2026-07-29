@@ -8,19 +8,14 @@ import type {
   Settings,
   ThemePreference,
 } from "../../../shared/types";
+// notify.ts is deliberately Electron/Node-free (unlike the rest of shared/), so
+// the renderer can value-import this default rather than mirroring it. Used
+// before settings load and as a fallback for a settings file from an older
+// version. Single source of truth shared with config.ts's main-process default.
+import { DEFAULT_NOTIFICATION_SETTINGS as DEFAULT_NOTIFICATIONS } from "../../../shared/notify";
 import { cn } from "../format";
 
 const GITHUB_GRAPHQL = "https://api.github.com/graphql";
-
-// Renderer-side mirror of the main-process defaults (config.ts uses node
-// builtins, so the renderer can't import it). Used before settings load and as
-// a fallback for a settings file written by an older version.
-const DEFAULT_NOTIFICATIONS: NotificationSettings = {
-  enabled: false,
-  native: true,
-  sound: false,
-  events: { yourTurn: true, ciFailed: true, goodNews: true },
-};
 
 // While editing, repos are kept as the raw textarea text (reposText) so typing
 // newlines / partial entries isn't stripped mid-edit. They're parsed into the

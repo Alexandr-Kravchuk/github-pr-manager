@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 
+import { DEFAULT_NOTIFICATION_SETTINGS } from "./notify";
 import type {
   GhStatus,
   HostConfig,
@@ -82,12 +83,10 @@ export function clearGhTokenCache(): void {
  * Settings. Once enabled, native is on and sound is off, with all event groups on.
  */
 export function defaultNotificationSettings(): NotificationSettings {
-  return {
-    enabled: false,
-    native: true,
-    sound: false,
-    events: { yourTurn: true, ciFailed: true, goodNews: true },
-  };
+  // Single source of truth lives in shared/notify.ts (also value-imported by the
+  // renderer); clone it so callers can't mutate the shared constant.
+  const d = DEFAULT_NOTIFICATION_SETTINGS;
+  return { ...d, events: { ...d.events } };
 }
 
 /**
