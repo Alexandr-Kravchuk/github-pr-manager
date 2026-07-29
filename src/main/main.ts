@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
-import { ConfigError, defaultSettings, getGhStatus, toHostConfigs, toPublicConfig } from "../shared/config";
+import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
 import { setIgnored } from "../shared/ignored";
 import { createReleaseGuard, planDelivery, runNotifyCycle } from "../shared/notify";
 import { markSeen } from "../shared/state";
@@ -143,9 +143,13 @@ function handleNotifications(prs: PullRequest[]): void {
   let settings: Settings;
   try {
     settings = loadSettings();
-  } catch {
+  } catch (e) {
+    // Advance the baseline (avoids a replay storm once settings recover), but
+    // surface this always-on, not only under PRD_DEBUG: a persistent settings
+    // problem silently drops real transitions otherwise. The poller surfaces the
+    // same failure to the UI as a config error; this keeps a diagnosable trace.
     prevNotifyPrs = prs;
-    dbg("settings unreadable — baseline only");
+    console.warn(`[notify] settings unreadable — notifications skipped this tick: ${e instanceof Error ? e.message : String(e)}`);
     return;
   }
 
@@ -285,8 +289,9 @@ function resolveWindowsAppId(): string {
   const fallback = "com.creatio.prdashboard"; // keep in sync with package.json build.appId
   try {
     const raw = fs.readFileSync(path.join(app.getAppPath(), "package.json"), "utf8");
-    const appId = (JSON.parse(raw) as { build?: { appId?: unknown } }).build?.appId;
-    return typeof appId === "string" && appId.trim() ? appId : fallback;
+    // Branch selection (present / malformed / missing / non-string) lives in the
+    // pure `pickAppId`, which is unit-tested; this only does the file read.
+    return pickAppId(raw, fallback);
   } catch {
     return fallback;
   }

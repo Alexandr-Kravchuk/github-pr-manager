@@ -14,6 +14,23 @@ import type {
 /** Error with a friendly message — the UI surfaces its text. */
 export class ConfigError extends Error {}
 
+/**
+ * Extracts `build.appId` from a raw `package.json` string — the identifier
+ * electron-builder stamps the installer with, reused at runtime for the Windows
+ * AppUserModelID so the two can't drift. Pure (no fs/Electron) so the
+ * present/absent/malformed/non-string branches unit-test in plain Node; the
+ * caller does the file read and passes the text in. Returns `fallback` when the
+ * JSON is malformed or `build.appId` is missing or not a non-empty string.
+ */
+export function pickAppId(rawPackageJson: string, fallback: string): string {
+  try {
+    const appId = (JSON.parse(rawPackageJson) as { build?: { appId?: unknown } }).build?.appId;
+    return typeof appId === "string" && appId.trim() ? appId : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 export const MIN_POLL_INTERVAL_SECONDS = 10;
 

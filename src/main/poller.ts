@@ -145,7 +145,9 @@ export function hashSnapshot(s: DashboardResponse): string {
     // transition (`isReviewer && !wasReviewer` -> review_requested) from roles.
     // Being added as an additional reviewer to an already-tracked PR may not
     // move any other hashed field, so hash roles too or that toast can be lost.
-    p.roles.join(","),
+    // Sorted so the hash tracks role *membership*, not the producer's ordering —
+    // a reordering alone must not force a spurious re-emit.
+    [...p.roles].sort().join(","),
     p.isDraft,
     p.isIgnored,
     p.parentKey,

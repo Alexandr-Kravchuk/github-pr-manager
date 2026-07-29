@@ -58,6 +58,21 @@ test("ghHostnameFromUrl: GHE server (/api/graphql)", () =>
 test("ghHostnameFromUrl: invalid URL throws ConfigError", () =>
   assert.throws(() => cfg.ghHostnameFromUrl("not a url"), /Invalid graphqlUrl/));
 
+// --- pickAppId (Windows AppUserModelID, single-sourced from package.json) ----
+const FB = "com.creatio.prdashboard";
+test("pickAppId: returns build.appId when present", () =>
+  assert.strictEqual(cfg.pickAppId('{"build":{"appId":"com.example.app"}}', FB), "com.example.app"));
+test("pickAppId: falls back when build.appId is missing", () =>
+  assert.strictEqual(cfg.pickAppId('{"build":{}}', FB), FB));
+test("pickAppId: falls back when there is no build block", () =>
+  assert.strictEqual(cfg.pickAppId('{"name":"x"}', FB), FB));
+test("pickAppId: falls back when appId is not a non-empty string", () => {
+  assert.strictEqual(cfg.pickAppId('{"build":{"appId":42}}', FB), FB);
+  assert.strictEqual(cfg.pickAppId('{"build":{"appId":"  "}}', FB), FB);
+});
+test("pickAppId: falls back on malformed JSON", () =>
+  assert.strictEqual(cfg.pickAppId("{ not json", FB), FB));
+
 // --- defaultSettings ---------------------------------------------------------
 test("defaultSettings: empty + 60s + toggles", () => {
   const d = cfg.defaultSettings();
