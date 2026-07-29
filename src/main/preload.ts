@@ -41,6 +41,13 @@ const api: PrManagerApi = {
       ipcRenderer.removeListener("update-status", handler);
     };
   },
+  onNotifySound: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on("notify-sound", handler);
+    return () => {
+      ipcRenderer.removeListener("notify-sound", handler);
+    };
+  },
 };
 
 contextBridge.exposeInMainWorld("api", api);

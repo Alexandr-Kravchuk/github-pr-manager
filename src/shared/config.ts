@@ -1,9 +1,35 @@
 import { execFileSync } from "node:child_process";
 
-import type { GhStatus, HostConfig, JiraSettings, PublicConfig, Settings, SettingsHost } from "./types";
+import { DEFAULT_NOTIFICATION_SETTINGS } from "./notify";
+import type {
+  GhStatus,
+  HostConfig,
+  JiraSettings,
+  NotificationSettings,
+  PublicConfig,
+  Settings,
+  SettingsHost,
+} from "./types";
 
 /** Error with a friendly message — the UI surfaces its text. */
 export class ConfigError extends Error {}
+
+/**
+ * Extracts `build.appId` from a raw `package.json` string — the identifier
+ * electron-builder stamps the installer with, reused at runtime for the Windows
+ * AppUserModelID so the two can't drift. Pure (no fs/Electron) so the
+ * present/absent/malformed/non-string branches unit-test in plain Node; the
+ * caller does the file read and passes the text in. Returns `fallback` when the
+ * JSON is malformed or `build.appId` is missing or not a non-empty string.
+ */
+export function pickAppId(rawPackageJson: string, fallback: string): string {
+  try {
+    const appId = (JSON.parse(rawPackageJson) as { build?: { appId?: unknown } }).build?.appId;
+    return typeof appId === "string" && appId.trim() ? appId : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 export const MIN_POLL_INTERVAL_SECONDS = 10;
@@ -68,6 +94,43 @@ export function clearGhTokenCache(): void {
   ghTokenCache.clear();
 }
 
+/**
+ * Notification defaults: the whole feature is OFF (opt-in) so an existing user
+ * updating doesn't suddenly start getting OS toasts — they turn it on in
+ * Settings. Once enabled, native is on and sound is off, with all event groups on.
+ */
+export function defaultNotificationSettings(): NotificationSettings {
+  // Single source of truth lives in shared/notify.ts (also value-imported by the
+  // renderer); clone it so callers can't mutate the shared constant.
+  const d = DEFAULT_NOTIFICATION_SETTINGS;
+  return { ...d, events: { ...d.events } };
+}
+
+/**
+ * Coerces a raw `notifications` blob into a valid {@link NotificationSettings},
+ * filling any missing/garbage field from {@link defaultNotificationSettings}.
+ * Never throws — a bad shape falls back rather than blocking a settings save.
+ */
+export function validateNotifications(raw: unknown): NotificationSettings {
+  const d = defaultNotificationSettings();
+  const obj = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+  const bool = (v: unknown, dflt: boolean): boolean => (typeof v === "boolean" ? v : dflt);
+  const ev = (typeof obj.events === "object" && obj.events !== null ? obj.events : {}) as Record<
+    string,
+    unknown
+  >;
+  return {
+    enabled: bool(obj.enabled, d.enabled),
+    native: bool(obj.native, d.native),
+    sound: bool(obj.sound, d.sound),
+    events: {
+      yourTurn: bool(ev.yourTurn, d.events.yourTurn),
+      ciFailed: bool(ev.ciFailed, d.events.ciFailed),
+      goodNews: bool(ev.goodNews, d.events.goodNews),
+    },
+  };
+}
+
 /** Validates a raw settings object and throws ConfigError with a clear message. */
 export function validateSettings(raw: unknown): Settings {
   if (typeof raw !== "object" || raw === null) {
@@ -86,6 +149,8 @@ export function validateSettings(raw: unknown): Settings {
 
   // Appearance defaults to following the OS; anything unrecognized falls back.
   const theme = obj.theme === "light" || obj.theme === "dark" ? obj.theme : "system";
+
+  const notifications = validateNotifications(obj.notifications);
 
   // An empty hosts list is valid — it's the first-run / unconfigured state, not
   // an error (the UI guides the user to add a host).
@@ -109,7 +174,15 @@ export function validateSettings(raw: unknown): Settings {
     return { label, graphqlUrl: host.graphqlUrl.trim(), repos };
   });
 
-  return { pollIntervalSeconds, launchAtLogin, autoUpdate, theme, hosts, jira: validateJira(obj.jira) };
+  return {
+    pollIntervalSeconds,
+    launchAtLogin,
+    autoUpdate,
+    theme,
+    notifications,
+    hosts,
+    jira: validateJira(obj.jira),
+  };
 }
 
 /**
@@ -148,6 +221,7 @@ export function defaultSettings(): Settings {
     launchAtLogin: false,
     autoUpdate: true,
     theme: "system",
+    notifications: defaultNotificationSettings(),
     hosts: [],
   };
 }

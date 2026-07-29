@@ -11,6 +11,7 @@ const os = require("node:os");
 const cfg = require(path.join(__dirname, "../dist/main/shared/config.js"));
 const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
 const notif = require(path.join(__dirname, "../dist/main/shared/notifications.js"));
+const notify = require(path.join(__dirname, "../dist/main/shared/notify.js"));
 const github = require(path.join(__dirname, "../dist/main/shared/github.js"));
 const ignored = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
 const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
@@ -58,6 +59,41 @@ test("ghHostnameFromUrl: GHE server (/api/graphql)", () =>
 test("ghHostnameFromUrl: invalid URL throws ConfigError", () =>
   assert.throws(() => cfg.ghHostnameFromUrl("not a url"), /Invalid graphqlUrl/));
 
+// --- pickAppId (Windows AppUserModelID, single-sourced from package.json) ----
+const FB = "com.creatio.prdashboard";
+test("pickAppId: returns build.appId when present", () =>
+  assert.strictEqual(cfg.pickAppId('{"build":{"appId":"com.example.app"}}', FB), "com.example.app"));
+test("pickAppId: falls back when build.appId is missing", () =>
+  assert.strictEqual(cfg.pickAppId('{"build":{}}', FB), FB));
+test("pickAppId: falls back when there is no build block", () =>
+  assert.strictEqual(cfg.pickAppId('{"name":"x"}', FB), FB));
+test("pickAppId: falls back when appId is not a non-empty string", () => {
+  assert.strictEqual(cfg.pickAppId('{"build":{"appId":42}}', FB), FB);
+  assert.strictEqual(cfg.pickAppId('{"build":{"appId":"  "}}', FB), FB);
+});
+test("pickAppId: falls back on malformed JSON", () =>
+  assert.strictEqual(cfg.pickAppId("{ not json", FB), FB));
+
+// --- shared value-import carve-outs stay Node-free (renderer imports them) ---
+// The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify
+// and isPrVisibleForCategoryFilters from shared/pr-filter. That's only safe
+// while those modules pull in no node: builtin — a regression would break the
+// Vite renderer build. Assert the compiled output is clean so the AGENTS.md
+// carve-out is enforced, not just documented.
+for (const mod of ["notify.js", "pr-filter.js"]) {
+  test(`${mod} compiles free of node: builtin references`, () => {
+    const src = require("node:fs").readFileSync(
+      path.join(__dirname, `../dist/main/shared/${mod}`),
+      "utf8",
+    );
+    const hits =
+      src.match(
+        /require\(["'](?:node:[^"']+|fs|path|os|crypto|child_process|net|https?|url|util|stream|events)["']\)|from ["']node:[^"']+["']/g,
+      ) || [];
+    assert.deepStrictEqual(hits, [], `${mod} must not reference node: builtins, found: ${hits.join(", ")}`);
+  });
+}
+
 // --- defaultSettings ---------------------------------------------------------
 test("defaultSettings: empty + 60s + toggles", () => {
   const d = cfg.defaultSettings();
@@ -91,6 +127,24 @@ test("validateSettings: theme defaults to system when absent/invalid", () => {
 test("validateSettings: theme honored when light/dark", () => {
   assert.strictEqual(cfg.validateSettings({ theme: "light", hosts: [] }).theme, "light");
   assert.strictEqual(cfg.validateSettings({ theme: "dark", hosts: [] }).theme, "dark");
+});
+test("validateSettings: notifications default off (opt-in), native on, sound off, all events on", () => {
+  const n = cfg.validateSettings({ hosts: [] }).notifications;
+  assert.strictEqual(n.enabled, false);
+  assert.strictEqual(n.native, true);
+  assert.strictEqual(n.sound, false);
+  assert.deepStrictEqual(n.events, { yourTurn: true, ciFailed: true, goodNews: true });
+});
+test("validateSettings: notifications honored + garbage falls back per-field", () => {
+  const n = cfg.validateSettings({
+    hosts: [],
+    notifications: { enabled: false, sound: true, native: "nope", events: { ciFailed: false, extra: 1 } },
+  }).notifications;
+  assert.strictEqual(n.enabled, false);
+  assert.strictEqual(n.sound, true);
+  assert.strictEqual(n.native, true); // non-boolean falls back to default
+  assert.strictEqual(n.events.ciFailed, false);
+  assert.strictEqual(n.events.yourTurn, true); // absent falls back to default
 });
 test("validateSettings: sub-minimum interval falls back to 60", () => {
   assert.strictEqual(cfg.validateSettings({ pollIntervalSeconds: 2, hosts: [] }).pollIntervalSeconds, 60);
@@ -1041,6 +1095,317 @@ test("isPrVisibleForCategoryFilters: both chips on yields the union, not every P
       poller.stableJiraMessage("Jira HTTP 429 Too Many Requests — x"),
       poller.stableJiraMessage("Jira HTTP 500 Server Error — x"),
     );
+  });
+
+  // --- poller: hashSnapshot re-emit coupling ---------------------------------
+  // hashSnapshot gates snapshot re-emit, and handleNotifications runs only on
+  // re-emit — so every field the notifier (notify.ts) reads MUST be hashed here,
+  // or a tick whose only delta is that field silently never fires. These lock
+  // the hasUnaddressedComments and roles fields in (siblings of
+  // hasUnaddressedChangeRequest, which the notifier also reads).
+  const hsnap = (prOverrides = {}, top = {}) => ({
+    pullRequests: [
+      {
+        id: "PR_1",
+        updatedAt: "2026-01-01T00:00:00Z",
+        hasUnaddressedChangeRequest: false,
+        hasUnaddressedComments: false,
+        roles: ["author"],
+        // hashSnapshot reads .length on these three arrays.
+        failingChecks: [],
+        pendingChecks: [],
+        checks: [],
+        ...prOverrides,
+      },
+    ],
+    errors: [],
+    rateLimits: [],
+    fetchedAt: "2026-01-01T00:00:00Z",
+    version: "1.0.0",
+    ...top,
+  });
+  test("hashSnapshot: a hasUnaddressedComments-only delta changes the hash (so the notification fires)", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap()),
+      poller.hashSnapshot(hsnap({ hasUnaddressedComments: true })),
+    ));
+  test("hashSnapshot: a roles-only delta changes the hash (so review_requested fires)", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ roles: ["author"] })),
+      poller.hashSnapshot(hsnap({ roles: ["author", "reviewer"] })),
+    ));
+  test("hashSnapshot: identical PR fields hash equal, ignoring fetchedAt (no spurious re-emit)", () =>
+    assert.strictEqual(
+      poller.hashSnapshot(hsnap({}, { fetchedAt: "2026-01-01T00:00:00Z" })),
+      poller.hashSnapshot(hsnap({}, { fetchedAt: "2026-06-06T12:34:56Z" })),
+    ));
+
+  // --- notify: diffNotifications ---------------------------------------------
+  const N_ON = { enabled: true, native: true, sound: false, events: { yourTurn: true, ciFailed: true, goodNews: true } };
+  const npr = (o = {}) => ({
+    id: "1",
+    repo: "a/b",
+    number: 1,
+    title: "T",
+    url: "https://x/1",
+    roles: ["author"],
+    hasUnaddressedChangeRequest: false,
+    hasUnaddressedComments: false,
+    ciState: "success",
+    hasHumanApproval: false,
+    ...o,
+  });
+  const kinds = (evs) => evs.map((e) => e.kind);
+
+  test("diffNotifications: first snapshot (null prev) is a silent baseline", () =>
+    assert.deepStrictEqual(notify.diffNotifications(null, [npr()], N_ON), []));
+  test("diffNotifications: disabled fires nothing", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([npr()], [npr({ ciState: "failure" })], { ...N_ON, enabled: false }),
+      [],
+    ));
+  test("diffNotifications: newly-appeared reviewer PR fires review_requested", () =>
+    assert.deepStrictEqual(
+      kinds(notify.diffNotifications([], [npr({ id: "2", roles: ["reviewer"] })], N_ON)),
+      ["review_requested"],
+    ));
+  test("diffNotifications: opening your own PR (no prior) fires nothing", () =>
+    assert.deepStrictEqual(notify.diffNotifications([], [npr({ id: "9" })], N_ON), []));
+  test("diffNotifications: change request on your PR", () =>
+    assert.deepStrictEqual(
+      kinds(notify.diffNotifications([npr()], [npr({ hasUnaddressedChangeRequest: true })], N_ON)),
+      ["changes_requested"],
+    ));
+  test("diffNotifications: CI failing transition on your PR", () =>
+    assert.deepStrictEqual(
+      kinds(notify.diffNotifications([npr()], [npr({ ciState: "failure" })], N_ON)),
+      ["ci_failed"],
+    ));
+  test("diffNotifications: first human approval on your PR", () =>
+    assert.deepStrictEqual(
+      kinds(notify.diffNotifications([npr()], [npr({ hasHumanApproval: true })], N_ON)),
+      ["approved"],
+    ));
+  test("diffNotifications: approval suppressed when goodNews is off", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([npr()], [npr({ hasHumanApproval: true })], {
+        ...N_ON,
+        events: { ...N_ON.events, goodNews: false },
+      }),
+      [],
+    ));
+  test("diffNotifications: approval on a PR you only review does not fire (author-scoped)", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications(
+        [npr({ id: "4", roles: ["reviewer"] })],
+        [npr({ id: "4", roles: ["reviewer"], hasHumanApproval: true })],
+        N_ON,
+      ),
+      [],
+    ));
+  test("diffNotifications: CI failing on a PR you only review does not fire (author-scoped)", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications(
+        [npr({ id: "3", roles: ["reviewer"] })],
+        [npr({ id: "3", roles: ["reviewer"], ciState: "failure" })],
+        N_ON,
+      ),
+      [],
+    ));
+  test("diffNotifications: one event per PR — highest priority wins", () =>
+    assert.deepStrictEqual(
+      kinds(
+        notify.diffNotifications(
+          [npr()],
+          [npr({ hasUnaddressedChangeRequest: true, ciState: "failure" })],
+          N_ON,
+        ),
+      ),
+      ["changes_requested"],
+    ));
+  test("diffNotifications: a group toggle off suppresses its events", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([npr()], [npr({ ciState: "failure" })], {
+        ...N_ON,
+        events: { ...N_ON.events, ciFailed: false },
+      }),
+      [],
+    ));
+  test("diffNotifications: no re-fire while a state persists (needs a transition)", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications(
+        [npr({ ciState: "failure" })],
+        [npr({ ciState: "failure" })],
+        N_ON,
+      ),
+      [],
+    ));
+  test("diffNotifications: ignored PR fires nothing (muted everywhere)", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([npr()], [npr({ ciState: "failure", isIgnored: true })], N_ON),
+      [],
+    ));
+  test("diffNotifications: new unanswered comment on your PR fires unanswered_comment", () =>
+    assert.deepStrictEqual(
+      kinds(notify.diffNotifications([npr()], [npr({ hasUnaddressedComments: true })], N_ON)),
+      ["unanswered_comment"],
+    ));
+  test("diffNotifications: unanswered_comment suppressed when yourTurn is off", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([npr()], [npr({ hasUnaddressedComments: true })], {
+        ...N_ON,
+        events: { ...N_ON.events, yourTurn: false },
+      }),
+      [],
+    ));
+
+  // --- notify <-> poller: general field-coupling invariant -------------------
+  // The enumerative spot-checks above lock specific fields; this locks the whole
+  // class. Every PR field diffNotifications READS to decide a transition must be
+  // hashed by hashSnapshot (or a tick whose only delta is that field never
+  // re-emits and the toast is lost). Both read-sets are captured with a
+  // recording Proxy, so a *future* notifier-read field left out of the hash
+  // fails this automatically — no new per-field test required.
+  test("hashSnapshot hashes every PR field diffNotifications reads for transitions", () => {
+    const RENDER_ONLY = new Set(["repo", "number", "title", "url"]); // build the toast body, not the decision
+    const fieldsReadBy = (run) => {
+      const read = new Set();
+      const wrap = (o) =>
+        new Proxy(o, {
+          get(t, k) {
+            if (typeof k === "string") read.add(k);
+            return t[k];
+          },
+        });
+      run(wrap);
+      return read;
+    };
+    // Force a ci_failed transition so makeEvent runs and the render-only reads
+    // are exercised (and then proven excluded).
+    const notifierReads = fieldsReadBy((wrap) =>
+      notify.diffNotifications([wrap(npr())], [wrap(npr({ ciState: "failure" }))], N_ON),
+    );
+    const hpr = { id: "1", roles: ["author"], failingChecks: [], pendingChecks: [], checks: [] };
+    const hashReads = fieldsReadBy((wrap) =>
+      poller.hashSnapshot({ pullRequests: [wrap(hpr)], errors: [], rateLimits: [], fetchedAt: "", version: "" }),
+    );
+    const missing = [...notifierReads].filter((f) => !RENDER_ONLY.has(f) && !hashReads.has(f));
+    assert.deepStrictEqual(missing, [], `notifier-read PR fields missing from hashSnapshot: ${missing.join(", ")}`);
+  });
+
+  // --- notify: runNotifyCycle (baseline advance + best-effort delivery) ------
+  // Locks the ordering guarantee that lives in main.ts's notifier: the baseline
+  // advances even when delivery throws, and a delivery failure never escapes.
+  test("runNotifyCycle: advances baseline to next and delivers the diffed events", () => {
+    const delivered = [];
+    const next = [npr({ ciState: "failure" })];
+    const baseline = notify.runNotifyCycle([npr()], next, N_ON, (evs) =>
+      delivered.push(...evs.map((e) => e.kind)),
+    );
+    assert.strictEqual(baseline, next);
+    assert.deepStrictEqual(delivered, ["ci_failed"]);
+  });
+  test("runNotifyCycle: a throwing deliverer still advances the baseline and never escapes", () => {
+    const next = [npr({ ciState: "failure" })];
+    let baseline;
+    assert.doesNotThrow(() => {
+      baseline = notify.runNotifyCycle([npr()], next, N_ON, () => {
+        throw new Error("deliver boom");
+      });
+    });
+    assert.strictEqual(baseline, next); // baseline advanced despite the throw
+  });
+  test("runNotifyCycle: disabled delivers an empty batch and still advances baseline", () => {
+    const next = [npr({ ciState: "failure" })];
+    let got = null;
+    const baseline = notify.runNotifyCycle([npr()], next, { ...N_ON, enabled: false }, (evs) => {
+      got = evs;
+    });
+    assert.deepStrictEqual(got, []);
+    assert.strictEqual(baseline, next);
+  });
+
+  // --- notify: createReleaseGuard (dedup + safety-net) -----------------------
+  test("createReleaseGuard: releases once and clears the timer even when called repeatedly", () => {
+    let released = 0;
+    let cleared = 0;
+    const release = notify.createReleaseGuard(
+      { onRelease: () => released++, setTimer: () => ({ clear: () => cleared++ }) },
+      60_000,
+    );
+    release();
+    release();
+    release();
+    assert.strictEqual(released, 1);
+    assert.strictEqual(cleared, 1);
+  });
+  test("createReleaseGuard: the safety-net timer fires release when nothing else does", () => {
+    let released = 0;
+    let captured = null;
+    notify.createReleaseGuard(
+      { onRelease: () => released++, setTimer: (fn) => ((captured = fn), { clear: () => {} }) },
+      60_000,
+    );
+    assert.strictEqual(released, 0); // nothing has fired yet
+    captured(); // simulate the timer elapsing
+    assert.strictEqual(released, 1);
+  });
+  test("createReleaseGuard: a stale safety-net firing after release is a no-op (one-shot)", () => {
+    let released = 0;
+    let captured = null;
+    const release = notify.createReleaseGuard(
+      { onRelease: () => released++, setTimer: (fn) => ((captured = fn), { clear: () => {} }) },
+      60_000,
+    );
+    release(); // a click/close/failed arrives first
+    captured(); // the (already-cancelled) timer still fires later
+    assert.strictEqual(released, 1);
+  });
+
+  // --- notify: planDelivery (pure delivery decision) -------------------------
+  const evs = (n) =>
+    Array.from({ length: n }, (_, i) => ({ prId: String(i), kind: "ci_failed", title: "t", body: "b", url: "u" }));
+  const CTX = { focused: false, nativeSupported: true };
+  const NP = (o = {}) => ({ enabled: true, native: true, sound: false, ...o });
+  const CAP = notify.MAX_INDIVIDUAL_NOTIFICATIONS;
+
+  test("planDelivery: no events -> none", () =>
+    assert.strictEqual(notify.planDelivery([], NP(), CTX).mode, "none"));
+  test("planDelivery: disabled -> none", () =>
+    assert.strictEqual(notify.planDelivery(evs(2), NP({ enabled: false }), CTX).mode, "none"));
+  test("planDelivery: focused window -> none (suppressed)", () =>
+    assert.strictEqual(notify.planDelivery(evs(1), NP(), { ...CTX, focused: true }).mode, "none"));
+  test("planDelivery: burst over the cap -> silent summary (no sound)", () => {
+    const p = notify.planDelivery(evs(CAP + 1), NP(), CTX);
+    assert.strictEqual(p.mode, "summary");
+    assert.strictEqual(p.summarySilent, true);
+  });
+  test("planDelivery: burst over the cap with sound -> audible summary", () =>
+    assert.strictEqual(notify.planDelivery(evs(CAP + 1), NP({ sound: true }), CTX).summarySilent, false));
+  test("planDelivery: at the cap -> individual, chime only on the first", () => {
+    const p = notify.planDelivery(evs(CAP), NP({ sound: true }), CTX);
+    assert.strictEqual(p.mode, "individual");
+    // silent[i] === true means no chime; only index 0 should chime.
+    assert.deepStrictEqual(p.silent, [false, true, true, true]);
+  });
+  test("planDelivery: individual with sound off -> every toast silent", () =>
+    assert.deepStrictEqual(notify.planDelivery(evs(2), NP({ sound: false }), CTX).silent, [true, true]));
+  test("planDelivery: native off but sound on -> sound-only", () =>
+    assert.strictEqual(notify.planDelivery(evs(2), NP({ native: false, sound: true }), CTX).mode, "sound-only"));
+  test("planDelivery: native unsupported but sound on -> sound-only", () =>
+    assert.strictEqual(
+      notify.planDelivery(evs(2), NP({ sound: true }), { ...CTX, nativeSupported: false }).mode,
+      "sound-only",
+    ));
+  test("planDelivery: native off and sound off -> none", () =>
+    assert.strictEqual(notify.planDelivery(evs(2), NP({ native: false, sound: false }), CTX).mode, "none"));
+
+  // --- notify defaults: single source of truth -------------------------------
+  test("defaultNotificationSettings equals the shared default and is a fresh clone", () => {
+    assert.deepStrictEqual(cfg.defaultNotificationSettings(), notify.DEFAULT_NOTIFICATION_SETTINGS);
+    const a = cfg.defaultNotificationSettings();
+    a.events.yourTurn = false;
+    assert.strictEqual(notify.DEFAULT_NOTIFICATION_SETTINGS.events.yourTurn, true); // shared const not mutated
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

@@ -121,7 +121,7 @@ const IDLE_BACKOFF_MAX_FACTOR = 16;
  * `fetchedAt` so that "nothing actually changed" ticks don't push a fresh
  * payload to the renderer.
  */
-function hashSnapshot(s: DashboardResponse): string {
+export function hashSnapshot(s: DashboardResponse): string {
   const lite = s.pullRequests.map((p) => [
     p.id,
     p.updatedAt,
@@ -137,6 +137,17 @@ function hashSnapshot(s: DashboardResponse): string {
     p.checks.length,
     p.awaitingReview,
     p.hasUnaddressedChangeRequest,
+    // Sibling of hasUnaddressedChangeRequest and read by the notifier
+    // (notify.ts) — hash it too, so a tick whose only delta is a new
+    // unanswered comment still pushes a snapshot and fires the notification.
+    p.hasUnaddressedComments,
+    // Also read by the notifier (notify.ts) — it detects the reviewer-added
+    // transition (`isReviewer && !wasReviewer` -> review_requested) from roles.
+    // Being added as an additional reviewer to an already-tracked PR may not
+    // move any other hashed field, so hash roles too or that toast can be lost.
+    // Sorted so the hash tracks role *membership*, not the producer's ordering —
+    // a reordering alone must not force a spurious re-emit.
+    [...p.roles].sort().join(","),
     p.isDraft,
     p.isIgnored,
     p.parentKey,
