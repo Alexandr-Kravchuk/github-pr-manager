@@ -380,9 +380,17 @@ export function App() {
   const filtered = useMemo(
     () =>
       allPrs.filter((pr) => {
-        // Two independent reveal dimensions: an ignored draft needs BOTH chips.
-        if (!showIgnored && pr.isIgnored) return false;
-        if (!showDrafts && pr.isDraft) return false;
+        // `Drafts` and `Ignored` are exclusive category filters, like the chips
+        // beside them: each category is hidden by default, and turning a chip on
+        // narrows the list to ONLY that category (both on → the union). Ignored
+        // PRs stay out of the draft view unless the Ignored chip is on too.
+        if (showDrafts || showIgnored) {
+          const inRevealed =
+            (showDrafts && pr.isDraft && !pr.isIgnored) || (showIgnored && pr.isIgnored);
+          if (!inRevealed) return false;
+        } else if (pr.isDraft || pr.isIgnored) {
+          return false;
+        }
         if (role !== "all" && !pr.roles.includes(role)) return false;
         if (host !== "all" && pr.hostLabel !== host) return false;
         if (attentionOnly && !pr.needsAttention) return false;
