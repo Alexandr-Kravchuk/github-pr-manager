@@ -5,6 +5,7 @@ import { PrCard, prSignal } from "./components/PrCard";
 import { SettingsScreen } from "./components/Settings";
 import { cn, relativeTime } from "./format";
 import { playNotifySound } from "./notify-sound";
+import { isPrVisibleForCategoryFilters } from "../../shared/pr-filter";
 import type {
   DashboardResponse,
   JiraStatus,
@@ -377,11 +378,13 @@ export function App() {
       fresh: active.filter((p) => p.hasNewActivity).length,
       returned: active.filter((p) => p.returnedToMe).length,
       noReviews: active.filter((p) => p.hasNoReviews).length,
-      // Drafts and Ignored are the two reveal chips, so each counts what its own
-      // chip governs across ALL PRs — an ignored draft is counted by both. If
-      // drafts were counted over `active`, an ignored draft would show up in
-      // neither count while still being hidden by the drafts guard.
-      drafts: allPrs.filter((p) => p.isDraft).length,
+      // Drafts and Ignored are exclusive category filters, so each chip's badge
+      // counts exactly what activating that chip reveals. The Drafts view shows
+      // only non-ignored drafts (an ignored draft surfaces under Ignored, not
+      // Drafts), so the count excludes ignored drafts to match; an ignored draft
+      // is still counted once, by the Ignored chip. Both counts span all PRs
+      // rather than the ignored-free `active` base for that reason.
+      drafts: allPrs.filter((p) => p.isDraft && !p.isIgnored).length,
       mergeable: active.filter((p) => p.canBeMerged).length,
       ignored: allPrs.filter((p) => p.isIgnored).length,
     }),
@@ -391,9 +394,9 @@ export function App() {
   const filtered = useMemo(
     () =>
       allPrs.filter((pr) => {
-        // Two independent reveal dimensions: an ignored draft needs BOTH chips.
-        if (!showIgnored && pr.isIgnored) return false;
-        if (!showDrafts && pr.isDraft) return false;
+        // `Drafts` and `Ignored` are exclusive category filters, like the chips
+        // beside them — see `isPrVisibleForCategoryFilters` for the full rule.
+        if (!isPrVisibleForCategoryFilters(pr, { showDrafts, showIgnored })) return false;
         if (role !== "all" && !pr.roles.includes(role)) return false;
         if (host !== "all" && pr.hostLabel !== host) return false;
         if (attentionOnly && !pr.needsAttention) return false;

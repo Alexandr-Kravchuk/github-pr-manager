@@ -13,13 +13,16 @@ Three layers:
   (GraphQL query + mapping), `state.ts` (seen-state), `config.ts` (gh tokens +
   settings validation), `types.ts` (domain types **and** the renderer↔main
   contract). The renderer imports **only types** from here — never a value
-  import, since these modules use `node:` builtins. **One deliberate exception:**
-  `notify.ts` is kept strictly Electron/Node-free (no `node:` imports) precisely
-  so the renderer can value-import `DEFAULT_NOTIFICATION_SETTINGS` from it as the
-  single source of truth for the notification defaults. Keep `notify.ts` Node-free
-  — a `node:` import there would break the renderer build (Vite fails to bundle
-  it). A guard test in `tests/run-tests.cjs` asserts the compiled `notify.js`
-  stays free of `node:` builtin references so the invariant can't regress unnoticed.
+  import, since these modules use `node:` builtins. **The deliberate exceptions**
+  are `shared` modules kept strictly free of `node:` builtins (importing no
+  module that uses them) so the renderer can value-import them: `notify.ts`
+  (`DEFAULT_NOTIFICATION_SETTINGS`, the single source of truth for notification
+  defaults) and `pr-filter.ts` (`isPrVisibleForCategoryFilters`). Keep any such
+  module Node-free — a `node:` import there breaks the renderer build (Vite fails
+  to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
+  `notify.js` and `pr-filter.js` stay free of `node:` builtin references, so the
+  invariant can't regress unnoticed; extend that list before value-importing
+  another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
   It talks to main **exclusively** through `window.api` (the preload bridge):
   no direct network, no Node access (`contextIsolation` on, `nodeIntegration`

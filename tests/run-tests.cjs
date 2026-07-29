@@ -17,6 +17,7 @@ const ignored = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
 const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
 const jira = require(path.join(__dirname, "../dist/main/shared/jira.js"));
 const jiraHealth = require(path.join(__dirname, "../dist/main/shared/jira-health.js"));
+const prFilter = require(path.join(__dirname, "../dist/main/shared/pr-filter.js"));
 
 let passed = 0;
 let failed = 0;
@@ -73,22 +74,25 @@ test("pickAppId: falls back when appId is not a non-empty string", () => {
 test("pickAppId: falls back on malformed JSON", () =>
   assert.strictEqual(cfg.pickAppId("{ not json", FB), FB));
 
-// --- notify.ts stays Node-free (renderer value-imports it) -------------------
-// The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify.
-// That's only safe while notify.ts pulls in no node: builtin — a regression
-// would break the Vite renderer build. Assert the compiled output is clean so
-// the AGENTS.md carve-out is enforced, not just documented.
-test("notify.js compiles free of node: builtin references", () => {
-  const src = require("node:fs").readFileSync(
-    path.join(__dirname, "../dist/main/shared/notify.js"),
-    "utf8",
-  );
-  const hits =
-    src.match(
-      /require\(["'](?:node:[^"']+|fs|path|os|crypto|child_process|net|https?|url|util|stream|events)["']\)|from ["']node:[^"']+["']/g,
-    ) || [];
-  assert.deepStrictEqual(hits, [], `notify.js must not reference node: builtins, found: ${hits.join(", ")}`);
-});
+// --- shared value-import carve-outs stay Node-free (renderer imports them) ---
+// The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify
+// and isPrVisibleForCategoryFilters from shared/pr-filter. That's only safe
+// while those modules pull in no node: builtin — a regression would break the
+// Vite renderer build. Assert the compiled output is clean so the AGENTS.md
+// carve-out is enforced, not just documented.
+for (const mod of ["notify.js", "pr-filter.js"]) {
+  test(`${mod} compiles free of node: builtin references`, () => {
+    const src = require("node:fs").readFileSync(
+      path.join(__dirname, `../dist/main/shared/${mod}`),
+      "utf8",
+    );
+    const hits =
+      src.match(
+        /require\(["'](?:node:[^"']+|fs|path|os|crypto|child_process|net|https?|url|util|stream|events)["']\)|from ["']node:[^"']+["']/g,
+      ) || [];
+    assert.deepStrictEqual(hits, [], `${mod} must not reference node: builtins, found: ${hits.join(", ")}`);
+  });
+}
 
 // --- defaultSettings ---------------------------------------------------------
 test("defaultSettings: empty + 60s + toggles", () => {
@@ -485,6 +489,55 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     queried: 1,
     resolved: 0,
   }));
+
+// --- pr-filter: isPrVisibleForCategoryFilters (Drafts/Ignored exclusive chips)
+// The category gate the `filtered` useMemo runs before every other filter.
+// `true` = the PR passes the gate (drafts/ignored chips), `false` = hidden.
+// Exhaustive: all 4 chip states × all 4 PR kinds must match the acceptance
+// criteria (hidden by default; a chip narrows to ONLY its category; both on =
+// the union; an ignored draft stays out of the drafts-only view).
+const visible = prFilter.isPrVisibleForCategoryFilters;
+const PLAIN = { isDraft: false, isIgnored: false };
+const DRAFT = { isDraft: true, isIgnored: false };
+const IGNORED = { isDraft: false, isIgnored: true };
+const IGNORED_DRAFT = { isDraft: true, isIgnored: true };
+// [showDrafts, showIgnored, pr, expectedVisible]
+const catCases = [
+  // both off → only plain PRs show
+  [false, false, PLAIN, true],
+  [false, false, DRAFT, false],
+  [false, false, IGNORED, false],
+  [false, false, IGNORED_DRAFT, false],
+  // Drafts only → only non-ignored drafts
+  [true, false, PLAIN, false],
+  [true, false, DRAFT, true],
+  [true, false, IGNORED, false],
+  [true, false, IGNORED_DRAFT, false],
+  // Ignored only → only ignored (drafts among them included)
+  [false, true, PLAIN, false],
+  [false, true, DRAFT, false],
+  [false, true, IGNORED, true],
+  [false, true, IGNORED_DRAFT, true],
+  // both on → the union (drafts ∪ ignored), excludes plain
+  [true, true, PLAIN, false],
+  [true, true, DRAFT, true],
+  [true, true, IGNORED, true],
+  [true, true, IGNORED_DRAFT, true],
+];
+for (const [sd, si, pr, expected] of catCases) {
+  const kind = pr === PLAIN ? "plain" : pr === DRAFT ? "draft" : pr === IGNORED ? "ignored" : "ignored-draft";
+  test(`isPrVisibleForCategoryFilters: drafts=${sd} ignored=${si} ${kind} → ${expected}`, () =>
+    assert.strictEqual(visible(pr, { showDrafts: sd, showIgnored: si }), expected));
+}
+// The two riskiest branches called out in review (manual verification skipped them).
+test("isPrVisibleForCategoryFilters: an ignored draft stays out of the drafts-only view", () =>
+  assert.strictEqual(visible(IGNORED_DRAFT, { showDrafts: true, showIgnored: false }), false));
+test("isPrVisibleForCategoryFilters: both chips on yields the union, not every PR", () => {
+  assert.strictEqual(visible(DRAFT, { showDrafts: true, showIgnored: true }), true);
+  assert.strictEqual(visible(IGNORED, { showDrafts: true, showIgnored: true }), true);
+  assert.strictEqual(visible(IGNORED_DRAFT, { showDrafts: true, showIgnored: true }), true);
+  assert.strictEqual(visible(PLAIN, { showDrafts: true, showIgnored: true }), false);
+});
 
 (async () => {
   await atest("applyIgnored: flags ignored PRs, leaves the rest false", () =>
