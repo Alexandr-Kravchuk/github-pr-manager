@@ -1,9 +1,10 @@
+import fs from "node:fs";
 import path from "node:path";
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, toHostConfigs, toPublicConfig } from "../shared/config";
 import { setIgnored } from "../shared/ignored";
-import { diffNotifications, planDelivery } from "../shared/notify";
+import { createReleaseGuard, planDelivery, runNotifyCycle } from "../shared/notify";
 import { markSeen } from "../shared/state";
 import type {
   ConfigResult,
@@ -91,13 +92,27 @@ function focusMainWindow(): void {
  */
 const liveNotifications = new Set<Notification>();
 
+/** How long to retain a Notification with no click/close/failed before force-releasing it. */
+const NOTIFICATION_RELEASE_MS = 60_000;
+
 /** Shows one native OS notification; `onClick` runs when the user clicks it. */
 function showOsNotification(title: string, body: string, silent: boolean, onClick: () => void): void {
   const n = new Notification({ title, body, silent });
-  const release = () => {
-    clearTimeout(timer);
-    liveNotifications.delete(n);
-  };
+  // One-shot release shared across click/close/failed plus a safety-net timer
+  // (some OS/Electron combos expire a toast without emitting any event, which
+  // would otherwise retain the reference for the process lifetime). The dedup +
+  // safety-net logic is extracted to `createReleaseGuard` so it unit-tests.
+  const release = createReleaseGuard(
+    {
+      onRelease: () => liveNotifications.delete(n),
+      setTimer: (fn, ms) => {
+        const t = setTimeout(fn, ms);
+        t.unref?.();
+        return { clear: () => clearTimeout(t) };
+      },
+    },
+    NOTIFICATION_RELEASE_MS,
+  );
   // Release on click too: some OS/versions fire `click` without a later `close`,
   // which would otherwise retain every clicked toast for the process lifetime.
   n.on("click", () => {
@@ -109,11 +124,6 @@ function showOsNotification(title: string, body: string, silent: boolean, onClic
   });
   n.on("close", release);
   n.on("failed", release);
-  // Safety net: some OS/Electron combos can expire a toast without emitting any
-  // of click/close/failed, which would retain the reference for the process
-  // lifetime. Force-release after a generous window so nothing leaks unbounded.
-  const timer = setTimeout(release, 60_000);
-  timer.unref?.();
   liveNotifications.add(n);
   n.show();
 }
@@ -139,21 +149,14 @@ function handleNotifications(prs: PullRequest[]): void {
     return;
   }
 
-  // Advance the baseline first, then diff against the captured previous set.
-  // Doing this up front keeps the guarantee that a later failure in the delivery
-  // pipeline never replays a backlog when notifications are re-enabled.
-  const prev = prevNotifyPrs;
-  const wasBaseline = prev === null;
-  prevNotifyPrs = prs;
+  const wasBaseline = prevNotifyPrs === null;
 
-  // Best-effort: the doc contract is that nothing here may break the poll loop.
-  // The pure diff/plan can't realistically throw (settings are normalized by
-  // loadSettings), but the Electron delivery (Notification construction/show)
-  // can fail on some OS/version combos — degrade to a skipped tick, never an
-  // uncaught throw out of the poller's onSnapshot callback.
-  try {
-    const events = diffNotifications(prev, prs, settings.notifications);
-
+  // Advance the baseline and deliver via `runNotifyCycle`: it diffs, returns the
+  // new baseline (always `prs`) BEFORE the injected delivery runs, and swallows
+  // any delivery failure — so a throwing deliverer degrades to a skipped tick
+  // and never replays a backlog. That ordering guarantee is unit-tested on the
+  // pure helper; this callback holds only the Electron delivery.
+  prevNotifyPrs = runNotifyCycle(prevNotifyPrs, prs, settings.notifications, (events) => {
     if (!settings.notifications.enabled) {
       dbg("disabled in Settings — nothing fires (enable it under Notifications)");
       return;
@@ -165,8 +168,7 @@ function handleNotifications(prs: PullRequest[]): void {
 
     // Decide delivery with the pure planner (focus suppression, summary-vs-
     // individual split, chime-once, native-off sound fallback all live there and
-    // are unit-tested); this process only executes the descriptor. The baseline is
-    // updated above, so a suppressed batch won't re-fire once focus is lost.
+    // are unit-tested); this process only executes the descriptor.
     const win = mainWindow;
     const focused = Boolean(win && !win.isDestroyed() && win.isFocused());
     const kinds = events.map((e) => e.kind).join(", ");
@@ -192,24 +194,28 @@ function handleNotifications(prs: PullRequest[]): void {
       );
     } else if (plan.mode === "individual") {
       events.forEach((ev, i) => {
-        showOsNotification(ev.title, ev.body, plan.silent[i], () => {
-          // Validate before opening: the URL comes from a user-configured
-          // GraphQL host, so guard the scheme like every other openExternal
-          // call here. On a bad URL, fall back to surfacing the app.
-          try {
-            void shell.openExternal(validateExternalUrl(ev.url));
-          } catch {
-            focusMainWindow();
-          }
-        });
+        // Guard each toast independently so one failing construction/show can't
+        // drop the remaining ones in the batch.
+        try {
+          showOsNotification(ev.title, ev.body, plan.silent[i], () => {
+            // Validate before opening: the URL comes from a user-configured
+            // GraphQL host, so guard the scheme like every other openExternal
+            // call here. On a bad URL, fall back to surfacing the app.
+            try {
+              void shell.openExternal(validateExternalUrl(ev.url));
+            } catch {
+              focusMainWindow();
+            }
+          });
+        } catch (e) {
+          dbg(`toast failed for ${ev.kind}: ${e instanceof Error ? e.message : String(e)}`);
+        }
       });
     } else {
       // sound-only: no native window, but the user still wants an audible ping.
       sendToRenderer("notify-sound", undefined);
     }
-  } catch (e) {
-    dbg(`delivery failed — skipping this tick: ${e instanceof Error ? e.message : String(e)}`);
-  }
+  });
 }
 
 /** Registers/unregisters the OS "open at login" item. Packaged app only — in dev
@@ -265,6 +271,25 @@ function resolveAppIcon(): Electron.NativeImage | undefined {
   // Falls back to the default Electron icon if the file is missing.
   const image = nativeImage.createFromPath(path.join(app.getAppPath(), "build", "icon.png"));
   return image.isEmpty() ? undefined : image;
+}
+
+/**
+ * Windows AppUserModelID used for native toast attribution. Read from
+ * `package.json`'s `build.appId` — the *same* key electron-builder reads to
+ * stamp the installed app's shortcut — so the runtime value and the packaged
+ * installer share one source and can't silently drift. `package.json` is bundled
+ * into the app (see `build.files`), so this resolves in dev and packaged alike;
+ * falls back to the known literal if it can't be read.
+ */
+function resolveWindowsAppId(): string {
+  const fallback = "com.creatio.prdashboard"; // keep in sync with package.json build.appId
+  try {
+    const raw = fs.readFileSync(path.join(app.getAppPath(), "package.json"), "utf8");
+    const appId = (JSON.parse(raw) as { build?: { appId?: unknown } }).build?.appId;
+    return typeof appId === "string" && appId.trim() ? appId : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function createWindow(): void {
@@ -488,7 +513,7 @@ void app.whenReady().then(() => {
   // Windows attributes toast notifications to an AppUserModelID; without this
   // they can show under a generic name (or not at all). Must match the
   // electron-builder `appId` so the packaged install's shortcut lines up.
-  if (process.platform === "win32") app.setAppUserModelId("com.creatio.prdashboard");
+  if (process.platform === "win32") app.setAppUserModelId(resolveWindowsAppId());
 
   if (process.env.PRD_DEBUG) {
     console.log("[main] userData:", app.getPath("userData"));

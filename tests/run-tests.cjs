@@ -1174,6 +1174,75 @@ test("healthFromError: stringifies a non-Error rejection", () =>
       [],
     ));
 
+  // --- notify: runNotifyCycle (baseline advance + best-effort delivery) ------
+  // Locks the ordering guarantee that lives in main.ts's notifier: the baseline
+  // advances even when delivery throws, and a delivery failure never escapes.
+  test("runNotifyCycle: advances baseline to next and delivers the diffed events", () => {
+    const delivered = [];
+    const next = [npr({ ciState: "failure" })];
+    const baseline = notify.runNotifyCycle([npr()], next, N_ON, (evs) =>
+      delivered.push(...evs.map((e) => e.kind)),
+    );
+    assert.strictEqual(baseline, next);
+    assert.deepStrictEqual(delivered, ["ci_failed"]);
+  });
+  test("runNotifyCycle: a throwing deliverer still advances the baseline and never escapes", () => {
+    const next = [npr({ ciState: "failure" })];
+    let baseline;
+    assert.doesNotThrow(() => {
+      baseline = notify.runNotifyCycle([npr()], next, N_ON, () => {
+        throw new Error("deliver boom");
+      });
+    });
+    assert.strictEqual(baseline, next); // baseline advanced despite the throw
+  });
+  test("runNotifyCycle: disabled delivers an empty batch and still advances baseline", () => {
+    const next = [npr({ ciState: "failure" })];
+    let got = null;
+    const baseline = notify.runNotifyCycle([npr()], next, { ...N_ON, enabled: false }, (evs) => {
+      got = evs;
+    });
+    assert.deepStrictEqual(got, []);
+    assert.strictEqual(baseline, next);
+  });
+
+  // --- notify: createReleaseGuard (dedup + safety-net) -----------------------
+  test("createReleaseGuard: releases once and clears the timer even when called repeatedly", () => {
+    let released = 0;
+    let cleared = 0;
+    const release = notify.createReleaseGuard(
+      { onRelease: () => released++, setTimer: () => ({ clear: () => cleared++ }) },
+      60_000,
+    );
+    release();
+    release();
+    release();
+    assert.strictEqual(released, 1);
+    assert.strictEqual(cleared, 1);
+  });
+  test("createReleaseGuard: the safety-net timer fires release when nothing else does", () => {
+    let released = 0;
+    let captured = null;
+    notify.createReleaseGuard(
+      { onRelease: () => released++, setTimer: (fn) => ((captured = fn), { clear: () => {} }) },
+      60_000,
+    );
+    assert.strictEqual(released, 0); // nothing has fired yet
+    captured(); // simulate the timer elapsing
+    assert.strictEqual(released, 1);
+  });
+  test("createReleaseGuard: a stale safety-net firing after release is a no-op (one-shot)", () => {
+    let released = 0;
+    let captured = null;
+    const release = notify.createReleaseGuard(
+      { onRelease: () => released++, setTimer: (fn) => ((captured = fn), { clear: () => {} }) },
+      60_000,
+    );
+    release(); // a click/close/failed arrives first
+    captured(); // the (already-cancelled) timer still fires later
+    assert.strictEqual(released, 1);
+  });
+
   // --- notify: planDelivery (pure delivery decision) -------------------------
   const evs = (n) =>
     Array.from({ length: n }, (_, i) => ({ prId: String(i), kind: "ci_failed", title: "t", body: "b", url: "u" }));

@@ -211,3 +211,64 @@ export function planDelivery(
   if (sound) return { mode: "sound-only", silent: [], summarySilent: true };
   return none;
 }
+
+/**
+ * Runs one notification cycle: diffs `prev` → `next`, hands the resulting events
+ * to the injected `deliver`, and returns the new baseline (always `next`).
+ *
+ * The baseline is advanced by *returning* `next` regardless of what `deliver`
+ * does, and `deliver` failures are swallowed — so a throwing deliverer degrades
+ * to a skipped tick and can never replay a backlog on the following tick. The
+ * host wires the Electron delivery in as `deliver`; this keeps the ordering
+ * guarantee ("baseline advances even when delivery throws, and nothing escapes")
+ * pure and unit-testable, away from Electron.
+ */
+export function runNotifyCycle(
+  prev: PullRequest[] | null,
+  next: PullRequest[],
+  settings: NotificationSettings,
+  deliver: (events: NotifyEvent[]) => void,
+): PullRequest[] {
+  const events = diffNotifications(prev, next, settings);
+  try {
+    deliver(events);
+  } catch {
+    /* best-effort — a delivery failure must never break the poll loop */
+  }
+  return next;
+}
+
+/** Cancels a scheduled safety-net timer (see {@link createReleaseGuard}). */
+export interface ReleaseTimer {
+  clear: () => void;
+}
+
+/** Injected effects for {@link createReleaseGuard} — real ones use Electron/timers. */
+export interface ReleaseGuardHooks {
+  /** Runs exactly once, when the guarded resource is released. */
+  onRelease: () => void;
+  /** Schedules `fn` after `ms`; the returned handle's `clear()` cancels it. */
+  setTimer: (fn: () => void, ms: number) => ReleaseTimer;
+}
+
+/**
+ * One-shot release guard shared across several "done" signals (a Notification's
+ * click / close / failed events) plus a safety-net timer. The returned `release`
+ * runs `onRelease` at most once and cancels the timer; the timer fires `release`
+ * after `ms` if no signal arrived first — so a toast the OS silently expires
+ * (never firing any event) is still released instead of retained forever. Pure
+ * and injectable so the dedup + safety-net behaviour unit-tests without Electron
+ * or real timers.
+ */
+export function createReleaseGuard(hooks: ReleaseGuardHooks, ms: number): () => void {
+  let released = false;
+  let timer: ReleaseTimer | null = null;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    timer?.clear();
+    hooks.onRelease();
+  };
+  timer = hooks.setTimer(release, ms);
+  return release;
+}
