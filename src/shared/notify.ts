@@ -130,6 +130,10 @@ export function diffNotifications(
       // errors can't cause that — the poller carries the last-good PRs forward —
       // and re-firing on a genuine re-request is the desired behavior, so this
       // is left as a deliberate tradeoff rather than a persistent seen-store.
+      // Same tradeoff on adding a new host/repo: its already-open reviewer PRs
+      // are absent from the previous snapshot, so each counts as newly-requested
+      // and fires. That burst collapses to a single summary toast (planDelivery),
+      // and you were in fact requested on them, so it's accepted, not suppressed.
       const wasReviewer = before ? before.roles.includes("reviewer") : false;
       if (isReviewer && !wasReviewer) kinds.add("review_requested");
 

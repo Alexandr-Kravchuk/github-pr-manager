@@ -73,6 +73,23 @@ test("pickAppId: falls back when appId is not a non-empty string", () => {
 test("pickAppId: falls back on malformed JSON", () =>
   assert.strictEqual(cfg.pickAppId("{ not json", FB), FB));
 
+// --- notify.ts stays Node-free (renderer value-imports it) -------------------
+// The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify.
+// That's only safe while notify.ts pulls in no node: builtin — a regression
+// would break the Vite renderer build. Assert the compiled output is clean so
+// the AGENTS.md carve-out is enforced, not just documented.
+test("notify.js compiles free of node: builtin references", () => {
+  const src = require("node:fs").readFileSync(
+    path.join(__dirname, "../dist/main/shared/notify.js"),
+    "utf8",
+  );
+  const hits =
+    src.match(
+      /require\(["'](?:node:[^"']+|fs|path|os|crypto|child_process|net|https?|url|util|stream|events)["']\)|from ["']node:[^"']+["']/g,
+    ) || [];
+  assert.deepStrictEqual(hits, [], `notify.js must not reference node: builtins, found: ${hits.join(", ")}`);
+});
+
 // --- defaultSettings ---------------------------------------------------------
 test("defaultSettings: empty + 60s + toggles", () => {
   const d = cfg.defaultSettings();
@@ -1188,6 +1205,40 @@ test("healthFromError: stringifies a non-Error rejection", () =>
       }),
       [],
     ));
+
+  // --- notify <-> poller: general field-coupling invariant -------------------
+  // The enumerative spot-checks above lock specific fields; this locks the whole
+  // class. Every PR field diffNotifications READS to decide a transition must be
+  // hashed by hashSnapshot (or a tick whose only delta is that field never
+  // re-emits and the toast is lost). Both read-sets are captured with a
+  // recording Proxy, so a *future* notifier-read field left out of the hash
+  // fails this automatically — no new per-field test required.
+  test("hashSnapshot hashes every PR field diffNotifications reads for transitions", () => {
+    const RENDER_ONLY = new Set(["repo", "number", "title", "url"]); // build the toast body, not the decision
+    const fieldsReadBy = (run) => {
+      const read = new Set();
+      const wrap = (o) =>
+        new Proxy(o, {
+          get(t, k) {
+            if (typeof k === "string") read.add(k);
+            return t[k];
+          },
+        });
+      run(wrap);
+      return read;
+    };
+    // Force a ci_failed transition so makeEvent runs and the render-only reads
+    // are exercised (and then proven excluded).
+    const notifierReads = fieldsReadBy((wrap) =>
+      notify.diffNotifications([wrap(npr())], [wrap(npr({ ciState: "failure" }))], N_ON),
+    );
+    const hpr = { id: "1", roles: ["author"], failingChecks: [], pendingChecks: [], checks: [] };
+    const hashReads = fieldsReadBy((wrap) =>
+      poller.hashSnapshot({ pullRequests: [wrap(hpr)], errors: [], rateLimits: [], fetchedAt: "", version: "" }),
+    );
+    const missing = [...notifierReads].filter((f) => !RENDER_ONLY.has(f) && !hashReads.has(f));
+    assert.deepStrictEqual(missing, [], `notifier-read PR fields missing from hashSnapshot: ${missing.join(", ")}`);
+  });
 
   // --- notify: runNotifyCycle (baseline advance + best-effort delivery) ------
   // Locks the ordering guarantee that lives in main.ts's notifier: the baseline

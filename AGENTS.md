@@ -17,7 +17,9 @@ Three layers:
   `notify.ts` is kept strictly Electron/Node-free (no `node:` imports) precisely
   so the renderer can value-import `DEFAULT_NOTIFICATION_SETTINGS` from it as the
   single source of truth for the notification defaults. Keep `notify.ts` Node-free
-  — adding a `node:` import there would silently break the renderer bundle.
+  — a `node:` import there would break the renderer build (Vite fails to bundle
+  it). A guard test in `tests/run-tests.cjs` asserts the compiled `notify.js`
+  stays free of `node:` builtin references so the invariant can't regress unnoticed.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
   It talks to main **exclusively** through `window.api` (the preload bridge):
   no direct network, no Node access (`contextIsolation` on, `nodeIntegration`

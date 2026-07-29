@@ -190,16 +190,23 @@ function handleNotifications(prs: PullRequest[]): void {
     dbg(`delivering ${events.length} event(s) [native=${native} sound=${sound} mode=${plan.mode}]: ${kinds}`);
 
     if (plan.mode === "summary") {
-      showOsNotification(
-        "PR Dashboard",
-        `${events.length} pull requests need your attention`,
-        plan.summarySilent,
-        focusMainWindow,
-      );
+      // Guarded like the individual branch: on the busiest path a throwing
+      // Notification must leave a trace, not vanish into runNotifyCycle's catch.
+      try {
+        showOsNotification(
+          "PR Dashboard",
+          `${events.length} pull requests need your attention`,
+          plan.summarySilent,
+          focusMainWindow,
+        );
+      } catch (e) {
+        console.warn(`[notify] summary toast failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
     } else if (plan.mode === "individual") {
       events.forEach((ev, i) => {
         // Guard each toast independently so one failing construction/show can't
-        // drop the remaining ones in the batch.
+        // drop the remaining ones in the batch. Always-on (not PRD_DEBUG-gated)
+        // so a delivery failure is diagnosable in production.
         try {
           showOsNotification(ev.title, ev.body, plan.silent[i], () => {
             // Validate before opening: the URL comes from a user-configured
@@ -212,7 +219,7 @@ function handleNotifications(prs: PullRequest[]): void {
             }
           });
         } catch (e) {
-          dbg(`toast failed for ${ev.kind}: ${e instanceof Error ? e.message : String(e)}`);
+          console.warn(`[notify] toast failed for ${ev.kind}: ${e instanceof Error ? e.message : String(e)}`);
         }
       });
     } else {
