@@ -4,6 +4,7 @@ import { Buddy, type BuddyMood } from "./components/Buddy";
 import { PrCard, prSignal } from "./components/PrCard";
 import { SettingsScreen } from "./components/Settings";
 import { cn, relativeTime } from "./format";
+import { isPrVisibleForCategoryFilters } from "../../shared/pr-filter";
 import type { DashboardResponse, JiraStatus, PublicConfig, PullRequest, UpdateStatus } from "../../shared/types";
 
 type RoleFilter = "all" | "author" | "reviewer";
@@ -366,10 +367,12 @@ export function App() {
       fresh: active.filter((p) => p.hasNewActivity).length,
       returned: active.filter((p) => p.returnedToMe).length,
       noReviews: active.filter((p) => p.hasNoReviews).length,
-      // Drafts and Ignored are the two reveal chips, so each counts what its own
-      // chip governs across ALL PRs — an ignored draft is counted by both. If
-      // drafts were counted over `active`, an ignored draft would show up in
-      // neither count while still being hidden by the drafts guard.
+      // Drafts and Ignored are exclusive category filters, but their chip counts
+      // deliberately span ALL PRs (not the ignored-free `active` base): an
+      // ignored draft is counted by both chips. Counting drafts over `active`
+      // would drop ignored drafts from the tally entirely. Note the Drafts chip
+      // reveals only non-ignored drafts, so its count can exceed what toggling
+      // that chip alone shows.
       drafts: allPrs.filter((p) => p.isDraft).length,
       mergeable: active.filter((p) => p.canBeMerged).length,
       ignored: allPrs.filter((p) => p.isIgnored).length,
@@ -381,16 +384,8 @@ export function App() {
     () =>
       allPrs.filter((pr) => {
         // `Drafts` and `Ignored` are exclusive category filters, like the chips
-        // beside them: each category is hidden by default, and turning a chip on
-        // narrows the list to ONLY that category (both on → the union). Ignored
-        // PRs stay out of the draft view unless the Ignored chip is on too.
-        if (showDrafts || showIgnored) {
-          const inRevealed =
-            (showDrafts && pr.isDraft && !pr.isIgnored) || (showIgnored && pr.isIgnored);
-          if (!inRevealed) return false;
-        } else if (pr.isDraft || pr.isIgnored) {
-          return false;
-        }
+        // beside them — see `isPrVisibleForCategoryFilters` for the full rule.
+        if (!isPrVisibleForCategoryFilters(pr, showDrafts, showIgnored)) return false;
         if (role !== "all" && !pr.roles.includes(role)) return false;
         if (host !== "all" && pr.hostLabel !== host) return false;
         if (attentionOnly && !pr.needsAttention) return false;

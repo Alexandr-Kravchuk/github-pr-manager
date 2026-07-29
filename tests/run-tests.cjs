@@ -16,6 +16,7 @@ const ignored = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
 const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
 const jira = require(path.join(__dirname, "../dist/main/shared/jira.js"));
 const jiraHealth = require(path.join(__dirname, "../dist/main/shared/jira-health.js"));
+const prFilter = require(path.join(__dirname, "../dist/main/shared/pr-filter.js"));
 
 let passed = 0;
 let failed = 0;
@@ -434,6 +435,55 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     queried: 1,
     resolved: 0,
   }));
+
+// --- pr-filter: isPrVisibleForCategoryFilters (Drafts/Ignored exclusive chips)
+// The category gate the `filtered` useMemo runs before every other filter.
+// `true` = the PR passes the gate (drafts/ignored chips), `false` = hidden.
+// Exhaustive: all 4 chip states × all 4 PR kinds must match the acceptance
+// criteria (hidden by default; a chip narrows to ONLY its category; both on =
+// the union; an ignored draft stays out of the drafts-only view).
+const visible = prFilter.isPrVisibleForCategoryFilters;
+const PLAIN = { isDraft: false, isIgnored: false };
+const DRAFT = { isDraft: true, isIgnored: false };
+const IGNORED = { isDraft: false, isIgnored: true };
+const IGNORED_DRAFT = { isDraft: true, isIgnored: true };
+// [showDrafts, showIgnored, pr, expectedVisible]
+const catCases = [
+  // both off → only plain PRs show
+  [false, false, PLAIN, true],
+  [false, false, DRAFT, false],
+  [false, false, IGNORED, false],
+  [false, false, IGNORED_DRAFT, false],
+  // Drafts only → only non-ignored drafts
+  [true, false, PLAIN, false],
+  [true, false, DRAFT, true],
+  [true, false, IGNORED, false],
+  [true, false, IGNORED_DRAFT, false],
+  // Ignored only → only ignored (drafts among them included)
+  [false, true, PLAIN, false],
+  [false, true, DRAFT, false],
+  [false, true, IGNORED, true],
+  [false, true, IGNORED_DRAFT, true],
+  // both on → the union (drafts ∪ ignored), excludes plain
+  [true, true, PLAIN, false],
+  [true, true, DRAFT, true],
+  [true, true, IGNORED, true],
+  [true, true, IGNORED_DRAFT, true],
+];
+for (const [sd, si, pr, expected] of catCases) {
+  const kind = pr === PLAIN ? "plain" : pr === DRAFT ? "draft" : pr === IGNORED ? "ignored" : "ignored-draft";
+  test(`isPrVisibleForCategoryFilters: drafts=${sd} ignored=${si} ${kind} → ${expected}`, () =>
+    assert.strictEqual(visible(pr, sd, si), expected));
+}
+// The two riskiest branches called out in review (manual verification skipped them).
+test("isPrVisibleForCategoryFilters: an ignored draft stays out of the drafts-only view", () =>
+  assert.strictEqual(visible(IGNORED_DRAFT, true, false), false));
+test("isPrVisibleForCategoryFilters: both chips on yields the union, not every PR", () => {
+  assert.strictEqual(visible(DRAFT, true, true), true);
+  assert.strictEqual(visible(IGNORED, true, true), true);
+  assert.strictEqual(visible(IGNORED_DRAFT, true, true), true);
+  assert.strictEqual(visible(PLAIN, true, true), false);
+});
 
 (async () => {
   await atest("applyIgnored: flags ignored PRs, leaves the rest false", () =>
