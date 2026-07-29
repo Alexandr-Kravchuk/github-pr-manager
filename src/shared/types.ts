@@ -69,6 +69,37 @@ export interface JiraSettings {
   email: string;
 }
 
+/** Which PR events raise a desktop notification. Each maps to a group agreed
+ *  with the user — see `shared/notify.ts` for the exact transitions. */
+export interface NotificationEventToggles {
+  /**
+   * "Your turn to act": you were requested as a reviewer, or a change was
+   * requested / a comment left unanswered on a PR you authored.
+   */
+  yourTurn: boolean;
+  /** CI went red on a PR you authored. */
+  ciFailed: boolean;
+  /** Good news on a PR you authored: a human approval landed. */
+  goodNews: boolean;
+}
+
+/**
+ * Desktop-notification preferences. Delivery (native window / sound) is
+ * independent from *which* events fire: both default on, except `sound`, which
+ * is opt-in so the first event doesn't startle. When `native` and `sound` are
+ * both on the OS plays its own sound; with `native` off, `sound` falls back to
+ * a synthesized beep in the renderer.
+ */
+export interface NotificationSettings {
+  /** Master switch — off silences everything regardless of the toggles below. */
+  enabled: boolean;
+  /** Show a native OS notification (Notification Center / Action Center). */
+  native: boolean;
+  /** Play a sound alongside the event. */
+  sound: boolean;
+  events: NotificationEventToggles;
+}
+
 /** Persisted application settings (userData/settings.json) — no tokens. */
 export interface Settings {
   /** Auto-refresh interval in seconds. */
@@ -79,6 +110,8 @@ export interface Settings {
   autoUpdate: boolean;
   /** Light/dark appearance, or follow the OS. */
   theme: ThemePreference;
+  /** Desktop-notification preferences. */
+  notifications: NotificationSettings;
   hosts: SettingsHost[];
   /** Optional Jira connection for parent-task grouping (token stored separately). */
   jira?: JiraSettings;
@@ -386,6 +419,12 @@ export interface PrManagerApi {
   dismissWhatsNew(): Promise<void>;
   /** Subscribe to live snapshots. Returns an unsubscribe function. */
   onSnapshot(listener: (snapshot: DashboardResponse) => void): () => void;
+  /**
+   * Subscribe to "play a notification sound" pings from the main process. Sent
+   * only when the user wants a sound but has native notifications off (when
+   * native is on, the OS plays its own sound). Returns an unsubscribe function.
+   */
+  onNotifySound(listener: () => void): () => void;
   /** Subscribe to config-error messages. Returns an unsubscribe function. */
   onConfigError(listener: (message: string) => void): () => void;
   /** Subscribe to auto-update progress. Returns an unsubscribe function. */

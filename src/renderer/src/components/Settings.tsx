@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 
-import type { GhStatus, JiraStatus, Settings, ThemePreference } from "../../../shared/types";
+import type {
+  GhStatus,
+  JiraStatus,
+  NotificationEventToggles,
+  NotificationSettings,
+  Settings,
+  ThemePreference,
+} from "../../../shared/types";
+// notify.ts is deliberately Electron/Node-free (unlike the rest of shared/), so
+// the renderer can value-import this default rather than mirroring it. Used
+// before settings load and as a fallback for a settings file from an older
+// version. Single source of truth shared with config.ts's main-process default.
+import { DEFAULT_NOTIFICATION_SETTINGS as DEFAULT_NOTIFICATIONS } from "../../../shared/notify";
 import { cn } from "../format";
 
 const GITHUB_GRAPHQL = "https://api.github.com/graphql";
@@ -44,6 +56,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [autoUpdate, setAutoUpdate] = useState(true);
   const [theme, setTheme] = useState<ThemePreference>("system");
+  const [notifications, setNotifications] = useState<NotificationSettings>(DEFAULT_NOTIFICATIONS);
   const [hosts, setHosts] = useState<DraftHost[]>([]);
   const [gh, setGh] = useState<GhStatus | null>(null);
   const [saving, setSaving] = useState(false);
@@ -72,6 +85,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setLaunchAtLogin(s.launchAtLogin);
         setAutoUpdate(s.autoUpdate);
         setTheme(s.theme);
+        setNotifications(s.notifications ?? DEFAULT_NOTIFICATIONS);
         setHosts(
           s.hosts.map((h) => ({
             label: h.label,
@@ -111,6 +125,11 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const setNotif = (patch: Partial<NotificationSettings>) =>
+    setNotifications((prev) => ({ ...prev, ...patch }));
+  const setNotifEvent = (patch: Partial<NotificationEventToggles>) =>
+    setNotifications((prev) => ({ ...prev, events: { ...prev.events, ...patch } }));
+
   const save = async () => {
     setSaving(true);
     setError(null);
@@ -122,6 +141,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         launchAtLogin,
         autoUpdate,
         theme,
+        notifications,
         hosts: hosts.map((h) => ({
           label: h.label,
           graphqlUrl: h.graphqlUrl,
@@ -380,6 +400,59 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         </label>
       </section>
 
+      {/* Notifications */}
+      <section className="mb-6">
+        <h2 className="mb-2 text-sm font-semibold text-fg-secondary">Notifications</h2>
+        <div className="space-y-3">
+          <CheckRow
+            checked={notifications.enabled}
+            onChange={(v) => setNotif({ enabled: v })}
+            title="Enable notifications"
+            hint="Get notified when a PR needs your attention while the app is running."
+          />
+          <div className="ml-7 space-y-3 border-l border-line pl-4">
+            <CheckRow
+              checked={notifications.native}
+              onChange={(v) => setNotif({ native: v })}
+              disabled={!notifications.enabled}
+              title="Show desktop notifications"
+              hint="A clickable OS notification that opens the PR. Respects your Focus / Do Not Disturb settings."
+            />
+            <CheckRow
+              checked={notifications.sound}
+              onChange={(v) => setNotif({ sound: v })}
+              disabled={!notifications.enabled}
+              title="Play a sound"
+            />
+            <div className="pt-1">
+              <span className="block text-xs font-medium text-fg-muted">Notify me about</span>
+              <div className="mt-2 space-y-3">
+                <CheckRow
+                  checked={notifications.events.yourTurn}
+                  onChange={(v) => setNotifEvent({ yourTurn: v })}
+                  disabled={!notifications.enabled}
+                  title="My turn to act"
+                  hint="Review requested of me, or a change request / unanswered comment on my PR."
+                />
+                <CheckRow
+                  checked={notifications.events.ciFailed}
+                  onChange={(v) => setNotifEvent({ ciFailed: v })}
+                  disabled={!notifications.enabled}
+                  title="CI failed on my PR"
+                  hint="Detected on the regular poll — may lag a few minutes behind GitHub."
+                />
+                <CheckRow
+                  checked={notifications.events.goodNews}
+                  onChange={(v) => setNotifEvent({ goodNews: v })}
+                  disabled={!notifications.enabled}
+                  title="My PR was approved"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* Hosts */}
       <section>
         <div className="mb-2 flex items-center justify-between">
@@ -478,6 +551,37 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         </div>
       </section>
     </div>
+  );
+}
+
+/** A checkbox with a title + optional hint, matching the general-toggles rows. */
+function CheckRow({
+  checked,
+  onChange,
+  title,
+  hint,
+  disabled = false,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  title: string;
+  hint?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <label className={cn("flex items-start gap-3", disabled && "opacity-50")}>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-0.5 h-4 w-4 accent-sky-500"
+      />
+      <span>
+        <span className="block text-sm text-fg-secondary">{title}</span>
+        {hint && <span className="block text-xs text-fg-faint">{hint}</span>}
+      </span>
+    </label>
   );
 }
 

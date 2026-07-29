@@ -8,6 +8,12 @@
  *
  * Cases: sad-ci, sad-changes, sad-comments, curious, mixed, waiting, busy,
  * approved, empty, draft-red, grid-many, grid-repos, grid-tall.
+ *
+ * Notification transitions: switch `.prd-mock` from `notif-quiet` (baseline) to
+ * `notif-ci` / `notif-changes` / `notif-approved` to drive a single field
+ * transition on the SAME PR id, firing that desktop notification. `notif-review`
+ * is a standalone reviewer PR — switching to it from any case fires
+ * "review requested". See `shared/notify.ts`.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -187,6 +193,52 @@ const CASES: Record<string, () => PullRequest[]> = {
     }),
   ],
   empty: () => [],
+  // Notification transition fixtures — all share id "mock-notif" so switching
+  // between them mutates one PR's fields (the transition the notifier diffs on).
+  "notif-quiet": () => [pr({ id: "mock-notif", number: 901, title: "My quiet green PR" })],
+  "notif-ci": () => [
+    pr({
+      id: "mock-notif",
+      number: 901,
+      title: "My quiet green PR",
+      checks: [failing, passing],
+      failingChecks: [failing],
+      ciState: "failure",
+    }),
+  ],
+  "notif-changes": () => [
+    pr({
+      id: "mock-notif",
+      number: 901,
+      title: "My quiet green PR",
+      reviewDecision: "CHANGES_REQUESTED",
+      hasUnaddressedChangeRequest: true,
+      unresolvedThreads: 1,
+      totalComments: 3,
+      reviewers: [reviewerBlocking],
+    }),
+  ],
+  "notif-approved": () => [
+    pr({
+      id: "mock-notif",
+      number: 901,
+      title: "My quiet green PR",
+      reviewDecision: "APPROVED",
+      hasHumanApproval: true,
+      canBeMerged: true,
+      reviewers: [reviewerApproved],
+    }),
+  ],
+  "notif-review": () => [
+    pr({
+      id: "mock-notif-review",
+      number: 902,
+      title: "Teammate PR needing my review",
+      roles: ["reviewer"],
+      author: { login: "teammate", avatarUrl: TEAMMATE },
+      awaitingReview: true,
+    }),
+  ],
   // Layout cases — exercise the grouped/ungrouped card grid, not the buddy.
   "grid-many": () =>
     Array.from({ length: 8 }, (_, i) =>

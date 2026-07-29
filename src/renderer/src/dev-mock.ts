@@ -244,6 +244,12 @@ const settings: Settings = {
   launchAtLogin: false,
   autoUpdate: false,
   theme: "system",
+  notifications: {
+    enabled: true,
+    native: true,
+    sound: false,
+    events: { yourTurn: true, ciFailed: true, goodNews: true },
+  },
   hosts: [{ label: "GitHub", graphqlUrl: "https://api.github.com/graphql", repos: ["acme/widgets"] }],
 };
 
@@ -270,6 +276,7 @@ const api: PrManagerApi = {
   onSnapshot: () => () => {},
   onConfigError: () => () => {},
   onUpdateStatus: () => () => {},
+  onNotifySound: () => () => {},
 };
 
 (window as unknown as { api: PrManagerApi }).api = api;

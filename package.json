@@ -13,7 +13,7 @@
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "test": "npm run build:main && node tests/run-tests.cjs",
     "dev": "node scripts/dev.mjs",
-    "dev:mock": "PRD_MOCK=empty node scripts/dev.mjs",
+    "dev:mock": "node scripts/dev.mjs --mock",
     "start": "npm run build && electron .",
     "app": "electron .",
     "package": "npm run build && electron-builder",

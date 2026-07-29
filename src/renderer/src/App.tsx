@@ -4,7 +4,14 @@ import { Buddy, type BuddyMood } from "./components/Buddy";
 import { PrCard, prSignal } from "./components/PrCard";
 import { SettingsScreen } from "./components/Settings";
 import { cn, relativeTime } from "./format";
-import type { DashboardResponse, JiraStatus, PublicConfig, PullRequest, UpdateStatus } from "../../shared/types";
+import { playNotifySound } from "./notify-sound";
+import type {
+  DashboardResponse,
+  JiraStatus,
+  PublicConfig,
+  PullRequest,
+  UpdateStatus,
+} from "../../shared/types";
 
 type RoleFilter = "all" | "author" | "reviewer";
 type SortKey = "action" | "waiting" | "active" | "newest";
@@ -294,6 +301,10 @@ export function App() {
       setGroupBy("repo");
     }
   }, [jiraStatus, groupBy]);
+
+  // Sound pings from the main process (only when the user has sound on but
+  // native notifications off — otherwise the OS notification plays its sound).
+  useEffect(() => window.api.onNotifySound(() => playNotifySound()), []);
 
   const postSeen = useCallback(async (prs: PullRequest[]) => {
     const items = prs.map((p) => ({

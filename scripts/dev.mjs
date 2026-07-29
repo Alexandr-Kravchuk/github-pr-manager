@@ -4,7 +4,7 @@
 //
 // Kept dependency-free on purpose — a tiny custom launcher beats pulling in
 // concurrently + wait-on + cross-env just for `npm run dev`.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import net from "node:net";
 import process from "node:process";
 
@@ -16,6 +16,16 @@ const DEV_PORT = Number(process.env.PRD_DEV_PORT) || 5173;
 const DEV_HOST = "127.0.0.1";
 const DEV_URL = `http://${DEV_HOST}:${DEV_PORT}`;
 const children = [];
+
+// `--mock` (optionally `--mock=<case>`) enables PRD_MOCK fixture mode from here
+// rather than an inline `VAR=value` npm-script prefix, which cmd.exe (Windows)
+// can't parse. Set before spawning so the value flows to the Electron child via
+// its inherited env. Default case "empty" — switch live by editing `.prd-mock`.
+const mockArg = process.argv.find((a) => a === "--mock" || a.startsWith("--mock="));
+if (mockArg) {
+  const eq = mockArg.indexOf("=");
+  process.env.PRD_MOCK = eq >= 0 ? mockArg.slice(eq + 1) : "empty";
+}
 
 function run(command, args, extraEnv = {}) {
   const child = spawn(command, args, {
@@ -49,10 +59,32 @@ function waitForPort(port, timeoutMs = 30_000) {
   });
 }
 
-function shutdown(code = 0) {
-  for (const child of children) {
-    if (!child.killed) child.kill();
+function killChild(child) {
+  if (child.killed || child.pid == null) return;
+  // On Windows the children are spawned via a shell (npx), so `child.kill()`
+  // reaps only the shell wrapper and orphans the real node grandchild (Vite),
+  // which keeps holding the dev port and breaks the next launch. Kill the whole
+  // tree with taskkill instead; fall back to kill() if that isn't available.
+  if (process.platform === "win32") {
+    // spawnSync only throws when the process can't be spawned at all; a taskkill
+    // that runs but exits non-zero (e.g. the tree is already gone, or access is
+    // denied) reports via .error/.status, not an exception — so fall back to
+    // child.kill() on any of those, not only a thrown error.
+    let killed = false;
+    try {
+      const res = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      killed = !res.error && res.status === 0;
+    } catch {
+      killed = false;
+    }
+    if (!killed) child.kill();
+  } else {
+    child.kill();
   }
+}
+
+function shutdown(code = 0) {
+  for (const child of children) killChild(child);
   process.exit(code);
 }
 

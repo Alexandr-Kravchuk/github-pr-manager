@@ -1,14 +1,17 @@
+import fs from "node:fs";
 import path from "node:path";
-import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, powerMonitor, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
-import { ConfigError, defaultSettings, getGhStatus, toHostConfigs, toPublicConfig } from "../shared/config";
+import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
 import { setIgnored } from "../shared/ignored";
+import { createReleaseGuard, planDelivery, runNotifyCycle } from "../shared/notify";
 import { markSeen } from "../shared/state";
 import type {
   ConfigResult,
   DashboardResult,
   GhStatus,
   JiraStatus,
+  PullRequest,
   SaveSettingsResult,
   Settings,
 } from "../shared/types";
@@ -39,6 +42,12 @@ let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
 let systemSuspended = false;
 
+/**
+ * Previous PR set seen by the notifier — for transition diffing. Null until the
+ * first snapshot, which only establishes the baseline (fires nothing).
+ */
+let prevNotifyPrs: PullRequest[] | null = null;
+
 /** Pause polling after this many seconds of user inactivity. */
 const IDLE_PAUSE_SECONDS = 300;
 
@@ -65,6 +74,159 @@ function sendToRenderer(channel: string, payload: unknown): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+}
+
+/** Brings the window back to the foreground (from minimized / hidden / behind). */
+function focusMainWindow(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+/**
+ * Shown notifications, retained until the OS is done with them. Electron can
+ * garbage-collect a `Notification` while its toast is still on screen, which
+ * drops the pending `click` event — so we hold a reference until it closes.
+ */
+const liveNotifications = new Set<Notification>();
+
+/** How long to retain a Notification with no click/close/failed before force-releasing it. */
+const NOTIFICATION_RELEASE_MS = 60_000;
+
+/** Shows one native OS notification; `onClick` runs when the user clicks it. */
+function showOsNotification(title: string, body: string, silent: boolean, onClick: () => void): void {
+  const n = new Notification({ title, body, silent });
+  // One-shot release shared across click/close/failed plus a safety-net timer
+  // (some OS/Electron combos expire a toast without emitting any event, which
+  // would otherwise retain the reference for the process lifetime). The dedup +
+  // safety-net logic is extracted to `createReleaseGuard` so it unit-tests.
+  const release = createReleaseGuard(
+    {
+      onRelease: () => liveNotifications.delete(n),
+      setTimer: (fn, ms) => {
+        const t = setTimeout(fn, ms);
+        t.unref?.();
+        return { clear: () => clearTimeout(t) };
+      },
+    },
+    NOTIFICATION_RELEASE_MS,
+  );
+  // Release on click too: some OS/versions fire `click` without a later `close`,
+  // which would otherwise retain every clicked toast for the process lifetime.
+  n.on("click", () => {
+    try {
+      onClick();
+    } finally {
+      release();
+    }
+  });
+  n.on("close", release);
+  n.on("failed", release);
+  liveNotifications.add(n);
+  n.show();
+}
+
+/**
+ * Diffs the new snapshot against the last, then delivers desktop notifications
+ * per the user's settings: a native OS notification (click opens the PR) and/or
+ * a sound. Best-effort — a failure here must never break the poll loop, and the
+ * baseline is kept current even when settings can't be read, so re-enabling
+ * notifications later doesn't replay a backlog.
+ */
+function handleNotifications(prs: PullRequest[]): void {
+  const dbg = (msg: string): void => {
+    if (process.env.PRD_DEBUG) console.log(`[notify] ${msg}`);
+  };
+
+  let settings: Settings;
+  try {
+    settings = loadSettings();
+  } catch (e) {
+    // Advance the baseline (avoids a replay storm once settings recover), but
+    // surface this always-on, not only under PRD_DEBUG: a persistent settings
+    // problem silently drops real transitions otherwise. The poller surfaces the
+    // same failure to the UI as a config error; this keeps a diagnosable trace.
+    prevNotifyPrs = prs;
+    console.warn(`[notify] settings unreadable — notifications skipped this tick: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+
+  const wasBaseline = prevNotifyPrs === null;
+
+  // Advance the baseline and deliver via `runNotifyCycle`: it diffs, returns the
+  // new baseline (always `prs`) BEFORE the injected delivery runs, and swallows
+  // any delivery failure — so a throwing deliverer degrades to a skipped tick
+  // and never replays a backlog. That ordering guarantee is unit-tested on the
+  // pure helper; this callback holds only the Electron delivery.
+  prevNotifyPrs = runNotifyCycle(prevNotifyPrs, prs, settings.notifications, (events) => {
+    if (!settings.notifications.enabled) {
+      dbg("disabled in Settings — nothing fires (enable it under Notifications)");
+      return;
+    }
+    if (events.length === 0) {
+      dbg(wasBaseline ? "baseline snapshot — no toasts on first tick" : "no notifiable transitions this tick");
+      return;
+    }
+
+    // Decide delivery with the pure planner (focus suppression, summary-vs-
+    // individual split, chime-once, native-off sound fallback all live there and
+    // are unit-tested); this process only executes the descriptor.
+    const win = mainWindow;
+    const focused = Boolean(win && !win.isDestroyed() && win.isFocused());
+    const kinds = events.map((e) => e.kind).join(", ");
+    const plan = planDelivery(events, settings.notifications, {
+      focused,
+      nativeSupported: Notification.isSupported(),
+    });
+
+    if (plan.mode === "none") {
+      dbg(focused ? `suppressed ${events.length} event(s) — window focused: ${kinds}` : `no delivery channel: ${kinds}`);
+      return;
+    }
+
+    const { native, sound } = settings.notifications;
+    dbg(`delivering ${events.length} event(s) [native=${native} sound=${sound} mode=${plan.mode}]: ${kinds}`);
+
+    if (plan.mode === "summary") {
+      // Guarded like the individual branch: on the busiest path a throwing
+      // Notification must leave a trace, not vanish into runNotifyCycle's catch.
+      try {
+        showOsNotification(
+          "PR Dashboard",
+          `${events.length} pull requests need your attention`,
+          plan.summarySilent,
+          focusMainWindow,
+        );
+      } catch (e) {
+        console.warn(`[notify] summary toast failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } else if (plan.mode === "individual") {
+      events.forEach((ev, i) => {
+        // Guard each toast independently so one failing construction/show can't
+        // drop the remaining ones in the batch. Always-on (not PRD_DEBUG-gated)
+        // so a delivery failure is diagnosable in production.
+        try {
+          showOsNotification(ev.title, ev.body, plan.silent[i], () => {
+            // Validate before opening: the URL comes from a user-configured
+            // GraphQL host, so guard the scheme like every other openExternal
+            // call here. On a bad URL, fall back to surfacing the app.
+            try {
+              void shell.openExternal(validateExternalUrl(ev.url));
+            } catch {
+              focusMainWindow();
+            }
+          });
+        } catch (e) {
+          console.warn(`[notify] toast failed for ${ev.kind}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      });
+    } else {
+      // sound-only: no native window, but the user still wants an audible ping.
+      sendToRenderer("notify-sound", undefined);
+    }
+  });
 }
 
 /** Registers/unregisters the OS "open at login" item. Packaged app only — in dev
@@ -122,6 +284,26 @@ function resolveAppIcon(): Electron.NativeImage | undefined {
   return image.isEmpty() ? undefined : image;
 }
 
+/**
+ * Windows AppUserModelID used for native toast attribution. Read from
+ * `package.json`'s `build.appId` — the *same* key electron-builder reads to
+ * stamp the installed app's shortcut — so the runtime value and the packaged
+ * installer share one source and can't silently drift. `package.json` is bundled
+ * into the app (see `build.files`), so this resolves in dev and packaged alike;
+ * falls back to the known literal if it can't be read.
+ */
+function resolveWindowsAppId(): string {
+  const fallback = "com.creatio.prdashboard"; // keep in sync with package.json build.appId
+  try {
+    const raw = fs.readFileSync(path.join(app.getAppPath(), "package.json"), "utf8");
+    // Branch selection (present / malformed / missing / non-string) lives in the
+    // pure `pickAppId`, which is unit-tested; this only does the file read.
+    return pickAppId(raw, fallback);
+  } catch {
+    return fallback;
+  }
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -136,6 +318,9 @@ function createWindow(): void {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // Let the renderer play the notification sound without a prior click —
+      // pings fire on their own, never off a user gesture.
+      autoplayPolicy: "no-user-gesture-required",
     },
   });
 
@@ -337,6 +522,11 @@ void app.whenReady().then(() => {
   // resolution fails with a misleading "not signed in".
   ensureCliPath();
 
+  // Windows attributes toast notifications to an AppUserModelID; without this
+  // they can show under a generic name (or not at all). Must match the
+  // electron-builder `appId` so the packaged install's shortcut lines up.
+  if (process.platform === "win32") app.setAppUserModelId(resolveWindowsAppId());
+
   if (process.env.PRD_DEBUG) {
     console.log("[main] userData:", app.getPath("userData"));
     console.log("[main] PATH:", process.env.PATH);
@@ -366,6 +556,7 @@ void app.whenReady().then(() => {
         );
       }
       sendToRenderer("snapshot", snapshot);
+      handleNotifications(snapshot.pullRequests);
     },
     onConfigError: (message) => {
       if (process.env.PRD_DEBUG) console.error("[config-error]", message);
