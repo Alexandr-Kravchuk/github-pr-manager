@@ -13,7 +13,11 @@ Three layers:
   (GraphQL query + mapping), `state.ts` (seen-state), `config.ts` (gh tokens +
   settings validation), `types.ts` (domain types **and** the renderer↔main
   contract). The renderer imports **only types** from here — never a value
-  import, since these modules use `node:` builtins.
+  import, since these modules use `node:` builtins. **One deliberate exception:**
+  `notify.ts` is kept strictly Electron/Node-free (no `node:` imports) precisely
+  so the renderer can value-import `DEFAULT_NOTIFICATION_SETTINGS` from it as the
+  single source of truth for the notification defaults. Keep `notify.ts` Node-free
+  — adding a `node:` import there would silently break the renderer bundle.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
   It talks to main **exclusively** through `window.api` (the preload bridge):
   no direct network, no Node access (`contextIsolation` on, `nodeIntegration`

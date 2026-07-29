@@ -94,7 +94,10 @@ const liveNotifications = new Set<Notification>();
 /** Shows one native OS notification; `onClick` runs when the user clicks it. */
 function showOsNotification(title: string, body: string, silent: boolean, onClick: () => void): void {
   const n = new Notification({ title, body, silent });
-  const release = () => liveNotifications.delete(n);
+  const release = () => {
+    clearTimeout(timer);
+    liveNotifications.delete(n);
+  };
   // Release on click too: some OS/versions fire `click` without a later `close`,
   // which would otherwise retain every clicked toast for the process lifetime.
   n.on("click", () => {
@@ -106,6 +109,11 @@ function showOsNotification(title: string, body: string, silent: boolean, onClic
   });
   n.on("close", release);
   n.on("failed", release);
+  // Safety net: some OS/Electron combos can expire a toast without emitting any
+  // of click/close/failed, which would retain the reference for the process
+  // lifetime. Force-release after a generous window so nothing leaks unbounded.
+  const timer = setTimeout(release, 60_000);
+  timer.unref?.();
   liveNotifications.add(n);
   n.show();
 }
@@ -131,62 +139,76 @@ function handleNotifications(prs: PullRequest[]): void {
     return;
   }
 
-  const wasBaseline = prevNotifyPrs === null;
-  const events = diffNotifications(prevNotifyPrs, prs, settings.notifications);
+  // Advance the baseline first, then diff against the captured previous set.
+  // Doing this up front keeps the guarantee that a later failure in the delivery
+  // pipeline never replays a backlog when notifications are re-enabled.
+  const prev = prevNotifyPrs;
+  const wasBaseline = prev === null;
   prevNotifyPrs = prs;
 
-  if (!settings.notifications.enabled) {
-    dbg("disabled in Settings — nothing fires (enable it under Notifications)");
-    return;
-  }
-  if (events.length === 0) {
-    dbg(wasBaseline ? "baseline snapshot — no toasts on first tick" : "no notifiable transitions this tick");
-    return;
-  }
+  // Best-effort: the doc contract is that nothing here may break the poll loop.
+  // The pure diff/plan can't realistically throw (settings are normalized by
+  // loadSettings), but the Electron delivery (Notification construction/show)
+  // can fail on some OS/version combos — degrade to a skipped tick, never an
+  // uncaught throw out of the poller's onSnapshot callback.
+  try {
+    const events = diffNotifications(prev, prs, settings.notifications);
 
-  // Decide delivery with the pure planner (focus suppression, summary-vs-
-  // individual split, chime-once, native-off sound fallback all live there and
-  // are unit-tested); this process only executes the descriptor. The baseline is
-  // updated above, so a suppressed batch won't re-fire once focus is lost.
-  const win = mainWindow;
-  const focused = Boolean(win && !win.isDestroyed() && win.isFocused());
-  const kinds = events.map((e) => e.kind).join(", ");
-  const plan = planDelivery(events, settings.notifications, {
-    focused,
-    nativeSupported: Notification.isSupported(),
-  });
+    if (!settings.notifications.enabled) {
+      dbg("disabled in Settings — nothing fires (enable it under Notifications)");
+      return;
+    }
+    if (events.length === 0) {
+      dbg(wasBaseline ? "baseline snapshot — no toasts on first tick" : "no notifiable transitions this tick");
+      return;
+    }
 
-  if (plan.mode === "none") {
-    dbg(focused ? `suppressed ${events.length} event(s) — window focused: ${kinds}` : `no delivery channel: ${kinds}`);
-    return;
-  }
-
-  const { native, sound } = settings.notifications;
-  dbg(`delivering ${events.length} event(s) [native=${native} sound=${sound} mode=${plan.mode}]: ${kinds}`);
-
-  if (plan.mode === "summary") {
-    showOsNotification(
-      "PR Dashboard",
-      `${events.length} pull requests need your attention`,
-      plan.summarySilent,
-      focusMainWindow,
-    );
-  } else if (plan.mode === "individual") {
-    events.forEach((ev, i) => {
-      showOsNotification(ev.title, ev.body, plan.silent[i], () => {
-        // Validate before opening: the URL comes from a user-configured
-        // GraphQL host, so guard the scheme like every other openExternal
-        // call here. On a bad URL, fall back to surfacing the app.
-        try {
-          void shell.openExternal(validateExternalUrl(ev.url));
-        } catch {
-          focusMainWindow();
-        }
-      });
+    // Decide delivery with the pure planner (focus suppression, summary-vs-
+    // individual split, chime-once, native-off sound fallback all live there and
+    // are unit-tested); this process only executes the descriptor. The baseline is
+    // updated above, so a suppressed batch won't re-fire once focus is lost.
+    const win = mainWindow;
+    const focused = Boolean(win && !win.isDestroyed() && win.isFocused());
+    const kinds = events.map((e) => e.kind).join(", ");
+    const plan = planDelivery(events, settings.notifications, {
+      focused,
+      nativeSupported: Notification.isSupported(),
     });
-  } else {
-    // sound-only: no native window, but the user still wants an audible ping.
-    sendToRenderer("notify-sound", undefined);
+
+    if (plan.mode === "none") {
+      dbg(focused ? `suppressed ${events.length} event(s) — window focused: ${kinds}` : `no delivery channel: ${kinds}`);
+      return;
+    }
+
+    const { native, sound } = settings.notifications;
+    dbg(`delivering ${events.length} event(s) [native=${native} sound=${sound} mode=${plan.mode}]: ${kinds}`);
+
+    if (plan.mode === "summary") {
+      showOsNotification(
+        "PR Dashboard",
+        `${events.length} pull requests need your attention`,
+        plan.summarySilent,
+        focusMainWindow,
+      );
+    } else if (plan.mode === "individual") {
+      events.forEach((ev, i) => {
+        showOsNotification(ev.title, ev.body, plan.silent[i], () => {
+          // Validate before opening: the URL comes from a user-configured
+          // GraphQL host, so guard the scheme like every other openExternal
+          // call here. On a bad URL, fall back to surfacing the app.
+          try {
+            void shell.openExternal(validateExternalUrl(ev.url));
+          } catch {
+            focusMainWindow();
+          }
+        });
+      });
+    } else {
+      // sound-only: no native window, but the user still wants an audible ping.
+      sendToRenderer("notify-sound", undefined);
+    }
+  } catch (e) {
+    dbg(`delivery failed — skipping this tick: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 

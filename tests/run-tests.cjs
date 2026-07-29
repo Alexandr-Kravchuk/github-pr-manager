@@ -1016,7 +1016,8 @@ test("healthFromError: stringifies a non-Error rejection", () =>
   // hashSnapshot gates snapshot re-emit, and handleNotifications runs only on
   // re-emit — so every field the notifier (notify.ts) reads MUST be hashed here,
   // or a tick whose only delta is that field silently never fires. These lock
-  // the hasUnaddressedComments field in (sibling of hasUnaddressedChangeRequest).
+  // the hasUnaddressedComments and roles fields in (siblings of
+  // hasUnaddressedChangeRequest, which the notifier also reads).
   const hsnap = (prOverrides = {}, top = {}) => ({
     pullRequests: [
       {
@@ -1024,6 +1025,7 @@ test("healthFromError: stringifies a non-Error rejection", () =>
         updatedAt: "2026-01-01T00:00:00Z",
         hasUnaddressedChangeRequest: false,
         hasUnaddressedComments: false,
+        roles: ["author"],
         // hashSnapshot reads .length on these three arrays.
         failingChecks: [],
         pendingChecks: [],
@@ -1041,6 +1043,11 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     assert.notStrictEqual(
       poller.hashSnapshot(hsnap()),
       poller.hashSnapshot(hsnap({ hasUnaddressedComments: true })),
+    ));
+  test("hashSnapshot: a roles-only delta changes the hash (so review_requested fires)", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ roles: ["author"] })),
+      poller.hashSnapshot(hsnap({ roles: ["author", "reviewer"] })),
     ));
   test("hashSnapshot: identical PR fields hash equal, ignoring fetchedAt (no spurious re-emit)", () =>
     assert.strictEqual(
@@ -1093,6 +1100,23 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     assert.deepStrictEqual(
       kinds(notify.diffNotifications([npr()], [npr({ hasHumanApproval: true })], N_ON)),
       ["approved"],
+    ));
+  test("diffNotifications: approval suppressed when goodNews is off", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([npr()], [npr({ hasHumanApproval: true })], {
+        ...N_ON,
+        events: { ...N_ON.events, goodNews: false },
+      }),
+      [],
+    ));
+  test("diffNotifications: approval on a PR you only review does not fire (author-scoped)", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications(
+        [npr({ id: "4", roles: ["reviewer"] })],
+        [npr({ id: "4", roles: ["reviewer"], hasHumanApproval: true })],
+        N_ON,
+      ),
+      [],
     ));
   test("diffNotifications: CI failing on a PR you only review does not fire (author-scoped)", () =>
     assert.deepStrictEqual(

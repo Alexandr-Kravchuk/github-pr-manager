@@ -31,6 +31,13 @@ export function playNotifySound(): void {
     osc.frequency.setValueAtTime(880, now); // A5
     osc.frequency.setValueAtTime(1174.66, now + 0.12); // D6 — a rising two-tone
     osc.connect(gain);
+    // Release the graph once playback ends so stopped nodes don't linger
+    // connected to the destination (the browser reclaims them eventually, but
+    // disconnecting is cheap and keeps a long-lived app tidy).
+    osc.onended = () => {
+      osc.disconnect();
+      gain.disconnect();
+    };
     osc.start(now);
     osc.stop(now + 0.45);
   } catch {

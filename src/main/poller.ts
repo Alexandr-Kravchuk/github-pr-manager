@@ -141,6 +141,11 @@ export function hashSnapshot(s: DashboardResponse): string {
     // (notify.ts) — hash it too, so a tick whose only delta is a new
     // unanswered comment still pushes a snapshot and fires the notification.
     p.hasUnaddressedComments,
+    // Also read by the notifier (notify.ts) — it detects the reviewer-added
+    // transition (`isReviewer && !wasReviewer` -> review_requested) from roles.
+    // Being added as an additional reviewer to an already-tracked PR may not
+    // move any other hashed field, so hash roles too or that toast can be lost.
+    p.roles.join(","),
     p.isDraft,
     p.isIgnored,
     p.parentKey,

@@ -66,11 +66,18 @@ function killChild(child) {
   // which keeps holding the dev port and breaks the next launch. Kill the whole
   // tree with taskkill instead; fall back to kill() if that isn't available.
   if (process.platform === "win32") {
+    // spawnSync only throws when the process can't be spawned at all; a taskkill
+    // that runs but exits non-zero (e.g. the tree is already gone, or access is
+    // denied) reports via .error/.status, not an exception — so fall back to
+    // child.kill() on any of those, not only a thrown error.
+    let killed = false;
     try {
-      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      const res = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      killed = !res.error && res.status === 0;
     } catch {
-      child.kill();
+      killed = false;
     }
+    if (!killed) child.kill();
   } else {
     child.kill();
   }
