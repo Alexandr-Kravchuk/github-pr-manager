@@ -14,11 +14,19 @@ import type { PullRequest } from "./types";
  * is why this is the one module the renderer value-imports — so it bundles into
  * the renderer AND is unit-testable via the Node runner against
  * `dist/main/shared`, the same pattern as `ignored.ts` / `mapPr.canBeMerged`.
+ *
+ * The chip flags are passed as a named object, not positional booleans, so a
+ * caller can't silently swap Drafts/Ignored (both are `boolean`, so a swap
+ * would otherwise type-check and invert the behavior).
  */
+export interface CategoryFilterState {
+  showDrafts: boolean;
+  showIgnored: boolean;
+}
+
 export function isPrVisibleForCategoryFilters(
   pr: Pick<PullRequest, "isDraft" | "isIgnored">,
-  showDrafts: boolean,
-  showIgnored: boolean,
+  { showDrafts, showIgnored }: CategoryFilterState,
 ): boolean {
   if (showDrafts || showIgnored) {
     return (showDrafts && pr.isDraft && !pr.isIgnored) || (showIgnored && pr.isIgnored);

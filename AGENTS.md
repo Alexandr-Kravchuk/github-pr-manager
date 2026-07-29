@@ -13,7 +13,12 @@ Three layers:
   (GraphQL query + mapping), `state.ts` (seen-state), `config.ts` (gh tokens +
   settings validation), `types.ts` (domain types **and** the renderer↔main
   contract). The renderer imports **only types** from here — never a value
-  import, since these modules use `node:` builtins.
+  import, since these modules use `node:` builtins. **Sole carve-out:** a
+  `shared` module that is provably free of `node:` builtins (and imports no
+  module that uses them) may be value-imported by the renderer — currently only
+  `pr-filter.ts`. Before adding another, confirm it stays node-free, or the
+  renderer bundle will break. There is no lint rule enforcing this yet, so the
+  condition is guarded by review.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
   It talks to main **exclusively** through `window.api` (the preload bridge):
   no direct network, no Node access (`contextIsolation` on, `nodeIntegration`

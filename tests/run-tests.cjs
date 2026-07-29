@@ -473,16 +473,16 @@ const catCases = [
 for (const [sd, si, pr, expected] of catCases) {
   const kind = pr === PLAIN ? "plain" : pr === DRAFT ? "draft" : pr === IGNORED ? "ignored" : "ignored-draft";
   test(`isPrVisibleForCategoryFilters: drafts=${sd} ignored=${si} ${kind} → ${expected}`, () =>
-    assert.strictEqual(visible(pr, sd, si), expected));
+    assert.strictEqual(visible(pr, { showDrafts: sd, showIgnored: si }), expected));
 }
 // The two riskiest branches called out in review (manual verification skipped them).
 test("isPrVisibleForCategoryFilters: an ignored draft stays out of the drafts-only view", () =>
-  assert.strictEqual(visible(IGNORED_DRAFT, true, false), false));
+  assert.strictEqual(visible(IGNORED_DRAFT, { showDrafts: true, showIgnored: false }), false));
 test("isPrVisibleForCategoryFilters: both chips on yields the union, not every PR", () => {
-  assert.strictEqual(visible(DRAFT, true, true), true);
-  assert.strictEqual(visible(IGNORED, true, true), true);
-  assert.strictEqual(visible(IGNORED_DRAFT, true, true), true);
-  assert.strictEqual(visible(PLAIN, true, true), false);
+  assert.strictEqual(visible(DRAFT, { showDrafts: true, showIgnored: true }), true);
+  assert.strictEqual(visible(IGNORED, { showDrafts: true, showIgnored: true }), true);
+  assert.strictEqual(visible(IGNORED_DRAFT, { showDrafts: true, showIgnored: true }), true);
+  assert.strictEqual(visible(PLAIN, { showDrafts: true, showIgnored: true }), false);
 });
 
 (async () => {

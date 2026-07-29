@@ -367,13 +367,13 @@ export function App() {
       fresh: active.filter((p) => p.hasNewActivity).length,
       returned: active.filter((p) => p.returnedToMe).length,
       noReviews: active.filter((p) => p.hasNoReviews).length,
-      // Drafts and Ignored are exclusive category filters, but their chip counts
-      // deliberately span ALL PRs (not the ignored-free `active` base): an
-      // ignored draft is counted by both chips. Counting drafts over `active`
-      // would drop ignored drafts from the tally entirely. Note the Drafts chip
-      // reveals only non-ignored drafts, so its count can exceed what toggling
-      // that chip alone shows.
-      drafts: allPrs.filter((p) => p.isDraft).length,
+      // Drafts and Ignored are exclusive category filters, so each chip's badge
+      // counts exactly what activating that chip reveals. The Drafts view shows
+      // only non-ignored drafts (an ignored draft surfaces under Ignored, not
+      // Drafts), so the count excludes ignored drafts to match; an ignored draft
+      // is still counted once, by the Ignored chip. Both counts span all PRs
+      // rather than the ignored-free `active` base for that reason.
+      drafts: allPrs.filter((p) => p.isDraft && !p.isIgnored).length,
       mergeable: active.filter((p) => p.canBeMerged).length,
       ignored: allPrs.filter((p) => p.isIgnored).length,
     }),
@@ -385,7 +385,7 @@ export function App() {
       allPrs.filter((pr) => {
         // `Drafts` and `Ignored` are exclusive category filters, like the chips
         // beside them — see `isPrVisibleForCategoryFilters` for the full rule.
-        if (!isPrVisibleForCategoryFilters(pr, showDrafts, showIgnored)) return false;
+        if (!isPrVisibleForCategoryFilters(pr, { showDrafts, showIgnored })) return false;
         if (role !== "all" && !pr.roles.includes(role)) return false;
         if (host !== "all" && pr.hostLabel !== host) return false;
         if (attentionOnly && !pr.needsAttention) return false;
