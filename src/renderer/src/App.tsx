@@ -148,7 +148,7 @@ interface ViewPrefs {
 const ROLE_SEGMENTS: { value: RoleFilter; label: string }[] = [
   { value: "reviewer", label: "I'm a reviewer" },
   { value: "author", label: "I'm the author" },
-  { value: "all", label: "Everyone" },
+  { value: "all", label: "All" },
 ];
 
 const PREFS_KEY = "prd:view-prefs:v1";
