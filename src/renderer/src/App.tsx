@@ -140,7 +140,6 @@ interface ViewPrefs {
   newOnly: boolean;
   mergeableOnly: boolean;
   noReviewsOnly: boolean;
-  showDrafts: boolean;
   showIgnored: boolean;
 }
 
@@ -165,7 +164,6 @@ const DEFAULT_PREFS: ViewPrefs = {
   newOnly: false,
   mergeableOnly: false,
   noReviewsOnly: false,
-  showDrafts: false,
   showIgnored: false,
 };
 
@@ -187,7 +185,6 @@ function loadPrefs(): ViewPrefs {
       newOnly: Boolean(p.newOnly),
       mergeableOnly: Boolean(p.mergeableOnly),
       noReviewsOnly: Boolean(p.noReviewsOnly),
-      showDrafts: Boolean(p.showDrafts),
       showIgnored: Boolean(p.showIgnored),
     };
   } catch {
@@ -230,7 +227,6 @@ export function App() {
   const [noReviewsOnly, setNoReviewsOnly] = useState(boot.noReviewsOnly);
   const [sortBy, setSortBy] = useState<SortKey>(boot.sortBy);
   const [groupBy, setGroupBy] = useState<GroupMode>(boot.groupBy);
-  const [showDrafts, setShowDrafts] = useState(boot.showDrafts);
   const [showIgnored, setShowIgnored] = useState(boot.showIgnored);
   // Collapsed repo groups, keyed by `${hostLabel}/${repo}`. In-memory, like
   // the filters: a fresh launch starts with everything expanded.
@@ -351,7 +347,6 @@ export function App() {
       newOnly,
       mergeableOnly,
       noReviewsOnly,
-      showDrafts,
       showIgnored,
     });
   }, [
@@ -364,7 +359,6 @@ export function App() {
     newOnly,
     mergeableOnly,
     noReviewsOnly,
-    showDrafts,
     showIgnored,
   ]);
 
@@ -455,12 +449,9 @@ export function App() {
       fresh: active.filter((p) => p.hasNewActivity).length,
       returned: active.filter((p) => p.returnedToMe).length,
       noReviews: active.filter((p) => p.hasNoReviews).length,
-      // Drafts and Ignored are the two reveal chips, so each counts what its own
-      // chip governs across ALL PRs — an ignored draft is counted by both. If
-      // drafts were counted over `active`, an ignored draft would show up in
-      // neither count while still being hidden by the drafts guard.
-      drafts: allPrs.filter((p) => p.isDraft).length,
       mergeable: active.filter((p) => p.canBeMerged).length,
+      // Ignored is a reveal chip, so it counts across ALL PRs (not `active`,
+      // which already excludes ignored ones).
       ignored: allPrs.filter((p) => p.isIgnored).length,
     }),
     [active, allPrs],
@@ -469,9 +460,9 @@ export function App() {
   const filtered = useMemo(
     () =>
       allPrs.filter((pr) => {
-        // Two independent reveal dimensions: an ignored draft needs BOTH chips.
+        // Ignored PRs are hidden unless the reveal chip is on. Drafts are shown
+        // like any other PR (they carry a "Draft" tag on the card).
         if (!showIgnored && pr.isIgnored) return false;
-        if (!showDrafts && pr.isDraft) return false;
         if (role !== "all" && !pr.roles.includes(role)) return false;
         if (host !== "all" && pr.hostLabel !== host) return false;
         if (attentionOnly && !pr.needsAttention) return false;
@@ -496,7 +487,6 @@ export function App() {
       mergeableOnly,
       noReviewsOnly,
       search,
-      showDrafts,
       showIgnored,
     ],
   );
@@ -627,7 +617,6 @@ export function App() {
     (newOnly ? 1 : 0) +
     (mergeableOnly ? 1 : 0) +
     (noReviewsOnly ? 1 : 0) +
-    (showDrafts ? 1 : 0) +
     (showIgnored ? 1 : 0);
 
   const clearFilters = useCallback(() => {
@@ -639,7 +628,6 @@ export function App() {
     setNewOnly(false);
     setMergeableOnly(false);
     setNoReviewsOnly(false);
-    setShowDrafts(false);
     setShowIgnored(false);
   }, []);
 
@@ -895,11 +883,6 @@ export function App() {
             <FilterChip active={noReviewsOnly} onClick={() => setNoReviewsOnly((v) => !v)}>
               ◷ No reviews yet{counts.noReviews > 0 ? ` (${counts.noReviews})` : ""}
             </FilterChip>
-            {counts.drafts > 0 && (
-              <FilterChip active={showDrafts} onClick={() => setShowDrafts((v) => !v)}>
-                Drafts ({counts.drafts})
-              </FilterChip>
-            )}
             {counts.ignored > 0 && (
               <FilterChip active={showIgnored} onClick={() => setShowIgnored((v) => !v)}>
                 Ignored ({counts.ignored})
