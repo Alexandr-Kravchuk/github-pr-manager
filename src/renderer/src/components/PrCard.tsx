@@ -239,6 +239,9 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
       className={cn(
         "rounded-lg border border-line border-l-4 p-4 transition-colors hover:bg-surface bg-surface/60",
         accentClass(pr),
+        // Revealed by the Ignored chip: on screen, but not part of the workload
+        // the header counts — so it reads as set aside rather than as normal.
+        pr.isIgnored && "opacity-60 hover:opacity-100",
       )}
     >
       {/* Top row: repo/number + updated time */}
@@ -256,6 +259,11 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
           )}
           {pr.isDraft && (
             <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">Draft</span>
+          )}
+          {/* An ignored draft carries both badges — together they say exactly which
+              chips were hiding it. */}
+          {pr.isIgnored && (
+            <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">Ignored</span>
           )}
           {!pr.baseIsDefaultBranch && (
             <span

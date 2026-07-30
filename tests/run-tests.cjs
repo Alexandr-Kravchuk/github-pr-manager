@@ -76,7 +76,7 @@ test("pickAppId: falls back on malformed JSON", () =>
 
 // --- shared value-import carve-outs stay Node-free (renderer imports them) ---
 // The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify
-// and isPrVisibleForCategoryFilters from shared/pr-filter. That's only safe
+// and the view-filter helpers from shared/pr-filter. That's only safe
 // while those modules pull in no node: builtin — a regression would break the
 // Vite renderer build. Assert the compiled output is clean so the AGENTS.md
 // carve-out is enforced, not just documented.
@@ -490,54 +490,182 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     resolved: 0,
   }));
 
-// --- pr-filter: isPrVisibleForCategoryFilters (Drafts/Ignored exclusive chips)
-// The category gate the `filtered` useMemo runs before every other filter.
-// `true` = the PR passes the gate (drafts/ignored chips), `false` = hidden.
-// Exhaustive: all 4 chip states × all 4 PR kinds must match the acceptance
-// criteria (hidden by default; a chip narrows to ONLY its category; both on =
-// the union; an ignored draft stays out of the drafts-only view).
-const visible = prFilter.isPrVisibleForCategoryFilters;
+// --- pr-filter: the reveal gate (Drafts/Ignored chips) ----------------------
+// Drafts and ignored PRs are hidden by default and each chip REVEALS its own
+// category on top of the normal list. The rule that matters: ANY owning chip is
+// enough, so an ignored draft surfaces under Drafts OR Ignored. Requiring both
+// is the bug this replaces — two ignored drafts badged "Drafts (2) Ignored (2)"
+// while every single-chip click rendered zero rows.
 const PLAIN = { isDraft: false, isIgnored: false };
 const DRAFT = { isDraft: true, isIgnored: false };
 const IGNORED = { isDraft: false, isIgnored: true };
 const IGNORED_DRAFT = { isDraft: true, isIgnored: true };
-// [showDrafts, showIgnored, pr, expectedVisible]
-const catCases = [
-  // both off → only plain PRs show
+// [showDrafts, showIgnored, pr, expectedRevealed]
+const revealCases = [
+  // both off → only uncategorized PRs show
   [false, false, PLAIN, true],
   [false, false, DRAFT, false],
   [false, false, IGNORED, false],
   [false, false, IGNORED_DRAFT, false],
-  // Drafts only → only non-ignored drafts
-  [true, false, PLAIN, false],
+  // Drafts on → drafts join the normal list; plain PRs stay (reveal, not "only")
+  [true, false, PLAIN, true],
   [true, false, DRAFT, true],
   [true, false, IGNORED, false],
-  [true, false, IGNORED_DRAFT, false],
-  // Ignored only → only ignored (drafts among them included)
-  [false, true, PLAIN, false],
+  [true, false, IGNORED_DRAFT, true],
+  // Ignored on → ignored join, drafts among them included
+  [false, true, PLAIN, true],
   [false, true, DRAFT, false],
   [false, true, IGNORED, true],
   [false, true, IGNORED_DRAFT, true],
-  // both on → the union (drafts ∪ ignored), excludes plain
-  [true, true, PLAIN, false],
+  // both on → everything
+  [true, true, PLAIN, true],
   [true, true, DRAFT, true],
   [true, true, IGNORED, true],
   [true, true, IGNORED_DRAFT, true],
 ];
-for (const [sd, si, pr, expected] of catCases) {
-  const kind = pr === PLAIN ? "plain" : pr === DRAFT ? "draft" : pr === IGNORED ? "ignored" : "ignored-draft";
-  test(`isPrVisibleForCategoryFilters: drafts=${sd} ignored=${si} ${kind} → ${expected}`, () =>
-    assert.strictEqual(visible(pr, { showDrafts: sd, showIgnored: si }), expected));
+for (const [sd, si, pr, expected] of revealCases) {
+  const kind =
+    pr === PLAIN ? "plain" : pr === DRAFT ? "draft" : pr === IGNORED ? "ignored" : "ignored-draft";
+  test(`isRevealed: drafts=${sd} ignored=${si} ${kind} → ${expected}`, () =>
+    assert.strictEqual(prFilter.isRevealed(pr, { showDrafts: sd, showIgnored: si }), expected));
 }
-// The two riskiest branches called out in review (manual verification skipped them).
-test("isPrVisibleForCategoryFilters: an ignored draft stays out of the drafts-only view", () =>
-  assert.strictEqual(visible(IGNORED_DRAFT, { showDrafts: true, showIgnored: false }), false));
-test("isPrVisibleForCategoryFilters: both chips on yields the union, not every PR", () => {
-  assert.strictEqual(visible(DRAFT, { showDrafts: true, showIgnored: true }), true);
-  assert.strictEqual(visible(IGNORED, { showDrafts: true, showIgnored: true }), true);
-  assert.strictEqual(visible(IGNORED_DRAFT, { showDrafts: true, showIgnored: true }), true);
-  assert.strictEqual(visible(PLAIN, { showDrafts: true, showIgnored: true }), false);
+test("isRevealed: one chip is enough for an ignored draft (the regression)", () => {
+  assert.strictEqual(prFilter.isRevealed(IGNORED_DRAFT, { showDrafts: true, showIgnored: false }), true);
+  assert.strictEqual(prFilter.isRevealed(IGNORED_DRAFT, { showDrafts: false, showIgnored: true }), true);
 });
+
+// --- pr-filter: filterPrs / facet counts ------------------------------------
+let prSeq = 0;
+const mkPr = (over = {}) => ({
+  number: ++prSeq,
+  title: "Some change",
+  repo: "acme/widgets",
+  author: { login: "octocat" },
+  hostLabel: "GitHub",
+  roles: ["author"],
+  isDraft: false,
+  isIgnored: false,
+  needsAttention: false,
+  failingChecks: [],
+  hasNewActivity: false,
+  canBeMerged: false,
+  hasNoReviews: false,
+  returnedToMe: false,
+  ...over,
+});
+const ST = {
+  role: "all",
+  host: "all",
+  search: "",
+  attentionOnly: false,
+  failingOnly: false,
+  newOnly: false,
+  mergeableOnly: false,
+  noReviewsOnly: false,
+  showDrafts: false,
+  showIgnored: false,
+};
+const st = (over = {}) => ({ ...ST, ...over });
+
+// The live shape that produced the bug report: every open PR is an ignored draft.
+const IGNORED_DRAFTS = [
+  mkPr({ isDraft: true, isIgnored: true, hasNoReviews: true }),
+  mkPr({ isDraft: true, isIgnored: true, hasNoReviews: true }),
+];
+test("filterPrs: two ignored drafts are hidden by default", () =>
+  assert.strictEqual(prFilter.filterPrs(IGNORED_DRAFTS, st()).length, 0));
+test("filterPrs: the Drafts chip alone reveals ignored drafts", () =>
+  assert.strictEqual(prFilter.filterPrs(IGNORED_DRAFTS, st({ showDrafts: true })).length, 2));
+test("filterPrs: the Ignored chip alone reveals ignored drafts", () =>
+  assert.strictEqual(prFilter.filterPrs(IGNORED_DRAFTS, st({ showIgnored: true })).length, 2));
+test("filterPrs: both chips on reveals them once, not twice", () =>
+  assert.strictEqual(
+    prFilter.filterPrs(IGNORED_DRAFTS, st({ showDrafts: true, showIgnored: true })).length,
+    2,
+  ));
+
+test("revealDelta: each chip promises the 2 rows it actually adds", () => {
+  assert.strictEqual(prFilter.revealDelta(IGNORED_DRAFTS, st(), "drafts"), 2);
+  assert.strictEqual(prFilter.revealDelta(IGNORED_DRAFTS, st(), "ignored"), 2);
+});
+test("revealDelta: 0 once the other chip already revealed the same PRs", () => {
+  assert.strictEqual(
+    prFilter.revealDelta(IGNORED_DRAFTS, st({ showIgnored: true }), "drafts"),
+    0,
+  );
+  assert.strictEqual(
+    prFilter.revealDelta(IGNORED_DRAFTS, st({ showDrafts: true }), "ignored"),
+    0,
+  );
+});
+test("revealDelta: still reports its own contribution while active", () =>
+  assert.strictEqual(prFilter.revealDelta(IGNORED_DRAFTS, st({ showDrafts: true }), "drafts"), 2));
+
+// A draft can never be "Ready to merge" (mapPr sets canBeMerged = !isDraft), so
+// the badge must read 0 rather than advertise drafts the click can't surface.
+test("revealDelta: Drafts is 0 while Ready to merge is on", () =>
+  assert.strictEqual(
+    prFilter.revealDelta(IGNORED_DRAFTS, st({ mergeableOnly: true }), "drafts"),
+    0,
+  ));
+
+const MIXED = [
+  mkPr({ needsAttention: true, failingChecks: ["build"], hostLabel: "GitHub" }),
+  mkPr({ needsAttention: true, hasNewActivity: true, canBeMerged: true, hostLabel: "GHE" }),
+  mkPr({ hasNoReviews: true, roles: ["reviewer"], title: "Bump deps" }),
+  mkPr({ isDraft: true, hasNoReviews: true, needsAttention: true }),
+  mkPr({ isIgnored: true, failingChecks: ["test"], needsAttention: true }),
+  mkPr({ isDraft: true, isIgnored: true, hasNewActivity: true }),
+];
+// The promise a badge makes: click this chip and you get exactly this many rows.
+const FACET_STATES = [
+  st(),
+  st({ showDrafts: true }),
+  st({ showIgnored: true }),
+  st({ showDrafts: true, showIgnored: true }),
+  st({ host: "GHE" }),
+  st({ role: "reviewer" }),
+  st({ search: "bump" }),
+  st({ attentionOnly: true, showDrafts: true }),
+  st({ failingOnly: true, showIgnored: true }),
+];
+for (const key of ["attention", "failing", "fresh", "mergeable", "noReviews"]) {
+  for (const [i, state] of FACET_STATES.entries()) {
+    test(`narrowFacetCount(${key}) equals the rows it yields [state ${i}]`, () => {
+      const chip = prFilter.NARROW_CHIPS.find((c) => c.key === key);
+      assert.strictEqual(
+        prFilter.narrowFacetCount(MIXED, state, key),
+        prFilter.filterPrs(MIXED, { ...state, [chip.flag]: true }).length,
+      );
+    });
+  }
+}
+test("narrowFacetCount: counts hidden drafts only once the chip reveals them", () => {
+  // Two PRs have hasNoReviews; one of them is a draft, hidden by default.
+  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st(), "noReviews"), 1);
+  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ showDrafts: true }), "noReviews"), 2);
+});
+test("narrowFacetCount: honours host, role and search", () => {
+  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ host: "GHE" }), "attention"), 1);
+  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ role: "reviewer" }), "noReviews"), 1);
+  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ search: "bump" }), "noReviews"), 1);
+});
+
+test("baselineStats: excludes both ignored PRs and drafts", () => {
+  const stats = prFilter.baselineStats(MIXED);
+  assert.strictEqual(stats.total, 3);
+  assert.strictEqual(stats.attention, 2);
+  assert.strictEqual(stats.failing, 1);
+  assert.strictEqual(stats.fresh, 1);
+});
+test("baselineStats: all-hidden inbox reports zero, matching the header", () =>
+  assert.deepStrictEqual(prFilter.baselineStats(IGNORED_DRAFTS), {
+    total: 0,
+    attention: 0,
+    failing: 0,
+    fresh: 0,
+    returned: 0,
+  }));
 
 (async () => {
   await atest("applyIgnored: flags ignored PRs, leaves the rest false", () =>
