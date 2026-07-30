@@ -598,8 +598,14 @@ export function App() {
               </span>
             ))}
             {data && (
+              // One finite blink per incoming snapshot — `fetchedAt` remounts the
+              // node, the same trick Buddy uses for its mood animations. It used
+              // to carry Tailwind's `animate-pulse`, whose `infinite` keyframes
+              // kept the compositor producing frames around the clock: ~33% CPU
+              // in the GPU helper permanently, even with the window hidden.
               <span
-                className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-500"
+                key={data.fetchedAt}
+                className="live-beat inline-block h-2 w-2 rounded-full bg-emerald-500"
                 title="Live — auto-refreshing"
               />
             )}

@@ -48,3 +48,15 @@ Three layers:
   time (`config.ts`).
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes
   `electron .` self-quit after the renderer loads (a non-interactive boot check).
+- **No always-running animation in the renderer.** An `infinite` CSS animation —
+  including Tailwind's `animate-pulse` / `-spin` / `-bounce` / `-ping` — keeps the
+  compositor producing frames for as long as the app is open, and Electron
+  launches with `MacWebContentsOcclusion` disabled, so they keep coming even while
+  the window is hidden. In v1.12.0 one 2x2px `animate-pulse` dot in the header
+  held `PR Dashboard Helper (GPU)` at ~33% CPU permanently. Use a **finite**
+  animation remounted via a React `key` when the underlying event fires — see
+  `Buddy.tsx` (mood changes) and `.live-beat` in `styles.css` (one blink per
+  snapshot). A guard test in `tests/run-tests.cjs` scans `src/renderer/src` and
+  fails on any `infinite` declaration, so this can't regress unnoticed.
+  Related: `backdrop-blur` on the sticky header is free at rest but roughly
+  triples the cost of anything that animates beneath it — don't pair the two.

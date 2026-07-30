@@ -94,6 +94,45 @@ for (const mod of ["notify.js", "pr-filter.js"]) {
   });
 }
 
+// --- the renderer ships no always-running animation --------------------------
+// An `infinite` CSS animation keeps the compositor producing frames for as long
+// as the app is open, and Electron launches with MacWebContentsOcclusion
+// disabled — so the frames keep coming even while the window is hidden. In
+// v1.12.0 a single 2x2px `animate-pulse` dot in the header held the GPU helper
+// at ~33% CPU permanently, hidden window included. The pattern here is a finite
+// animation remounted via `key` (see Buddy.tsx and `.live-beat` in styles.css).
+// Comment lines are exempt so the rule can be explained where it's enforced.
+{
+  const rendererSrc = path.join(__dirname, "../src/renderer/src");
+  const listFiles = (dir) =>
+    require("node:fs")
+      .readdirSync(dir, { withFileTypes: true })
+      .flatMap((e) =>
+        e.isDirectory() ? listFiles(path.join(dir, e.name)) : [path.join(dir, e.name)],
+      );
+  // Tailwind's animate-{pulse,spin,bounce,ping} all compile to `infinite`.
+  const FOREVER =
+    /\banimate-(?:pulse|spin|bounce|ping)\b|animation(?:-iteration-count)?:[^;]*\binfinite\b/;
+  const isComment = (line) => /^\s*(?:\/\/|\/\*|\*|\{\/\*)/.test(line);
+  test("renderer declares no infinite animations", () => {
+    const hits = [];
+    for (const file of listFiles(rendererSrc)) {
+      if (!/\.(?:tsx?|css)$/.test(file)) continue;
+      const lines = require("node:fs").readFileSync(file, "utf8").split("\n");
+      lines.forEach((line, i) => {
+        if (!isComment(line) && FOREVER.test(line)) {
+          hits.push(`${path.relative(rendererSrc, file)}:${i + 1}`);
+        }
+      });
+    }
+    assert.deepStrictEqual(
+      hits,
+      [],
+      `infinite animations burn CPU whether or not the window is visible, found at: ${hits.join(", ")}`,
+    );
+  });
+}
+
 // --- defaultSettings ---------------------------------------------------------
 test("defaultSettings: empty + 60s + toggles", () => {
   const d = cfg.defaultSettings();
