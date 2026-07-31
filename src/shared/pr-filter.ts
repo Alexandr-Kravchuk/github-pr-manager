@@ -227,3 +227,20 @@ export function emptyStateKind(state: FilterState, totalCount: number): EmptySta
   if (totalCount === 0) return "no-prs";
   return activeFilterCount(state) === 0 ? "all-hidden" : "no-match";
 }
+
+/**
+ * How many of the hidden PRs still want you — what the `all-hidden` empty state
+ * may not stay silent about, since `baselineStats` no longer counts them and
+ * notifications still fire for them.
+ *
+ * Ignored PRs are excluded even when `needsAttention` is true (nothing clears it
+ * for them — see `applyActivity`): the user muted those on purpose, so claiming
+ * they need attention would be the same false statement in the other direction.
+ * In the `all-hidden` case every PR is a draft and/or ignored, so what remains is
+ * exactly "drafts that need you".
+ */
+export function hiddenAttentionCount(
+  prs: readonly Pick<PullRequest, "isIgnored" | "needsAttention">[],
+): number {
+  return prs.filter((pr) => !pr.isIgnored && pr.needsAttention).length;
+}

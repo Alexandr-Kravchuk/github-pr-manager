@@ -10,6 +10,7 @@ import {
   baselineStats,
   emptyStateKind,
   filterPrs,
+  hiddenAttentionCount,
   isBaselinePr,
   narrowFacetCount,
   revealDelta,
@@ -531,8 +532,9 @@ export function App() {
   // what makes the `all-hidden` copy exact: with no narrowing filter active,
   // visibility is the reveal gate alone, so an empty list means every PR is a
   // draft and/or ignored. It must never claim nothing needs you while one of
-  // those hidden PRs does — that leading clause is the whole reason the
-  // needsAttention tally is here.
+  // those hidden PRs does — that leading clause is the whole reason for the
+  // `hiddenAttentionCount` tally (which skips muted PRs, so the claim can't go
+  // false in the other direction either).
   const emptyMessage = useMemo(() => {
     switch (emptyStateKind(filterState, allPrs.length)) {
       case "no-prs":
@@ -541,7 +543,7 @@ export function App() {
         // One number, not an "N drafts · M ignored" split: the categories overlap,
         // so the two would double-count an ignored draft.
         const hidden = `${allPrs.length} ${allPrs.length === 1 ? "PR is" : "PRs are"} hidden by the Drafts / Ignored chips`;
-        const waiting = allPrs.filter((p) => p.needsAttention).length;
+        const waiting = hiddenAttentionCount(allPrs);
         return waiting > 0
           ? `${hidden} — ${waiting} ${waiting === 1 ? "needs" : "need"} your attention.`
           : `Nothing needs you right now — ${hidden}.`;

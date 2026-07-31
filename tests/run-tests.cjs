@@ -794,6 +794,33 @@ test("emptyStateKind: all-hidden when only the reveal chips could help", () => {
     "all-hidden",
   );
 });
+// The claim the `all-hidden` copy is allowed to make. Both directions must hold:
+// a hidden draft that wants you must be counted (the header baseline no longer
+// counts it, yet it still toasts), and a muted PR must NOT be — nothing clears
+// needsAttention for ignored PRs, so counting them would say the user's own
+// mutes need attention.
+test("hiddenAttentionCount: an ignored inbox never claims to need you", () => {
+  // The live PR #6 shape: two ignored drafts, both needsAttention.
+  const ignoredDrafts = [
+    mkPr({ isDraft: true, isIgnored: true, needsAttention: true }),
+    mkPr({ isDraft: true, isIgnored: true, needsAttention: true }),
+  ];
+  assert.strictEqual(prFilter.hiddenAttentionCount(ignoredDrafts), 0);
+  assert.strictEqual(prFilter.hiddenAttentionCount(IGNORED_DRAFTS), 0);
+});
+test("hiddenAttentionCount: a draft that wants you is counted", () => {
+  assert.strictEqual(
+    prFilter.hiddenAttentionCount([
+      mkPr({ isDraft: true, needsAttention: true }),
+      mkPr({ isDraft: true, needsAttention: false }),
+      mkPr({ isDraft: true, isIgnored: true, needsAttention: true }),
+    ]),
+    1,
+  );
+});
+test("hiddenAttentionCount: nothing to report is 0, not a falsy surprise", () =>
+  assert.strictEqual(prFilter.hiddenAttentionCount([]), 0));
+
 test("emptyStateKind: no-match as soon as anything narrows", () => {
   assert.strictEqual(prFilter.emptyStateKind(st({ attentionOnly: true }), 2), "no-match");
   assert.strictEqual(prFilter.emptyStateKind(st({ search: "zzz" }), 2), "no-match");
