@@ -169,8 +169,28 @@
   }
 }
 
+/*
+ * Header live-refresh dot — one finite blink per incoming snapshot, keyed on the
+ * snapshot's `fetchedAt` in App.tsx. Deliberately NOT Tailwind's `animate-pulse`:
+ * that ships `infinite` keyframes, and an always-running animation keeps the
+ * compositor producing frames whether or not the window is even on screen.
+ */
+.live-beat {
+  animation: live-beat 1.1s ease-in-out 2;
+}
+@keyframes live-beat {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .buddy :is(g, path, circle, text) {
+  .buddy :is(g, path, circle, text),
+  .live-beat {
     animation: none !important;
   }
 }

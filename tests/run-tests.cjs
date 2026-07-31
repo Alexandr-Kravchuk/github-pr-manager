@@ -94,6 +94,117 @@ for (const mod of ["notify.js", "pr-filter.js"]) {
   });
 }
 
+// --- the renderer ships no always-running animation --------------------------
+// An `infinite` CSS animation keeps the compositor producing frames for as long
+// as the app is open, and Electron launches with MacWebContentsOcclusion
+// disabled — so the frames keep coming even while the window is hidden. In
+// v1.12.0 a single 2x2px `animate-pulse` dot in the header held the GPU helper
+// at ~33% CPU permanently, hidden window included. The pattern here is a finite
+// animation remounted via `key` (see Buddy.tsx and `.live-beat` in styles.css).
+// Comments are blanked before matching (offsets preserved, so reported line
+// numbers stay honest) — the rule has to be explainable where it's enforced,
+// and stripping rather than exempting whole lines means a banned token on a
+// comment continuation line can't smuggle real code past the guard.
+{
+  const fs = require("node:fs");
+  const rendererRoot = path.join(__dirname, "../src/renderer");
+  const listFiles = (dir) =>
+    fs
+      .readdirSync(dir, { withFileTypes: true })
+      .flatMap((e) =>
+        e.isDirectory() ? listFiles(path.join(dir, e.name)) : [path.join(dir, e.name)],
+      );
+
+  // Blank out `//` and `/* */` comments, keeping every other offset intact.
+  // String literals are preserved — `className="animate-spin"` is the very
+  // thing being hunted, and `https://…` inside one must not read as a comment.
+  const stripComments = (src) => {
+    let out = "";
+    let state = "code"; // code | line | block | ' | " | `
+    for (let i = 0; i < src.length; i++) {
+      const c = src[i];
+      const n = src[i + 1];
+      if (state === "code") {
+        if (c === "/" && (n === "/" || n === "*")) {
+          state = n === "/" ? "line" : "block";
+          out += "  ";
+          i++;
+        } else {
+          if (c === "'" || c === '"' || c === "`") state = c;
+          out += c;
+        }
+      } else if (state === "line") {
+        if (c === "\n") state = "code";
+        out += c === "\n" ? c : " ";
+      } else if (state === "block") {
+        if (c === "*" && n === "/") {
+          state = "code";
+          out += "  ";
+          i++;
+        } else {
+          out += c === "\n" ? c : " ";
+        }
+      } else {
+        // Inside a string literal: keep it, but don't let an escaped quote end it.
+        if (c === "\\") {
+          out += src[i + 1] === "\n" ? " \n" : "  ";
+          i++;
+        } else {
+          if (c === state || c === "\n") state = "code";
+          out += c;
+        }
+      }
+    }
+    return out;
+  };
+
+  // Tailwind's animate-{pulse,spin,bounce,ping} all compile to `infinite`, and
+  // so does any arbitrary-value utility that spells it out. The CSS alternative
+  // spans newlines on purpose: a Prettier-wrapped shorthand must not slip by.
+  const FOREVER =
+    // No `\b` around the bracketed form: Tailwind joins its parts with `_`,
+    // which is a word character, so `linear_infinite` has no boundary to find.
+    /\banimate-(?:pulse|spin|bounce|ping)\b|\banimate-\[[^\]]*infinite[^\]]*\]|\banimation(?:-iteration-count)?\s*:[^;{}]*\binfinite\b/g;
+
+  test("infinite-animation detector matches what it claims", () => {
+    const hit = (s) => new RegExp(FOREVER.source).test(s);
+    assert.ok(hit('className="animate-pulse"'), "bare Tailwind utility");
+    assert.ok(hit("animate-[spin_1s_linear_infinite]"), "arbitrary-value utility");
+    assert.ok(hit("animation: x 1s infinite;"), "shorthand on one line");
+    assert.ok(hit("animation:\n    x 1s linear\n    infinite;"), "wrapped shorthand");
+    assert.ok(hit("animation-iteration-count: infinite;"), "longhand");
+    assert.ok(!hit("animation: live-beat 1.1s ease-in-out 2;"), "finite shorthand is fine");
+    assert.ok(!hit("animation: a 1s; }\n.b { infinite"), "must not span rules");
+    // Comments are blanked, string literals survive, and offsets don't shift.
+    const sample = 'a /* animate-spin */\n// animate-pulse\nx="animate-ping"';
+    assert.ok(!hit(stripComments(sample.split("\n").slice(0, 2).join("\n"))), "comments stripped");
+    assert.ok(hit(stripComments(sample)), "string literals survive stripping");
+    assert.strictEqual(stripComments(sample).length, sample.length, "offsets preserved");
+  });
+
+  test("renderer declares no infinite animations", () => {
+    const hits = [];
+    let scanned = 0;
+    for (const file of listFiles(rendererRoot)) {
+      if (!/\.(?:tsx?|css|html)$/.test(file)) continue;
+      scanned++;
+      const src = stripComments(fs.readFileSync(file, "utf8"));
+      for (const m of src.matchAll(FOREVER)) {
+        const line = src.slice(0, m.index).split("\n").length;
+        hits.push(`${path.relative(rendererRoot, file)}:${line}`);
+      }
+    }
+    // Without this, a broken glob or extension filter would silently downgrade
+    // the guard to a no-op that still reports green.
+    assert.ok(scanned > 5, `expected to scan the renderer, only saw ${scanned} files`);
+    assert.deepStrictEqual(
+      hits,
+      [],
+      `infinite animations burn CPU whether or not the window is visible, found at: ${hits.join(", ")}`,
+    );
+  });
+}
+
 // --- defaultSettings ---------------------------------------------------------
 test("defaultSettings: empty + 60s + toggles", () => {
   const d = cfg.defaultSettings();
@@ -1068,6 +1179,87 @@ test("isPrVisibleForCategoryFilters: both chips on yields the union, not every P
     // Tick 3: nothing changed → hash identical → no re-emit.
     await p.refresh();
     assert.strictEqual(snapshots.length, 2);
+
+    p.stop();
+  });
+
+  // --- poller: fetchedAt is not a per-snapshot identity ----------------------
+  // Why the header live-dot keys on a snapshot counter (App.tsx) and not on
+  // `snapshot.fetchedAt`: the snapshot carries the *oldest* per-host timestamp
+  // ("only as fresh as its stalest host"), and a host that keeps failing drags
+  // its previous value forward. So two materially different snapshots can be
+  // pushed with an identical `fetchedAt` — keying a remount on it would drop
+  // the blink for every one of them.
+  await atest("Poller.tick: two distinct snapshots can carry the same fetchedAt", async () => {
+    const snapshots = [];
+    let comments = 0;
+    const mkPr = () => ({
+      id: "PR1",
+      updatedAt: "2026-07-07T00:00:00Z",
+      totalComments: comments,
+      unresolvedThreads: 0,
+      ciState: "success",
+      reviewDecision: null,
+      hasHumanApproval: false,
+      hasNewActivity: false,
+      needsAttention: false,
+      failingChecks: [],
+      pendingChecks: [],
+      checks: [],
+      awaitingReview: false,
+      hasUnaddressedChangeRequest: false,
+      hasUnaddressedComments: false,
+      roles: ["author"],
+      isDraft: false,
+      isIgnored: false,
+      parentKey: null,
+      parentSummary: null,
+    });
+    const p = new poller.Poller({
+      loadSettings: () => ({
+        pollIntervalSeconds: 60,
+        launchAtLogin: false,
+        autoUpdate: false,
+        theme: "system",
+        hosts: [],
+      }),
+      toHostConfigs: () => [
+        { label: "up", graphqlUrl: "https://up.test/graphql", token: "t", repos: ["o/r"] },
+        { label: "down", graphqlUrl: "https://down.test/graphql", token: "t", repos: ["o/r"] },
+      ],
+      statePath: path.join(os.tmpdir(), "prd-poller-state-missing.json"),
+      ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),
+      appVersion: "test",
+      onSnapshot: (s) => snapshots.push(s),
+      onConfigError: () => {},
+      // One healthy host, one that never comes back.
+      fetchHostFn: async (host) => {
+        if (host.label === "down") throw new Error("host down");
+        return {
+          pullRequests: [mkPr()],
+          rateLimit: { hostLabel: "up", remaining: 5000, cost: 1, resetAt: "2026-07-07T13:00:00Z" },
+        };
+      },
+    });
+
+    await p.refresh();
+    await new Promise((r) => setTimeout(r, 5)); // so the two fetch stamps differ
+    comments = 1; // hash-relevant change → the second snapshot really is pushed
+    await p.refresh();
+
+    assert.strictEqual(snapshots.length, 2, "a changed PR must push a second snapshot");
+    // The healthy host genuinely refetched between the two pushes...
+    assert.notStrictEqual(
+      snapshots[0].rateLimits[0].fetchedAt,
+      snapshots[1].rateLimits[0].fetchedAt,
+      "the healthy host should carry a newer per-host fetchedAt",
+    );
+    // ...yet the snapshot-level timestamp is pinned to the host that is down.
+    assert.strictEqual(
+      snapshots[0].fetchedAt,
+      snapshots[1].fetchedAt,
+      "snapshot.fetchedAt is the oldest host's stamp — it is not a per-push id",
+    );
 
     p.stop();
   });
