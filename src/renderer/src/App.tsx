@@ -5,7 +5,18 @@ import { PrCard, prSignal } from "./components/PrCard";
 import { SettingsScreen } from "./components/Settings";
 import { cn, relativeTime } from "./format";
 import { playNotifySound } from "./notify-sound";
-import { isPrVisibleForCategoryFilters } from "../../shared/pr-filter";
+import {
+  activeFilterCount,
+  baselineStats,
+  emptyStateKind,
+  filterPrs,
+  hiddenAttentionCount,
+  isBaselinePr,
+  narrowFacetCount,
+  revealDelta,
+  type FilterState,
+  type RoleFilter,
+} from "../../shared/pr-filter";
 import type {
   DashboardResponse,
   JiraStatus,
@@ -14,7 +25,6 @@ import type {
   UpdateStatus,
 } from "../../shared/types";
 
-type RoleFilter = "all" | "author" | "reviewer";
 type SortKey = "action" | "waiting" | "active" | "newest";
 type GroupMode = "none" | "repo" | "issue" | "parent";
 
@@ -366,74 +376,66 @@ export function App() {
 
   const allPrs = useMemo(() => data?.pullRequests ?? [], [data]);
 
-  // Ignored PRs are excluded from everything (counts, buddy mood, the other
-  // filters) — they only surface via the "Ignored" chip. `active` is that
-  // ignored-free base the whole dashboard reasons about.
-  const active = useMemo(() => allPrs.filter((p) => !p.isIgnored), [allPrs]);
-
-  // Buddy mood mirrors the card accents (drafts excluded, like the default
-  // view): any red PR → sad, else a requested review → curious, else asleep.
-  const buddyMood = useMemo<BuddyMood>(() => {
-    const signals = active.filter((p) => !p.isDraft).map(prSignal);
-    if (signals.includes("blocked")) return "sad";
-    if (signals.includes("myReview")) return "curious";
-    return "sleeping";
-  }, [active]);
-
-  const counts = useMemo(
+  // Every filter decision lives in `shared/pr-filter` so it can be unit-tested —
+  // this is the whole view state that module needs.
+  const filterState = useMemo<FilterState>(
     () => ({
-      total: active.length,
-      attention: active.filter((p) => p.needsAttention).length,
-      failing: active.filter((p) => p.failingChecks.length > 0).length,
-      fresh: active.filter((p) => p.hasNewActivity).length,
-      returned: active.filter((p) => p.returnedToMe).length,
-      noReviews: active.filter((p) => p.hasNoReviews).length,
-      // Drafts and Ignored are exclusive category filters, so each chip's badge
-      // counts exactly what activating that chip reveals. The Drafts view shows
-      // only non-ignored drafts (an ignored draft surfaces under Ignored, not
-      // Drafts), so the count excludes ignored drafts to match; an ignored draft
-      // is still counted once, by the Ignored chip. Both counts span all PRs
-      // rather than the ignored-free `active` base for that reason.
-      drafts: allPrs.filter((p) => p.isDraft && !p.isIgnored).length,
-      mergeable: active.filter((p) => p.canBeMerged).length,
-      ignored: allPrs.filter((p) => p.isIgnored).length,
-    }),
-    [active, allPrs],
-  );
-
-  const filtered = useMemo(
-    () =>
-      allPrs.filter((pr) => {
-        // `Drafts` and `Ignored` are exclusive category filters, like the chips
-        // beside them — see `isPrVisibleForCategoryFilters` for the full rule.
-        if (!isPrVisibleForCategoryFilters(pr, { showDrafts, showIgnored })) return false;
-        if (role !== "all" && !pr.roles.includes(role)) return false;
-        if (host !== "all" && pr.hostLabel !== host) return false;
-        if (attentionOnly && !pr.needsAttention) return false;
-        if (failingOnly && pr.failingChecks.length === 0) return false;
-        if (newOnly && !pr.hasNewActivity) return false;
-        if (mergeableOnly && !pr.canBeMerged) return false;
-        if (noReviewsOnly && !pr.hasNoReviews) return false;
-        if (search.trim()) {
-          const q = search.toLowerCase();
-          const hay = `${pr.title} ${pr.repo} ${pr.author?.login ?? ""} #${pr.number}`.toLowerCase();
-          if (!hay.includes(q)) return false;
-        }
-        return true;
-      }),
-    [
-      allPrs,
       role,
       host,
+      search,
       attentionOnly,
       failingOnly,
       newOnly,
       mergeableOnly,
       noReviewsOnly,
+      showDrafts,
+      showIgnored,
+    }),
+    [
+      role,
+      host,
       search,
+      attentionOnly,
+      failingOnly,
+      newOnly,
+      mergeableOnly,
+      noReviewsOnly,
       showDrafts,
       showIgnored,
     ],
+  );
+
+  // The standing "is there work for me" numbers: neither ignored nor drafts, and
+  // deliberately independent of the filters.
+  const stats = useMemo(() => baselineStats(allPrs), [allPrs]);
+
+  // Buddy mood mirrors the card accents over that same base — literally the same
+  // predicate as `baselineStats`, so the mascot and the numbers can't disagree:
+  // any red PR → sad, else a requested review → curious, else asleep.
+  const buddyMood = useMemo<BuddyMood>(() => {
+    const signals = allPrs.filter(isBaselinePr).map(prSignal);
+    if (signals.includes("blocked")) return "sad";
+    if (signals.includes("myReview")) return "curious";
+    return "sleeping";
+  }, [allPrs]);
+
+  const filtered = useMemo(() => filterPrs(allPrs, filterState), [allPrs, filterState]);
+
+  // Chip badges are facet counts, with every other active filter applied: a
+  // narrowing chip reports the rows it yields while ON (so for one that is
+  // already on, that's what you currently see), a reveal chip reports the rows
+  // toggling it changes — added when off, taken away when on.
+  const chipCounts = useMemo(
+    () => ({
+      attention: narrowFacetCount(allPrs, filterState, "attention"),
+      failing: narrowFacetCount(allPrs, filterState, "failing"),
+      fresh: narrowFacetCount(allPrs, filterState, "fresh"),
+      mergeable: narrowFacetCount(allPrs, filterState, "mergeable"),
+      noReviews: narrowFacetCount(allPrs, filterState, "noReviews"),
+      drafts: revealDelta(allPrs, filterState, "drafts"),
+      ignored: revealDelta(allPrs, filterState, "ignored"),
+    }),
+    [allPrs, filterState],
   );
 
   // Ordering applies to the flat list and within each group alike.
@@ -530,19 +532,36 @@ export function App() {
     });
   }, []);
 
-  // Active filters (what narrows the list) — sort/group are view controls, not
-  // filters, so they don't count and aren't cleared.
-  const activeFilterCount =
-    (search.trim() ? 1 : 0) +
-    (role !== "all" ? 1 : 0) +
-    (host !== "all" ? 1 : 0) +
-    (attentionOnly ? 1 : 0) +
-    (failingOnly ? 1 : 0) +
-    (newOnly ? 1 : 0) +
-    (mergeableOnly ? 1 : 0) +
-    (noReviewsOnly ? 1 : 0) +
-    (showDrafts ? 1 : 0) +
-    (showIgnored ? 1 : 0);
+  // What narrows the list — sort/group are view controls, not filters, so they
+  // don't count and aren't cleared, and the reveal chips are excluded on purpose
+  // (see `activeFilterCount`). It also decides which empty-state story we tell,
+  // so it lives in `shared` where both promises are unit-tested.
+  const activeFilters = useMemo(() => activeFilterCount(filterState), [filterState]);
+
+  // What an empty list means. Only rendered while nothing is on screen, which is
+  // what makes the `all-hidden` copy exact: with no narrowing filter active,
+  // visibility is the reveal gate alone, so an empty list means every PR is a
+  // draft and/or ignored. It must never claim nothing needs you while one of
+  // those hidden PRs does — that leading clause is the whole reason for the
+  // `hiddenAttentionCount` tally (which skips muted PRs, so the claim can't go
+  // false in the other direction either).
+  const emptyMessage = useMemo(() => {
+    switch (emptyStateKind(filterState, allPrs.length)) {
+      case "no-prs":
+        return "No open pull requests where you're involved in the added repositories.";
+      case "all-hidden": {
+        // One number, not an "N drafts · M ignored" split: the categories overlap,
+        // so the two would double-count an ignored draft.
+        const hidden = `${allPrs.length} ${allPrs.length === 1 ? "PR is" : "PRs are"} hidden by the Drafts / Ignored chips`;
+        const waiting = hiddenAttentionCount(allPrs);
+        return waiting > 0
+          ? `${hidden} — ${waiting} ${waiting === 1 ? "needs" : "need"} your attention.`
+          : `Nothing needs you right now — ${hidden}.`;
+      }
+      default:
+        return "No PRs match the current filters.";
+    }
+  }, [filterState, allPrs]);
 
   const clearFilters = useCallback(() => {
     setSearch("");
@@ -553,8 +572,6 @@ export function App() {
     setNewOnly(false);
     setMergeableOnly(false);
     setNoReviewsOnly(false);
-    setShowDrafts(false);
-    setShowIgnored(false);
   }, []);
 
   const noHosts = config !== null && config.hosts.length === 0;
@@ -589,9 +606,17 @@ export function App() {
             <div>
               <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
               <p className="text-xs text-fg-subtle">
-                {counts.total} PRs · {counts.attention} need attention · {counts.failing} failing CI
-                · {counts.fresh} with new comments
-                {counts.returned > 0 && ` · ${counts.returned} back to you`}
+                {stats.total} PRs · {stats.attention} need attention · {stats.failing} failing CI ·{" "}
+                {stats.fresh} with new comments
+                {stats.returned > 0 && ` · ${stats.returned} back to you`}
+                {/* The stats describe the standing workload, so say so whenever the
+                    rendered SET differs — otherwise "0 PRs" above two revealed
+                    cards reads as a bug. Equal counts aren't equal sets: one
+                    baseline PR filtered out and one revealed draft in its place
+                    would tie, so a rendered row outside the baseline is its own
+                    trigger. */}
+                {(filtered.length !== stats.total || filtered.some((p) => !isBaselinePr(p))) &&
+                  ` · ${filtered.length} shown`}
               </p>
             </div>
           </div>
@@ -768,38 +793,73 @@ export function App() {
             <span className="mr-0.5 text-xs font-medium uppercase tracking-wide text-fg-muted">
               Filters
             </span>
-            <FilterChip active={attentionOnly} onClick={() => setAttentionOnly((v) => !v)} tone="amber">
+            {/* Every chip always renders, so the row never reflows under the cursor
+                and a persisted reveal can't hide as an invisible active filter. */}
+            <FilterChip
+              active={attentionOnly}
+              count={chipCounts.attention}
+              onClick={() => setAttentionOnly((v) => !v)}
+              tone="amber"
+            >
               ⚠ Needs attention
             </FilterChip>
-            <FilterChip active={failingOnly} onClick={() => setFailingOnly((v) => !v)} tone="red">
+            <FilterChip
+              active={failingOnly}
+              count={chipCounts.failing}
+              onClick={() => setFailingOnly((v) => !v)}
+              tone="red"
+            >
               ✗ Failing CI
             </FilterChip>
-            <FilterChip active={newOnly} onClick={() => setNewOnly((v) => !v)} tone="violet">
+            <FilterChip
+              active={newOnly}
+              count={chipCounts.fresh}
+              onClick={() => setNewOnly((v) => !v)}
+              tone="violet"
+            >
               ✦ New comments
             </FilterChip>
-            <FilterChip active={mergeableOnly} onClick={() => setMergeableOnly((v) => !v)} tone="green">
-              ✔ Ready to merge{counts.mergeable > 0 ? ` (${counts.mergeable})` : ""}
+            <FilterChip
+              active={mergeableOnly}
+              count={chipCounts.mergeable}
+              onClick={() => setMergeableOnly((v) => !v)}
+              tone="green"
+            >
+              ✔ Ready to merge
             </FilterChip>
-            <FilterChip active={noReviewsOnly} onClick={() => setNoReviewsOnly((v) => !v)}>
-              ◷ No reviews yet{counts.noReviews > 0 ? ` (${counts.noReviews})` : ""}
+            <FilterChip
+              active={noReviewsOnly}
+              count={chipCounts.noReviews}
+              onClick={() => setNoReviewsOnly((v) => !v)}
+            >
+              ◷ No reviews yet
             </FilterChip>
-            {counts.drafts > 0 && (
-              <FilterChip active={showDrafts} onClick={() => setShowDrafts((v) => !v)}>
-                Drafts ({counts.drafts})
-              </FilterChip>
-            )}
-            {counts.ignored > 0 && (
-              <FilterChip active={showIgnored} onClick={() => setShowIgnored((v) => !v)}>
-                Ignored ({counts.ignored})
-              </FilterChip>
-            )}
-            {activeFilterCount > 0 && (
+            {/* Reveal chips stay clickable at 0 — the count is a delta, so it hits 0
+                whenever the other chip already revealed the same PRs, and their
+                state is a persisted preference you must always be able to flip. */}
+            <FilterChip
+              active={showDrafts}
+              count={chipCounts.drafts}
+              neverDisable
+              onClick={() => setShowDrafts((v) => !v)}
+            >
+              Drafts
+            </FilterChip>
+            <FilterChip
+              active={showIgnored}
+              count={chipCounts.ignored}
+              neverDisable
+              onClick={() => setShowIgnored((v) => !v)}
+            >
+              Ignored
+            </FilterChip>
+            {activeFilters > 0 && (
               <button
                 type="button"
                 onClick={clearFilters}
                 className="ml-auto rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
               >
-                ✕ Clear filters ({activeFilterCount})
+                ✕ Clear filters ({activeFilters})
               </button>
             )}
           </div>
@@ -823,9 +883,7 @@ export function App() {
       {/* Content */}
       {!configError && !noHosts && data && filtered.length === 0 && (
         <div className="rounded-lg border border-line bg-surface/40 p-8 text-center text-sm text-fg-subtle">
-          {allPrs.length === 0
-            ? "No open pull requests where you're involved in the added repositories."
-            : "No PRs match the current filters."}
+          {emptyMessage}
         </div>
       )}
 
@@ -1000,29 +1058,48 @@ const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
   green: "border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200",
 };
 
+/**
+ * A filter chip with its facet count. `count` is the rows this chip yields while
+ * ON (narrowing chips) or the rows toggling it changes (reveal chips), so a chip
+ * at 0 is dimmed — and disabled too, since turning it on would empty the list,
+ * unless `neverDisable` marks it as a reveal chip whose state must stay togglable
+ * at 0. `cn` is a plain join with no tailwind-merge, so the hover class is only
+ * emitted when it can apply — two competing `hover:bg-*` rules would be resolved
+ * by stylesheet order, not by which one we meant.
+ */
 function FilterChip({
   active,
+  count,
+  neverDisable = false,
   onClick,
   children,
   tone = "sky",
 }: {
   active: boolean;
+  count: number;
+  neverDisable?: boolean;
   onClick: () => void;
   children: React.ReactNode;
   tone?: ChipTone;
 }) {
+  const empty = count === 0;
+  const disabled = empty && !active && !neverDisable;
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      title={disabled ? "No PRs match this with the current filters" : undefined}
       className={cn(
         "rounded-md border px-3 py-1.5 text-sm transition-colors",
         active
           ? CHIP_TONE_ACTIVE[tone]
-          : "border-line-strong bg-surface text-fg-muted hover:bg-elevated",
+          : cn("border-line-strong bg-surface text-fg-muted", !disabled && "hover:bg-elevated"),
+        empty && !active && "opacity-50",
+        disabled && "cursor-not-allowed",
       )}
     >
-      {children}
+      {children} ({count})
     </button>
   );
 }

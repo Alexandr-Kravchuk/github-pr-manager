@@ -76,7 +76,7 @@ test("pickAppId: falls back on malformed JSON", () =>
 
 // --- shared value-import carve-outs stay Node-free (renderer imports them) ---
 // The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify
-// and isPrVisibleForCategoryFilters from shared/pr-filter. That's only safe
+// and the view-filter helpers from shared/pr-filter. That's only safe
 // while those modules pull in no node: builtin — a regression would break the
 // Vite renderer build. Assert the compiled output is clean so the AGENTS.md
 // carve-out is enforced, not just documented.
@@ -601,53 +601,342 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     resolved: 0,
   }));
 
-// --- pr-filter: isPrVisibleForCategoryFilters (Drafts/Ignored exclusive chips)
-// The category gate the `filtered` useMemo runs before every other filter.
-// `true` = the PR passes the gate (drafts/ignored chips), `false` = hidden.
-// Exhaustive: all 4 chip states × all 4 PR kinds must match the acceptance
-// criteria (hidden by default; a chip narrows to ONLY its category; both on =
-// the union; an ignored draft stays out of the drafts-only view).
-const visible = prFilter.isPrVisibleForCategoryFilters;
+// --- pr-filter: the reveal gate (Drafts/Ignored chips) ----------------------
+// Drafts and ignored PRs are hidden by default and each chip REVEALS its own
+// category on top of the normal list. The rule that matters: ANY owning chip is
+// enough, so an ignored draft surfaces under Drafts OR Ignored. Requiring both
+// is the bug this replaces — two ignored drafts badged "Drafts (2) Ignored (2)"
+// while every single-chip click rendered zero rows.
 const PLAIN = { isDraft: false, isIgnored: false };
 const DRAFT = { isDraft: true, isIgnored: false };
 const IGNORED = { isDraft: false, isIgnored: true };
 const IGNORED_DRAFT = { isDraft: true, isIgnored: true };
-// [showDrafts, showIgnored, pr, expectedVisible]
-const catCases = [
-  // both off → only plain PRs show
+// [showDrafts, showIgnored, pr, expectedRevealed]
+const revealCases = [
+  // both off → only uncategorized PRs show
   [false, false, PLAIN, true],
   [false, false, DRAFT, false],
   [false, false, IGNORED, false],
   [false, false, IGNORED_DRAFT, false],
-  // Drafts only → only non-ignored drafts
-  [true, false, PLAIN, false],
+  // Drafts on → drafts join the normal list; plain PRs stay (reveal, not "only")
+  [true, false, PLAIN, true],
   [true, false, DRAFT, true],
   [true, false, IGNORED, false],
-  [true, false, IGNORED_DRAFT, false],
-  // Ignored only → only ignored (drafts among them included)
-  [false, true, PLAIN, false],
+  [true, false, IGNORED_DRAFT, true],
+  // Ignored on → ignored join, drafts among them included
+  [false, true, PLAIN, true],
   [false, true, DRAFT, false],
   [false, true, IGNORED, true],
   [false, true, IGNORED_DRAFT, true],
-  // both on → the union (drafts ∪ ignored), excludes plain
-  [true, true, PLAIN, false],
+  // both on → everything
+  [true, true, PLAIN, true],
   [true, true, DRAFT, true],
   [true, true, IGNORED, true],
   [true, true, IGNORED_DRAFT, true],
 ];
-for (const [sd, si, pr, expected] of catCases) {
-  const kind = pr === PLAIN ? "plain" : pr === DRAFT ? "draft" : pr === IGNORED ? "ignored" : "ignored-draft";
-  test(`isPrVisibleForCategoryFilters: drafts=${sd} ignored=${si} ${kind} → ${expected}`, () =>
-    assert.strictEqual(visible(pr, { showDrafts: sd, showIgnored: si }), expected));
+for (const [sd, si, pr, expected] of revealCases) {
+  const kind =
+    pr === PLAIN ? "plain" : pr === DRAFT ? "draft" : pr === IGNORED ? "ignored" : "ignored-draft";
+  test(`isRevealed: drafts=${sd} ignored=${si} ${kind} → ${expected}`, () =>
+    assert.strictEqual(prFilter.isRevealed(pr, { showDrafts: sd, showIgnored: si }), expected));
 }
-// The two riskiest branches called out in review (manual verification skipped them).
-test("isPrVisibleForCategoryFilters: an ignored draft stays out of the drafts-only view", () =>
-  assert.strictEqual(visible(IGNORED_DRAFT, { showDrafts: true, showIgnored: false }), false));
-test("isPrVisibleForCategoryFilters: both chips on yields the union, not every PR", () => {
-  assert.strictEqual(visible(DRAFT, { showDrafts: true, showIgnored: true }), true);
-  assert.strictEqual(visible(IGNORED, { showDrafts: true, showIgnored: true }), true);
-  assert.strictEqual(visible(IGNORED_DRAFT, { showDrafts: true, showIgnored: true }), true);
-  assert.strictEqual(visible(PLAIN, { showDrafts: true, showIgnored: true }), false);
+test("isRevealed: one chip is enough for an ignored draft (the regression)", () => {
+  assert.strictEqual(prFilter.isRevealed(IGNORED_DRAFT, { showDrafts: true, showIgnored: false }), true);
+  assert.strictEqual(prFilter.isRevealed(IGNORED_DRAFT, { showDrafts: false, showIgnored: true }), true);
+});
+
+// --- pr-filter: filterPrs / facet counts ------------------------------------
+let prSeq = 0;
+const mkPr = (over = {}) => ({
+  number: ++prSeq,
+  title: "Some change",
+  repo: "acme/widgets",
+  author: { login: "octocat" },
+  hostLabel: "GitHub",
+  roles: ["author"],
+  isDraft: false,
+  isIgnored: false,
+  needsAttention: false,
+  failingChecks: [],
+  hasNewActivity: false,
+  canBeMerged: false,
+  hasNoReviews: false,
+  returnedToMe: false,
+  ...over,
+});
+const ST = {
+  role: "all",
+  host: "all",
+  search: "",
+  attentionOnly: false,
+  failingOnly: false,
+  newOnly: false,
+  mergeableOnly: false,
+  noReviewsOnly: false,
+  showDrafts: false,
+  showIgnored: false,
+};
+const st = (over = {}) => ({ ...ST, ...over });
+
+// The live shape that produced the bug report: every open PR is an ignored draft.
+const IGNORED_DRAFTS = [
+  mkPr({ isDraft: true, isIgnored: true, hasNoReviews: true }),
+  mkPr({ isDraft: true, isIgnored: true, hasNoReviews: true }),
+];
+test("filterPrs: two ignored drafts are hidden by default", () =>
+  assert.strictEqual(prFilter.filterPrs(IGNORED_DRAFTS, st()).length, 0));
+test("filterPrs: the Drafts chip alone reveals ignored drafts", () =>
+  assert.strictEqual(prFilter.filterPrs(IGNORED_DRAFTS, st({ showDrafts: true })).length, 2));
+test("filterPrs: the Ignored chip alone reveals ignored drafts", () =>
+  assert.strictEqual(prFilter.filterPrs(IGNORED_DRAFTS, st({ showIgnored: true })).length, 2));
+test("filterPrs: both chips on reveals them once, not twice", () =>
+  assert.strictEqual(
+    prFilter.filterPrs(IGNORED_DRAFTS, st({ showDrafts: true, showIgnored: true })).length,
+    2,
+  ));
+
+test("revealDelta: each chip promises the 2 rows it actually adds", () => {
+  assert.strictEqual(prFilter.revealDelta(IGNORED_DRAFTS, st(), "drafts"), 2);
+  assert.strictEqual(prFilter.revealDelta(IGNORED_DRAFTS, st(), "ignored"), 2);
+});
+test("revealDelta: 0 once the other chip already revealed the same PRs", () => {
+  assert.strictEqual(
+    prFilter.revealDelta(IGNORED_DRAFTS, st({ showIgnored: true }), "drafts"),
+    0,
+  );
+  assert.strictEqual(
+    prFilter.revealDelta(IGNORED_DRAFTS, st({ showDrafts: true }), "ignored"),
+    0,
+  );
+});
+test("revealDelta: still reports its own contribution while active", () =>
+  assert.strictEqual(prFilter.revealDelta(IGNORED_DRAFTS, st({ showDrafts: true }), "drafts"), 2));
+
+// A draft can never be "Ready to merge" (mapPr sets canBeMerged = !isDraft), so
+// the badge must read 0 rather than advertise drafts the click can't surface.
+test("revealDelta: Drafts is 0 while Ready to merge is on", () =>
+  assert.strictEqual(
+    prFilter.revealDelta(IGNORED_DRAFTS, st({ mergeableOnly: true }), "drafts"),
+    0,
+  ));
+
+// Partial overlap on purpose: a plain draft, a plain ignored PR and one ignored
+// draft, which is what IGNORED_DRAFTS cannot express.
+const MIXED = [
+  mkPr({ needsAttention: true, failingChecks: ["build"], hostLabel: "GitHub" }),
+  mkPr({ needsAttention: true, hasNewActivity: true, canBeMerged: true, hostLabel: "GHE" }),
+  mkPr({ hasNoReviews: true, roles: ["reviewer"], title: "Bump deps", returnedToMe: true }),
+  mkPr({ isDraft: true, hasNoReviews: true, needsAttention: true }),
+  // returnedToMe on a hidden PR as well, so `baselineStats.returned` proves the
+  // exclusion instead of merely being non-zero.
+  mkPr({ isIgnored: true, failingChecks: ["test"], needsAttention: true, returnedToMe: true }),
+  mkPr({ isDraft: true, isIgnored: true, hasNewActivity: true }),
+];
+// The promise a badge makes: click this chip and you get exactly this many rows.
+const FACET_STATES = [
+  st(),
+  st({ showDrafts: true }),
+  st({ showIgnored: true }),
+  st({ showDrafts: true, showIgnored: true }),
+  st({ host: "GHE" }),
+  st({ role: "reviewer" }),
+  st({ search: "bump" }),
+  st({ attentionOnly: true, showDrafts: true }),
+  st({ failingOnly: true, showIgnored: true }),
+];
+// Keys come from NARROW_CHIPS rather than a hardcoded list, so a sixth chip
+// cannot be added without inheriting the invariant.
+for (const chip of prFilter.NARROW_CHIPS) {
+  for (const [i, state] of FACET_STATES.entries()) {
+    test(`narrowFacetCount(${chip.key}) equals the rows it yields [state ${i}]`, () =>
+      assert.strictEqual(
+        prFilter.narrowFacetCount(MIXED, state, chip.key),
+        prFilter.filterPrs(MIXED, { ...state, [chip.flag]: true }).length,
+      ));
+  }
+}
+test("narrowFacetCount: counts hidden drafts only once the chip reveals them", () => {
+  // Two PRs have hasNoReviews; one of them is a draft, hidden by default.
+  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st(), "noReviews"), 1);
+  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ showDrafts: true }), "noReviews"), 2);
+});
+test("narrowFacetCount: honours host, role and search", () => {
+  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ host: "GHE" }), "attention"), 1);
+  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ role: "reviewer" }), "noReviews"), 1);
+  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ search: "bump" }), "noReviews"), 1);
+});
+
+// The reveal side, over the partially-overlapping MIXED fixture. On IGNORED_DRAFTS
+// every delta is 2 or 0, so "the whole category unless the sibling is on" passes
+// there; the asymmetric 1s below can only come from counting the rows the click
+// actually adds.
+const num = (pr) => pr.number;
+test("revealDelta: each chip adds its own category from the base state", () => {
+  assert.strictEqual(prFilter.revealDelta(MIXED, st(), "drafts"), 2);
+  assert.strictEqual(prFilter.revealDelta(MIXED, st(), "ignored"), 2);
+});
+test("revealDelta: counts only what the sibling chip has not already revealed", () => {
+  assert.strictEqual(prFilter.revealDelta(MIXED, st({ showDrafts: true }), "ignored"), 1);
+  assert.strictEqual(prFilter.revealDelta(MIXED, st({ showIgnored: true }), "drafts"), 1);
+});
+
+// The badge's promise, checked against an independently computed set difference
+// rather than against revealDelta's own expression: the delta is exactly the rows
+// that appear when the flag flips on, and revealing never drops a row. Reusing
+// FACET_STATES pulls host / role / search / narrowing states in for free, which is
+// what criterion 2 promises of the reveal badges too.
+for (const [key, flag] of Object.entries(prFilter.REVEAL_FLAG)) {
+  for (const [i, state] of FACET_STATES.entries()) {
+    test(`revealDelta(${key}) equals the rows the click adds [state ${i}]`, () => {
+      const on = prFilter.filterPrs(MIXED, { ...state, [flag]: true });
+      const off = prFilter.filterPrs(MIXED, { ...state, [flag]: false });
+      const onNumbers = new Set(on.map(num));
+      const offNumbers = new Set(off.map(num));
+      assert.ok(
+        off.every((pr) => onNumbers.has(pr.number)),
+        "revealing must never drop a row that was already shown",
+      );
+      assert.strictEqual(
+        prFilter.revealDelta(MIXED, state, key),
+        on.filter((pr) => !offNumbers.has(pr.number)).length,
+      );
+    });
+  }
+}
+
+// --- pr-filter: matchesSearch (via filterPrs) -------------------------------
+// The haystack spans title, repo, author login and #number, and the needle is
+// trimmed. Fixed numbers rather than the shared prSeq counter, so the "#" cases
+// don't drift when a fixture is added above.
+const SEARCHABLE = [
+  mkPr({ number: 41, title: "Bump deps", repo: "acme/widgets", author: { login: "octocat" } }),
+  mkPr({ number: 412, title: "Rewrite parser", repo: "acme/gizmos", author: { login: "hubot" } }),
+  mkPr({ number: 7, title: "Untitled", repo: "other/thing", author: null }),
+];
+test("filterPrs: the query is trimmed before matching", () => {
+  assert.deepStrictEqual(prFilter.filterPrs(SEARCHABLE, st({ search: "bump" })).map(num), [41]);
+  assert.deepStrictEqual(prFilter.filterPrs(SEARCHABLE, st({ search: "  bump  " })).map(num), [41]);
+});
+test("filterPrs: a whitespace-only query filters nothing", () =>
+  assert.strictEqual(prFilter.filterPrs(SEARCHABLE, st({ search: "   " })).length, 3));
+test("filterPrs: the query matches repo and author login, not just the title", () => {
+  assert.deepStrictEqual(prFilter.filterPrs(SEARCHABLE, st({ search: "gizmos" })).map(num), [412]);
+  assert.deepStrictEqual(prFilter.filterPrs(SEARCHABLE, st({ search: "hubot" })).map(num), [412]);
+});
+test("filterPrs: the query matches the PR number", () => {
+  assert.deepStrictEqual(prFilter.filterPrs(SEARCHABLE, st({ search: "#7" })).map(num), [7]);
+  // Substring, not equality: "#41" also hits #412. Pinned so a stricter number
+  // match would be a deliberate change rather than a surprise.
+  assert.deepStrictEqual(prFilter.filterPrs(SEARCHABLE, st({ search: "#41" })).map(num), [41, 412]);
+});
+test("filterPrs: an author-less PR is searchable instead of throwing", () => {
+  assert.deepStrictEqual(prFilter.filterPrs(SEARCHABLE, st({ search: "untitled" })).map(num), [7]);
+  assert.deepStrictEqual(prFilter.filterPrs(SEARCHABLE, st({ search: "octocat" })).map(num), [41]);
+});
+
+test("isBaselinePr: the standing workload is neither draft nor ignored", () => {
+  assert.strictEqual(prFilter.isBaselinePr(PLAIN), true);
+  assert.strictEqual(prFilter.isBaselinePr(DRAFT), false);
+  assert.strictEqual(prFilter.isBaselinePr(IGNORED), false);
+  assert.strictEqual(prFilter.isBaselinePr(IGNORED_DRAFT), false);
+});
+
+test("baselineStats: excludes both ignored PRs and drafts", () => {
+  const stats = prFilter.baselineStats(MIXED);
+  assert.strictEqual(stats.total, 3);
+  assert.strictEqual(stats.attention, 2);
+  assert.strictEqual(stats.failing, 1);
+  assert.strictEqual(stats.fresh, 1);
+  // Two PRs are returnedToMe; the ignored one is not part of the workload.
+  assert.strictEqual(stats.returned, 1);
+});
+test("baselineStats: all-hidden inbox reports zero, matching the header", () =>
+  assert.deepStrictEqual(prFilter.baselineStats(IGNORED_DRAFTS), {
+    total: 0,
+    attention: 0,
+    failing: 0,
+    fresh: 0,
+    returned: 0,
+  }));
+
+// --- pr-filter: activeFilterCount / emptyStateKind --------------------------
+// The reveal chips must not read as active filters — counting them let
+// "Clear filters" SHRINK the list — and the empty state keys on the same number
+// to decide whether it may claim a filter is at work.
+test("activeFilterCount: nothing set is 0, and the reveal chips stay out of it", () => {
+  assert.strictEqual(prFilter.activeFilterCount(st()), 0);
+  assert.strictEqual(prFilter.activeFilterCount(st({ showDrafts: true, showIgnored: true })), 0);
+});
+test("activeFilterCount: a whitespace-only search is not a filter", () =>
+  assert.strictEqual(prFilter.activeFilterCount(st({ search: "   " })), 0));
+for (const over of [
+  { search: "bump" },
+  { role: "reviewer" },
+  { host: "GHE" },
+  ...prFilter.NARROW_CHIPS.map((chip) => ({ [chip.flag]: true })),
+]) {
+  test(`activeFilterCount: ${Object.keys(over)[0]} adds exactly 1`, () =>
+    assert.strictEqual(prFilter.activeFilterCount(st(over)), 1));
+}
+test("activeFilterCount: every narrowing control at once", () =>
+  assert.strictEqual(
+    prFilter.activeFilterCount(
+      st({
+        search: "bump",
+        role: "reviewer",
+        host: "GHE",
+        attentionOnly: true,
+        failingOnly: true,
+        newOnly: true,
+        mergeableOnly: true,
+        noReviewsOnly: true,
+      }),
+    ),
+    3 + prFilter.NARROW_CHIPS.length,
+  ));
+
+test("emptyStateKind: an empty fetch is not a filter story", () =>
+  assert.strictEqual(prFilter.emptyStateKind(st(), 0), "no-prs"));
+test("emptyStateKind: all-hidden when only the reveal chips could help", () => {
+  assert.strictEqual(prFilter.emptyStateKind(st(), IGNORED_DRAFTS.length), "all-hidden");
+  // A reveal chip being on does not turn it into "a filter is at work".
+  assert.strictEqual(
+    prFilter.emptyStateKind(st({ showDrafts: true }), IGNORED_DRAFTS.length),
+    "all-hidden",
+  );
+});
+// The claim the `all-hidden` copy is allowed to make. Both directions must hold:
+// a hidden draft that wants you must be counted (the header baseline no longer
+// counts it, yet it still toasts), and a muted PR must NOT be — nothing clears
+// needsAttention for ignored PRs, so counting them would say the user's own
+// mutes need attention.
+test("hiddenAttentionCount: an ignored inbox never claims to need you", () => {
+  // The live PR #6 shape: two ignored drafts, both needsAttention.
+  const ignoredDrafts = [
+    mkPr({ isDraft: true, isIgnored: true, needsAttention: true }),
+    mkPr({ isDraft: true, isIgnored: true, needsAttention: true }),
+  ];
+  assert.strictEqual(prFilter.hiddenAttentionCount(ignoredDrafts), 0);
+  assert.strictEqual(prFilter.hiddenAttentionCount(IGNORED_DRAFTS), 0);
+});
+test("hiddenAttentionCount: a draft that wants you is counted", () => {
+  assert.strictEqual(
+    prFilter.hiddenAttentionCount([
+      mkPr({ isDraft: true, needsAttention: true }),
+      mkPr({ isDraft: true, needsAttention: false }),
+      mkPr({ isDraft: true, isIgnored: true, needsAttention: true }),
+    ]),
+    1,
+  );
+});
+test("hiddenAttentionCount: nothing to report is 0, not a falsy surprise", () =>
+  assert.strictEqual(prFilter.hiddenAttentionCount([]), 0));
+
+test("emptyStateKind: no-match as soon as anything narrows", () => {
+  assert.strictEqual(prFilter.emptyStateKind(st({ attentionOnly: true }), 2), "no-match");
+  assert.strictEqual(prFilter.emptyStateKind(st({ search: "zzz" }), 2), "no-match");
+  assert.strictEqual(prFilter.emptyStateKind(st({ host: "GHE" }), 2), "no-match");
+  assert.strictEqual(prFilter.emptyStateKind(st({ role: "reviewer" }), 2), "no-match");
 });
 
 (async () => {

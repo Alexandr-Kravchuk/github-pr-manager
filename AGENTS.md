@@ -17,7 +17,8 @@ Three layers:
   are `shared` modules kept strictly free of `node:` builtins (importing no
   module that uses them) so the renderer can value-import them: `notify.ts`
   (`DEFAULT_NOTIFICATION_SETTINGS`, the single source of truth for notification
-  defaults) and `pr-filter.ts` (`isPrVisibleForCategoryFilters`). Keep any such
+  defaults) and `pr-filter.ts` (the whole view-filter layer: the reveal gate, the
+  filter pipeline and the chips' facet counts). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js` and `pr-filter.js` stay free of `node:` builtin references, so the
