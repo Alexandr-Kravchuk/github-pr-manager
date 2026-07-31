@@ -81,10 +81,20 @@ export const NARROW_CHIPS: readonly NarrowChip[] = [
   { key: "noReviews", flag: "noReviewsOnly", matches: (pr) => pr.hasNoReviews },
 ];
 
-const REVEAL_FLAG: Record<RevealKey, "showDrafts" | "showIgnored"> = {
+/** The `FilterState` flag each reveal chip toggles — the reveal counterpart of `NARROW_CHIPS[].flag`. */
+export const REVEAL_FLAG: Record<RevealKey, "showDrafts" | "showIgnored"> = {
   drafts: "showDrafts",
   ignored: "showIgnored",
 };
+
+/**
+ * The standing workload: PRs that are neither ignored nor drafts. The single
+ * definition behind `baselineStats`, the header's `· N shown` reconciliation and
+ * the mascot's mood, so those three can't drift apart.
+ */
+export function isBaselinePr(pr: Pick<PullRequest, "isDraft" | "isIgnored">): boolean {
+  return !pr.isIgnored && !pr.isDraft;
+}
 
 /**
  * Whether a PR survives the two reveal chips. Drafts and ignored PRs are hidden
@@ -171,7 +181,7 @@ export interface BaselineStats {
 export function baselineStats(
   prs: readonly (FilterablePr & Pick<PullRequest, "returnedToMe">)[],
 ): BaselineStats {
-  const base = prs.filter((pr) => !pr.isIgnored && !pr.isDraft);
+  const base = prs.filter(isBaselinePr);
   return {
     total: base.length,
     attention: base.filter((pr) => pr.needsAttention).length,
@@ -179,4 +189,41 @@ export function baselineStats(
     fresh: base.filter((pr) => pr.hasNewActivity).length,
     returned: base.filter((pr) => pr.returnedToMe).length,
   };
+}
+
+/**
+ * How many filters currently NARROW the list — what `Clear filters` resets and
+ * badges. Derived from `NARROW_CHIPS`, so a sixth chip is counted without
+ * touching this. `Drafts`/`Ignored` are left out on purpose: they REVEAL rows, so
+ * clearing them would shrink the list and "Clear filters" would no longer mean
+ * "show me more".
+ */
+export function activeFilterCount(state: FilterState): number {
+  let n = 0;
+  if (state.search.trim()) n += 1;
+  if (state.role !== "all") n += 1;
+  if (state.host !== "all") n += 1;
+  for (const chip of NARROW_CHIPS) {
+    if (state[chip.flag]) n += 1;
+  }
+  return n;
+}
+
+/**
+ * Which "nothing to show" story the empty state tells:
+ *
+ * - `no-prs` — the fetch itself came back empty;
+ * - `all-hidden` — no filter is narrowing anything, so every PR is a draft
+ *   and/or ignored and only the reveal chips can surface them;
+ * - `no-match` — a filter really is at work.
+ *
+ * Only meaningful while the rendered list is empty — the caller checks that
+ * before asking. Keeping the discriminant here (rather than inline in the
+ * renderer) is what lets the copy's claims be unit-tested.
+ */
+export type EmptyStateKind = "no-prs" | "all-hidden" | "no-match";
+
+export function emptyStateKind(state: FilterState, totalCount: number): EmptyStateKind {
+  if (totalCount === 0) return "no-prs";
+  return activeFilterCount(state) === 0 ? "all-hidden" : "no-match";
 }
