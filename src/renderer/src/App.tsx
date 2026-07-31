@@ -127,6 +127,8 @@ export function App() {
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraStatus | null>(null);
   const [data, setData] = useState<DashboardResponse | null>(null);
+  // Monotonic count of snapshots applied — the live-dot's remount key.
+  const [beat, setBeat] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -156,8 +158,16 @@ export function App() {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
 
   // Applies a snapshot received either from the initial fetch or a live event.
+  // `beat` counts arrivals so the header live-dot can remount on each one. It
+  // has to be a counter, not `snapshot.fetchedAt`: that field is the *oldest*
+  // per-host timestamp (poller.ts — "only as fresh as its stalest host"), so it
+  // stalls at the slow host's cadence and freezes outright while a host errors.
+  // Bumping it here — the single funnel for the initial paint, manual Refresh
+  // and the live subscription — also keeps local optimistic `setData` edits
+  // (mark-seen, ignore) from triggering a blink.
   const applySnapshot = useCallback((snapshot: DashboardResponse) => {
     setData(snapshot);
+    setBeat((n) => n + 1);
     setError(null);
     setConfigError(null);
   }, []);
@@ -598,15 +608,16 @@ export function App() {
               </span>
             ))}
             {data && (
-              // One finite blink per incoming snapshot — `fetchedAt` remounts the
-              // node, the same trick Buddy uses for its mood animations. It used
-              // to carry Tailwind's `animate-pulse`, whose `infinite` keyframes
-              // kept the compositor producing frames around the clock: ~33% CPU
-              // in the GPU helper permanently, even with the window hidden.
+              // One finite blink per incoming snapshot: `beat` remounts the node,
+              // the same monotonic-counter trick Buddy uses for its mood
+              // animations (`animationRun`). It used to carry Tailwind's
+              // `animate-pulse`, whose `infinite` keyframes kept the compositor
+              // producing frames around the clock: ~33% CPU in the GPU helper
+              // permanently, even with the window hidden.
               <span
-                key={data.fetchedAt}
+                key={beat}
                 className="live-beat inline-block h-2 w-2 rounded-full bg-emerald-500"
-                title="Live — auto-refreshing"
+                title="Live — blinks when new data arrives"
               />
             )}
             <button
