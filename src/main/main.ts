@@ -3,6 +3,7 @@ import path from "node:path";
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
+import { isPollingPaused } from "../shared/idle-gate";
 import { setIgnored } from "../shared/ignored";
 import { createReleaseGuard, planDelivery, runNotifyCycle } from "../shared/notify";
 import { markSeen } from "../shared/state";
@@ -48,26 +49,44 @@ let systemSuspended = false;
  */
 let prevNotifyPrs: PullRequest[] | null = null;
 
-/** Pause polling after this many seconds of user inactivity. */
-const IDLE_PAUSE_SECONDS = 300;
-
 /**
  * The idle gate handed to the poller: true when a fetch would just waste the
- * rate-limit budget — the machine is asleep, the window is minimized/hidden, or
- * the user has been idle a while. No window yet (startup / dock activate) counts
- * as active so the first fetch runs. `wake()` (focus/resume) forces a fetch back.
+ * rate-limit budget. The suspend / genuinely-away / no-window branches and the
+ * notifications-aware "hidden window" carve-out all live in the pure
+ * `isPollingPaused` (unit-tested); this only samples the live Electron state and
+ * feeds it in. `wake()` (focus/resume) forces a fetch back regardless.
+ *
+ * A hidden/minimized window no longer pauses polling when notifications are
+ * enabled — otherwise the notifier can never observe a transition while the
+ * window is out of sight, which is exactly when the user relies on it. Budget is
+ * still bounded by per-host spacing, the cold-host floor, the no-change backoff
+ * and the cheap REST detector.
  */
 function isDashboardPaused(): boolean {
-  if (systemSuspended) return true;
   const win = mainWindow;
-  if (!win || win.isDestroyed()) return false;
-  if (win.isMinimized() || !win.isVisible()) return true;
+  const hasWindow = Boolean(win && !win.isDestroyed());
+
+  let notificationsEnabled = false;
   try {
-    if (powerMonitor.getSystemIdleTime() > IDLE_PAUSE_SECONDS) return true;
+    notificationsEnabled = loadSettings().notifications.enabled;
+  } catch {
+    /* settings unreadable — fall back to the aggressive gate (notifications off) */
+  }
+
+  let systemIdleSeconds: number | null = null;
+  try {
+    systemIdleSeconds = powerMonitor.getSystemIdleTime();
   } catch {
     /* getSystemIdleTime can be unavailable on some platforms — treat as active */
   }
-  return false;
+
+  return isPollingPaused({
+    systemSuspended,
+    hasWindow,
+    windowHidden: hasWindow && (win!.isMinimized() || !win!.isVisible()),
+    systemIdleSeconds,
+    notificationsEnabled,
+  });
 }
 
 function sendToRenderer(channel: string, payload: unknown): void {

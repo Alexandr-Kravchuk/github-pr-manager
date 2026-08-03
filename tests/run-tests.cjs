@@ -12,6 +12,7 @@ const cfg = require(path.join(__dirname, "../dist/main/shared/config.js"));
 const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
 const notif = require(path.join(__dirname, "../dist/main/shared/notifications.js"));
 const notify = require(path.join(__dirname, "../dist/main/shared/notify.js"));
+const idleGate = require(path.join(__dirname, "../dist/main/shared/idle-gate.js"));
 const github = require(path.join(__dirname, "../dist/main/shared/github.js"));
 const ignored = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
 const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
@@ -1888,6 +1889,44 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     a.events.yourTurn = false;
     assert.strictEqual(notify.DEFAULT_NOTIFICATION_SETTINGS.events.yourTurn, true); // shared const not mutated
   });
+
+  // --- idle gate: hidden window no longer pauses when notifications are on ----
+  // Base = "polling should run" (active). Each case flips one field.
+  const GATE = {
+    systemSuspended: false,
+    hasWindow: true,
+    windowHidden: false,
+    systemIdleSeconds: 0,
+    notificationsEnabled: false,
+  };
+  const gate = (over) => idleGate.isPollingPaused({ ...GATE, ...over });
+
+  test("isPollingPaused: visible, active, no notifications -> runs", () =>
+    assert.strictEqual(gate({}), false));
+  test("isPollingPaused: suspended always pauses (even with notifications on)", () => {
+    assert.strictEqual(gate({ systemSuspended: true }), true);
+    assert.strictEqual(gate({ systemSuspended: true, notificationsEnabled: true }), true);
+  });
+  test("isPollingPaused: no window yet (startup/activate) -> runs", () =>
+    // hasWindow false wins even if a stale windowHidden slips through.
+    assert.strictEqual(gate({ hasWindow: false, windowHidden: true }), false));
+  test("isPollingPaused: hidden window WITHOUT notifications -> pauses (budget saving)", () =>
+    assert.strictEqual(gate({ windowHidden: true, notificationsEnabled: false }), true));
+  test("isPollingPaused: hidden window WITH notifications -> runs (the fix)", () =>
+    assert.strictEqual(gate({ windowHidden: true, notificationsEnabled: true }), false));
+  test("isPollingPaused: away user pauses regardless of notifications", () => {
+    const away = idleGate.IDLE_PAUSE_SECONDS + 1;
+    assert.strictEqual(gate({ systemIdleSeconds: away }), true);
+    assert.strictEqual(gate({ systemIdleSeconds: away, notificationsEnabled: true }), true);
+    assert.strictEqual(
+      gate({ windowHidden: true, systemIdleSeconds: away, notificationsEnabled: true }),
+      true,
+    );
+  });
+  test("isPollingPaused: idle exactly at the threshold is not yet away -> runs", () =>
+    assert.strictEqual(gate({ systemIdleSeconds: idleGate.IDLE_PAUSE_SECONDS }), false));
+  test("isPollingPaused: null idle (platform can't report) treated as active", () =>
+    assert.strictEqual(gate({ systemIdleSeconds: null }), false));
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

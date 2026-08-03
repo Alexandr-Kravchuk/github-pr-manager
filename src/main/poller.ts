@@ -10,10 +10,12 @@
  * this app — and a github.com tick costs many tens of points, observed ~35–100
  * depending on repo/PR volume, vs only a few on a GHE host):
  *
- *  - **Idle gating** — when the injected `isPaused()` says the window is hidden
- *    / minimized or the machine is asleep / the user is idle, ticks skip the
- *    network entirely. `wake()` (wired to focus/resume) forces an immediate
- *    fetch on return.
+ *  - **Idle gating** — when the injected `isPaused()` says the machine is asleep
+ *    or the user is genuinely away, ticks skip the network entirely. A merely
+ *    hidden / minimized window also pauses *unless* notifications are enabled —
+ *    then polling continues in the background so the notifier can see a
+ *    transition (see `isPollingPaused` in `shared/idle-gate.ts`). `wake()`
+ *    (wired to focus/resume) forces an immediate fetch on return.
  *  - **Per-host spacing** — each host is fetched on its own cadence; expensive
  *    hosts (high GraphQL cost) get a higher minimum interval so the shared
  *    budget survives other clients. A host not due this tick keeps its last
