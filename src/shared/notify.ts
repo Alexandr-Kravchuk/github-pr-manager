@@ -186,6 +186,32 @@ export interface DeliveryContext {
 }
 
 /**
+ * Whether these settings can produce a notification at all. The master `enabled`
+ * toggle alone doesn't imply anything will ever fire: the Settings UI gates the
+ * event and channel checkboxes only on `enabled`, so `enabled` with every event
+ * type unchecked (then `diffNotifications` emits nothing) or with both delivery
+ * channels unchecked (then `planDelivery` returns `none`) is reachable, and both
+ * are dead ends.
+ *
+ * Exported because the poller's idle gate keys its hidden-window carve-out off
+ * this rather than off `enabled`: otherwise a dead configuration keeps
+ * background polling — and its GraphQL spend — alive to service notifications
+ * that provably cannot fire. Lives beside `planDelivery`, whose channel
+ * selection it mirrors; keep the two in step.
+ */
+export function hasDeliverableNotifications(
+  settings: NotificationSettings,
+  nativeSupported = true,
+): boolean {
+  if (!settings.enabled) return false;
+  // Same channel choice planDelivery makes: native (when the OS supports it),
+  // else the sound fallback. Neither available means mode "none".
+  if (!((settings.native && nativeSupported) || settings.sound)) return false;
+  const { yourTurn, ciFailed, goodNews } = settings.events;
+  return yourTurn || ciFailed || goodNews;
+}
+
+/**
  * Decides how to deliver a batch of notification events, given the user's
  * settings and runtime context. Pure and Electron-free so every branch —
  * focus suppression, the summary-vs-individual split, chime-once, and the

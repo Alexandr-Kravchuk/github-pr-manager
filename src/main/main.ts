@@ -5,7 +5,12 @@ import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, Notif
 import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
 import { isPollingPaused } from "../shared/idle-gate";
 import { setIgnored } from "../shared/ignored";
-import { createReleaseGuard, planDelivery, runNotifyCycle } from "../shared/notify";
+import {
+  createReleaseGuard,
+  hasDeliverableNotifications,
+  planDelivery,
+  runNotifyCycle,
+} from "../shared/notify";
 import { markSeen } from "../shared/state";
 import type {
   ConfigResult,
@@ -56,36 +61,44 @@ let prevNotifyPrs: PullRequest[] | null = null;
  * `isPollingPaused` (unit-tested); this only samples the live Electron state and
  * feeds it in. `wake()` (focus/resume) forces a fetch back regardless.
  *
- * A hidden/minimized window no longer pauses polling when notifications are
- * enabled — otherwise the notifier can never observe a transition while the
- * window is out of sight, which is exactly when the user relies on it. Budget is
- * still bounded by per-host spacing, the cold-host floor, the no-change backoff
- * and the cheap REST detector.
+ * A hidden/minimized window no longer pauses polling when a notification could
+ * actually reach the user — otherwise the notifier can never observe a
+ * transition while the window is out of sight, which is exactly when the user
+ * relies on it. "Could actually reach" comes from `hasDeliverableNotifications`,
+ * not the bare `notifications.enabled` toggle: `enabled` with every event type
+ * or both delivery channels off can never fire a toast, and keeping the poll
+ * loop alive for that state would spend budget for nothing. Budget is otherwise
+ * bounded by per-host spacing, the cold-host floor, the no-change backoff and
+ * the cheap REST detector.
+ *
+ * Takes the `settings` the poller already loaded this tick instead of reading
+ * `settings.json` again: `Poller.tick()` loads and validates it at the top of
+ * every tick and returns early via `emitConfigError` if that throws, so a second
+ * read here would be duplicate synchronous I/O on the main thread and its error
+ * branch would be unreachable. `getSystemIdleTime` is passed as a thunk for the
+ * same reason — the cheap branches inside `isPollingPaused` decide without
+ * paying for the native query.
  */
-function isDashboardPaused(): boolean {
+function isDashboardPaused(settings: Settings): boolean {
   const win = mainWindow;
   const hasWindow = Boolean(win && !win.isDestroyed());
-
-  let notificationsEnabled = false;
-  try {
-    notificationsEnabled = loadSettings().notifications.enabled;
-  } catch {
-    /* settings unreadable — fall back to the aggressive gate (notifications off) */
-  }
-
-  let systemIdleSeconds: number | null = null;
-  try {
-    systemIdleSeconds = powerMonitor.getSystemIdleTime();
-  } catch {
-    /* getSystemIdleTime can be unavailable on some platforms — treat as active */
-  }
 
   return isPollingPaused({
     systemSuspended,
     hasWindow,
     windowHidden: hasWindow && (win!.isMinimized() || !win!.isVisible()),
-    systemIdleSeconds,
-    notificationsEnabled,
+    systemIdleSeconds: () => {
+      try {
+        return powerMonitor.getSystemIdleTime();
+      } catch {
+        /* getSystemIdleTime can be unavailable on some platforms — treat as active */
+        return null;
+      }
+    },
+    notificationsActionable: hasDeliverableNotifications(
+      settings.notifications,
+      Notification.isSupported(),
+    ),
   });
 }
 
