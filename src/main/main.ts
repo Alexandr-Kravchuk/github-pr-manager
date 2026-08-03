@@ -75,9 +75,10 @@ let prevNotifyPrs: PullRequest[] | null = null;
  * `settings.json` again: `Poller.tick()` loads and validates it at the top of
  * every tick and returns early via `emitConfigError` if that throws, so a second
  * read here would be duplicate synchronous I/O on the main thread and its error
- * branch would be unreachable. `getSystemIdleTime` is passed as a thunk for the
- * same reason — the cheap branches inside `isPollingPaused` decide without
- * paying for the native query.
+ * branch would be unreachable. Both native-touching inputs
+ * (`getSystemIdleTime`, `Notification.isSupported`) are passed as thunks for the
+ * same reason — the free branches inside `isPollingPaused` decide without paying
+ * for either.
  */
 function isDashboardPaused(settings: Settings): boolean {
   const win = mainWindow;
@@ -95,10 +96,8 @@ function isDashboardPaused(settings: Settings): boolean {
         return null;
       }
     },
-    notificationsActionable: hasDeliverableNotifications(
-      settings.notifications,
-      Notification.isSupported(),
-    ),
+    notificationsActionable: () =>
+      hasDeliverableNotifications(settings.notifications, Notification.isSupported()),
   });
 }
 

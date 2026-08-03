@@ -48,7 +48,7 @@ export interface IdleGateInputs {
    */
   systemIdleSeconds: () => number | null;
   /**
-   * A notification could actually reach this user — from
+   * Reads whether a notification could actually reach this user — from
    * `hasDeliverableNotifications` in `notify.ts`, not the raw
    * `notifications.enabled` toggle. When true, a hidden window does not pause
    * polling, because otherwise the notifier can never see a transition.
@@ -56,17 +56,21 @@ export interface IdleGateInputs {
    * The distinction matters: `enabled` can be on with every event type or both
    * delivery channels off, in which case no toast can ever fire and keeping the
    * poll loop alive would spend the shared GraphQL budget for nothing.
+   *
+   * A thunk for the same reason as `systemIdleSeconds` — it ends in a native
+   * `Notification.isSupported()` call, so the suspend / no-window branches must
+   * be able to decide without it. Read at most once, only in the hidden branch.
    */
-  notificationsActionable: boolean;
+  notificationsActionable: () => boolean;
 }
 
 /**
  * Whether a poll tick should skip the network. See the module doc for the
  * budget-vs-notifications tradeoff this encodes.
  *
- * Branch order is load-bearing, not cosmetic: every cheap check runs before
- * `systemIdleSeconds()` is invoked, so a suspended machine or a
- * hidden-window-with-nothing-to-notify tick costs nothing to decide.
+ * Branch order is load-bearing, not cosmetic: the free checks all run before
+ * either costly input is read, so a suspended machine or a machine with no window
+ * yet costs nothing to decide.
  */
 export function isPollingPaused(inputs: IdleGateInputs): boolean {
   // Asleep: nothing to poll for, and the resume `wake()` will force a fetch.
@@ -75,7 +79,7 @@ export function isPollingPaused(inputs: IdleGateInputs): boolean {
   if (!inputs.hasWindow) return false;
   // Hidden window pauses ONLY when no notification could reach the user anyway;
   // when one could, we keep polling so the transition surfaces.
-  if (inputs.windowHidden && !inputs.notificationsActionable) return true;
+  if (inputs.windowHidden && !inputs.notificationsActionable()) return true;
   // Genuinely-away user pauses either way — "there is no user", not "the user
   // is relying on notifications". Only here is the native query worth paying for.
   const idleSeconds = inputs.systemIdleSeconds();

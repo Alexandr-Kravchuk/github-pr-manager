@@ -1892,9 +1892,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
   // --- idle gate: hidden window no longer pauses when a toast could fire -------
   // Base = "polling should run" (active). Each case flips one field.
-  // `systemIdleSeconds` is a thunk in IdleGateInputs (lazy, so the cheap branches
-  // never pay for the native query) — the helper takes a plain number/null and
-  // wraps it, counting reads so the branch ORDER is assertable, not just the result.
+  // Both costly inputs are thunks in IdleGateInputs (lazy, so the free branches
+  // never pay for a native query) — the helper takes plain values and wraps them,
+  // counting reads so the branch ORDER is assertable, not just the result.
   const GATE = {
     systemSuspended: false,
     hasWindow: true,
@@ -1905,17 +1905,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   const gateWithReads = (over) => {
     const o = { ...GATE, ...over };
     let idleReads = 0;
+    let actionableReads = 0;
     const paused = idleGate.isPollingPaused({
       systemSuspended: o.systemSuspended,
       hasWindow: o.hasWindow,
       windowHidden: o.windowHidden,
-      notificationsActionable: o.notificationsActionable,
+      notificationsActionable: () => {
+        actionableReads++;
+        return o.notificationsActionable;
+      },
       systemIdleSeconds: () => {
         idleReads++;
         return o.systemIdleSeconds;
       },
     });
-    return { paused, idleReads };
+    return { paused, idleReads, actionableReads };
   };
   const gate = (over) => gateWithReads(over).paused;
 
@@ -1946,24 +1950,38 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   test("isPollingPaused: null idle (platform can't report) treated as active", () =>
     assert.strictEqual(gate({ systemIdleSeconds: null }), false));
 
-  // The costly input stays unread whenever a cheap branch already decided — the
+  // The costly inputs stay unread whenever a free branch already decided — the
   // ordering regression this guards against is invisible to result-only asserts.
-  test("isPollingPaused: suspended decides without reading system idle time", () =>
-    assert.strictEqual(gateWithReads({ systemSuspended: true }).idleReads, 0));
-  test("isPollingPaused: no window decides without reading system idle time", () =>
-    assert.strictEqual(gateWithReads({ hasWindow: false }).idleReads, 0));
+  test("isPollingPaused: suspended decides without reading either costly input", () => {
+    const r = gateWithReads({ systemSuspended: true });
+    assert.strictEqual(r.idleReads, 0);
+    assert.strictEqual(r.actionableReads, 0);
+  });
+  test("isPollingPaused: no window decides without reading either costly input", () => {
+    const r = gateWithReads({ hasWindow: false });
+    assert.strictEqual(r.idleReads, 0);
+    assert.strictEqual(r.actionableReads, 0);
+  });
   test("isPollingPaused: hidden + nothing to notify decides without reading idle time", () =>
     assert.strictEqual(
       gateWithReads({ windowHidden: true, notificationsActionable: false }).idleReads,
       0,
     ));
-  test("isPollingPaused: idle time is read once when the cheap branches don't decide", () => {
+  test("isPollingPaused: a visible window never asks whether notifications fire", () =>
+    // Only the hidden branch needs it; asking anyway would be a wasted native call.
+    assert.strictEqual(gateWithReads({}).actionableReads, 0));
+  test("isPollingPaused: idle time is read once when the free branches don't decide", () => {
     assert.strictEqual(gateWithReads({}).idleReads, 1);
     assert.strictEqual(
       gateWithReads({ windowHidden: true, notificationsActionable: true }).idleReads,
       1,
     );
   });
+  test("isPollingPaused: the hidden branch reads actionability exactly once", () =>
+    assert.strictEqual(
+      gateWithReads({ windowHidden: true, notificationsActionable: true }).actionableReads,
+      1,
+    ));
 
   // --- hasDeliverableNotifications: the gate's "could a toast fire?" signal ----
   // Guards the dead configurations the master `enabled` toggle alone can't see:
@@ -1975,47 +1993,120 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     events: { ...notify.DEFAULT_NOTIFICATION_SETTINGS.events, ...(over.events ?? {}) },
   });
 
+  // nativeSupported is a REQUIRED arg (no optimistic default) — always explicit.
+  const deliverable = (over, nativeSupported = true) =>
+    notify.hasDeliverableNotifications(notifSettings(over), nativeSupported);
+
   test("hasDeliverableNotifications: master toggle off -> false", () =>
-    assert.strictEqual(
-      notify.hasDeliverableNotifications(notifSettings({ enabled: false })),
-      false,
-    ));
+    assert.strictEqual(deliverable({ enabled: false }), false));
   test("hasDeliverableNotifications: enabled with a channel and an event -> true", () =>
-    assert.strictEqual(notify.hasDeliverableNotifications(notifSettings()), true));
+    assert.strictEqual(deliverable({}), true));
   test("hasDeliverableNotifications: every event type off -> false", () =>
     assert.strictEqual(
-      notify.hasDeliverableNotifications(
-        notifSettings({ events: { yourTurn: false, ciFailed: false, goodNews: false } }),
-      ),
+      deliverable({ events: { yourTurn: false, ciFailed: false, goodNews: false } }),
       false,
     ));
   test("hasDeliverableNotifications: one event type left on -> true", () =>
     assert.strictEqual(
-      notify.hasDeliverableNotifications(
-        notifSettings({ events: { yourTurn: false, ciFailed: true, goodNews: false } }),
-      ),
+      deliverable({ events: { yourTurn: false, ciFailed: true, goodNews: false } }),
       true,
     ));
   test("hasDeliverableNotifications: both delivery channels off -> false", () =>
-    assert.strictEqual(
-      notify.hasDeliverableNotifications(notifSettings({ native: false, sound: false })),
-      false,
-    ));
+    assert.strictEqual(deliverable({ native: false, sound: false }), false));
   test("hasDeliverableNotifications: sound-only still deliverable", () =>
-    assert.strictEqual(
-      notify.hasDeliverableNotifications(notifSettings({ native: false, sound: true })),
-      true,
-    ));
+    assert.strictEqual(deliverable({ native: false, sound: true }), true));
   test("hasDeliverableNotifications: native unsupported by the OS falls back to sound", () => {
     // Mirrors planDelivery: native+unsupported is not a channel, sound still is.
-    assert.strictEqual(
-      notify.hasDeliverableNotifications(notifSettings({ native: true, sound: false }), false),
-      false,
-    );
-    assert.strictEqual(
-      notify.hasDeliverableNotifications(notifSettings({ native: true, sound: true }), false),
-      true,
-    );
+    assert.strictEqual(deliverable({ native: true, sound: false }, false), false);
+    assert.strictEqual(deliverable({ native: true, sound: true }, false), true);
+  });
+
+  // --- parity: the gate's verdict can never disagree with actual delivery ------
+  // hasDeliverableNotifications and planDelivery both answer "can a channel carry
+  // this?", and both now route through pickDeliveryChannel. This asserts the
+  // agreement directly over the full settings matrix rather than trusting the
+  // shared helper to stay shared: if the two ever drift so that the gate says
+  // "nothing can fire" while planDelivery still delivers, a hidden window stops
+  // polling with a deliverable toast pending — the exact bug the gate prevents.
+  test("parity: hasDeliverableNotifications agrees with planDelivery on every settings combo", () => {
+    const bools = [false, true];
+    const ev = (n) => ({ yourTurn: !!(n & 1), ciFailed: !!(n & 2), goodNews: !!(n & 4) });
+    const oneEvent = [
+      { prId: "1", kind: "ci_failed", title: "t", body: "b", url: "http://x" },
+    ];
+    let combos = 0;
+    for (const enabled of bools) {
+      for (const native of bools) {
+        for (const sound of bools) {
+          for (let e = 0; e < 8; e++) {
+            for (const nativeSupported of bools) {
+              const s = { enabled, native, sound, events: ev(e) };
+              const canFire = notify.hasDeliverableNotifications(s, nativeSupported);
+              // planDelivery is handed a non-empty batch and an unfocused window,
+              // so the ONLY thing left that can zero it out is channel viability.
+              const plan = notify.planDelivery(oneEvent, s, { focused: false, nativeSupported });
+              const wouldDeliver = plan.mode !== "none";
+              // A settings state with no enabled event type can't produce events at
+              // all, so planDelivery is never reached with one — exclude those from
+              // the equivalence and assert the gate blocks them instead.
+              const anyEvent = ev(e).yourTurn || ev(e).ciFailed || ev(e).goodNews;
+              if (enabled && anyEvent) {
+                assert.strictEqual(
+                  canFire,
+                  wouldDeliver,
+                  `drift at enabled=${enabled} native=${native} sound=${sound} ` +
+                    `events=${e} nativeSupported=${nativeSupported}: ` +
+                    `gate=${canFire} planDelivery=${plan.mode}`,
+                );
+              } else {
+                assert.strictEqual(canFire, false, `gate must block events=${e} enabled=${enabled}`);
+              }
+              combos++;
+            }
+          }
+        }
+      }
+    }
+    assert.strictEqual(combos, 128); // 2*2*2*8*2 — the whole space, not a sample
+  });
+
+  // --- poller threads its already-loaded settings into the idle gate -----------
+  // The isPaused widening from `() => boolean` to `(settings) => boolean` is
+  // backward-compatible, so nothing else would fail if tick() passed undefined or
+  // a stale object — and the gate would then read notification prefs off garbage.
+  // Note: refresh() forces past the gate entirely, so this drives a plain tick.
+  await atest("Poller.tick: passes the settings it just loaded to isPaused", async () => {
+    const loaded = {
+      pollIntervalSeconds: 60,
+      launchAtLogin: false,
+      autoUpdate: false,
+      theme: "system",
+      hosts: [],
+      notifications: { enabled: true, native: true, sound: false, events: { yourTurn: true, ciFailed: true, goodNews: true } },
+    };
+    let seen = "never called";
+    let calls = 0;
+    const p = new poller.Poller({
+      loadSettings: () => loaded,
+      toHostConfigs: () => [],
+      statePath: path.join(os.tmpdir(), "prd-poller-state-missing.json"),
+      ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),
+      appVersion: "test",
+      onSnapshot: () => {},
+      onConfigError: () => {},
+      // Returning true parks the tick before any network work.
+      isPaused: (s) => {
+        calls++;
+        seen = s;
+        return true;
+      },
+    });
+    p.start();
+    await p.awaitFirstTick();
+    p.stop();
+    assert.strictEqual(calls, 1, "the gate should be consulted exactly once per tick");
+    assert.strictEqual(seen, loaded, "isPaused must receive the very object loadSettings returned");
+    assert.strictEqual(seen.notifications.enabled, true);
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

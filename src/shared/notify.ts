@@ -185,28 +185,56 @@ export interface DeliveryContext {
   nativeSupported: boolean;
 }
 
+/** Which channel a batch would go out on, or `null` when none can carry it. */
+export type DeliveryChannel = "native" | "sound" | null;
+
+/**
+ * The single source of truth for channel viability: the native toast when the
+ * user wants it *and* the OS supports it, else the sound fallback, else nothing
+ * can be delivered.
+ *
+ * Both callers route through here. `planDelivery` needs to know *which* channel
+ * won; `hasDeliverableNotifications` only needs to know whether one exists — and
+ * "which" subsumes "whether", so one function serves both. They previously
+ * derived the same rule independently with nothing but a doc comment asking
+ * future maintainers to keep them in step. Drift in the direction of
+ * `hasDeliverableNotifications` reporting "no channel" while `planDelivery`
+ * would still deliver silently restores the hidden-window bug the idle gate
+ * exists to prevent, so a parity test over both now enforces the agreement.
+ */
+export function pickDeliveryChannel(
+  settings: NotificationSettings,
+  nativeSupported: boolean,
+): DeliveryChannel {
+  if (settings.native && nativeSupported) return "native";
+  if (settings.sound) return "sound";
+  return null;
+}
+
 /**
  * Whether these settings can produce a notification at all. The master `enabled`
  * toggle alone doesn't imply anything will ever fire: the Settings UI gates the
  * event and channel checkboxes only on `enabled`, so `enabled` with every event
  * type unchecked (then `diffNotifications` emits nothing) or with both delivery
- * channels unchecked (then `planDelivery` returns `none`) is reachable, and both
- * are dead ends.
+ * channels unchecked (then `pickDeliveryChannel` returns `null`) is reachable,
+ * and both are dead ends.
  *
  * Exported because the poller's idle gate keys its hidden-window carve-out off
  * this rather than off `enabled`: otherwise a dead configuration keeps
  * background polling — and its GraphQL spend — alive to service notifications
- * that provably cannot fire. Lives beside `planDelivery`, whose channel
- * selection it mirrors; keep the two in step.
+ * that provably cannot fire.
+ *
+ * `nativeSupported` is required, not defaulted: a default would hand a forgetful
+ * call site the optimistic answer, and over-reporting deliverability is exactly
+ * the budget-waste this predicate was added to prevent. Matches
+ * `DeliveryContext.nativeSupported`, which is likewise required.
  */
 export function hasDeliverableNotifications(
   settings: NotificationSettings,
-  nativeSupported = true,
+  nativeSupported: boolean,
 ): boolean {
   if (!settings.enabled) return false;
-  // Same channel choice planDelivery makes: native (when the OS supports it),
-  // else the sound fallback. Neither available means mode "none".
-  if (!((settings.native && nativeSupported) || settings.sound)) return false;
+  if (pickDeliveryChannel(settings, nativeSupported) === null) return false;
   const { yourTurn, ciFailed, goodNews } = settings.events;
   return yourTurn || ciFailed || goodNews;
 }
@@ -229,8 +257,11 @@ export function planDelivery(
   // tick would otherwise dump a burst of toasts for everything that moved away.
   if (ctx.focused) return none;
 
-  const { native, sound } = settings;
-  if (native && ctx.nativeSupported) {
+  const { sound } = settings;
+  // Which channel carries this batch — shared with hasDeliverableNotifications so
+  // the gate's "could anything fire?" can never disagree with what we do here.
+  const channel = pickDeliveryChannel(settings, ctx.nativeSupported);
+  if (channel === "native") {
     if (events.length > MAX_INDIVIDUAL_NOTIFICATIONS) {
       return { mode: "summary", silent: [], summarySilent: !sound };
     }
@@ -238,7 +269,7 @@ export function planDelivery(
     return { mode: "individual", silent: events.map((_, i) => !(sound && i === 0)), summarySilent: true };
   }
   // No native toast (disabled or unsupported), but the user still wants a ping.
-  if (sound) return { mode: "sound-only", silent: [], summarySilent: true };
+  if (channel === "sound") return { mode: "sound-only", silent: [], summarySilent: true };
   return none;
 }
 
