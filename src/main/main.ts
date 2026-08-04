@@ -3,8 +3,14 @@ import path from "node:path";
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
+import { isPollingPaused } from "../shared/idle-gate";
 import { setIgnored } from "../shared/ignored";
-import { createReleaseGuard, planDelivery, runNotifyCycle } from "../shared/notify";
+import {
+  createReleaseGuard,
+  hasDeliverableNotifications,
+  planDelivery,
+  runNotifyCycle,
+} from "../shared/notify";
 import { markSeen } from "../shared/state";
 import type {
   ConfigResult,
@@ -48,26 +54,56 @@ let systemSuspended = false;
  */
 let prevNotifyPrs: PullRequest[] | null = null;
 
-/** Pause polling after this many seconds of user inactivity. */
-const IDLE_PAUSE_SECONDS = 300;
-
 /**
  * The idle gate handed to the poller: true when a fetch would just waste the
- * rate-limit budget — the machine is asleep, the window is minimized/hidden, or
- * the user has been idle a while. No window yet (startup / dock activate) counts
- * as active so the first fetch runs. `wake()` (focus/resume) forces a fetch back.
+ * rate-limit budget. The suspend / genuinely-away / no-window branches and the
+ * notifications-aware "hidden window" carve-out all live in the pure
+ * `isPollingPaused` (unit-tested); this only samples the live Electron state and
+ * feeds it in. `wake()` (focus/resume) forces a fetch back regardless.
+ *
+ * A hidden/minimized window no longer pauses polling when a notification could
+ * actually reach the user — otherwise the notifier can never observe a
+ * transition while the window is out of sight, which is exactly when the user
+ * relies on it. "Could actually reach" comes from `hasDeliverableNotifications`,
+ * not the bare `notifications.enabled` toggle: `enabled` with every event type
+ * or both delivery channels off can never fire a toast, and keeping the poll
+ * loop alive for that state would spend budget for nothing. Budget is otherwise
+ * bounded by per-host spacing, the cold-host floor, the no-change backoff and
+ * the cheap REST detector.
+ *
+ * Takes the `settings` the poller already loaded this tick instead of reading
+ * `settings.json` again: `Poller.tick()` loads and validates it at the top of
+ * every tick and returns early via `emitConfigError` if that throws, so a second
+ * read here would be duplicate synchronous I/O on the main thread and its error
+ * branch would be unreachable. Both native-touching inputs
+ * (`getSystemIdleTime`, `Notification.isSupported`) are passed as thunks for the
+ * same reason — the free branches inside `isPollingPaused` decide without paying
+ * for either.
  */
-function isDashboardPaused(): boolean {
-  if (systemSuspended) return true;
+function isDashboardPaused(settings: Settings): boolean {
   const win = mainWindow;
-  if (!win || win.isDestroyed()) return false;
-  if (win.isMinimized() || !win.isVisible()) return true;
-  try {
-    if (powerMonitor.getSystemIdleTime() > IDLE_PAUSE_SECONDS) return true;
-  } catch {
-    /* getSystemIdleTime can be unavailable on some platforms — treat as active */
-  }
-  return false;
+  const hasWindow = Boolean(win && !win.isDestroyed());
+
+  return isPollingPaused({
+    systemSuspended,
+    hasWindow,
+    // Verified against Electron's win32 semantics (minimize + hide-to-taskbar).
+    // The macOS equivalents — Cmd+H, moving the window to another Space, and
+    // native full-screen — are not yet manually confirmed to resolve
+    // `isMinimized()`/`isVisible()` the same way; the failure direction is safe
+    // (we'd keep polling, never miss a toast), but a macOS pass is still owed.
+    windowHidden: hasWindow && (win!.isMinimized() || !win!.isVisible()),
+    systemIdleSeconds: () => {
+      try {
+        return powerMonitor.getSystemIdleTime();
+      } catch {
+        /* getSystemIdleTime can be unavailable on some platforms — treat as active */
+        return null;
+      }
+    },
+    notificationsActionable: () =>
+      hasDeliverableNotifications(settings.notifications, Notification.isSupported()),
+  });
 }
 
 function sendToRenderer(channel: string, payload: unknown): void {

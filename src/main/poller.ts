@@ -10,10 +10,12 @@
  * this app — and a github.com tick costs many tens of points, observed ~35–100
  * depending on repo/PR volume, vs only a few on a GHE host):
  *
- *  - **Idle gating** — when the injected `isPaused()` says the window is hidden
- *    / minimized or the machine is asleep / the user is idle, ticks skip the
- *    network entirely. `wake()` (wired to focus/resume) forces an immediate
- *    fetch on return.
+ *  - **Idle gating** — when the injected `isPaused()` says the machine is asleep
+ *    or the user is genuinely away, ticks skip the network entirely. A merely
+ *    hidden / minimized window also pauses *unless* a notification could actually
+ *    reach the user — then polling continues in the background so the notifier
+ *    can see a transition (see `isPollingPaused` in `shared/idle-gate.ts`).
+ *    `wake()` (wired to focus/resume) forces an immediate fetch on return.
  *  - **Per-host spacing** — each host is fetched on its own cadence; expensive
  *    hosts (high GraphQL cost) get a higher minimum interval so the shared
  *    budget survives other clients. A host not due this tick keeps its last
@@ -70,8 +72,11 @@ export interface PollerOptions {
    * Optional idle gate. When it returns true (window hidden/minimized, machine
    * asleep or user idle), a tick skips the network fetch — sparing the rate-limit
    * budget while nobody is looking. `wake()` forces a fetch when the user returns.
+   *
+   * Receives the settings this tick already loaded, so the gate can read
+   * notification preferences without a second synchronous `settings.json` read.
    */
-  isPaused?: () => boolean;
+  isPaused?: (settings: Settings) => boolean;
   /** Host fetcher — defaults to the real GraphQL `fetchHost`; PRD_MOCK swaps in fixtures. */
   fetchHostFn?: typeof fetchHost;
   /**
@@ -383,7 +388,7 @@ export class Poller {
 
     // Idle gate: skip all gh/network work while nobody is looking. A forced
     // tick (manual refresh) always runs. Cheap re-check cadence until we wake.
-    if (!force && !skipIdleGate && this.options.isPaused?.()) {
+    if (!force && !skipIdleGate && this.options.isPaused?.(settings)) {
       this.resolveFirst();
       return PARKED_INTERVAL_MS;
     }

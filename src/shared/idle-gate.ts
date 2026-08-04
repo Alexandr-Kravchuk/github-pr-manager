@@ -1,0 +1,121 @@
+/**
+ * Pure decision for the poller's idle gate — "should this tick skip the network?"
+ *
+ * The gate exists to spare the shared `gh` rate-limit budget while nobody is
+ * looking at the dashboard. But desktop notifications exist precisely to alert
+ * the user *while* the window isn't in front of them — so a hidden/minimized
+ * window used to pause polling exactly when the notifier was supposed to be the
+ * user's eyes. Net effect: notifications only ever fired on the `wake()` path
+ * (system resume/unlock), which bypasses the gate.
+ *
+ * The fix: when a notification could actually fire, a hidden window alone no
+ * longer pauses polling. Budget is still bounded by the poller's per-host
+ * spacing, the cold-host floor, the no-change backoff and the cheap REST
+ * `/notifications` detector that gates the expensive GraphQL hydrate. A truly
+ * asleep machine (`systemSuspended`) and a genuinely-away user
+ * (`systemIdleSeconds` past the threshold) still pause regardless — those aren't
+ * "the user is relying on notifications", they're "there is no user".
+ *
+ * "Could actually fire" is deliberately stricter than the master
+ * `notifications.enabled` toggle — see `notificationsActionable` below.
+ *
+ * ## Scope bound (intentional, not a gap)
+ *
+ * `systemIdleSeconds` reads *input* idle time, so the carve-out only keeps
+ * notifications flowing while the machine sees keyboard/mouse activity. Sit in a
+ * meeting or watch a second monitor without touching this machine and, after
+ * `IDLE_PAUSE_SECONDS`, the away-user branch pauses polling regardless of
+ * notifications — from then until the next `wake()` (resume/unlock/focus) the
+ * pre-fix behaviour returns. The benefit is therefore bounded to the first
+ * 5 minutes of input-idle after the window is hidden.
+ *
+ * This is deliberate and load-bearing, not an oversight: the same branch is the
+ * only thing that stops a minimized window with notifications on from polling
+ * *all night* after the user has actually left. Removing or widening the ceiling
+ * for the actionable case (so a meeting stays covered) would reopen that
+ * overnight budget hole. The 5-minute input-idle proxy is the accepted line
+ * between "present but not typing" and "gone"; a finer distinction
+ * (lock-screen / screensaver state) is a larger change left out of scope.
+ *
+ * ## Budget cost of the carve-out (quantified)
+ *
+ * While the window is hidden, notifications are actionable and the user is
+ * active at the machine, polling runs at the poller's normal cadence rather than
+ * pausing. That is not free, but it is bounded: the expensive GraphQL hydrate is
+ * floored per host (`EXPENSIVE_FLOOR_MS`, 5 min for github.com) and gated behind
+ * the cheap REST `/notifications` probe, so the worst case is ~12 hydrates/hour
+ * (~420–1200 of the 5000 points/hour GraphQL budget the poller documents) plus
+ * ~60 REST probes/hour on the separate `core` budget — where it was zero while
+ * minimized before. That headroom is why no tiered "poll slower while hidden"
+ * interval, backoff, or budget telemetry was added here: for a single-user
+ * desktop app on one identity's token the extra observability would cost more
+ * complexity than the bounded spend justifies. Revisit if the floors change or
+ * the app ever shares a token more aggressively.
+ *
+ * Electron-free so it unit-tests in plain Node, exactly like `notify.ts` — the
+ * host (`main.ts`) reads the live window / powerMonitor / settings state and
+ * feeds it in.
+ */
+
+/** Pause polling once the user has been inactive at the machine this long. */
+export const IDLE_PAUSE_SECONDS = 300;
+
+export interface IdleGateInputs {
+  /** `powerMonitor` 'suspend' latched — the machine is asleep. */
+  systemSuspended: boolean;
+  /**
+   * A window exists and is usable. No window yet (startup / dock activate)
+   * counts as active so the very first fetch runs.
+   */
+  hasWindow: boolean;
+  /** The window is minimized or otherwise not visible to the user. */
+  windowHidden: boolean;
+  /**
+   * Reads seconds since the last user input (`powerMonitor.getSystemIdleTime`),
+   * or `null` when the platform can't report it — treated as "active".
+   *
+   * A thunk, not a value: it is the only costly input here (a native query), and
+   * the cheap suspend / no-window / hidden branches must be able to decide
+   * without paying for it. Called at most once, and only when those branches
+   * haven't already answered.
+   */
+  systemIdleSeconds: () => number | null;
+  /**
+   * Reads whether a notification could actually reach this user — from
+   * `hasDeliverableNotifications` in `notify.ts`, not the raw
+   * `notifications.enabled` toggle. When true, a hidden window does not pause
+   * polling, because otherwise the notifier can never see a transition.
+   *
+   * The distinction matters: `enabled` can be on with every event type or both
+   * delivery channels off, in which case no toast can ever fire and keeping the
+   * poll loop alive would spend the shared GraphQL budget for nothing.
+   *
+   * A thunk for the same reason as `systemIdleSeconds` — it ends in a native
+   * `Notification.isSupported()` call, so the suspend / no-window branches must
+   * be able to decide without it. Read at most once, only in the hidden branch.
+   */
+  notificationsActionable: () => boolean;
+}
+
+/**
+ * Whether a poll tick should skip the network. See the module doc for the
+ * budget-vs-notifications tradeoff this encodes.
+ *
+ * Branch order is load-bearing, not cosmetic: the free checks all run before
+ * either costly input is read, so a suspended machine or a machine with no window
+ * yet costs nothing to decide.
+ */
+export function isPollingPaused(inputs: IdleGateInputs): boolean {
+  // Asleep: nothing to poll for, and the resume `wake()` will force a fetch.
+  if (inputs.systemSuspended) return true;
+  // No window: startup / activate — let the first fetch run.
+  if (!inputs.hasWindow) return false;
+  // Hidden window pauses ONLY when no notification could reach the user anyway;
+  // when one could, we keep polling so the transition surfaces.
+  if (inputs.windowHidden && !inputs.notificationsActionable()) return true;
+  // Genuinely-away user pauses either way — "there is no user", not "the user
+  // is relying on notifications". Only here is the native query worth paying for.
+  const idleSeconds = inputs.systemIdleSeconds();
+  if (idleSeconds !== null && idleSeconds > IDLE_PAUSE_SECONDS) return true;
+  return false;
+}
