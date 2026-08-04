@@ -2070,6 +2070,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.strictEqual(combos, 128); // 2*2*2*8*2 — the whole space, not a sample
   });
 
+  // --- pickDeliveryChannel: pin the shared rule directly -----------------------
+  // The parity test above only proves the two callers AGREE; since both now route
+  // through pickDeliveryChannel, a wrong rule in the helper moves them in lockstep
+  // and parity stays green by construction. So the rule itself — native wins when
+  // wanted AND OS-supported, else sound, else nothing — needs its own truth table.
+  test("pickDeliveryChannel: native wins only when wanted AND supported", () => {
+    const ch = (native, sound, nativeSupported) =>
+      notify.pickDeliveryChannel({ enabled: true, native, sound, events: {} }, nativeSupported);
+    // native requested + OS supports it -> native, regardless of sound.
+    assert.strictEqual(ch(true, false, true), "native");
+    assert.strictEqual(ch(true, true, true), "native");
+    // native requested but OS can't -> fall back to sound if wanted, else null.
+    assert.strictEqual(ch(true, true, false), "sound");
+    assert.strictEqual(ch(true, false, false), null);
+    // native not wanted -> sound if wanted, else null (support flag irrelevant).
+    assert.strictEqual(ch(false, true, true), "sound");
+    assert.strictEqual(ch(false, true, false), "sound");
+    assert.strictEqual(ch(false, false, true), null);
+    assert.strictEqual(ch(false, false, false), null);
+  });
+
   // --- poller threads its already-loaded settings into the idle gate -----------
   // The isPaused widening from `() => boolean` to `(settings) => boolean` is
   // backward-compatible, so nothing else would fail if tick() passed undefined or

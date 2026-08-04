@@ -19,6 +19,39 @@
  * "Could actually fire" is deliberately stricter than the master
  * `notifications.enabled` toggle — see `notificationsActionable` below.
  *
+ * ## Scope bound (intentional, not a gap)
+ *
+ * `systemIdleSeconds` reads *input* idle time, so the carve-out only keeps
+ * notifications flowing while the machine sees keyboard/mouse activity. Sit in a
+ * meeting or watch a second monitor without touching this machine and, after
+ * `IDLE_PAUSE_SECONDS`, the away-user branch pauses polling regardless of
+ * notifications — from then until the next `wake()` (resume/unlock/focus) the
+ * pre-fix behaviour returns. The benefit is therefore bounded to the first
+ * 5 minutes of input-idle after the window is hidden.
+ *
+ * This is deliberate and load-bearing, not an oversight: the same branch is the
+ * only thing that stops a minimized window with notifications on from polling
+ * *all night* after the user has actually left. Removing or widening the ceiling
+ * for the actionable case (so a meeting stays covered) would reopen that
+ * overnight budget hole. The 5-minute input-idle proxy is the accepted line
+ * between "present but not typing" and "gone"; a finer distinction
+ * (lock-screen / screensaver state) is a larger change left out of scope.
+ *
+ * ## Budget cost of the carve-out (quantified)
+ *
+ * While the window is hidden, notifications are actionable and the user is
+ * active at the machine, polling runs at the poller's normal cadence rather than
+ * pausing. That is not free, but it is bounded: the expensive GraphQL hydrate is
+ * floored per host (`EXPENSIVE_FLOOR_MS`, 5 min for github.com) and gated behind
+ * the cheap REST `/notifications` probe, so the worst case is ~12 hydrates/hour
+ * (~420–1200 of the 5000 points/hour GraphQL budget the poller documents) plus
+ * ~60 REST probes/hour on the separate `core` budget — where it was zero while
+ * minimized before. That headroom is why no tiered "poll slower while hidden"
+ * interval, backoff, or budget telemetry was added here: for a single-user
+ * desktop app on one identity's token the extra observability would cost more
+ * complexity than the bounded spend justifies. Revisit if the floors change or
+ * the app ever shares a token more aggressively.
+ *
  * Electron-free so it unit-tests in plain Node, exactly like `notify.ts` — the
  * host (`main.ts`) reads the live window / powerMonitor / settings state and
  * feeds it in.

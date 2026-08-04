@@ -87,6 +87,11 @@ function isDashboardPaused(settings: Settings): boolean {
   return isPollingPaused({
     systemSuspended,
     hasWindow,
+    // Verified against Electron's win32 semantics (minimize + hide-to-taskbar).
+    // The macOS equivalents — Cmd+H, moving the window to another Space, and
+    // native full-screen — are not yet manually confirmed to resolve
+    // `isMinimized()`/`isVisible()` the same way; the failure direction is safe
+    // (we'd keep polling, never miss a toast), but a macOS pass is still owed.
     windowHidden: hasWindow && (win!.isMinimized() || !win!.isVisible()),
     systemIdleSeconds: () => {
       try {
