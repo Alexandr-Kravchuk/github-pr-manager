@@ -2096,7 +2096,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // backward-compatible, so nothing else would fail if tick() passed undefined or
   // a stale object — and the gate would then read notification prefs off garbage.
   // Note: refresh() forces past the gate entirely, so this drives a plain tick.
-  await atest("Poller.tick: passes the settings it just loaded to isPaused", async () => {
+  //
+  // Beyond the argument threading, this also pins the *behavioural* contract: a
+  // gate that returns true must actually suppress the tick's side effects. The
+  // argument assertions alone would survive a condition inversion on the gate
+  // check in tick() (`!force && !skipIdleGate && isPaused?.(settings)`), which
+  // would consult the gate with the right settings yet poll anyway — so we assert
+  // no snapshot is emitted. refresh() is the only other path past the gate and it
+  // forces past it, so this plain tick is the sole test of the gate-active path.
+  await atest("Poller.tick: gate returning true parks the tick with the loaded settings", async () => {
     const loaded = {
       pollIntervalSeconds: 60,
       launchAtLogin: false,
@@ -2107,13 +2115,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     };
     let seen = "never called";
     let calls = 0;
+    const snapshots = [];
     const p = new poller.Poller({
       loadSettings: () => loaded,
       toHostConfigs: () => [],
       statePath: path.join(os.tmpdir(), "prd-poller-state-missing.json"),
       ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),
       appVersion: "test",
-      onSnapshot: () => {},
+      onSnapshot: (s) => snapshots.push(s),
       onConfigError: () => {},
       // Returning true parks the tick before any network work.
       isPaused: (s) => {
@@ -2128,6 +2137,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.strictEqual(calls, 1, "the gate should be consulted exactly once per tick");
     assert.strictEqual(seen, loaded, "isPaused must receive the very object loadSettings returned");
     assert.strictEqual(seen.notifications.enabled, true);
+    assert.strictEqual(snapshots.length, 0, "a paused tick must not emit a snapshot — the gate must suppress, not just be consulted");
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);
