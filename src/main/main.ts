@@ -552,6 +552,20 @@ function registerIpc(): void {
   });
 }
 
+// Enforce single instance: if another copy is already running, bring it to
+// the foreground and quit this one. Without this guard the OS login-item and
+// any accidental double-launch each spin up their own window.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    // A second launch attempt arrived — surface the existing window instead of
+    // opening another. focusMainWindow is safe when mainWindow is null.
+    focusMainWindow();
+  });
+}
+
 void app.whenReady().then(() => {
   // Must run before any `gh` invocation: a Finder/.app launch inherits a minimal
   // PATH without Homebrew, so without this `gh` is not found and token
