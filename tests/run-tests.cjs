@@ -309,6 +309,13 @@ test("acquireSingleInstanceLock: the registered handler routes through handleSec
 // cheap, fast first line of defense; the Electron-mock integration test below is
 // what actually verifies the runtime wiring. Keep the gate body free of
 // literals bearing those characters, or this guard needs hardening.
+//
+// Intentionally kept as defense-in-depth alongside the behavioral mock test: the
+// mock test is the primary, refactor-resilient check, but this near-free source
+// scan catches a stray registration pasted outside the gate at edit time — before
+// a build — and reads as executable documentation of the invariant next to
+// main.ts. If it ever becomes a maintenance drag, drop it; the mock test stands
+// alone.
 test("main gates startup + window-all-closed on the acquired single-instance lock", () => {
   const raw = require("node:fs").readFileSync(
     path.join(__dirname, "../src/main/main.ts"),

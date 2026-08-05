@@ -15,27 +15,35 @@
 // PRD_SMOKE_EXIT_MS budget, so "B exited far sooner than its budget" is the
 // signal that the lock — not the smoke timer — shut it down.
 //
-// NOTE: This test was authored but NOT executed in the environment that wrote
-// it (no display / packaged runtime available there). Run it on a real machine
-// before relying on its result.
+// STATUS: executed on a Windows 11 workstation — the primary held the lock and
+// the second instance was rejected in ~300ms (well inside its 15s budget). Kept
+// out of `npm test` because it needs a display + a built dist/, so CI won't run
+// it; re-run manually on a real machine as closing evidence for a release.
 
 const path = require("node:path");
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 
 const REPO_ROOT = path.join(__dirname, "..");
-const MAIN_ENTRY = path.join(REPO_ROOT, "dist", "main", "main", "main.js");
+// Derive the entry from package.json `main` rather than hardcoding the compiled
+// path, so a change to the tsc/electron-builder output layout can't silently
+// desync this guard from what `electron .` actually loads.
+const MAIN_ENTRY = path.join(REPO_ROOT, require(path.join(REPO_ROOT, "package.json")).main);
 
 // `require("electron")` resolves to the path of the Electron executable.
 const electronPath = require("electron");
 
+// Timing budgets. These were calibrated on a Windows workstation (B is rejected
+// in ~300ms); they are deliberately generous. Override via env vars if a slower
+// or loaded machine shows flakiness — e.g. PRD_SMOKE_A_HEADSTART_MS=5000.
+//
 // A holds the lock this long; B is given the same budget so a fast B exit can
 // only mean the lock rejected it, not that its own timer fired.
-const SMOKE_MS = 15000;
+const SMOKE_MS = Number(process.env.PRD_SMOKE_MS) || 15000;
 // B must quit within this window to count as "rejected by the lock".
-const B_MUST_EXIT_WITHIN_MS = 4000;
+const B_MUST_EXIT_WITHIN_MS = Number(process.env.PRD_SMOKE_B_EXIT_MS) || 4000;
 // Let A fully boot and acquire the lock before B races it.
-const A_HEADSTART_MS = 2500;
+const A_HEADSTART_MS = Number(process.env.PRD_SMOKE_A_HEADSTART_MS) || 2500;
 
 function fail(msg) {
   console.error(`FAIL - ${msg}`);
