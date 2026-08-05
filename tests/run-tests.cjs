@@ -1206,6 +1206,57 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.strictEqual(focused, 1, "focus fires once the first window is created");
   });
 
+  await atest("createWindowReadyGate: stays pending until marked, then resolves (idempotent)", async () => {
+    const gate = singleInstance.createWindowReadyGate();
+    let resolved = false;
+    void gate.whenWindowReady().then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    assert.strictEqual(resolved, false, "whenWindowReady is pending before markWindowReady");
+    gate.markWindowReady();
+    gate.markWindowReady(); // second call must be a harmless no-op
+    await gate.whenWindowReady();
+    await Promise.resolve();
+    assert.strictEqual(resolved, true, "whenWindowReady resolves after markWindowReady");
+  });
+
+  await atest("end-to-end: second-instance before the window -> focus fires after createWindow signals the gate", async () => {
+    // Drive the real production wiring — acquireSingleInstanceLock + the deferred
+    // handleSecondInstance branch + the window-ready gate — exactly as main.ts
+    // composes them (this is createWindowReadyGate(), not a hand-rolled promise).
+    // Asserts focus ACTUALLY fires after the window appears, closing AK's gap that
+    // prior coverage only checked "doesn't throw".
+    const gate = singleInstance.createWindowReadyGate();
+    let win = null; // stands in for main.ts's live `mainWindow`
+    let focused = 0;
+    let handler = null;
+    singleInstance.acquireSingleInstanceLock({
+      requestSingleInstanceLock: () => true,
+      quit: () => {},
+      onSecondInstance: (h) => {
+        handler = h;
+      },
+      getMainWindow: () => win, // live reference, like `() => mainWindow`
+      focusMainWindow: () => {
+        if (win) focused++; // null-guarded like the real focusMainWindow
+      },
+      whenWindowReady: gate.whenWindowReady,
+    });
+    // A second launch arrives before the first window exists.
+    handler();
+    await Promise.resolve();
+    assert.strictEqual(focused, 0, "focus must not fire while no window exists");
+    // createWindow() runs: assign the window, THEN signal the gate (main.ts order).
+    // If the gate were marked before the window was assigned, focus would no-op —
+    // this ordering is exactly what the window-ready signal guarantees.
+    win = {};
+    gate.markWindowReady();
+    await gate.whenWindowReady();
+    await Promise.resolve();
+    assert.strictEqual(focused, 1, "focus fires once the window exists and the gate is marked");
+  });
+
   await atest("applyIgnored: flags ignored PRs, leaves the rest false", () =>
     withTempStore(async (file) => {
       await ignored.setIgnored("PR_1", true, file);

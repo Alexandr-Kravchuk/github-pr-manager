@@ -68,3 +68,26 @@ export function acquireSingleInstanceLock(deps: SingleInstanceDeps): boolean {
   );
   return true;
 }
+
+/** A one-shot "the first window now exists" signal for {@link SingleInstanceDeps.whenWindowReady}. */
+export interface WindowReadyGate {
+  /** Resolves once {@link markWindowReady} has been called at least once. */
+  whenWindowReady: () => Promise<void>;
+  /** Call when the first window is created; resolving again is a harmless no-op. */
+  markWindowReady: () => void;
+}
+
+/**
+ * Create the window-ready gate wired into `main.ts`: `createWindow()` calls
+ * `markWindowReady()` once `mainWindow` is assigned, and the second-instance
+ * deferred focus awaits `whenWindowReady()`. Extracted so the full deferred-focus
+ * timeline (arrive before the window exists → window appears → focus fires) can be
+ * driven against real production wiring in a unit test, not a hand-rolled promise.
+ */
+export function createWindowReadyGate(): WindowReadyGate {
+  let markWindowReady!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    markWindowReady = resolve;
+  });
+  return { whenWindowReady: () => ready, markWindowReady };
+}

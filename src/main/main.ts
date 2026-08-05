@@ -34,7 +34,7 @@ import {
 } from "./ipc-validation";
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
-import { acquireSingleInstanceLock } from "./single-instance";
+import { acquireSingleInstanceLock, createWindowReadyGate } from "./single-instance";
 import {
   acknowledgeVersion,
   ignoredStatePath,
@@ -49,14 +49,12 @@ let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
 let systemSuspended = false;
 
-// Resolves the first time createWindow() assigns mainWindow. The second-instance
+// Signals the first time createWindow() assigns mainWindow. The second-instance
 // handler's deferred focus waits on THIS — a window actually existing — rather
 // than app.whenReady(), because the two are distinct events: whenReady can
-// resolve while mainWindow is still null. See single-instance.ts.
-let signalFirstWindowReady!: () => void;
-const firstWindowReady = new Promise<void>((resolve) => {
-  signalFirstWindowReady = resolve;
-});
+// resolve while mainWindow is still null. See single-instance.ts (the gate is
+// factored out so the full deferred-focus timeline is unit-testable).
+const windowGate = createWindowReadyGate();
 
 /**
  * Previous PR set seen by the notifier — for transition diffing. Null until the
@@ -376,7 +374,7 @@ function createWindow(): void {
 
   // A window now exists: release any second-instance focus that was deferred
   // because it arrived before the first window. Resolving again is a no-op.
-  signalFirstWindowReady();
+  windowGate.markWindowReady();
 
   // Returning to the dashboard (focus / un-minimize / re-show) should refresh
   // immediately rather than wait out the parked idle cadence.
@@ -680,7 +678,7 @@ const isPrimaryInstance = acquireSingleInstanceLock({
   },
   getMainWindow: () => mainWindow,
   focusMainWindow,
-  whenWindowReady: () => firstWindowReady,
+  whenWindowReady: windowGate.whenWindowReady,
 });
 
 // All startup and window lifecycle stays inside the primary-instance branch: a
