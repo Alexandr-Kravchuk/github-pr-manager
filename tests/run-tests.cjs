@@ -206,6 +206,32 @@ for (const mod of ["notify.js", "pr-filter.js"]) {
   });
 }
 
+// --- single-instance lock is requested before whenReady ----------------------
+// requestSingleInstanceLock() only quits the second instance early if it runs
+// before the app is ready. If a refactor moved the call inside the whenReady
+// callback, Electron would still resolve the lock but far too late — the second
+// instance would have already run startup, so the double-launch guard silently
+// degrades with no error and no failing runtime test. Encode the ordering the
+// same way as the node:-builtin and infinite-animation invariants: a source
+// scan that fails loudly. Comments/strings aren't stripped here on purpose —
+// the real calls are the earliest occurrences, and a mention in a comment can
+// only make the guard stricter, never let a mis-ordered call through.
+test("main requests the single-instance lock before whenReady", () => {
+  const src = require("node:fs").readFileSync(
+    path.join(__dirname, "../src/main/main.ts"),
+    "utf8",
+  );
+  const lockAt = src.indexOf("requestSingleInstanceLock(");
+  const readyAt = src.indexOf("app.whenReady(");
+  assert.ok(lockAt !== -1, "expected a requestSingleInstanceLock() call in main.ts");
+  assert.ok(readyAt !== -1, "expected an app.whenReady() call in main.ts");
+  assert.ok(
+    lockAt < readyAt,
+    "requestSingleInstanceLock() must be called before app.whenReady(), " +
+      "otherwise the second instance runs startup before the lock quits it",
+  );
+});
+
 // --- defaultSettings ---------------------------------------------------------
 test("defaultSettings: empty + 60s + toggles", () => {
   const d = cfg.defaultSettings();
