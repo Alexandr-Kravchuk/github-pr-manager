@@ -34,6 +34,7 @@ import {
 } from "./ipc-validation";
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
+import { acquireSingleInstanceLock, createWindowReadyGate } from "./single-instance";
 import {
   acknowledgeVersion,
   ignoredStatePath,
@@ -47,6 +48,13 @@ import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./upd
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
 let systemSuspended = false;
+
+// Signals the first time createWindow() assigns mainWindow. The second-instance
+// handler's deferred focus waits on THIS — a window actually existing — rather
+// than app.whenReady(), because the two are distinct events: whenReady can
+// resolve while mainWindow is still null. See single-instance.ts (the gate is
+// factored out so the full deferred-focus timeline is unit-testable).
+const windowGate = createWindowReadyGate();
 
 /**
  * Previous PR set seen by the notifier — for transition diffing. Null until the
@@ -364,6 +372,10 @@ function createWindow(): void {
     mainWindow = null;
   });
 
+  // A window now exists: release any second-instance focus that was deferred
+  // because it arrived before the first window. Resolving again is a no-op.
+  windowGate.markWindowReady();
+
   // Returning to the dashboard (focus / un-minimize / re-show) should refresh
   // immediately rather than wait out the parked idle cadence.
   const wakePoller = (): void => void poller?.wake();
@@ -552,7 +564,11 @@ function registerIpc(): void {
   });
 }
 
-void app.whenReady().then(() => {
+// The primary instance's startup, run once the app is ready. Extracted from the
+// whenReady callback (a) to keep the lock-acquisition branch below shallow and
+// readable, and (b) so the single-instance decision logic lives in the
+// unit-tested single-instance.ts rather than an inline closure.
+function startApp(): void {
   // Must run before any `gh` invocation: a Finder/.app launch inherits a minimal
   // PATH without Homebrew, so without this `gh` is not found and token
   // resolution fails with a misleading "not signed in".
@@ -646,10 +662,38 @@ void app.whenReady().then(() => {
       createWindow();
     }
   });
+}
+
+// Enforce single instance: if another copy already holds the OS lock, quit this
+// one; otherwise register the second-instance refocus and proceed with startup.
+// Without this guard the OS login-item and any accidental double-launch each
+// spin up their own window. The decision logic is unit-tested in
+// single-instance.ts, and this wiring is covered by a fake-electron test that
+// requires the COMPILED dist/main/main/main.js (see the "main.js wiring" tests in
+// tests/run-tests.cjs). The deps stay injectable callbacks because importing this
+// module runs the real lock request at import time — so tests drive the compiled
+// output with electron mocked rather than importing the TS source directly.
+const isPrimaryInstance = acquireSingleInstanceLock({
+  requestSingleInstanceLock: () => app.requestSingleInstanceLock(),
+  quit: () => app.quit(),
+  onSecondInstance: (handler) => {
+    app.on("second-instance", handler);
+  },
+  getMainWindow: () => mainWindow,
+  focusMainWindow,
+  whenWindowReady: windowGate.whenWindowReady,
 });
 
-// Plain window app (per product decision): closing the last window quits.
-app.on("window-all-closed", () => {
-  poller?.stop();
-  app.quit();
-});
+// All startup and window lifecycle stays inside the primary-instance branch: a
+// non-primary instance has already been told to quit and must never register
+// `ready` or `window-all-closed` handlers. Gating on the boolean makes that
+// exclusion structural, independent of Electron's internal ready/quit timing.
+if (isPrimaryInstance) {
+  void app.whenReady().then(startApp);
+
+  // Plain window app (per product decision): closing the last window quits.
+  app.on("window-all-closed", () => {
+    poller?.stop();
+    app.quit();
+  });
+}

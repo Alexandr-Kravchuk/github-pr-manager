@@ -12,6 +12,7 @@
     "build": "npm run build:main && npm run build:renderer",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "test": "npm run build:main && node tests/run-tests.cjs",
+    "test:double-launch": "node tests/double-launch.smoke.cjs",
     "dev": "node scripts/dev.mjs",
     "dev:mock": "node scripts/dev.mjs --mock",
     "start": "npm run build && electron .",

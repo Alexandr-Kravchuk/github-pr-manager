@@ -19,6 +19,7 @@ const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
 const jira = require(path.join(__dirname, "../dist/main/shared/jira.js"));
 const jiraHealth = require(path.join(__dirname, "../dist/main/shared/jira-health.js"));
 const prFilter = require(path.join(__dirname, "../dist/main/shared/pr-filter.js"));
+const singleInstance = require(path.join(__dirname, "../dist/main/main/single-instance.js"));
 
 let passed = 0;
 let failed = 0;
@@ -204,6 +205,265 @@ for (const mod of ["notify.js", "pr-filter.js"]) {
       `infinite animations burn CPU whether or not the window is visible, found at: ${hits.join(", ")}`,
     );
   });
+}
+
+// --- single-instance decision logic (pure, unit-tested) ----------------------
+// The lock/second-instance branches live in single-instance.ts precisely so they
+// can run here without booting Electron (main.ts runs the real lock request at
+// import time and can't be required from a test). These cover the behavior the
+// PR exists to add: quit on a lost lock, focus synchronously when a window is
+// up, defer the focus when it isn't. The deferred (async) case is exercised in
+// the async block below.
+test("acquireSingleInstanceLock: lost lock -> quit, returns false, no handler registered", () => {
+  let quits = 0;
+  let registered = 0;
+  const primary = singleInstance.acquireSingleInstanceLock({
+    requestSingleInstanceLock: () => false,
+    quit: () => quits++,
+    onSecondInstance: () => registered++,
+    getMainWindow: () => null,
+    focusMainWindow: () => {},
+    whenWindowReady: () => Promise.resolve(),
+  });
+  assert.strictEqual(primary, false, "a non-primary instance reports false");
+  assert.strictEqual(quits, 1, "the losing instance quits exactly once");
+  assert.strictEqual(registered, 0, "the losing instance registers no second-instance handler");
+});
+
+test("acquireSingleInstanceLock: won lock -> no quit, returns true, registers handler", () => {
+  let quits = 0;
+  let handler = null;
+  const primary = singleInstance.acquireSingleInstanceLock({
+    requestSingleInstanceLock: () => true,
+    quit: () => quits++,
+    onSecondInstance: (h) => {
+      handler = h;
+    },
+    getMainWindow: () => null,
+    focusMainWindow: () => {},
+    whenWindowReady: () => Promise.resolve(),
+  });
+  assert.strictEqual(primary, true, "the primary instance reports true");
+  assert.strictEqual(quits, 0, "the primary instance does not quit");
+  assert.strictEqual(typeof handler, "function", "a second-instance handler is registered");
+});
+
+test("handleSecondInstance: window present -> focuses synchronously, ignores the window-ready signal", () => {
+  let focused = 0;
+  let signalConsulted = 0;
+  singleInstance.handleSecondInstance(
+    {}, // a truthy window stand-in
+    () => focused++,
+    () => {
+      signalConsulted++;
+      return Promise.resolve();
+    },
+  );
+  assert.strictEqual(focused, 1, "an existing window is focused synchronously");
+  assert.strictEqual(
+    signalConsulted,
+    0,
+    "the window-ready signal is not consulted when a window already exists",
+  );
+});
+
+test("acquireSingleInstanceLock: the registered handler routes through handleSecondInstance", () => {
+  let focused = 0;
+  let handler = null;
+  singleInstance.acquireSingleInstanceLock({
+    requestSingleInstanceLock: () => true,
+    quit: () => {},
+    onSecondInstance: (h) => {
+      handler = h;
+    },
+    getMainWindow: () => ({}), // truthy window
+    focusMainWindow: () => focused++,
+    whenWindowReady: () => Promise.resolve(),
+  });
+  handler();
+  assert.strictEqual(focused, 1, "invoking the registered handler focuses the existing window");
+});
+
+// --- single-instance startup is gated on the acquired lock -------------------
+// The double-launch fix hinges on one wiring invariant in main.ts: the real
+// startup (`app.whenReady().then(startApp)`) and the `window-all-closed`
+// registration run ONLY in the primary instance — i.e. lexically inside the
+// `if (isPrimaryInstance) { ... }` gate. The branch decisions are unit-tested
+// above; this scan guards the main.ts wiring those units can't see. If a refactor
+// moved either registration out of the gate (reintroducing the double-launch
+// bug), Electron would register them on every instance again with no error and
+// no failing runtime test. The previous version of this guard used
+// `indexOf("app.whenReady(")`, which — once the deferred-focus call was added —
+// matched that call instead of the startup one and silently stopped protecting
+// anything; brace-matching the gate avoids relying on occurrence order.
+// Comments are blanked first (offset-preserving), mirroring the animation guard:
+// `window-all-closed` and `isPrimaryInstance` appear in nearby prose, and a raw
+// indexOf could latch onto the comment rather than the code.
+//
+// Known limitation (see the behavioral test below, which is the authoritative
+// check): this is a source-SHAPE scan, not a runtime one. The comment blanking is
+// a naive regex — it does NOT understand string or template literals, so a string
+// containing `//`, `/*`, or a stray `{`/`}` inside the gate body could corrupt the
+// brace match. It also can't see a semantically-equivalent refactor that drops the
+// `if (isPrimaryInstance)` gate entirely (e.g. an early `return`). It survives as a
+// cheap, fast first line of defense; the Electron-mock integration test below is
+// what actually verifies the runtime wiring. Keep the gate body free of
+// literals bearing those characters, or this guard needs hardening.
+//
+// Intentionally kept as defense-in-depth alongside the behavioral mock test: the
+// mock test is the primary, refactor-resilient check, but this near-free source
+// scan catches a stray registration pasted outside the gate at edit time — before
+// a build — and reads as executable documentation of the invariant next to
+// main.ts. If it ever becomes a maintenance drag, drop it; the mock test stands
+// alone.
+//
+// TRIAGE NOTE: if this test fails, do NOT assume the invariant is broken — first
+// check the authoritative behavioral test below ("main.js wiring: won lock ->
+// registers second-instance + window-all-closed"). If that one is green, this
+// failure is almost certainly a false alarm from a benign reshape (a string
+// literal or reformat this source scan can't parse), not a real regression.
+test("main gates startup + window-all-closed on the acquired single-instance lock", () => {
+  const raw = require("node:fs").readFileSync(
+    path.join(__dirname, "../src/main/main.ts"),
+    "utf8",
+  );
+  // Blank `//` and `/* */` comments, preserving byte offsets (spaces for text,
+  // newlines kept) so brace-matching positions still line up with real source.
+  const src = raw
+    .replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length))
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+
+  const lockAt = src.indexOf("acquireSingleInstanceLock(");
+  assert.ok(lockAt !== -1, "expected acquireSingleInstanceLock() to be called in main.ts");
+
+  const gateAt = src.indexOf("if (isPrimaryInstance)", lockAt);
+  assert.ok(gateAt !== -1, "expected an `if (isPrimaryInstance)` gate after the lock call");
+  assert.ok(lockAt < gateAt, "the lock must be acquired before the primary-instance gate");
+
+  const open = src.indexOf("{", gateAt);
+  assert.ok(open !== -1, "malformed primary-instance gate (no `{`)");
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") {
+      depth--;
+      if (depth === 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  assert.ok(close !== -1, "could not brace-match the primary-instance gate body");
+
+  const inside = (needle) => {
+    const at = src.indexOf(needle);
+    return at !== -1 && at > open && at < close;
+  };
+  assert.ok(
+    inside("app.whenReady().then(startApp)"),
+    "startup (app.whenReady().then(startApp)) must run only inside the primary-instance gate",
+  );
+  assert.ok(
+    inside('app.on("window-all-closed"'),
+    "window-all-closed must be registered only inside the primary-instance gate",
+  );
+});
+
+// --- single-instance wiring, verified against a mocked Electron --------------
+// The pure decision logic is unit-tested above and the source shape is scanned
+// by the guard above; this test closes the gap between them by requiring the
+// COMPILED main.js with a fake `electron` injected into the module cache, so the
+// real `acquireSingleInstanceLock({...})` deps object in main.ts is exercised.
+// `app.whenReady()` is stubbed with a never-resolving promise, so `startApp`
+// (poller, window, auto-updater) never runs — only the bootstrap wiring does.
+// This is a behavioral check: unlike the text guard, a refactor that drops the
+// lock gate would fail here regardless of how the source is shaped.
+{
+  const Module = require("node:module");
+  const mainJs = path.join(__dirname, "../dist/main/main/main.js");
+  const elPath = require.resolve("electron", { paths: [path.dirname(mainJs)] });
+  // Everything already cached before we touch main.js — the test file's own
+  // module graph. We only ever evict what requiring main.js adds, never these.
+  const preloaded = new Set(Object.keys(require.cache));
+
+  // Boot main.js once with a fake electron and return what the wiring did.
+  const bootMain = (lockGranted) => {
+    for (const k of Object.keys(require.cache)) {
+      if (!preloaded.has(k)) delete require.cache[k]; // fresh main.js graph each boot
+    }
+    const events = [];
+    let secondInstanceHandler = null;
+    let quits = 0;
+    const fakeApp = {
+      requestSingleInstanceLock: () => lockGranted,
+      quit: () => quits++,
+      on: (event, cb) => {
+        events.push(event);
+        if (event === "second-instance") secondInstanceHandler = cb;
+      },
+      whenReady: () => new Promise(() => {}), // never resolves: startApp stays parked
+      getVersion: () => "0.0.0-test",
+      getPath: () => os.tmpdir(),
+      setAppUserModelId: () => {},
+      isReady: () => false,
+    };
+    class FakeBrowserWindow {
+      static getAllWindows() {
+        return [];
+      }
+      on() {}
+    }
+    const fakeElectron = {
+      app: fakeApp,
+      BrowserWindow: FakeBrowserWindow,
+      nativeTheme: { on() {} },
+      powerMonitor: { on() {} },
+      ipcMain: { handle() {}, on() {} },
+      session: {},
+      shell: {},
+      clipboard: {},
+      Notification: class {},
+      nativeImage: { createFromPath: () => ({}) },
+    };
+    require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: fakeElectron };
+    require(mainJs);
+    return { events, secondInstanceHandler, quits };
+  };
+
+  test("main.js wiring: lost lock -> quits, registers no ready/window handlers", () => {
+    const r = bootMain(false);
+    assert.strictEqual(r.quits, 1, "the non-primary instance quits exactly once");
+    assert.ok(
+      !r.events.includes("second-instance"),
+      "a non-primary instance must not register a second-instance handler",
+    );
+    assert.ok(
+      !r.events.includes("window-all-closed"),
+      "a non-primary instance must not register window-all-closed",
+    );
+  });
+
+  test("main.js wiring: won lock -> no quit, registers second-instance + window-all-closed", () => {
+    const r = bootMain(true);
+    assert.strictEqual(r.quits, 0, "the primary instance does not quit");
+    assert.ok(r.events.includes("second-instance"), "the primary registers a second-instance handler");
+    assert.ok(r.events.includes("window-all-closed"), "the primary registers window-all-closed");
+    assert.strictEqual(
+      typeof r.secondInstanceHandler,
+      "function",
+      "the registered second-instance handler is callable",
+    );
+    // Exercise the wired handler: no window yet (startApp never ran), so it must
+    // take the deferred path without throwing rather than focusing nothing.
+    assert.doesNotThrow(() => r.secondInstanceHandler(), "the wired handler runs cleanly with no window");
+  });
+
+  // Restore the cache to its pre-test shape so later tests see a clean graph.
+  for (const k of Object.keys(require.cache)) {
+    if (!preloaded.has(k)) delete require.cache[k];
+  }
+  delete require.cache[elPath];
 }
 
 // --- defaultSettings ---------------------------------------------------------
@@ -941,6 +1201,75 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 });
 
 (async () => {
+  await atest("handleSecondInstance: no window -> defers focus until a window is created", async () => {
+    let focused = 0;
+    let signalWindowReady;
+    const windowReady = new Promise((r) => {
+      signalWindowReady = r;
+    });
+    // A second launch arrives before the first window exists.
+    singleInstance.handleSecondInstance(null, () => focused++, () => windowReady);
+    assert.strictEqual(focused, 0, "focus must not fire while no window exists yet");
+    // The window is created — the deferred raise must now fire. This is the case
+    // AK flagged: keying off window-creation (not app.whenReady) guarantees the
+    // window actually exists when focusMainWindow runs.
+    signalWindowReady();
+    await windowReady;
+    await Promise.resolve(); // flush the .then microtask queued on the signal
+    assert.strictEqual(focused, 1, "focus fires once the first window is created");
+  });
+
+  await atest("createWindowReadyGate: stays pending until marked, then resolves (idempotent)", async () => {
+    const gate = singleInstance.createWindowReadyGate();
+    let resolved = false;
+    void gate.whenWindowReady().then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    assert.strictEqual(resolved, false, "whenWindowReady is pending before markWindowReady");
+    gate.markWindowReady();
+    gate.markWindowReady(); // second call must be a harmless no-op
+    await gate.whenWindowReady();
+    await Promise.resolve();
+    assert.strictEqual(resolved, true, "whenWindowReady resolves after markWindowReady");
+  });
+
+  await atest("end-to-end: second-instance before the window -> focus fires after createWindow signals the gate", async () => {
+    // Drive the real production wiring — acquireSingleInstanceLock + the deferred
+    // handleSecondInstance branch + the window-ready gate — exactly as main.ts
+    // composes them (this is createWindowReadyGate(), not a hand-rolled promise).
+    // Asserts focus ACTUALLY fires after the window appears, closing AK's gap that
+    // prior coverage only checked "doesn't throw".
+    const gate = singleInstance.createWindowReadyGate();
+    let win = null; // stands in for main.ts's live `mainWindow`
+    let focused = 0;
+    let handler = null;
+    singleInstance.acquireSingleInstanceLock({
+      requestSingleInstanceLock: () => true,
+      quit: () => {},
+      onSecondInstance: (h) => {
+        handler = h;
+      },
+      getMainWindow: () => win, // live reference, like `() => mainWindow`
+      focusMainWindow: () => {
+        if (win) focused++; // null-guarded like the real focusMainWindow
+      },
+      whenWindowReady: gate.whenWindowReady,
+    });
+    // A second launch arrives before the first window exists.
+    handler();
+    await Promise.resolve();
+    assert.strictEqual(focused, 0, "focus must not fire while no window exists");
+    // createWindow() runs: assign the window, THEN signal the gate (main.ts order).
+    // If the gate were marked before the window was assigned, focus would no-op —
+    // this ordering is exactly what the window-ready signal guarantees.
+    win = {};
+    gate.markWindowReady();
+    await gate.whenWindowReady();
+    await Promise.resolve();
+    assert.strictEqual(focused, 1, "focus fires once the window exists and the gate is marked");
+  });
+
   await atest("applyIgnored: flags ignored PRs, leaves the rest false", () =>
     withTempStore(async (file) => {
       await ignored.setIgnored("PR_1", true, file);
