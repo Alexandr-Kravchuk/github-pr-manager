@@ -34,6 +34,7 @@ import {
 } from "./ipc-validation";
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
+import { acquireSingleInstanceLock } from "./single-instance";
 import {
   acknowledgeVersion,
   ignoredStatePath,
@@ -552,125 +553,129 @@ function registerIpc(): void {
   });
 }
 
-// Enforce single instance: if another copy is already running, bring it to
-// the foreground and quit this one. Without this guard the OS login-item and
-// any accidental double-launch each spin up their own window.
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
-if (!gotSingleInstanceLock) {
-  app.quit();
-} else {
-  app.on("second-instance", () => {
-    // A second launch attempt arrived — surface the existing window instead of
-    // opening another. If it lands in the gap between acquiring the lock and
-    // createWindow(), mainWindow is still null; defer the raise to whenReady so
-    // the focus-to-front intent isn't silently dropped.
-    if (mainWindow) {
-      focusMainWindow();
-    } else {
-      void app.whenReady().then(() => focusMainWindow());
+// The primary instance's startup, run once the app is ready. Extracted from the
+// whenReady callback (a) to keep the lock-acquisition branch below shallow and
+// readable, and (b) so the single-instance decision logic lives in the
+// unit-tested single-instance.ts rather than an inline closure.
+function startApp(): void {
+  // Must run before any `gh` invocation: a Finder/.app launch inherits a minimal
+  // PATH without Homebrew, so without this `gh` is not found and token
+  // resolution fails with a misleading "not signed in".
+  ensureCliPath();
+
+  // Windows attributes toast notifications to an AppUserModelID; without this
+  // they can show under a generic name (or not at all). Must match the
+  // electron-builder `appId` so the packaged install's shortcut lines up.
+  if (process.platform === "win32") app.setAppUserModelId(resolveWindowsAppId());
+
+  if (process.env.PRD_DEBUG) {
+    console.log("[main] userData:", app.getPath("userData"));
+    console.log("[main] PATH:", process.env.PATH);
+  }
+
+  applyCsp();
+  registerIpc();
+
+  // Seed the acknowledged version on first run so "What's new" doesn't flash
+  // on a fresh install.
+  if (loadAcknowledgedVersion() === null) {
+    acknowledgeVersion(app.getVersion());
+  }
+
+  poller = new Poller({
+    loadSettings,
+    toHostConfigs,
+    statePath: seenStatePath(),
+    ignoredStatePath: ignoredStatePath(),
+    appVersion: app.getVersion(),
+    // No real Jira calls in fixture mode; the mock overrides below win anyway.
+    enrichParents: isMockMode() ? undefined : buildParentEnricher(loadSettings),
+    onSnapshot: (snapshot) => {
+      if (process.env.PRD_DEBUG) {
+        console.log(
+          `[snapshot] prs=${snapshot.pullRequests.length} errors=${snapshot.errors.length} rate=${JSON.stringify(snapshot.rateLimits)}`,
+        );
+      }
+      sendToRenderer("snapshot", snapshot);
+      handleNotifications(snapshot.pullRequests);
+    },
+    onConfigError: (message) => {
+      if (process.env.PRD_DEBUG) console.error("[config-error]", message);
+      sendToRenderer("config-error", message);
+    },
+    isPaused: isDashboardPaused,
+    // PRD_MOCK: canned PRs instead of gh/network — see mock.ts.
+    ...(isMockMode() ? mockPollerOverrides(app.getPath("userData")) : {}),
+  });
+  poller.start();
+
+  // Pause polling across sleep; refresh on resume / unlock so the first thing
+  // the user sees on return is current rather than stale.
+  powerMonitor.on("suspend", () => {
+    systemSuspended = true;
+  });
+  powerMonitor.on("resume", () => {
+    systemSuspended = false;
+    void poller?.wake();
+  });
+  powerMonitor.on("unlock-screen", () => void poller?.wake());
+
+  // Resolve the saved appearance before the first window so the initial paint
+  // and the native window background already match (no dark flash in light mode).
+  // Fall back to defaults if the settings file is invalid.
+  let prefs: Settings;
+  try {
+    prefs = loadSettings();
+  } catch {
+    prefs = defaultSettings();
+  }
+  applyThemeSource(prefs.theme);
+
+  // Keep the window's native background in sync when the effective theme flips —
+  // an OS change under "system", or a Light/Dark toggle.
+  nativeTheme.on("updated", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setBackgroundColor(themeBackground());
     }
   });
 
-  // All startup and window lifecycle lives inside the lock-acquired branch. The
-  // second instance quits above, so it must never register `ready` or
-  // `window-all-closed` handlers. Nesting them here makes that exclusion
-  // structural rather than relying on Electron suppressing the `ready` event
-  // after an early app.quit() — undocumented internal timing we shouldn't lean on.
-  void app.whenReady().then(() => {
-    // Must run before any `gh` invocation: a Finder/.app launch inherits a minimal
-    // PATH without Homebrew, so without this `gh` is not found and token
-    // resolution fails with a misleading "not signed in".
-    ensureCliPath();
+  createWindow();
+  initAutoUpdater((status) => sendToRenderer("update-status", status));
 
-    // Windows attributes toast notifications to an AppUserModelID; without this
-    // they can show under a generic name (or not at all). Must match the
-    // electron-builder `appId` so the packaged install's shortcut lines up.
-    if (process.platform === "win32") app.setAppUserModelId(resolveWindowsAppId());
+  // Apply the remaining prefs (launch-at-login + auto-update; theme re-applied
+  // harmlessly). Runs after the updater is initialized.
+  applyPreferences(prefs);
 
-    if (process.env.PRD_DEBUG) {
-      console.log("[main] userData:", app.getPath("userData"));
-      console.log("[main] PATH:", process.env.PATH);
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
     }
-
-    applyCsp();
-    registerIpc();
-
-    // Seed the acknowledged version on first run so "What's new" doesn't flash
-    // on a fresh install.
-    if (loadAcknowledgedVersion() === null) {
-      acknowledgeVersion(app.getVersion());
-    }
-
-    poller = new Poller({
-      loadSettings,
-      toHostConfigs,
-      statePath: seenStatePath(),
-      ignoredStatePath: ignoredStatePath(),
-      appVersion: app.getVersion(),
-      // No real Jira calls in fixture mode; the mock overrides below win anyway.
-      enrichParents: isMockMode() ? undefined : buildParentEnricher(loadSettings),
-      onSnapshot: (snapshot) => {
-        if (process.env.PRD_DEBUG) {
-          console.log(
-            `[snapshot] prs=${snapshot.pullRequests.length} errors=${snapshot.errors.length} rate=${JSON.stringify(snapshot.rateLimits)}`,
-          );
-        }
-        sendToRenderer("snapshot", snapshot);
-        handleNotifications(snapshot.pullRequests);
-      },
-      onConfigError: (message) => {
-        if (process.env.PRD_DEBUG) console.error("[config-error]", message);
-        sendToRenderer("config-error", message);
-      },
-      isPaused: isDashboardPaused,
-      // PRD_MOCK: canned PRs instead of gh/network — see mock.ts.
-      ...(isMockMode() ? mockPollerOverrides(app.getPath("userData")) : {}),
-    });
-    poller.start();
-
-    // Pause polling across sleep; refresh on resume / unlock so the first thing
-    // the user sees on return is current rather than stale.
-    powerMonitor.on("suspend", () => {
-      systemSuspended = true;
-    });
-    powerMonitor.on("resume", () => {
-      systemSuspended = false;
-      void poller?.wake();
-    });
-    powerMonitor.on("unlock-screen", () => void poller?.wake());
-
-    // Resolve the saved appearance before the first window so the initial paint
-    // and the native window background already match (no dark flash in light mode).
-    // Fall back to defaults if the settings file is invalid.
-    let prefs: Settings;
-    try {
-      prefs = loadSettings();
-    } catch {
-      prefs = defaultSettings();
-    }
-    applyThemeSource(prefs.theme);
-
-    // Keep the window's native background in sync when the effective theme flips —
-    // an OS change under "system", or a Light/Dark toggle.
-    nativeTheme.on("updated", () => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.setBackgroundColor(themeBackground());
-      }
-    });
-
-    createWindow();
-    initAutoUpdater((status) => sendToRenderer("update-status", status));
-
-    // Apply the remaining prefs (launch-at-login + auto-update; theme re-applied
-    // harmlessly). Runs after the updater is initialized.
-    applyPreferences(prefs);
-
-    app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-      }
-    });
   });
+}
+
+// Enforce single instance: if another copy already holds the OS lock, quit this
+// one; otherwise register the second-instance refocus and proceed with startup.
+// Without this guard the OS login-item and any accidental double-launch each
+// spin up their own window. The decision logic is unit-tested in
+// single-instance.ts (main.ts can't be required from a test — this call runs the
+// real lock request at import time).
+const isPrimaryInstance = acquireSingleInstanceLock({
+  requestSingleInstanceLock: () => app.requestSingleInstanceLock(),
+  quit: () => app.quit(),
+  onSecondInstance: (handler) => {
+    app.on("second-instance", handler);
+  },
+  getMainWindow: () => mainWindow,
+  focusMainWindow,
+  whenReady: () => app.whenReady(),
+});
+
+// All startup and window lifecycle stays inside the primary-instance branch: a
+// non-primary instance has already been told to quit and must never register
+// `ready` or `window-all-closed` handlers. Gating on the boolean makes that
+// exclusion structural, independent of Electron's internal ready/quit timing.
+if (isPrimaryInstance) {
+  void app.whenReady().then(startApp);
 
   // Plain window app (per product decision): closing the last window quits.
   app.on("window-all-closed", () => {

@@ -19,6 +19,7 @@ const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
 const jira = require(path.join(__dirname, "../dist/main/shared/jira.js"));
 const jiraHealth = require(path.join(__dirname, "../dist/main/shared/jira-health.js"));
 const prFilter = require(path.join(__dirname, "../dist/main/shared/pr-filter.js"));
+const singleInstance = require(path.join(__dirname, "../dist/main/main/single-instance.js"));
 
 let passed = 0;
 let failed = 0;
@@ -206,29 +207,139 @@ for (const mod of ["notify.js", "pr-filter.js"]) {
   });
 }
 
-// --- single-instance lock is requested before whenReady ----------------------
-// requestSingleInstanceLock() only quits the second instance early if it runs
-// before the app is ready. If a refactor moved the call inside the whenReady
-// callback, Electron would still resolve the lock but far too late — the second
-// instance would have already run startup, so the double-launch guard silently
-// degrades with no error and no failing runtime test. Encode the ordering the
-// same way as the node:-builtin and infinite-animation invariants: a source
-// scan that fails loudly. Comments/strings aren't stripped here on purpose —
-// the real calls are the earliest occurrences, and a mention in a comment can
-// only make the guard stricter, never let a mis-ordered call through.
-test("main requests the single-instance lock before whenReady", () => {
-  const src = require("node:fs").readFileSync(
+// --- single-instance decision logic (pure, unit-tested) ----------------------
+// The lock/second-instance branches live in single-instance.ts precisely so they
+// can run here without booting Electron (main.ts runs the real lock request at
+// import time and can't be required from a test). These cover the behavior the
+// PR exists to add: quit on a lost lock, focus synchronously when a window is
+// up, defer the focus when it isn't. The deferred (async) case is exercised in
+// the async block below.
+test("acquireSingleInstanceLock: lost lock -> quit, returns false, no handler registered", () => {
+  let quits = 0;
+  let registered = 0;
+  const primary = singleInstance.acquireSingleInstanceLock({
+    requestSingleInstanceLock: () => false,
+    quit: () => quits++,
+    onSecondInstance: () => registered++,
+    getMainWindow: () => null,
+    focusMainWindow: () => {},
+    whenReady: () => Promise.resolve(),
+  });
+  assert.strictEqual(primary, false, "a non-primary instance reports false");
+  assert.strictEqual(quits, 1, "the losing instance quits exactly once");
+  assert.strictEqual(registered, 0, "the losing instance registers no second-instance handler");
+});
+
+test("acquireSingleInstanceLock: won lock -> no quit, returns true, registers handler", () => {
+  let quits = 0;
+  let handler = null;
+  const primary = singleInstance.acquireSingleInstanceLock({
+    requestSingleInstanceLock: () => true,
+    quit: () => quits++,
+    onSecondInstance: (h) => {
+      handler = h;
+    },
+    getMainWindow: () => null,
+    focusMainWindow: () => {},
+    whenReady: () => Promise.resolve(),
+  });
+  assert.strictEqual(primary, true, "the primary instance reports true");
+  assert.strictEqual(quits, 0, "the primary instance does not quit");
+  assert.strictEqual(typeof handler, "function", "a second-instance handler is registered");
+});
+
+test("handleSecondInstance: window present -> focuses synchronously, ignores whenReady", () => {
+  let focused = 0;
+  let readyConsulted = 0;
+  singleInstance.handleSecondInstance(
+    {}, // a truthy window stand-in
+    () => focused++,
+    () => {
+      readyConsulted++;
+      return Promise.resolve();
+    },
+  );
+  assert.strictEqual(focused, 1, "an existing window is focused synchronously");
+  assert.strictEqual(readyConsulted, 0, "whenReady is not consulted when a window already exists");
+});
+
+test("acquireSingleInstanceLock: the registered handler routes through handleSecondInstance", () => {
+  let focused = 0;
+  let handler = null;
+  singleInstance.acquireSingleInstanceLock({
+    requestSingleInstanceLock: () => true,
+    quit: () => {},
+    onSecondInstance: (h) => {
+      handler = h;
+    },
+    getMainWindow: () => ({}), // truthy window
+    focusMainWindow: () => focused++,
+    whenReady: () => Promise.resolve(),
+  });
+  handler();
+  assert.strictEqual(focused, 1, "invoking the registered handler focuses the existing window");
+});
+
+// --- single-instance startup is gated on the acquired lock -------------------
+// The double-launch fix hinges on one wiring invariant in main.ts: the real
+// startup (`app.whenReady().then(startApp)`) and the `window-all-closed`
+// registration run ONLY in the primary instance — i.e. lexically inside the
+// `if (isPrimaryInstance) { ... }` gate. The branch decisions are unit-tested
+// above; this scan guards the main.ts wiring those units can't see. If a refactor
+// moved either registration out of the gate (reintroducing the double-launch
+// bug), Electron would register them on every instance again with no error and
+// no failing runtime test. The previous version of this guard used
+// `indexOf("app.whenReady(")`, which — once the deferred-focus call was added —
+// matched that call instead of the startup one and silently stopped protecting
+// anything; brace-matching the gate avoids relying on occurrence order.
+// Comments are blanked first (offset-preserving), mirroring the animation guard:
+// `window-all-closed` and `isPrimaryInstance` appear in nearby prose, and a raw
+// indexOf could latch onto the comment rather than the code.
+test("main gates startup + window-all-closed on the acquired single-instance lock", () => {
+  const raw = require("node:fs").readFileSync(
     path.join(__dirname, "../src/main/main.ts"),
     "utf8",
   );
-  const lockAt = src.indexOf("requestSingleInstanceLock(");
-  const readyAt = src.indexOf("app.whenReady(");
-  assert.ok(lockAt !== -1, "expected a requestSingleInstanceLock() call in main.ts");
-  assert.ok(readyAt !== -1, "expected an app.whenReady() call in main.ts");
+  // Blank `//` and `/* */` comments, preserving byte offsets (spaces for text,
+  // newlines kept) so brace-matching positions still line up with real source.
+  const src = raw
+    .replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length))
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+
+  const lockAt = src.indexOf("acquireSingleInstanceLock(");
+  assert.ok(lockAt !== -1, "expected acquireSingleInstanceLock() to be called in main.ts");
+
+  const gateAt = src.indexOf("if (isPrimaryInstance)", lockAt);
+  assert.ok(gateAt !== -1, "expected an `if (isPrimaryInstance)` gate after the lock call");
+  assert.ok(lockAt < gateAt, "the lock must be acquired before the primary-instance gate");
+
+  const open = src.indexOf("{", gateAt);
+  assert.ok(open !== -1, "malformed primary-instance gate (no `{`)");
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") {
+      depth--;
+      if (depth === 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  assert.ok(close !== -1, "could not brace-match the primary-instance gate body");
+
+  const inside = (needle) => {
+    const at = src.indexOf(needle);
+    return at !== -1 && at > open && at < close;
+  };
   assert.ok(
-    lockAt < readyAt,
-    "requestSingleInstanceLock() must be called before app.whenReady(), " +
-      "otherwise the second instance runs startup before the lock quits it",
+    inside("app.whenReady().then(startApp)"),
+    "startup (app.whenReady().then(startApp)) must run only inside the primary-instance gate",
+  );
+  assert.ok(
+    inside('app.on("window-all-closed"'),
+    "window-all-closed must be registered only inside the primary-instance gate",
   );
 });
 
@@ -967,6 +1078,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 });
 
 (async () => {
+  await atest("handleSecondInstance: no window -> defers focus until whenReady resolves", async () => {
+    let focused = 0;
+    let resolveReady;
+    const ready = new Promise((r) => {
+      resolveReady = r;
+    });
+    singleInstance.handleSecondInstance(null, () => focused++, () => ready);
+    assert.strictEqual(focused, 0, "focus must not fire before whenReady resolves");
+    resolveReady();
+    await ready;
+    await Promise.resolve(); // flush the .then microtask queued on `ready`
+    assert.strictEqual(focused, 1, "focus fires once whenReady resolves");
+  });
+
   await atest("applyIgnored: flags ignored PRs, leaves the rest false", () =>
     withTempStore(async (file) => {
       await ignored.setIgnored("PR_1", true, file);
