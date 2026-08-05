@@ -223,7 +223,7 @@ test("acquireSingleInstanceLock: lost lock -> quit, returns false, no handler re
     onSecondInstance: () => registered++,
     getMainWindow: () => null,
     focusMainWindow: () => {},
-    whenReady: () => Promise.resolve(),
+    whenWindowReady: () => Promise.resolve(),
   });
   assert.strictEqual(primary, false, "a non-primary instance reports false");
   assert.strictEqual(quits, 1, "the losing instance quits exactly once");
@@ -241,26 +241,30 @@ test("acquireSingleInstanceLock: won lock -> no quit, returns true, registers ha
     },
     getMainWindow: () => null,
     focusMainWindow: () => {},
-    whenReady: () => Promise.resolve(),
+    whenWindowReady: () => Promise.resolve(),
   });
   assert.strictEqual(primary, true, "the primary instance reports true");
   assert.strictEqual(quits, 0, "the primary instance does not quit");
   assert.strictEqual(typeof handler, "function", "a second-instance handler is registered");
 });
 
-test("handleSecondInstance: window present -> focuses synchronously, ignores whenReady", () => {
+test("handleSecondInstance: window present -> focuses synchronously, ignores the window-ready signal", () => {
   let focused = 0;
-  let readyConsulted = 0;
+  let signalConsulted = 0;
   singleInstance.handleSecondInstance(
     {}, // a truthy window stand-in
     () => focused++,
     () => {
-      readyConsulted++;
+      signalConsulted++;
       return Promise.resolve();
     },
   );
   assert.strictEqual(focused, 1, "an existing window is focused synchronously");
-  assert.strictEqual(readyConsulted, 0, "whenReady is not consulted when a window already exists");
+  assert.strictEqual(
+    signalConsulted,
+    0,
+    "the window-ready signal is not consulted when a window already exists",
+  );
 });
 
 test("acquireSingleInstanceLock: the registered handler routes through handleSecondInstance", () => {
@@ -274,7 +278,7 @@ test("acquireSingleInstanceLock: the registered handler routes through handleSec
     },
     getMainWindow: () => ({}), // truthy window
     focusMainWindow: () => focused++,
-    whenReady: () => Promise.resolve(),
+    whenWindowReady: () => Promise.resolve(),
   });
   handler();
   assert.strictEqual(focused, 1, "invoking the registered handler focuses the existing window");
@@ -295,6 +299,16 @@ test("acquireSingleInstanceLock: the registered handler routes through handleSec
 // Comments are blanked first (offset-preserving), mirroring the animation guard:
 // `window-all-closed` and `isPrimaryInstance` appear in nearby prose, and a raw
 // indexOf could latch onto the comment rather than the code.
+//
+// Known limitation (see the behavioral test below, which is the authoritative
+// check): this is a source-SHAPE scan, not a runtime one. The comment blanking is
+// a naive regex — it does NOT understand string or template literals, so a string
+// containing `//`, `/*`, or a stray `{`/`}` inside the gate body could corrupt the
+// brace match. It also can't see a semantically-equivalent refactor that drops the
+// `if (isPrimaryInstance)` gate entirely (e.g. an early `return`). It survives as a
+// cheap, fast first line of defense; the Electron-mock integration test below is
+// what actually verifies the runtime wiring. Keep the gate body free of
+// literals bearing those characters, or this guard needs hardening.
 test("main gates startup + window-all-closed on the acquired single-instance lock", () => {
   const raw = require("node:fs").readFileSync(
     path.join(__dirname, "../src/main/main.ts"),
@@ -342,6 +356,102 @@ test("main gates startup + window-all-closed on the acquired single-instance loc
     "window-all-closed must be registered only inside the primary-instance gate",
   );
 });
+
+// --- single-instance wiring, verified against a mocked Electron --------------
+// The pure decision logic is unit-tested above and the source shape is scanned
+// by the guard above; this test closes the gap between them by requiring the
+// COMPILED main.js with a fake `electron` injected into the module cache, so the
+// real `acquireSingleInstanceLock({...})` deps object in main.ts is exercised.
+// `app.whenReady()` is stubbed with a never-resolving promise, so `startApp`
+// (poller, window, auto-updater) never runs — only the bootstrap wiring does.
+// This is a behavioral check: unlike the text guard, a refactor that drops the
+// lock gate would fail here regardless of how the source is shaped.
+{
+  const Module = require("node:module");
+  const mainJs = path.join(__dirname, "../dist/main/main/main.js");
+  const elPath = require.resolve("electron", { paths: [path.dirname(mainJs)] });
+  // Everything already cached before we touch main.js — the test file's own
+  // module graph. We only ever evict what requiring main.js adds, never these.
+  const preloaded = new Set(Object.keys(require.cache));
+
+  // Boot main.js once with a fake electron and return what the wiring did.
+  const bootMain = (lockGranted) => {
+    for (const k of Object.keys(require.cache)) {
+      if (!preloaded.has(k)) delete require.cache[k]; // fresh main.js graph each boot
+    }
+    const events = [];
+    let secondInstanceHandler = null;
+    let quits = 0;
+    const fakeApp = {
+      requestSingleInstanceLock: () => lockGranted,
+      quit: () => quits++,
+      on: (event, cb) => {
+        events.push(event);
+        if (event === "second-instance") secondInstanceHandler = cb;
+      },
+      whenReady: () => new Promise(() => {}), // never resolves: startApp stays parked
+      getVersion: () => "0.0.0-test",
+      getPath: () => os.tmpdir(),
+      setAppUserModelId: () => {},
+      isReady: () => false,
+    };
+    class FakeBrowserWindow {
+      static getAllWindows() {
+        return [];
+      }
+      on() {}
+    }
+    const fakeElectron = {
+      app: fakeApp,
+      BrowserWindow: FakeBrowserWindow,
+      nativeTheme: { on() {} },
+      powerMonitor: { on() {} },
+      ipcMain: { handle() {}, on() {} },
+      session: {},
+      shell: {},
+      clipboard: {},
+      Notification: class {},
+      nativeImage: { createFromPath: () => ({}) },
+    };
+    require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: fakeElectron };
+    require(mainJs);
+    return { events, secondInstanceHandler, quits };
+  };
+
+  test("main.js wiring: lost lock -> quits, registers no ready/window handlers", () => {
+    const r = bootMain(false);
+    assert.strictEqual(r.quits, 1, "the non-primary instance quits exactly once");
+    assert.ok(
+      !r.events.includes("second-instance"),
+      "a non-primary instance must not register a second-instance handler",
+    );
+    assert.ok(
+      !r.events.includes("window-all-closed"),
+      "a non-primary instance must not register window-all-closed",
+    );
+  });
+
+  test("main.js wiring: won lock -> no quit, registers second-instance + window-all-closed", () => {
+    const r = bootMain(true);
+    assert.strictEqual(r.quits, 0, "the primary instance does not quit");
+    assert.ok(r.events.includes("second-instance"), "the primary registers a second-instance handler");
+    assert.ok(r.events.includes("window-all-closed"), "the primary registers window-all-closed");
+    assert.strictEqual(
+      typeof r.secondInstanceHandler,
+      "function",
+      "the registered second-instance handler is callable",
+    );
+    // Exercise the wired handler: no window yet (startApp never ran), so it must
+    // take the deferred path without throwing rather than focusing nothing.
+    assert.doesNotThrow(() => r.secondInstanceHandler(), "the wired handler runs cleanly with no window");
+  });
+
+  // Restore the cache to its pre-test shape so later tests see a clean graph.
+  for (const k of Object.keys(require.cache)) {
+    if (!preloaded.has(k)) delete require.cache[k];
+  }
+  delete require.cache[elPath];
+}
 
 // --- defaultSettings ---------------------------------------------------------
 test("defaultSettings: empty + 60s + toggles", () => {
@@ -1078,18 +1188,22 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 });
 
 (async () => {
-  await atest("handleSecondInstance: no window -> defers focus until whenReady resolves", async () => {
+  await atest("handleSecondInstance: no window -> defers focus until a window is created", async () => {
     let focused = 0;
-    let resolveReady;
-    const ready = new Promise((r) => {
-      resolveReady = r;
+    let signalWindowReady;
+    const windowReady = new Promise((r) => {
+      signalWindowReady = r;
     });
-    singleInstance.handleSecondInstance(null, () => focused++, () => ready);
-    assert.strictEqual(focused, 0, "focus must not fire before whenReady resolves");
-    resolveReady();
-    await ready;
-    await Promise.resolve(); // flush the .then microtask queued on `ready`
-    assert.strictEqual(focused, 1, "focus fires once whenReady resolves");
+    // A second launch arrives before the first window exists.
+    singleInstance.handleSecondInstance(null, () => focused++, () => windowReady);
+    assert.strictEqual(focused, 0, "focus must not fire while no window exists yet");
+    // The window is created — the deferred raise must now fire. This is the case
+    // AK flagged: keying off window-creation (not app.whenReady) guarantees the
+    // window actually exists when focusMainWindow runs.
+    signalWindowReady();
+    await windowReady;
+    await Promise.resolve(); // flush the .then microtask queued on the signal
+    assert.strictEqual(focused, 1, "focus fires once the first window is created");
   });
 
   await atest("applyIgnored: flags ignored PRs, leaves the rest false", () =>

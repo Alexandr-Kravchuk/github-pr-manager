@@ -17,27 +17,38 @@ export interface SingleInstanceDeps {
   getMainWindow: () => BrowserWindow | null;
   /** Raise the existing window to the foreground (already null-safe). */
   focusMainWindow: () => void;
-  /** `app.whenReady()` — resolves once the app is ready. */
-  whenReady: () => Promise<unknown>;
+  /**
+   * Resolves once the first window has actually been created (i.e. `mainWindow`
+   * is assigned) — NOT merely when the app is ready. Keying the deferred focus
+   * off window creation instead of `app.whenReady()` is deliberate: `whenReady`
+   * resolving and `mainWindow` being assigned are distinct events, so a fallback
+   * gated on `whenReady` could run while `mainWindow` is still null and silently
+   * no-op. Gating on window creation makes the raise-to-front correct regardless
+   * of startup timing or handler-registration order.
+   */
+  whenWindowReady: () => Promise<unknown>;
 }
 
 /**
  * Surface the already-running instance's window when a second launch arrives.
  *
- * `second-instance` normally fires after the app is ready and `createWindow()`
- * has run, so `win` is set and we focus synchronously. When `win` is null — the
- * brief startup gap, or after the window closed during teardown — defer the
- * focus to `whenReady` so the raise-to-front intent isn't silently dropped.
+ * `second-instance` normally fires after the first window exists, so `win` is
+ * set and we focus synchronously. When `win` is null — a second launch during
+ * the pre-window startup gap, or after the window closed during teardown — defer
+ * the focus until a window has been created (`whenWindowReady`) so the
+ * raise-to-front intent isn't silently dropped. In the teardown case the window
+ * is already gone and the deferred focus null-guards harmlessly (the app is
+ * quitting anyway).
  */
 export function handleSecondInstance(
   win: BrowserWindow | null,
   focusMainWindow: () => void,
-  whenReady: () => Promise<unknown>,
+  whenWindowReady: () => Promise<unknown>,
 ): void {
   if (win) {
     focusMainWindow();
   } else {
-    void whenReady().then(() => focusMainWindow());
+    void whenWindowReady().then(() => focusMainWindow());
   }
 }
 
@@ -53,7 +64,7 @@ export function acquireSingleInstanceLock(deps: SingleInstanceDeps): boolean {
     return false;
   }
   deps.onSecondInstance(() =>
-    handleSecondInstance(deps.getMainWindow(), deps.focusMainWindow, deps.whenReady),
+    handleSecondInstance(deps.getMainWindow(), deps.focusMainWindow, deps.whenWindowReady),
   );
   return true;
 }
