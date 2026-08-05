@@ -316,6 +316,12 @@ test("acquireSingleInstanceLock: the registered handler routes through handleSec
 // a build — and reads as executable documentation of the invariant next to
 // main.ts. If it ever becomes a maintenance drag, drop it; the mock test stands
 // alone.
+//
+// TRIAGE NOTE: if this test fails, do NOT assume the invariant is broken — first
+// check the authoritative behavioral test below ("main.js wiring: won lock ->
+// registers second-instance + window-all-closed"). If that one is green, this
+// failure is almost certainly a false alarm from a benign reshape (a string
+// literal or reformat this source scan can't parse), not a real regression.
 test("main gates startup + window-all-closed on the acquired single-instance lock", () => {
   const raw = require("node:fs").readFileSync(
     path.join(__dirname, "../src/main/main.ts"),

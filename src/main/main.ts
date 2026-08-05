@@ -668,8 +668,11 @@ function startApp(): void {
 // one; otherwise register the second-instance refocus and proceed with startup.
 // Without this guard the OS login-item and any accidental double-launch each
 // spin up their own window. The decision logic is unit-tested in
-// single-instance.ts (main.ts can't be required from a test — this call runs the
-// real lock request at import time).
+// single-instance.ts, and this wiring is covered by a fake-electron test that
+// requires the COMPILED dist/main/main/main.js (see the "main.js wiring" tests in
+// tests/run-tests.cjs). The deps stay injectable callbacks because importing this
+// module runs the real lock request at import time — so tests drive the compiled
+// output with electron mocked rather than importing the TS source directly.
 const isPrimaryInstance = acquireSingleInstanceLock({
   requestSingleInstanceLock: () => app.requestSingleInstanceLock(),
   quit: () => app.quit(),
