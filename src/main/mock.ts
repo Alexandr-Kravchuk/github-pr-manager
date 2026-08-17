@@ -144,6 +144,23 @@ const CASES: Record<string, () => PullRequest[]> = {
       author: { login: "teammate", avatarUrl: TEAMMATE },
       awaitingReview: true,
     }),
+    // The passive role: my review is submitted, so GitHub dropped the request —
+    // the card is here to keep it on my radar, and stays quiet (no attention
+    // accent) until it comes back to me.
+    pr({
+      id: "mock-reviewed",
+      number: 202,
+      title: "Teammate's PR I have already reviewed",
+      roles: ["reviewed"],
+      author: { login: "teammate", avatarUrl: TEAMMATE },
+      viewerHasReviewed: true,
+      hasNoReviews: false,
+      reviewDecision: "CHANGES_REQUESTED",
+      hasUnaddressedChangeRequest: true,
+      unresolvedThreads: 2,
+      totalComments: 6,
+      reviewers: [{ login: "me", avatarUrl: OCTOCAT, reviewState: "changes_requested" }],
+    }),
   ],
   mixed: () => [
     ...CASES["sad-ci"](),

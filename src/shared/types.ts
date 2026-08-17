@@ -19,8 +19,20 @@ export type ReviewDecision =
   | "REVIEW_REQUIRED"
   | null;
 
-/** Why this PR shows up on the dashboard. */
-export type PrRole = "author" | "reviewer";
+/**
+ * Why this PR shows up on the dashboard.
+ *
+ * - `author` — you opened it;
+ * - `reviewer` — your review is requested, personally or via one of your teams;
+ * - `reviewed` — you already submitted a review on it. GitHub clears the review
+ *   request the moment you review, so the PR stops matching
+ *   `review-requested:@me`; `reviewed-by:@me` is what keeps it on the dashboard.
+ *
+ * `reviewed` is a **passive** role: nobody is waiting on you, so on its own it
+ * does not make the PR need attention — only its return to your court does (see
+ * `applyActivity` in state.ts). A re-request puts `reviewer` back alongside it.
+ */
+export type PrRole = "author" | "reviewer" | "reviewed";
 
 /**
  * A configured GitHub host, with the access token already resolved to a literal
@@ -210,13 +222,15 @@ export interface PullRequest {
   /** Summary (title) of {@link parentKey}, for the group heading. */
   parentSummary: string | null;
   reviewDecision: ReviewDecision;
-  /** The current user's roles on this PR (author / reviewer). */
+  /** The current user's roles on this PR (author / reviewer / reviewed). */
   roles: PrRole[];
   /**
    * true when the current user has already submitted an opinionated review
    * (approve / request-changes) on this PR. Note: GitHub clears the `reviewer`
    * role once you review, so this is how a reviewed PR is still recognized as
-   * "mine" for the returned-to-me signal.
+   * "mine" for the returned-to-me signal. Unlike the `reviewed` role — which is
+   * why the PR is on the dashboard at all — this keys off the reviews carried on
+   * the PR itself, so it is also true for a PR fetched as a re-request.
    */
   viewerHasReviewed: boolean;
   /**

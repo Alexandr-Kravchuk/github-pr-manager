@@ -63,13 +63,22 @@ fragment PrFields on PullRequest {
  * One GraphQL request per host, merged into a single HTTP call via aliases:
  *  - authored        — PRs the current user opened (author:@me)
  *  - reviewing        — PRs the user is *personally* asked to review (review-requested:@me)
+ *  - reviewed         — PRs the user has already reviewed (reviewed-by:@me).
+ *                       GitHub CLEARS the review request the moment you submit a
+ *                       review, so a reviewed PR drops out of `review-requested:@me`
+ *                       — without this alias it vanishes from the dashboard exactly
+ *                       when the author starts addressing your comments, which is
+ *                       the case `returnedToMe` exists to catch.
  *  - team0..teamN     — PRs asked of a *team* the user belongs to
  *                       (team-review-requested:org/team). `review-requested:@me`
  *                       does NOT cover team requests, so these are searched
  *                       separately — one alias per team — and merged by id.
  *
  * Each search is filtered by all of the host's repositories (multiple `repo:`
- * qualifiers act as OR).
+ * qualifiers act as OR). An alias is not free — each one costs roughly a dozen
+ * rate-limit points at `first: 25` with this fragment (measured: 5 searches → 69,
+ * 6 → 83 on a two-repo host with three team memberships), so a host lands far
+ * above the poller's `EXPENSIVE_COST` threshold and is spaced out accordingly.
  */
 function buildQuery(teamCount: number): string {
   const teamVarDecls = Array.from({ length: teamCount }, (_, i) => `, $teamQuery${i}: String!`).join("");
@@ -78,11 +87,12 @@ function buildQuery(teamCount: number): string {
     (_, i) => `  team${i}: search(query: $teamQuery${i}, type: ISSUE, first: 25) { nodes { ...PrFields } }`,
   ).join("\n");
   return /* GraphQL */ `
-query ($authoredQuery: String!, $reviewingQuery: String!${teamVarDecls}) {
+query ($authoredQuery: String!, $reviewingQuery: String!, $reviewedQuery: String!${teamVarDecls}) {
   rateLimit { remaining cost resetAt }
   viewer { login }
   authored: search(query: $authoredQuery, type: ISSUE, first: 25) { nodes { ...PrFields } }
   reviewing: search(query: $reviewingQuery, type: ISSUE, first: 25) { nodes { ...PrFields } }
+  reviewed: search(query: $reviewedQuery, type: ISSUE, first: 25) { nodes { ...PrFields } }
 ${teamSearches}
 }
 ${PR_FIELDS_FRAGMENT}`;
@@ -155,6 +165,7 @@ interface RawResponse {
     viewer: { login: string };
     authored: SearchNodes;
     reviewing: SearchNodes;
+    reviewed: SearchNodes;
     // team0, team1, … — one per team-review-requested search.
     [alias: string]:
       | SearchNodes
@@ -557,6 +568,14 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
   const variables: Record<string, string> = {
     authoredQuery: buildSearchQuery(host.repos, "author:@me"),
     reviewingQuery: buildSearchQuery(host.repos, "review-requested:@me"),
+    // Sorted, unlike its siblings, because this is the one set that only grows:
+    // a PR stays matched by `reviewed-by:@me` for its whole open life, while the
+    // other qualifiers clear themselves (you merge your PR, the request is
+    // satisfied). Past the `first: 25` cap the default "best match" order is
+    // neither recency-ordered nor stable — measured: it returned an older PR
+    // ahead of a newer one — so the window would both hide the PRs you care
+    // about and shuffle between polls, flickering cards in and out.
+    reviewedQuery: buildSearchQuery(host.repos, "reviewed-by:@me sort:updated-desc"),
   };
   teamSlugs.forEach((slug, i) => {
     variables[`teamQuery${i}`] = buildSearchQuery(host.repos, `team-review-requested:${slug}`);
@@ -609,6 +628,12 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
     const teamResult = json.data[`team${i}`] as SearchNodes | undefined;
     if (teamResult?.nodes) addNodes(teamResult.nodes, "reviewer");
   }
+  // Already-reviewed PRs get their own passive role — added last so it unions
+  // onto an outstanding request rather than replacing it (a PR you reviewed and
+  // were then re-requested on carries both, and "reviewer" is what claims your
+  // attention). `reviewed-by:@me` also matches your own PRs, where the role is
+  // redundant next to "author"; harmless, and dropping it would need a lookahead.
+  addNodes(json.data.reviewed.nodes, "reviewed");
 
   return {
     pullRequests: [...byId.values()],
