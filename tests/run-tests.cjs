@@ -1065,6 +1065,38 @@ for (const [key, flag] of Object.entries(prFilter.REVEAL_FLAG)) {
   }
 }
 
+// --- pr-filter: isPassiveReviewed (shared by the badge and the attention flag)
+// Tested directly, like its sibling gates: state.ts reads it for needsAttention
+// and PrCard for the badge, so a wrong clause would silently desynchronize the
+// card's accent from what it says about itself.
+for (const [roles, expected] of [
+  [["reviewed"], true],
+  [["reviewer"], false],
+  [["author"], false],
+  [["reviewer", "reviewed"], false], // re-requested — an active ask outranks it
+  [["author", "reviewed"], false], // your own PR, which reviewed-by:@me also matches
+]) {
+  test(`isPassiveReviewed([${roles}]) -> ${expected}`, () =>
+    assert.strictEqual(prFilter.isPassiveReviewed({ roles }), expected));
+}
+
+// --- pr-filter: the role selector, including the passive `reviewed` role ------
+// A PR you already reviewed carries `reviewed`; being re-requested adds
+// `reviewer` back alongside it, so the two selections legitimately overlap.
+const BY_ROLE = [
+  mkPr({ roles: ["author"], title: "mine" }),
+  mkPr({ roles: ["reviewer"], title: "asked of me" }),
+  mkPr({ roles: ["reviewed"], title: "already reviewed" }),
+  mkPr({ roles: ["reviewer", "reviewed"], title: "re-requested" }),
+];
+const titlesFor = (role) => prFilter.filterPrs(BY_ROLE, st({ role })).map((pr) => pr.title);
+test("filterPrs(role): 'reviewed' selects the PRs you have reviewed, re-requested included", () =>
+  assert.deepStrictEqual(titlesFor("reviewed"), ["already reviewed", "re-requested"]));
+test("filterPrs(role): 'reviewer' still means an outstanding request, not a past review", () =>
+  assert.deepStrictEqual(titlesFor("reviewer"), ["asked of me", "re-requested"]));
+test("filterPrs(role): 'author' is unaffected by the new role", () =>
+  assert.deepStrictEqual(titlesFor("author"), ["mine"]));
+
 // --- pr-filter: matchesSearch (via filterPrs) -------------------------------
 // The haystack spans title, repo, author login and #number, and the needle is
 // trimmed. Fixed numbers rather than the shared prSeq counter, so the "#" cases
@@ -1369,6 +1401,172 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(typeof pushed.lastSeenAt, "string"); // viewed → set
       assert.strictEqual(pushed.returnedToMe, true); // engaged via a view, new push
     }));
+
+  // --- state: the passive `reviewed` role doesn't claim attention ------------
+  // A PR you have only already reviewed is on the dashboard so it doesn't vanish
+  // the moment you submit a review — not because someone is waiting on you. Only
+  // its return to your court counts; the author's CI, threads and pending change
+  // request are theirs, or every PR you ever reviewed would sit in the red pile.
+  const reviewedPr = (o = {}) => reviewPr({ roles: ["reviewed"], ...o });
+
+  await atest("applyActivity.needsAttention: an already-reviewed PR is quiet while nothing moves", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewedPr()], file); // baseline
+      const same = reviewedPr();
+      await state.applyActivity([same], file);
+      assert.strictEqual(same.needsAttention, false);
+    }));
+
+  await atest("applyActivity.needsAttention: the author's CI/threads on a reviewed PR stay the author's", () =>
+    withTempStore(async (file) => {
+      const noisy = () =>
+        reviewedPr({
+          failingChecks: ["build"],
+          unresolvedThreads: 3,
+          hasUnaddressedChangeRequest: true,
+          hasUnaddressedComments: true,
+        });
+      await state.applyActivity([noisy()], file); // baseline
+      const again = noisy();
+      await state.applyActivity([again], file);
+      assert.strictEqual(again.needsAttention, false);
+    }));
+
+  await atest("applyActivity.needsAttention: a reviewed PR wakes up when it comes back to me", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewedPr()], file); // baseline
+      const pushed = reviewedPr({ lastCommitPushedAt: "2026-07-08T00:00:00Z" });
+      await state.applyActivity([pushed], file);
+      assert.strictEqual(pushed.returnedToMe, true);
+      assert.strictEqual(pushed.needsAttention, true);
+    }));
+
+  // The role, not `viewerHasReviewed`, is what proves engagement: a plain
+  // "Comment" review matches `reviewed-by:@me` but never lands in
+  // latestOpinionatedReviews (observed on 4 of 5 live reviewed-role PRs). Keying
+  // engagement off the opinionated flag alone would leave those cards mute
+  // forever, since a passive PR's attention flag IS returnedToMe.
+  await atest("applyActivity.returnedToMe: a comment-only review still counts as engaged", () =>
+    withTempStore(async (file) => {
+      const commentOnly = (o = {}) => reviewedPr({ viewerHasReviewed: false, ...o });
+      await state.applyActivity([commentOnly()], file); // baseline
+      const more = commentOnly({ totalComments: 5 });
+      await state.applyActivity([more], file);
+      assert.strictEqual(more.returnedToMe, true, "the reviewed role alone must prove engagement");
+      assert.strictEqual(more.needsAttention, true);
+    }));
+
+  await atest("applyActivity.returnedToMe: a plain reviewer request is still un-engaged", () =>
+    withTempStore(async (file) => {
+      // The guard the clause above must not weaken: asked to review, never
+      // reviewed and never opened — a new push is not "back to me".
+      const asked = (o = {}) => reviewPr({ roles: ["reviewer"], viewerHasReviewed: false, ...o });
+      await state.applyActivity([asked()], file);
+      const pushed = asked({ lastCommitPushedAt: "2026-07-08T00:00:00Z" });
+      await state.applyActivity([pushed], file);
+      assert.strictEqual(pushed.returnedToMe, false);
+    }));
+
+  await atest("applyActivity.needsAttention: a re-request alongside the past review is your turn again", () =>
+    withTempStore(async (file) => {
+      const reRequested = reviewPr({ roles: ["reviewer", "reviewed"] });
+      await state.applyActivity([reRequested], file);
+      assert.strictEqual(reRequested.needsAttention, true);
+    }));
+
+  await atest("applyActivity.needsAttention: your own PR keeps the full rules when you also reviewed it", () =>
+    withTempStore(async (file) => {
+      // reviewed-by:@me matches your own PRs too, so `author` and `reviewed`
+      // co-occur — the passive branch must not swallow the author's failing CI.
+      const mine = reviewPr({ roles: ["author", "reviewed"], failingChecks: ["build"] });
+      await state.applyActivity([mine], file);
+      assert.strictEqual(mine.needsAttention, true);
+    }));
+
+  // --- github: fetchHost also collects the PRs you already reviewed ----------
+  // GitHub clears the review request the moment you submit a review, so such a
+  // PR stops matching `review-requested:@me`. Without the `reviewed-by:@me`
+  // alias it drops off the dashboard exactly when the author starts addressing
+  // your comments — the case `returnedToMe` exists to catch.
+  const realGithubFetch = global.fetch;
+  let hostSeq = 0;
+
+  // Drives fetchHost against a stubbed transport and returns both the request it
+  // sent and the PRs it produced. A fresh graphqlUrl per call: team discovery is
+  // cached per host for 10 minutes and has no test-visible reset.
+  async function runFetchHost(searches) {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    let sent = null;
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      sent = JSON.parse(init.body);
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 4, resetAt: "2026-07-07T01:00:00Z" },
+            viewer: { login: "me" },
+            authored: { nodes: searches.authored ?? [] },
+            reviewing: { nodes: searches.reviewing ?? [] },
+            reviewed: { nodes: searches.reviewed ?? [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({
+      label: "H",
+      graphqlUrl,
+      repos: ["a/b"],
+      token: "t",
+    });
+    return { sent, result };
+  }
+
+  await atest("fetchHost: asks for reviewed-by:@me over the same repos, as its own alias", async () => {
+    const { sent } = await runFetchHost({});
+    assert.strictEqual(
+      sent.variables.reviewedQuery,
+      "is:open is:pr repo:a/b reviewed-by:@me sort:updated-desc",
+      // The only qualifier whose match set grows for the PR's whole open life,
+      // so past the first: 25 cap the default order would hide the recent ones
+      // and reshuffle between polls.
+      "the reviewed search must be pinned to a recency order",
+    );
+    assert.ok(
+      sent.query.includes("reviewed: search(query: $reviewedQuery"),
+      "the reviewed search must be its own alias in the merged query",
+    );
+  });
+
+  await atest("fetchHost: a PR you already reviewed arrives with the passive `reviewed` role", async () => {
+    const { result } = await runFetchHost({ reviewed: [rawPr({ id: "PR_reviewed" })] });
+    assert.strictEqual(result.pullRequests.length, 1);
+    assert.deepStrictEqual(result.pullRequests[0].roles, ["reviewed"]);
+  });
+
+  await atest("fetchHost: a re-requested PR is one card carrying both roles", async () => {
+    const { result } = await runFetchHost({
+      reviewing: [rawPr({ id: "PR_both" })],
+      reviewed: [rawPr({ id: "PR_both" })],
+    });
+    assert.strictEqual(result.pullRequests.length, 1, "the two searches must merge by id");
+    assert.deepStrictEqual(result.pullRequests[0].roles, ["reviewer", "reviewed"]);
+  });
+
+  await atest("fetchHost: your own PR keeps `author` when reviewed-by:@me also matches it", async () => {
+    const { result } = await runFetchHost({
+      authored: [rawPr({ id: "PR_mine" })],
+      reviewed: [rawPr({ id: "PR_mine" })],
+    });
+    assert.strictEqual(result.pullRequests.length, 1);
+    assert.ok(result.pullRequests[0].roles.includes("author"));
+  });
+
+  global.fetch = realGithubFetch;
 
   // --- jira: fetchParents ----------------------------------------------------
   const JIRA_CFG = { baseUrl: "https://org.atlassian.net", email: "me@x.com" };
@@ -1982,6 +2180,52 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     ));
   test("diffNotifications: opening your own PR (no prior) fires nothing", () =>
     assert.deepStrictEqual(notify.diffNotifications([], [npr({ id: "9" })], N_ON), []));
+  // returned_to_me — the one reviewer-side rule besides review_requested, and
+  // the only notification the `reviewed` category can ever produce: GitHub drops
+  // the review request once you review, so such a PR never re-enters the
+  // `reviewer` role that review_requested keys on.
+  const backPr = (o = {}) => npr({ id: "5", roles: ["reviewed"], returnedToMe: false, ...o });
+  test("diffNotifications: a reviewed PR coming back to you fires returned_to_me", () =>
+    assert.deepStrictEqual(
+      kinds(notify.diffNotifications([backPr()], [backPr({ returnedToMe: true })], N_ON)),
+      ["returned_to_me"],
+    ));
+  test("diffNotifications: returned_to_me does not re-fire while the flag stays true", () =>
+    assert.deepStrictEqual(
+      // The flag stays true until the PR is marked seen, so a state-based rule
+      // here would re-toast the same PR on every poll.
+      notify.diffNotifications(
+        [backPr({ returnedToMe: true })],
+        [backPr({ returnedToMe: true })],
+        N_ON,
+      ),
+      [],
+    ));
+  test("diffNotifications: a PR merely new to the snapshot has not come back", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([], [backPr({ returnedToMe: true })], N_ON),
+      [],
+    ));
+  test("diffNotifications: returned_to_me is suppressed when yourTurn is off", () =>
+    assert.deepStrictEqual(
+      notify.diffNotifications([backPr()], [backPr({ returnedToMe: true })], {
+        ...N_ON,
+        events: { ...N_ON.events, yourTurn: false },
+      }),
+      [],
+    ));
+  test("diffNotifications: an explicit re-request outranks the PR coming back", () =>
+    assert.deepStrictEqual(
+      kinds(
+        notify.diffNotifications(
+          [backPr()],
+          [backPr({ roles: ["reviewer", "reviewed"], returnedToMe: true })],
+          N_ON,
+        ),
+      ),
+      ["review_requested"],
+    ));
+
   test("diffNotifications: change request on your PR", () =>
     assert.deepStrictEqual(
       kinds(notify.diffNotifications([npr()], [npr({ hasUnaddressedChangeRequest: true })], N_ON)),

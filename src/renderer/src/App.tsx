@@ -107,7 +107,7 @@ function loadPrefs(): ViewPrefs {
     const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
       allowed.includes(v as T) ? (v as T) : fallback;
     return {
-      role: oneOf(p.role, ["all", "author", "reviewer"] as const, "all"),
+      role: oneOf(p.role, ["all", "author", "reviewer", "reviewed"] as const, "all"),
       host: typeof p.host === "string" ? p.host : "all",
       sortBy: oneOf(p.sortBy, ["action", "waiting", "active", "newest"] as const, "action"),
       groupBy: oneOf(p.groupBy, ["none", "repo", "issue", "parent"] as const, "repo"),
@@ -729,6 +729,7 @@ export function App() {
               <option value="all">All roles</option>
               <option value="author">I&apos;m the author</option>
               <option value="reviewer">I&apos;m a reviewer</option>
+              <option value="reviewed">I already reviewed</option>
             </select>
 
             <select
