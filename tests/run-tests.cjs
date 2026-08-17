@@ -862,6 +862,16 @@ test("jiraBrowseUrl: keeps a path — a self-hosted Jira can live under one", ()
     issueKey.jiraBrowseUrl("https://host/jira", "ENG-1"),
     "https://host/jira/browse/ENG-1",
   ));
+test("jiraBrowseUrl: a padded site is tidied, not passed through", () =>
+  // `new URL` ignores surrounding whitespace, so validating the raw value while
+  // building from it would emit "  https://site  /browse/ENG-1" — a string that
+  // then throws in validateExternalUrl and drops the click without a word.
+  assert.strictEqual(
+    issueKey.jiraBrowseUrl("  https://org.atlassian.net/  ", "ENG-1"),
+    "https://org.atlassian.net/browse/ENG-1",
+  ));
+test("jiraBrowseUrl: whitespace alone is not a site", () =>
+  assert.strictEqual(issueKey.jiraBrowseUrl("   ", "ENG-1"), null));
 test("jiraBrowseUrl accepts every key parseIssueKey produces (one shared shape)", () => {
   // Both sides are built from ISSUE_KEY_PATTERN. Were they to diverge again,
   // a key would still parse and the badge would just silently stop rendering —
@@ -938,8 +948,10 @@ test("jiraSiteState: no jira block -> no config, no site", () =>
     baseUrl: null,
   }));
 test("jiraSiteState: half-filled config still yields its site, but hasConfig is false", () =>
-  // hasJiraConfig needs both halves; the site alone is enough to build a link,
-  // and these two fields answer different questions.
+  // Pins the pure contract, not a reachable state: `validateJira` drops a jira
+  // block missing either half, so settings can't hold this. The two fields
+  // answer different questions — hasJiraConfig needs both, a link needs only
+  // the site — and that must stay true if validation ever loosens.
   assert.deepStrictEqual(
     jiraHealth.jiraSiteState(() => ({ jira: { baseUrl: "https://org.atlassian.net" } })),
     { hasConfig: false, baseUrl: "https://org.atlassian.net" },

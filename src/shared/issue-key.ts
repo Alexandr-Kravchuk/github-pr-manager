@@ -54,12 +54,17 @@ export function jiraBrowseUrl(
   baseUrl: string | null | undefined,
   issueKey: string | null,
 ): string | null {
-  if (!baseUrl || !isHttpUrl(baseUrl)) return null;
+  // Tidied FIRST, then validated, then used — all three must see the same
+  // string. Validating the raw value and building from it separately is how a
+  // padded site slips through: `new URL` ignores surrounding whitespace, so
+  // `" https://site "` passes the check and yields `" https://site /browse/K"`,
+  // which then throws in `validateExternalUrl` and drops the click in silence.
+  // Trailing slashes go the same way (`https://site//browse/K` would 404); any
+  // *path* is kept, since a self-hosted Jira may live under one.
+  const site = (baseUrl ?? "").trim().replace(/\/+$/, "");
+  if (!site || !isHttpUrl(site)) return null;
   if (!issueKey || !WHOLE_KEY_RE.test(issueKey)) return null;
-  // Trailing slashes only: any path is kept, since a self-hosted Jira may live
-  // under one. Normalization already strips both, so this is for a hand-edited
-  // settings.json — and `https://site//browse/ENG-1` would 404.
-  return `${baseUrl.replace(/\/+$/, "")}/browse/${issueKey}`;
+  return `${site}/browse/${issueKey}`;
 }
 
 /** A key at the very start, with whatever separator follows it: ": ", " - ", " ". */
