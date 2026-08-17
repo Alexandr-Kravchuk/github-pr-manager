@@ -121,6 +121,13 @@ export interface Settings {
 export interface JiraStatus {
   /** true when baseUrl + email are set AND an encrypted token is stored. */
   configured: boolean;
+  /**
+   * The configured Jira site origin, or null when none is set. Carried here
+   * because the renderer needs it to link a PR's issue key to `/browse/<KEY>`,
+   * and `PublicConfig` is about hosts and polling. A site URL is not a secret —
+   * the email and the token stay in the main process.
+   */
+  baseUrl: string | null;
   /** baseUrl + email are set (token may still be missing). */
   hasConfig: boolean;
   /** An encrypted token is stored. */

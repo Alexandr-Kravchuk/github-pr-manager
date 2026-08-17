@@ -18,6 +18,7 @@ const ignored = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
 const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
 const jira = require(path.join(__dirname, "../dist/main/shared/jira.js"));
 const jiraHealth = require(path.join(__dirname, "../dist/main/shared/jira-health.js"));
+const issueKey = require(path.join(__dirname, "../dist/main/shared/issue-key.js"));
 const prFilter = require(path.join(__dirname, "../dist/main/shared/pr-filter.js"));
 const singleInstance = require(path.join(__dirname, "../dist/main/main/single-instance.js"));
 
@@ -77,12 +78,13 @@ test("pickAppId: falls back on malformed JSON", () =>
   assert.strictEqual(cfg.pickAppId("{ not json", FB), FB));
 
 // --- shared value-import carve-outs stay Node-free (renderer imports them) ---
-// The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify
-// and the view-filter helpers from shared/pr-filter. That's only safe
-// while those modules pull in no node: builtin — a regression would break the
-// Vite renderer build. Assert the compiled output is clean so the AGENTS.md
-// carve-out is enforced, not just documented.
-for (const mod of ["notify.js", "pr-filter.js"]) {
+// The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify,
+// the view-filter helpers from shared/pr-filter and the issue-link builder from
+// shared/issue-key. That's only safe while those modules pull in no node:
+// builtin — a regression would break the Vite renderer build. Assert the
+// compiled output is clean so the AGENTS.md carve-out is enforced, not just
+// documented.
+for (const mod of ["notify.js", "pr-filter.js", "issue-key.js"]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
       path.join(__dirname, `../dist/main/shared/${mod}`),
@@ -818,6 +820,69 @@ test("mapPr.viewerHasReviewed: false for a different viewer", () =>
   assert.strictEqual(github.mapPr(rawPr(), "GH", [], "someone-else").viewerHasReviewed, false));
 test("mapPr.viewerHasReviewed: false when the viewer is unknown", () =>
   assert.strictEqual(github.mapPr(rawPr(), "GH", [], null).viewerHasReviewed, false));
+
+// --- issue-key: the card's Jira link -------------------------------------
+// Returns null wherever a link can't be built, because the badge IS the link:
+// the card renders nothing rather than a dead one.
+test("jiraBrowseUrl: builds <site>/browse/<KEY>", () =>
+  assert.strictEqual(
+    issueKey.jiraBrowseUrl("https://org.atlassian.net", "ENG-93374"),
+    "https://org.atlassian.net/browse/ENG-93374",
+  ));
+test("jiraBrowseUrl: tolerates a hand-edited trailing slash", () =>
+  assert.strictEqual(
+    issueKey.jiraBrowseUrl("https://org.atlassian.net/", "ENG-1"),
+    "https://org.atlassian.net/browse/ENG-1",
+  ));
+test("jiraBrowseUrl: null when Jira isn't configured", () => {
+  assert.strictEqual(issueKey.jiraBrowseUrl(null, "ENG-1"), null);
+  assert.strictEqual(issueKey.jiraBrowseUrl(undefined, "ENG-1"), null);
+  assert.strictEqual(issueKey.jiraBrowseUrl("", "ENG-1"), null);
+});
+test("jiraBrowseUrl: null when the PR has no issue key", () =>
+  assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", null), null));
+test("jiraBrowseUrl accepts every key parseIssueKey produces (one shared shape)", () => {
+  // Both sides are built from ISSUE_KEY_PATTERN. Were they to diverge again,
+  // a key would still parse and the badge would just silently stop rendering —
+  // nothing else in the suite would notice.
+  for (const title of ["ENG-93374 sync schemas", "Fix A1-9: the thing", "PRJ2-100 x"]) {
+    const key = github.mapPr(rawPr({ title }), "GH", [], null).issueKey;
+    assert.ok(key, `expected a key to be parsed from "${title}"`);
+    assert.strictEqual(
+      issueKey.jiraBrowseUrl("https://org.atlassian.net", key),
+      `https://org.atlassian.net/browse/${key}`,
+    );
+  }
+});
+// The badge carries the key, so the title shouldn't repeat it — but only where
+// cutting it is safe and leaves a readable title.
+for (const [title, key, expected] of [
+  ["ENG-1 Fix the thing", "ENG-1", "Fix the thing"],
+  ["ENG-1: Fix the thing", "ENG-1", "Fix the thing"],
+  ["ENG-1 - Fix the thing", "ENG-1", "Fix the thing"],
+  ["ENG-1 — Fix the thing", "ENG-1", "Fix the thing"],
+  // Mid-title: cutting anything would mangle the sentence.
+  ["Fix ENG-1: the thing", "ENG-1", "Fix ENG-1: the thing"],
+  // Parsed from the branch, absent from the title.
+  ["Datasource column selector", "ENG-1", "Datasource column selector"],
+  // Nothing would be left to read.
+  ["ENG-1", "ENG-1", "ENG-1"],
+  ["ENG-1:", "ENG-1", "ENG-1:"],
+  // A different key that merely shares a prefix must not be cut.
+  ["ENG-12 Fix", "ENG-1", "ENG-12 Fix"],
+  ["No key here", null, "No key here"],
+]) {
+  test(`stripLeadingIssueKey(${JSON.stringify(title)}, ${key}) -> ${JSON.stringify(expected)}`, () =>
+    assert.strictEqual(issueKey.stripLeadingIssueKey(title, key), expected));
+}
+
+test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () => {
+  // Defence in depth: today's parser can't emit these, but a key that escapes
+  // the /browse/ path must never become a link.
+  assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", "../../admin"), null);
+  assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", "ENG-1/../x"), null);
+  assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", "eng-1"), null);
+});
 
 // --- ignored: persistent ignore store ----------------------------------------
 async function withTempStore(fn) {

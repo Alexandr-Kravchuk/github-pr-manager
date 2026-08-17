@@ -84,16 +84,24 @@ export function getJiraToken(): string | null {
 /** Setup state for the settings UI and the grouping gate. */
 export function getJiraStatus(loadSettings: () => Settings): JiraStatus {
   let hasConfig = false;
+  // Read alongside hasConfig from the same load, and left null whenever settings
+  // can't be read — a null site means the card renders no issue-key badge at
+  // all, so a failed load degrades to no link rather than a broken one.
+  let baseUrl: string | null = null;
   try {
-    hasConfig = hasJiraConfig(loadSettings().jira);
+    const jira = loadSettings().jira;
+    hasConfig = hasJiraConfig(jira);
+    baseUrl = jira?.baseUrl ?? null;
   } catch {
     hasConfig = false;
+    baseUrl = null;
   }
   const hasToken = hasJiraToken();
   return {
     configured: hasConfig && hasToken,
     hasConfig,
     hasToken,
+    baseUrl,
     encryptionAvailable: encryptionAvailable(),
   };
 }

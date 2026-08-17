@@ -932,6 +932,7 @@ export function App() {
                         key={pr.id}
                         pr={pr}
                         hideRepo={groupBy === "repo"}
+                        jiraBaseUrl={jiraStatus?.baseUrl ?? null}
                         onOpen={openPr}
                         onMarkSeen={(p) => postSeen([p])}
                         onToggleIgnore={toggleIgnore}
@@ -949,6 +950,7 @@ export function App() {
             <PrCard
               key={pr.id}
               pr={pr}
+              jiraBaseUrl={jiraStatus?.baseUrl ?? null}
               onOpen={openPr}
               onMarkSeen={(p) => postSeen([p])}
               onToggleIgnore={toggleIgnore}
