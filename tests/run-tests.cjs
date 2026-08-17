@@ -841,6 +841,27 @@ test("jiraBrowseUrl: null when Jira isn't configured", () => {
 });
 test("jiraBrowseUrl: null when the PR has no issue key", () =>
   assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", null), null));
+
+// The site is validated like the key: a value that isn't an absolute http(s) URL
+// would build a string that LOOKS like a link and then die in
+// validateExternalUrl with nothing shown to the user. Normalization upstream
+// (`validateJira` in config.ts) keeps the app from reaching here with one, but
+// this is an exported pure function and shouldn't lean on its caller.
+for (const bad of [
+  "example.atlassian.net", // schemeless — what a hand-edited settings.json can hold
+  "//example.atlassian.net",
+  "javascript:alert(1)",
+  "ftp://example.atlassian.net",
+  "not a url",
+]) {
+  test(`jiraBrowseUrl: null for a site that isn't an http(s) URL (${bad})`, () =>
+    assert.strictEqual(issueKey.jiraBrowseUrl(bad, "ENG-1"), null));
+}
+test("jiraBrowseUrl: keeps a path — a self-hosted Jira can live under one", () =>
+  assert.strictEqual(
+    issueKey.jiraBrowseUrl("https://host/jira", "ENG-1"),
+    "https://host/jira/browse/ENG-1",
+  ));
 test("jiraBrowseUrl accepts every key parseIssueKey produces (one shared shape)", () => {
   // Both sides are built from ISSUE_KEY_PATTERN. Were they to diverge again,
   // a key would still parse and the badge would just silently stop rendering —
@@ -902,6 +923,35 @@ test("enrichmentSkipReason: no-config when baseUrl/email missing", () => {
   assert.strictEqual(jiraHealth.enrichmentSkipReason({ baseUrl: "https://org.atlassian.net" }, true, 3), "no-config");
   assert.strictEqual(jiraHealth.enrichmentSkipReason({ email: "me@x.com" }, true, 3), "no-config");
 });
+// jiraSiteState — the settings half of getJiraStatus, split out of the
+// Electron-bound jira-store so its fail-closed branch is reachable from here.
+// The renderer reads a null site as "render no issue-key link", so a broken
+// settings file must degrade to no link rather than a broken one.
+test("jiraSiteState: carries the configured site through", () =>
+  assert.deepStrictEqual(
+    jiraHealth.jiraSiteState(() => ({ jira: { baseUrl: "https://org.atlassian.net", email: "me@x.com" } })),
+    { hasConfig: true, baseUrl: "https://org.atlassian.net" },
+  ));
+test("jiraSiteState: no jira block -> no config, no site", () =>
+  assert.deepStrictEqual(jiraHealth.jiraSiteState(() => ({})), {
+    hasConfig: false,
+    baseUrl: null,
+  }));
+test("jiraSiteState: half-filled config still yields its site, but hasConfig is false", () =>
+  // hasJiraConfig needs both halves; the site alone is enough to build a link,
+  // and these two fields answer different questions.
+  assert.deepStrictEqual(
+    jiraHealth.jiraSiteState(() => ({ jira: { baseUrl: "https://org.atlassian.net" } })),
+    { hasConfig: false, baseUrl: "https://org.atlassian.net" },
+  ));
+test("jiraSiteState: a throwing loadSettings fails closed instead of propagating", () =>
+  assert.deepStrictEqual(
+    jiraHealth.jiraSiteState(() => {
+      throw new Error("settings.json: JSON parse error");
+    }),
+    { hasConfig: false, baseUrl: null },
+  ));
+
 test("enrichmentSkipReason: no-token when config present but token absent", () =>
   assert.strictEqual(jiraHealth.enrichmentSkipReason(JH_CFG, false, 3), "no-token"));
 test("enrichmentSkipReason: no-keys when config+token present but zero keys", () =>

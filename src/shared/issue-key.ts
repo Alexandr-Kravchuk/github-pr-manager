@@ -25,22 +25,40 @@ export const ISSUE_KEY_PATTERN = "[A-Z][A-Z0-9]+-\\d+";
 /** The pattern as a whole-string check — what a key must match to become a URL. */
 const WHOLE_KEY_RE = new RegExp(`^${ISSUE_KEY_PATTERN}$`);
 
+/** Whether a site string is an absolute http(s) URL — the only kind worth linking. */
+function isHttpUrl(value: string): boolean {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 /**
- * `<site>/browse/<KEY>`, or null when there is no site configured, no key, or a
- * key that isn't the shape above. Null means "there is no link", and the card
- * renders no badge at all rather than a dead one.
+ * `<site>/browse/<KEY>`, or null when there is no site, no key, or either is not
+ * the shape a link needs. Null means "there is no link", and the card renders no
+ * badge at all rather than a dead one.
  *
- * The key is validated rather than trusted, so a future change to the parser
- * can't produce one that escapes the `/browse/` path.
+ * Both halves are validated rather than trusted. The key, so a future change to
+ * the parser can't produce one that escapes the `/browse/` path. The site,
+ * because a schemeless or otherwise unparseable value would build a string that
+ * *looks* like a link and then dies silently in `validateExternalUrl` (main
+ * accepts http(s) only) with nothing shown to the user. In the app that can't
+ * happen — `validateJira` in `shared/config.ts` runs `normalizeJiraBaseUrl` on
+ * both the save and the load path, so what reaches here is already an origin —
+ * but this is an exported pure function and it should not depend on a caller's
+ * invariant to avoid emitting a broken link.
  */
 export function jiraBrowseUrl(
   baseUrl: string | null | undefined,
   issueKey: string | null,
 ): string | null {
-  if (!baseUrl || !issueKey || !WHOLE_KEY_RE.test(issueKey)) return null;
-  // `validateJira` normalizes the stored site to an origin, but a hand-edited
-  // settings.json can still carry a trailing slash — strip it so the result is
-  // never `https://site.atlassian.net//browse/ENG-1`.
+  if (!baseUrl || !isHttpUrl(baseUrl)) return null;
+  if (!issueKey || !WHOLE_KEY_RE.test(issueKey)) return null;
+  // Trailing slashes only: any path is kept, since a self-hosted Jira may live
+  // under one. Normalization already strips both, so this is for a hand-edited
+  // settings.json — and `https://site//browse/ENG-1` would 404.
   return `${baseUrl.replace(/\/+$/, "")}/browse/${issueKey}`;
 }
 

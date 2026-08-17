@@ -14,6 +14,7 @@ import { makeDebug } from "../shared/debug";
 import {
   enrichmentSkipReason,
   hasJiraConfig,
+  jiraSiteState,
   healthFromError,
   healthFromResolution,
 } from "../shared/jira-health";
@@ -83,19 +84,10 @@ export function getJiraToken(): string | null {
 
 /** Setup state for the settings UI and the grouping gate. */
 export function getJiraStatus(loadSettings: () => Settings): JiraStatus {
-  let hasConfig = false;
-  // Read alongside hasConfig from the same load, and left null whenever settings
-  // can't be read — a null site means the card renders no issue-key badge at
-  // all, so a failed load degrades to no link rather than a broken one.
-  let baseUrl: string | null = null;
-  try {
-    const jira = loadSettings().jira;
-    hasConfig = hasJiraConfig(jira);
-    baseUrl = jira?.baseUrl ?? null;
-  } catch {
-    hasConfig = false;
-    baseUrl = null;
-  }
+  // Both settings-derived fields come from `jiraSiteState`, which is pure and
+  // therefore unit-tested — including its fail-closed branch, which is what
+  // makes a broken settings file degrade to "no Jira" instead of a broken badge.
+  const { hasConfig, baseUrl } = jiraSiteState(loadSettings);
   const hasToken = hasJiraToken();
   return {
     configured: hasConfig && hasToken,
