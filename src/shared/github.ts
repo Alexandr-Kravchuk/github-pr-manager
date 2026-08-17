@@ -1,3 +1,4 @@
+import { ISSUE_KEY_PATTERN } from "./issue-key";
 import type {
   CheckItem,
   CheckState,
@@ -285,10 +286,11 @@ function extractChecks(pr: RawPr): CheckItem[] {
 }
 
 /**
- * Matches an issue-tracker key like "ENG-93374" — a Jira-style project key
- * (two or more uppercase alphanumerics) plus a number. Used to group related PRs.
+ * Matches an issue-tracker key like "ENG-93374" anywhere in a string. Used to
+ * group related PRs, and — via the same shared shape — to decide whether the
+ * card can link the key to Jira.
  */
-const ISSUE_KEY_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/;
+const ISSUE_KEY_RE = new RegExp(`\\b(${ISSUE_KEY_PATTERN})\\b`);
 
 /** Parses an issue key from the PR title, falling back to the head branch. */
 function parseIssueKey(title: string, headRefName: string): string | null {
