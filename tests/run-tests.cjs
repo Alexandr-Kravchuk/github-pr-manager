@@ -2358,6 +2358,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       poller.hashSnapshot(hsnap({ returnedToMe: false })),
       poller.hashSnapshot(hsnap({ returnedToMe: true })),
     ));
+  // Unlike its neighbours, this field is read by the view filter rather than the
+  // notifier, so the Proxy guard below — which only compares against what
+  // `diffNotifications` reads — would not notice it being dropped from the
+  // tuple. Until that guard has a filter-side twin, this test is the only thing
+  // standing between a refactor and a "Hide my approvals" view that goes stale
+  // for a whole poll tick.
+  test("hashSnapshot: a viewerApproved-only delta changes the hash", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ viewerApproved: false })),
+      poller.hashSnapshot(hsnap({ viewerApproved: true })),
+    ));
   test("hashSnapshot: identical PR fields hash equal, ignoring fetchedAt (no spurious re-emit)", () =>
     assert.strictEqual(
       poller.hashSnapshot(hsnap({}, { fetchedAt: "2026-01-01T00:00:00Z" })),

@@ -29,6 +29,19 @@ fragment PrFields on PullRequest {
     totalCount
     nodes { requestedReviewer { __typename ... on User { login avatarUrl } } }
   }
+  # One node per reviewer — their latest approve / request-changes. The cap is
+  # load-bearing beyond the reviewer avatars: hasHumanApproval, hasNoReviews,
+  # viewerHasReviewed and viewerApproved are all derived by scanning this array,
+  # and the last of those decides whether "Hide my approvals" hides a card. Past
+  # 15 distinct opinionated reviewers the viewer's own node can fall outside the
+  # page, which reads as "not approved" — the fail-safe direction (the PR stays
+  # visible), but a false negative all the same. GitHub offers no viewer-keyed
+  # opinionated-review field to sidestep it: viewerLatestOpinionatedReview does
+  # not exist (checked against both github.com and GHE), and viewerLatestReview
+  # is the latest review of ANY kind, so a plain comment left after an approval
+  # would read as not-approved — worse, and far more common. The honest fix is
+  # reviews(author: <viewer login>, states: [APPROVED, CHANGES_REQUESTED]),
+  # which needs the login as a query variable and so an extra cached lookup.
   latestOpinionatedReviews(first: 15) {
     nodes { author { __typename login avatarUrl } state }
   }
