@@ -2143,6 +2143,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       poller.hashSnapshot(hsnap({ roles: ["author"] })),
       poller.hashSnapshot(hsnap({ roles: ["author", "reviewer"] })),
     ));
+  // The field-coupling guard further down already fails if this one is dropped
+  // from the hash (the notifier reads it for returned_to_me), but that guard
+  // proves *coupling*; this states the behaviour the fix is actually about — a
+  // tick whose only delta is a PR coming back to you must re-emit, or the toast,
+  // the "↩ Back to you" badge and the action-sort rank all fail to appear.
+  test("hashSnapshot: a returnedToMe-only delta changes the hash (so returned_to_me fires)", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ returnedToMe: false })),
+      poller.hashSnapshot(hsnap({ returnedToMe: true })),
+    ));
   test("hashSnapshot: identical PR fields hash equal, ignoring fetchedAt (no spurious re-emit)", () =>
     assert.strictEqual(
       poller.hashSnapshot(hsnap({}, { fetchedAt: "2026-01-01T00:00:00Z" })),
