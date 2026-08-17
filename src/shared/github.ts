@@ -363,6 +363,16 @@ export function mapPr(
   const viewerHasReviewed =
     viewerLogin != null &&
     pr.latestOpinionatedReviews.nodes.some((r) => r.author?.login === viewerLogin);
+  // The narrower half of the same signal: your latest word on this PR is
+  // "approved". `latestOpinionatedReviews` returns one node per reviewer, so a
+  // later change request of yours replaces the approval here rather than adding
+  // to it, and a dismissed approval stops being opinionated at all — both make
+  // this false again without any bookkeeping of ours.
+  const viewerApproved =
+    viewerLogin != null &&
+    pr.latestOpinionatedReviews.nodes.some(
+      (r) => r.author?.login === viewerLogin && r.state === "APPROVED",
+    );
   const hasNoReviews = pr.latestOpinionatedReviews.nodes.length === 0;
 
   const issueKey = parseIssueKey(pr.title, pr.headRefName);
@@ -435,6 +445,7 @@ export function mapPr(
     reviewDecision: pr.reviewDecision,
     roles,
     viewerHasReviewed,
+    viewerApproved,
     hasNoReviews,
     unresolvedThreads,
     unaddressedThreads,

@@ -16,10 +16,12 @@ Cards can be grouped by repository, by issue, or by **parent Jira task** (see
 [Jira](#jira-optional--parent-task-grouping) below), and are colour-coded down the
 left edge (red = needs attention, green = ready to merge, yellow = CI running,
 purple = your review is requested). One-click **filters** (needs attention, failing CI, new comments,
-ready to merge, drafts) and a search box narrow the list; a **status buddy** in
-the header reflects the overall mood at a glance, and any PR you don't care about
-can be **ignored** and tucked behind an "Ignored" filter. Light / dark / system
-**theme** follows the OS or can be pinned in Settings.
+ready to merge, drafts) and a search box narrow the list, and **Hide my
+approvals** takes away the PRs you already approved that aren't waiting on you
+again; a **status buddy** in the header reflects the overall mood at a glance,
+and any PR you don't care about can be **ignored** and tucked behind an
+"Ignored" filter. Light / dark / system **theme** follows the OS or can be
+pinned in Settings.
 
 It is **per-user and single-identity**: tokens are read from the
 [`gh` CLI](https://cli.github.com/) you're already signed into — there is no

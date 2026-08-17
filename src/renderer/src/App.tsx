@@ -9,6 +9,7 @@ import {
   activeFilterCount,
   baselineStats,
   emptyStateKind,
+  excludeDelta,
   filterPrs,
   hiddenAttentionCount,
   isBaselinePr,
@@ -78,6 +79,7 @@ interface ViewPrefs {
   newOnly: boolean;
   mergeableOnly: boolean;
   noReviewsOnly: boolean;
+  hideApproved: boolean;
   showDrafts: boolean;
   showIgnored: boolean;
 }
@@ -94,6 +96,7 @@ const DEFAULT_PREFS: ViewPrefs = {
   newOnly: false,
   mergeableOnly: false,
   noReviewsOnly: false,
+  hideApproved: false,
   showDrafts: false,
   showIgnored: false,
 };
@@ -116,6 +119,7 @@ function loadPrefs(): ViewPrefs {
       newOnly: Boolean(p.newOnly),
       mergeableOnly: Boolean(p.mergeableOnly),
       noReviewsOnly: Boolean(p.noReviewsOnly),
+      hideApproved: Boolean(p.hideApproved),
       showDrafts: Boolean(p.showDrafts),
       showIgnored: Boolean(p.showIgnored),
     };
@@ -159,6 +163,7 @@ export function App() {
   const [newOnly, setNewOnly] = useState(boot.newOnly);
   const [mergeableOnly, setMergeableOnly] = useState(boot.mergeableOnly);
   const [noReviewsOnly, setNoReviewsOnly] = useState(boot.noReviewsOnly);
+  const [hideApproved, setHideApproved] = useState(boot.hideApproved);
   const [sortBy, setSortBy] = useState<SortKey>(boot.sortBy);
   const [groupBy, setGroupBy] = useState<GroupMode>(boot.groupBy);
   const [showDrafts, setShowDrafts] = useState(boot.showDrafts);
@@ -290,6 +295,7 @@ export function App() {
       newOnly,
       mergeableOnly,
       noReviewsOnly,
+      hideApproved,
       showDrafts,
       showIgnored,
     });
@@ -303,6 +309,7 @@ export function App() {
     newOnly,
     mergeableOnly,
     noReviewsOnly,
+    hideApproved,
     showDrafts,
     showIgnored,
   ]);
@@ -388,6 +395,7 @@ export function App() {
       newOnly,
       mergeableOnly,
       noReviewsOnly,
+      hideApproved,
       showDrafts,
       showIgnored,
     }),
@@ -400,6 +408,7 @@ export function App() {
       newOnly,
       mergeableOnly,
       noReviewsOnly,
+      hideApproved,
       showDrafts,
       showIgnored,
     ],
@@ -424,7 +433,8 @@ export function App() {
   // Chip badges are facet counts, with every other active filter applied: a
   // narrowing chip reports the rows it yields while ON (so for one that is
   // already on, that's what you currently see), a reveal chip reports the rows
-  // toggling it changes — added when off, taken away when on.
+  // toggling it changes — added when off, taken away when on. The exclude chip
+  // reports the same delta in the other direction: rows the click removes.
   const chipCounts = useMemo(
     () => ({
       attention: narrowFacetCount(allPrs, filterState, "attention"),
@@ -432,6 +442,7 @@ export function App() {
       fresh: narrowFacetCount(allPrs, filterState, "fresh"),
       mergeable: narrowFacetCount(allPrs, filterState, "mergeable"),
       noReviews: narrowFacetCount(allPrs, filterState, "noReviews"),
+      approved: excludeDelta(allPrs, filterState),
       drafts: revealDelta(allPrs, filterState, "drafts"),
       ignored: revealDelta(allPrs, filterState, "ignored"),
     }),
@@ -572,6 +583,7 @@ export function App() {
     setNewOnly(false);
     setMergeableOnly(false);
     setNoReviewsOnly(false);
+    setHideApproved(false);
   }, []);
 
   const noHosts = config !== null && config.hosts.length === 0;
@@ -834,6 +846,19 @@ export function App() {
               onClick={() => setNoReviewsOnly((v) => !v)}
             >
               ◷ No reviews yet
+            </FilterChip>
+            {/* The one chip that REMOVES rows: PRs you approved and that aren't
+                asking for you again. Its count is what the click takes away, and
+                like the reveal chips it stays clickable at 0 — a persisted "on"
+                with nothing left to hide must still be switchable off. */}
+            <FilterChip
+              active={hideApproved}
+              count={chipCounts.approved}
+              neverDisable
+              onClick={() => setHideApproved((v) => !v)}
+              tone="green"
+            >
+              ✓ Hide my approvals
             </FilterChip>
             {/* Reveal chips stay clickable at 0 — the count is a delta, so it hits 0
                 whenever the other chip already revealed the same PRs, and their

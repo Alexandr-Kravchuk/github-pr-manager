@@ -159,6 +159,13 @@ export function hashSnapshot(s: DashboardResponse): string {
     // Sorted so the hash tracks role *membership*, not the producer's ordering —
     // a reordering alone must not force a spurious re-emit.
     [...p.roles].sort().join(","),
+    // Read by the view filter (pr-filter.ts) — it decides whether the card is on
+    // screen at all while "Hide my approvals" is on. In practice it only ever
+    // moves together with `updatedAt` (submitting or dismissing a review bumps
+    // it), but that is GitHub's timestamp semantics, not an invariant of ours:
+    // hashing the field the consumer actually reads is what the two rules above
+    // do, and it costs nothing.
+    p.viewerApproved,
     p.isDraft,
     p.isIgnored,
     p.parentKey,

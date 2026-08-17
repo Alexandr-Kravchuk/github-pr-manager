@@ -234,6 +234,15 @@ export interface PullRequest {
    */
   viewerHasReviewed: boolean;
   /**
+   * true when the current user's latest opinionated review is an approval.
+   * Narrower than {@link viewerHasReviewed}, which is equally true after a
+   * change request, and unrelated to {@link hasHumanApproval}, which is about
+   * anyone. Backs the "Hide my approvals" filter: from your side such a PR is
+   * done. Falls back to false on its own when a later review of yours
+   * supersedes it, or when branch protection dismisses the approval on a push.
+   */
+  viewerApproved: boolean;
+  /**
    * true when nobody has submitted an opinionated review yet — the "nobody has
    * looked at it" pile. Keys off opinionated reviews (approve / request-changes);
    * a plain "Comment" review does not clear it.
