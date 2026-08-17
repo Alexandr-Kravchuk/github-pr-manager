@@ -4,7 +4,7 @@
  * logic — the PR's "no more silent empty groups" behaviour — is unit-testable in
  * the plain-Node test runner (which can't `require` anything importing electron).
  */
-import type { JiraHealth, JiraSettings } from "./types";
+import type { JiraHealth, JiraSettings, Settings } from "./types";
 
 /** Why a parent-enrichment pass has nothing to do; null when it should run. */
 export type EnrichmentSkipReason = "no-config" | "no-token" | "no-keys";
@@ -16,6 +16,33 @@ export type EnrichmentSkipReason = "no-config" | "no-token" | "no-keys";
  */
 export function hasJiraConfig(jira: JiraSettings | undefined): jira is JiraSettings {
   return Boolean(jira?.baseUrl && jira.email);
+}
+
+/** The settings half of `JiraStatus`: is the connection configured, and where does the site live. */
+export interface JiraSiteState {
+  hasConfig: boolean;
+  /** The configured site, or null — which the renderer reads as "render no issue-key link". */
+  baseUrl: string | null;
+}
+
+/**
+ * Reads the Jira connection out of settings, failing CLOSED: any error from
+ * `loadSettings` — an unreadable file, a `ConfigError` from a hand-edited site
+ * URL — yields no config and no site rather than propagating, so a broken
+ * settings file degrades to "no Jira" instead of taking down the status call.
+ *
+ * Lives here rather than in `main/jira-store.ts` for the reason this whole module
+ * exists: the caller there also touches `fs` and Electron `safeStorage`, so this
+ * branch would be untestable in the plain-Node runner. Both fields come from one
+ * load, so they can't disagree about which settings they describe.
+ */
+export function jiraSiteState(loadSettings: () => Settings): JiraSiteState {
+  try {
+    const jira = loadSettings().jira;
+    return { hasConfig: hasJiraConfig(jira), baseUrl: jira?.baseUrl ?? null };
+  } catch {
+    return { hasConfig: false, baseUrl: null };
+  }
 }
 
 /**

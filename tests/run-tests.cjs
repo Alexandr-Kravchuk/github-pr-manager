@@ -18,6 +18,7 @@ const ignored = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
 const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
 const jira = require(path.join(__dirname, "../dist/main/shared/jira.js"));
 const jiraHealth = require(path.join(__dirname, "../dist/main/shared/jira-health.js"));
+const issueKey = require(path.join(__dirname, "../dist/main/shared/issue-key.js"));
 const prFilter = require(path.join(__dirname, "../dist/main/shared/pr-filter.js"));
 const singleInstance = require(path.join(__dirname, "../dist/main/main/single-instance.js"));
 
@@ -77,12 +78,13 @@ test("pickAppId: falls back on malformed JSON", () =>
   assert.strictEqual(cfg.pickAppId("{ not json", FB), FB));
 
 // --- shared value-import carve-outs stay Node-free (renderer imports them) ---
-// The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify
-// and the view-filter helpers from shared/pr-filter. That's only safe
-// while those modules pull in no node: builtin — a regression would break the
-// Vite renderer build. Assert the compiled output is clean so the AGENTS.md
-// carve-out is enforced, not just documented.
-for (const mod of ["notify.js", "pr-filter.js"]) {
+// The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify,
+// the view-filter helpers from shared/pr-filter and the issue-link builder from
+// shared/issue-key. That's only safe while those modules pull in no node:
+// builtin — a regression would break the Vite renderer build. Assert the
+// compiled output is clean so the AGENTS.md carve-out is enforced, not just
+// documented.
+for (const mod of ["notify.js", "pr-filter.js", "issue-key.js"]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
       path.join(__dirname, `../dist/main/shared/${mod}`),
@@ -840,6 +842,99 @@ test("mapPr.viewerApproved: someone else's approval is not yours", () =>
   assert.strictEqual(github.mapPr(rawPr(), "GH", [], "someone-else").viewerApproved, false));
 test("mapPr.viewerApproved: false when the viewer is unknown", () =>
   assert.strictEqual(github.mapPr(rawPr(), "GH", [], null).viewerApproved, false));
+// --- issue-key: the card's Jira link -------------------------------------
+// Returns null wherever a link can't be built, because the badge IS the link:
+// the card renders nothing rather than a dead one.
+test("jiraBrowseUrl: builds <site>/browse/<KEY>", () =>
+  assert.strictEqual(
+    issueKey.jiraBrowseUrl("https://org.atlassian.net", "ENG-93374"),
+    "https://org.atlassian.net/browse/ENG-93374",
+  ));
+test("jiraBrowseUrl: tolerates a hand-edited trailing slash", () =>
+  assert.strictEqual(
+    issueKey.jiraBrowseUrl("https://org.atlassian.net/", "ENG-1"),
+    "https://org.atlassian.net/browse/ENG-1",
+  ));
+test("jiraBrowseUrl: null when Jira isn't configured", () => {
+  assert.strictEqual(issueKey.jiraBrowseUrl(null, "ENG-1"), null);
+  assert.strictEqual(issueKey.jiraBrowseUrl(undefined, "ENG-1"), null);
+  assert.strictEqual(issueKey.jiraBrowseUrl("", "ENG-1"), null);
+});
+test("jiraBrowseUrl: null when the PR has no issue key", () =>
+  assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", null), null));
+
+// The site is validated like the key: a value that isn't an absolute http(s) URL
+// would build a string that LOOKS like a link and then die in
+// validateExternalUrl with nothing shown to the user. Normalization upstream
+// (`validateJira` in config.ts) keeps the app from reaching here with one, but
+// this is an exported pure function and shouldn't lean on its caller.
+for (const bad of [
+  "example.atlassian.net", // schemeless — what a hand-edited settings.json can hold
+  "//example.atlassian.net",
+  "javascript:alert(1)",
+  "ftp://example.atlassian.net",
+  "not a url",
+]) {
+  test(`jiraBrowseUrl: null for a site that isn't an http(s) URL (${bad})`, () =>
+    assert.strictEqual(issueKey.jiraBrowseUrl(bad, "ENG-1"), null));
+}
+test("jiraBrowseUrl: keeps a path — a self-hosted Jira can live under one", () =>
+  assert.strictEqual(
+    issueKey.jiraBrowseUrl("https://host/jira", "ENG-1"),
+    "https://host/jira/browse/ENG-1",
+  ));
+test("jiraBrowseUrl: a padded site is tidied, not passed through", () =>
+  // `new URL` ignores surrounding whitespace, so validating the raw value while
+  // building from it would emit "  https://site  /browse/ENG-1" — a string that
+  // then throws in validateExternalUrl and drops the click without a word.
+  assert.strictEqual(
+    issueKey.jiraBrowseUrl("  https://org.atlassian.net/  ", "ENG-1"),
+    "https://org.atlassian.net/browse/ENG-1",
+  ));
+test("jiraBrowseUrl: whitespace alone is not a site", () =>
+  assert.strictEqual(issueKey.jiraBrowseUrl("   ", "ENG-1"), null));
+test("jiraBrowseUrl accepts every key parseIssueKey produces (one shared shape)", () => {
+  // Both sides are built from ISSUE_KEY_PATTERN. Were they to diverge again,
+  // a key would still parse and the badge would just silently stop rendering —
+  // nothing else in the suite would notice.
+  for (const title of ["ENG-93374 sync schemas", "Fix A1-9: the thing", "PRJ2-100 x"]) {
+    const key = github.mapPr(rawPr({ title }), "GH", [], null).issueKey;
+    assert.ok(key, `expected a key to be parsed from "${title}"`);
+    assert.strictEqual(
+      issueKey.jiraBrowseUrl("https://org.atlassian.net", key),
+      `https://org.atlassian.net/browse/${key}`,
+    );
+  }
+});
+// The badge carries the key, so the title shouldn't repeat it — but only where
+// cutting it is safe and leaves a readable title.
+for (const [title, key, expected] of [
+  ["ENG-1 Fix the thing", "ENG-1", "Fix the thing"],
+  ["ENG-1: Fix the thing", "ENG-1", "Fix the thing"],
+  ["ENG-1 - Fix the thing", "ENG-1", "Fix the thing"],
+  ["ENG-1 — Fix the thing", "ENG-1", "Fix the thing"],
+  // Mid-title: cutting anything would mangle the sentence.
+  ["Fix ENG-1: the thing", "ENG-1", "Fix ENG-1: the thing"],
+  // Parsed from the branch, absent from the title.
+  ["Datasource column selector", "ENG-1", "Datasource column selector"],
+  // Nothing would be left to read.
+  ["ENG-1", "ENG-1", "ENG-1"],
+  ["ENG-1:", "ENG-1", "ENG-1:"],
+  // A different key that merely shares a prefix must not be cut.
+  ["ENG-12 Fix", "ENG-1", "ENG-12 Fix"],
+  ["No key here", null, "No key here"],
+]) {
+  test(`stripLeadingIssueKey(${JSON.stringify(title)}, ${key}) -> ${JSON.stringify(expected)}`, () =>
+    assert.strictEqual(issueKey.stripLeadingIssueKey(title, key), expected));
+}
+
+test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () => {
+  // Defence in depth: today's parser can't emit these, but a key that escapes
+  // the /browse/ path must never become a link.
+  assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", "../../admin"), null);
+  assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", "ENG-1/../x"), null);
+  assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", "eng-1"), null);
+});
 
 // --- ignored: persistent ignore store ----------------------------------------
 async function withTempStore(fn) {
@@ -859,6 +954,37 @@ test("enrichmentSkipReason: no-config when baseUrl/email missing", () => {
   assert.strictEqual(jiraHealth.enrichmentSkipReason({ baseUrl: "https://org.atlassian.net" }, true, 3), "no-config");
   assert.strictEqual(jiraHealth.enrichmentSkipReason({ email: "me@x.com" }, true, 3), "no-config");
 });
+// jiraSiteState — the settings half of getJiraStatus, split out of the
+// Electron-bound jira-store so its fail-closed branch is reachable from here.
+// The renderer reads a null site as "render no issue-key link", so a broken
+// settings file must degrade to no link rather than a broken one.
+test("jiraSiteState: carries the configured site through", () =>
+  assert.deepStrictEqual(
+    jiraHealth.jiraSiteState(() => ({ jira: { baseUrl: "https://org.atlassian.net", email: "me@x.com" } })),
+    { hasConfig: true, baseUrl: "https://org.atlassian.net" },
+  ));
+test("jiraSiteState: no jira block -> no config, no site", () =>
+  assert.deepStrictEqual(jiraHealth.jiraSiteState(() => ({})), {
+    hasConfig: false,
+    baseUrl: null,
+  }));
+test("jiraSiteState: half-filled config still yields its site, but hasConfig is false", () =>
+  // Pins the pure contract, not a reachable state: `validateJira` drops a jira
+  // block missing either half, so settings can't hold this. The two fields
+  // answer different questions — hasJiraConfig needs both, a link needs only
+  // the site — and that must stay true if validation ever loosens.
+  assert.deepStrictEqual(
+    jiraHealth.jiraSiteState(() => ({ jira: { baseUrl: "https://org.atlassian.net" } })),
+    { hasConfig: false, baseUrl: "https://org.atlassian.net" },
+  ));
+test("jiraSiteState: a throwing loadSettings fails closed instead of propagating", () =>
+  assert.deepStrictEqual(
+    jiraHealth.jiraSiteState(() => {
+      throw new Error("settings.json: JSON parse error");
+    }),
+    { hasConfig: false, baseUrl: null },
+  ));
+
 test("enrichmentSkipReason: no-token when config present but token absent", () =>
   assert.strictEqual(jiraHealth.enrichmentSkipReason(JH_CFG, false, 3), "no-token"));
 test("enrichmentSkipReason: no-keys when config+token present but zero keys", () =>
@@ -2221,6 +2347,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.notStrictEqual(
       poller.hashSnapshot(hsnap({ roles: ["author"] })),
       poller.hashSnapshot(hsnap({ roles: ["author", "reviewer"] })),
+    ));
+  // The field-coupling guard further down already fails if this one is dropped
+  // from the hash (the notifier reads it for returned_to_me), but that guard
+  // proves *coupling*; this states the behaviour the fix is actually about — a
+  // tick whose only delta is a PR coming back to you must re-emit, or the toast,
+  // the "↩ Back to you" badge and the action-sort rank all fail to appear.
+  test("hashSnapshot: a returnedToMe-only delta changes the hash (so returned_to_me fires)", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ returnedToMe: false })),
+      poller.hashSnapshot(hsnap({ returnedToMe: true })),
     ));
   test("hashSnapshot: identical PR fields hash equal, ignoring fetchedAt (no spurious re-emit)", () =>
     assert.strictEqual(

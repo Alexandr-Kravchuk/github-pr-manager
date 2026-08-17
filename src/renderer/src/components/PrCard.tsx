@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 
+import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
 import { isPassiveReviewed } from "../../../shared/pr-filter";
 import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
@@ -13,6 +14,12 @@ interface Props {
   onToggleIgnore: (pr: PullRequest) => void;
   /** Hide the host/repo line (redundant inside a per-repo group). */
   hideRepo?: boolean;
+  /**
+   * The configured Jira site, or null when Jira isn't set up — the issue-key
+   * link is rendered only when a real URL can be built, so a user without Jira
+   * sees no dead badge.
+   */
+  jiraBaseUrl?: string | null;
 }
 
 /** Card signal, in priority order — drives the left accent and the header buddy. */
@@ -215,8 +222,25 @@ function EyeIcon() {
   );
 }
 
-export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = false }: Props) {
+export function PrCard({
+  pr,
+  onOpen,
+  onMarkSeen,
+  onToggleIgnore,
+  hideRepo = false,
+  jiraBaseUrl = null,
+}: Props) {
   const review = reviewLabel(pr.reviewDecision);
+  // Null unless both a site and a parsed key exist — the badge is the link, so
+  // there is nothing to show without one.
+  const jiraUrl = jiraBrowseUrl(jiraBaseUrl, pr.issueKey);
+  const openJira = useCallback(() => {
+    if (jiraUrl) window.api.openExternal(jiraUrl).catch(() => {});
+  }, [jiraUrl]);
+  // Most titles open with the key ("ENG-1: Fix the thing"), so once the badge
+  // carries it the prefix is said twice. Dropped only when the badge is actually
+  // there — without it the title is the sole place the key appears.
+  const displayTitle = jiraUrl ? stripLeadingIssueKey(pr.title, pr.issueKey) : pr.title;
   const passingCount = pr.checks.filter((c) => c.state === "success").length;
   const pendingReviewers = pr.reviewers.filter((r) => r.reviewState === "pending");
   const pendingReviewerNames = reviewerListLabel(pendingReviewers);
@@ -313,9 +337,11 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
       <button
         type="button"
         onClick={() => onOpen(pr)}
+        // The full title on hover, but only when it isn't what's already shown.
+        title={displayTitle === pr.title ? undefined : pr.title}
         className="mb-2 block text-left text-[15px] font-semibold leading-snug text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300"
       >
-        {pr.title}
+        {displayTitle}
       </button>
 
       {/* Meta: author, roles, review decision, comments, new activity */}
@@ -331,6 +357,23 @@ export function PrCard({ pr, onOpen, onMarkSeen, onToggleIgnore, hideRepo = fals
             />
             {pr.author.login}
           </span>
+        )}
+
+        {/* The issue key, straight to Jira. First in the row because it answers
+            "what work is this?" before "what's my part in it?", and it opens in
+            the system browser rather than navigating this window. */}
+        {jiraUrl && (
+          <button
+            type="button"
+            onClick={openJira}
+            title={`Open ${pr.issueKey} in Jira`}
+            className={cn(
+              pill,
+              "border-indigo-500/40 bg-indigo-500/15 text-indigo-700 hover:bg-indigo-500/25 hover:underline dark:text-indigo-300",
+            )}
+          >
+            {pr.issueKey} ↗
+          </button>
         )}
 
         {pr.roles.includes("author") && (

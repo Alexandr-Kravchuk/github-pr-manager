@@ -37,6 +37,21 @@ const SORT_LABELS: Record<SortKey, string> = {
 };
 
 /**
+ * The role selector's options, in render order. A `Record` keyed by `RoleFilter`
+ * rather than a hand-kept array, so a new `PrRole` fails the build here instead
+ * of silently missing from the dropdown and from the persisted-prefs allowlist —
+ * the same exhaustiveness guarantee `notify.ts` gets from `_priorityIsExhaustive`,
+ * with the label as the thing that must be supplied.
+ */
+const ROLE_FILTER_LABELS: Record<RoleFilter, string> = {
+  all: "All roles",
+  author: "I'm the author",
+  reviewer: "I'm a reviewer",
+  reviewed: "I already reviewed",
+};
+const ROLE_FILTERS = Object.keys(ROLE_FILTER_LABELS) as RoleFilter[];
+
+/**
  * Priority for the "Needs my action" sort — lower sorts higher. Ranks the PRs that
  * need your action soonest: a review requested of you that you haven't opened,
  * then PRs that came back to you after you engaged, then the rest.
@@ -110,7 +125,7 @@ function loadPrefs(): ViewPrefs {
     const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
       allowed.includes(v as T) ? (v as T) : fallback;
     return {
-      role: oneOf(p.role, ["all", "author", "reviewer", "reviewed"] as const, "all"),
+      role: oneOf(p.role, ROLE_FILTERS, "all"),
       host: typeof p.host === "string" ? p.host : "all",
       sortBy: oneOf(p.sortBy, ["action", "waiting", "active", "newest"] as const, "action"),
       groupBy: oneOf(p.groupBy, ["none", "repo", "issue", "parent"] as const, "repo"),
@@ -738,10 +753,11 @@ export function App() {
               onChange={(e) => setRole(e.target.value as RoleFilter)}
               className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
             >
-              <option value="all">All roles</option>
-              <option value="author">I&apos;m the author</option>
-              <option value="reviewer">I&apos;m a reviewer</option>
-              <option value="reviewed">I already reviewed</option>
+              {ROLE_FILTERS.map((key) => (
+                <option key={key} value={key}>
+                  {ROLE_FILTER_LABELS[key]}
+                </option>
+              ))}
             </select>
 
             <select
@@ -958,6 +974,7 @@ export function App() {
                         key={pr.id}
                         pr={pr}
                         hideRepo={groupBy === "repo"}
+                        jiraBaseUrl={jiraStatus?.baseUrl ?? null}
                         onOpen={openPr}
                         onMarkSeen={(p) => postSeen([p])}
                         onToggleIgnore={toggleIgnore}
@@ -975,6 +992,7 @@ export function App() {
             <PrCard
               key={pr.id}
               pr={pr}
+              jiraBaseUrl={jiraStatus?.baseUrl ?? null}
               onOpen={openPr}
               onMarkSeen={(p) => postSeen([p])}
               onToggleIgnore={toggleIgnore}

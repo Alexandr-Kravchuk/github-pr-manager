@@ -287,7 +287,15 @@ const api: PrManagerApi = {
   saveSettings: async () => ({ ok: true }),
   setTheme: async () => {},
   getGhStatus: async () => ({ installed: true, hosts: [{ hostname: "github.com", label: "GitHub", authenticated: true }] }),
-  getJiraStatus: async () => ({ configured: true, hasConfig: true, hasToken: true, encryptionAvailable: true }),
+  // A site is set so the issue-key badge renders in mock mode; openExternal is a
+  // no-op above, so clicking it stays inert.
+  getJiraStatus: async () => ({
+    configured: true,
+    hasConfig: true,
+    hasToken: true,
+    baseUrl: "https://example.atlassian.net",
+    encryptionAvailable: true,
+  }),
   setJiraToken: async () => ({ ok: true }),
   getAppVersion: async () => "dev",
   copyText: async () => {},
