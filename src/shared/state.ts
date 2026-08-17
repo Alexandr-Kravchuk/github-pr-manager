@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { isPassiveReviewed } from "./pr-filter";
 import type { PullRequest, SeenInput } from "./types";
 
 /** A stored "snapshot" of a PR at the time it was last recorded. */
@@ -88,8 +89,18 @@ export async function applyActivity(prs: PullRequest[], statePath: string): Prom
       // dashboard) that has new comments OR a newer push than the recorded
       // snapshot — the ball is back in your court. Your own PRs are excluded so
       // your pushes never trigger it.
+      //
+      // The `reviewed` role counts as engagement in its own right, and is the
+      // broader of the two review signals: it comes from `reviewed-by:@me`, which
+      // matches a plain "Comment" review, while `viewerHasReviewed` reads
+      // `latestOpinionatedReviews` and therefore only sees approve /
+      // request-changes. Observed live: 4 of 5 reviewed-role PRs had
+      // `viewerHasReviewed === false`. Without this term those PRs could never
+      // return to you, which for a passive-reviewed PR (whose attention flag is
+      // exactly `returnedToMe`, below) would mean a card that never speaks again.
       const isAuthor = pr.roles.includes("author");
-      const engaged = pr.viewerHasReviewed || entry.viewedAt != null;
+      const engaged =
+        pr.viewerHasReviewed || pr.roles.includes("reviewed") || entry.viewedAt != null;
       const newPush =
         pr.lastCommitPushedAt != null &&
         entry.lastCommitPushedAt != null &&
@@ -101,14 +112,23 @@ export async function applyActivity(prs: PullRequest[], statePath: string): Prom
     // turn to act); a re-requested change request and "just awaiting someone
     // else's review" (for your own PR) don't count as needing attention.
     const isAuthor = pr.roles.includes("author");
-    pr.needsAttention =
-      pr.roles.includes("reviewer") ||
-      pr.returnedToMe ||
-      pr.failingChecks.length > 0 ||
-      pr.hasUnaddressedChangeRequest ||
-      pr.hasUnaddressedComments ||
-      pr.hasNewActivity ||
-      (pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview));
+
+    // A PR you have ONLY already reviewed (see `isPassiveReviewed`) is on the
+    // dashboard so it doesn't vanish the moment you submit a review — not
+    // because someone is waiting on you. Its failing CI, open threads and
+    // pending change request are the author's business, and claiming they need
+    // your attention would light up every PR you ever reviewed that is still
+    // open. Only its return to your court counts, and `returnedToMe` already
+    // folds in new comments and new pushes since your last snapshot.
+    pr.needsAttention = isPassiveReviewed(pr)
+      ? pr.returnedToMe
+      : pr.roles.includes("reviewer") ||
+        pr.returnedToMe ||
+        pr.failingChecks.length > 0 ||
+        pr.hasUnaddressedChangeRequest ||
+        pr.hasUnaddressedComments ||
+        pr.hasNewActivity ||
+        (pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview));
   }
 
   if (mutated) await writeState(statePath, state);

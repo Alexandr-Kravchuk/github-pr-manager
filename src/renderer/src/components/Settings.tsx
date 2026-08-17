@@ -432,7 +432,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                   onChange={(v) => setNotifEvent({ yourTurn: v })}
                   disabled={!notifications.enabled}
                   title="My turn to act"
-                  hint="Review requested of me, or a change request / unanswered comment on my PR."
+                  hint="Review requested of me, a PR I reviewed coming back to me, or a change request / unanswered comment on my PR."
                 />
                 <CheckRow
                   checked={notifications.events.ciFailed}

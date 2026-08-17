@@ -204,9 +204,12 @@ const FIXTURES: Record<string, PullRequest[]> = {
       parentKey: "ENG-93367",
       parentSummary: "Analyze long app creating",
       headRefName: "feature/eng-93375",
-      roles: ["reviewer"],
+      // I reviewed this earlier and the author pushed new changes back to me —
+      // so GitHub has cleared the review request and only `reviewed-by:@me`
+      // still finds it. The passive role, with returnedToMe as its one way to
+      // claim attention.
+      roles: ["reviewed"],
       author: { login: "teammate", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4" },
-      // I reviewed this earlier and the author pushed new changes back to me.
       viewerHasReviewed: true,
       returnedToMe: true,
       hasNoReviews: false,

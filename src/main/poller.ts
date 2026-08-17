@@ -137,6 +137,12 @@ export function hashSnapshot(s: DashboardResponse): string {
     p.hasHumanApproval,
     p.hasNewActivity,
     p.needsAttention,
+    // Read by the notifier (notify.ts) for the returned_to_me transition, and it
+    // does NOT move needsAttention on every PR: for one that already needs
+    // attention through an outstanding request, this flag can flip on its own,
+    // so without it here the tick wouldn't re-emit and the toast would be lost.
+    // It also drives the card's "↩ Back to you" badge and the action sort.
+    p.returnedToMe,
     p.failingChecks.length,
     p.pendingChecks.length,
     p.checks.length,

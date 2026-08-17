@@ -15,7 +15,13 @@
  *  - **Your own actions don't count**: the underlying fields (`hasUnaddressed*`,
  *    `hasHumanApproval`, `ciState`) already reflect the *other* side's action,
  *    and the author-side transitions require a prior snapshot to compare against
- *    — so opening your own PR (no `before`) never pings.
+ *    — so opening your own PR (no `before`) never pings. `returnedToMe` is
+ *    likewise never set on a PR you authored (see `state.ts`).
+ *  - **State vs. transition**: `review_requested` is the one rule that may fire
+ *    for a PR with no `before` (you weren't involved, so it wasn't on the
+ *    dashboard). Everything else — including `returned_to_me`, whose flag stays
+ *    true until the PR is marked seen — requires the false→true edge, or the
+ *    same PR would toast on every poll.
  */
 
 import type { NotificationSettings, PullRequest } from "./types";
@@ -36,6 +42,7 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
 
 export type NotifyEventKind =
   | "review_requested"
+  | "returned_to_me"
   | "changes_requested"
   | "unanswered_comment"
   | "ci_failed"
@@ -55,7 +62,10 @@ export interface NotifyEvent {
 
 /** Highest priority first — the winner when several transitions hit one PR. */
 const PRIORITY = [
+  // An explicit ask outranks the PR merely coming back on its own, so a
+  // re-requested review reads as "review requested", not "back to you".
   "review_requested",
+  "returned_to_me",
   "changes_requested",
   "ci_failed",
   "unanswered_comment",
@@ -72,6 +82,9 @@ void _priorityIsExhaustive;
 
 const TITLES: Record<NotifyEventKind, string> = {
   review_requested: "Review requested",
+  // Same wording as the card badge and the header stat, so the toast and the
+  // dashboard name the same thing.
+  returned_to_me: "Back to you",
   changes_requested: "Changes requested",
   unanswered_comment: "Comment awaiting your reply",
   ci_failed: "CI failed",
@@ -136,6 +149,17 @@ export function diffNotifications(
       // and you were in fact requested on them, so it's accepted, not suppressed.
       const wasReviewer = before ? before.roles.includes("reviewer") : false;
       if (isReviewer && !wasReviewer) kinds.add("review_requested");
+
+      // A PR you engaged with that came back to you — new comments or a push
+      // since your snapshot. Without this, the whole `reviewed` category is
+      // silent: GitHub clears the review request once you review, so those PRs
+      // never re-enter the `reviewer` role above and nothing else here covers a
+      // PR you don't own. Strictly a transition, like every rule below it:
+      // `returnedToMe` stays true until you mark the PR seen, so firing on the
+      // state itself would re-toast the same PR on every poll. A `before` is
+      // required for the same reason the author-side rules require one — a PR
+      // that is merely new to the snapshot has not "come back".
+      if (before && !before.returnedToMe && pr.returnedToMe) kinds.add("returned_to_me");
 
       // Author-side transitions need a prior state to compare against.
       if (isAuthor && before) {

@@ -97,6 +97,22 @@ export function isBaselinePr(pr: Pick<PullRequest, "isDraft" | "isIgnored">): bo
 }
 
 /**
+ * Whether the PR is on the dashboard ONLY because you already reviewed it: no
+ * outstanding request, and not your own PR. Such a PR is *passive* — nobody is
+ * waiting on you — which is why it neither claims attention on its own (see
+ * `applyActivity` in state.ts) nor repeats a badge the card already carries in a
+ * louder form (`PrCard`). One definition rather than two, so the main-process
+ * flag and the renderer's badge can't drift apart when a role is added.
+ */
+export function isPassiveReviewed(pr: Pick<PullRequest, "roles">): boolean {
+  return (
+    pr.roles.includes("reviewed") &&
+    !pr.roles.includes("reviewer") &&
+    !pr.roles.includes("author")
+  );
+}
+
+/**
  * Whether a PR survives the two reveal chips. Drafts and ignored PRs are hidden
  * by default; ANY chip that owns one of the PR's categories reveals it, so an
  * ignored draft needs `Drafts` OR `Ignored`, not both.

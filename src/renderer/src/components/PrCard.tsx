@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
+import { isPassiveReviewed } from "../../../shared/pr-filter";
 import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { CheckBadge } from "./CheckBadge";
@@ -388,6 +389,18 @@ export function PrCard({
             )}
           >
             Reviewer
+          </span>
+        )}
+        {/* Shown only when nothing louder is on the card — an outstanding
+            request ("Reviewer") or your own PR ("Author") already says why it's
+            here. Same predicate the attention flag uses, so badge and accent
+            always agree. */}
+        {isPassiveReviewed(pr) && (
+          <span
+            title="You already reviewed this PR — GitHub cleared the review request, so it stays here to keep it on your radar, not because someone is waiting on you"
+            className={cn(pill, "border-slate-500/40 bg-slate-500/15 text-fg-muted")}
+          >
+            Reviewed
           </span>
         )}
 

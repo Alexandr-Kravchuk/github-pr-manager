@@ -2,8 +2,8 @@
 
 A **desktop app** (Electron) for tracking pull requests across **GitHub** and
 **GitHub Enterprise** in one place. It shows an always-current list of PRs where
-you're involved (author or requested reviewer) and highlights what needs
-attention:
+you're involved — author, requested reviewer, or a PR you have already
+reviewed — and highlights what needs attention:
 
 - ✗ **failing CI** — individual named checks (unit tests, Sonar, etc.) are shown by name;
 - ✦ **new comments** — comments added since the last time you viewed the PR;
@@ -35,8 +35,15 @@ Electron · Vite + React 19 + Tailwind CSS v4 (renderer) · TypeScript · Node
 
 - The **main process** runs a single poller that queries every configured host
   (one GraphQL request per host — `author:@me` + `review-requested:@me` +
-  team-review requests, merged via aliases; ~1–8 rate-limit points). It backs
-  off automatically as a host's rate limit runs low.
+  `reviewed-by:@me` + team-review requests, merged via aliases). Each alias adds
+  roughly a dozen rate-limit points, so a host with a couple of repos and a few
+  team memberships runs ~70–85 per tick; the poller spaces expensive hosts out
+  and backs off further as a host's limit runs low.
+- `reviewed-by:@me` is not redundant: GitHub clears the review request as soon as
+  you submit a review — even a plain "Comment" review — so without it a PR you
+  reviewed disappears from the dashboard just as the author starts addressing
+  your comments. Such a PR is tagged **Reviewed** and stays quiet until it comes
+  back to you (new comments or a new push since you last looked).
 - The **renderer** (the dashboard UI) talks to main only through a typed
   `window.api` bridge (`contextIsolation` on, `nodeIntegration` off). It gets the
   initial snapshot via `invoke`, then live updates pushed on every real change —
