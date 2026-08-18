@@ -8,6 +8,10 @@ import type { PrRole, PullRequest } from "./types";
  * - **narrowing** chips (`Needs attention`, `Failing CI`, `New comments`,
  *   `Ready to merge`, `No reviews yet`) drop every PR that doesn't match — an
  *   AND over whatever is active;
+ * - the **exclude** chip (`Hide my approvals`) is the mirror image: it takes a
+ *   category OFF the board rather than narrowing to it. It isn't a sixth
+ *   narrowing chip because "show me only what I approved" is not what anyone
+ *   wants from it — see `isFinishedApproval`;
  * - **reveal** chips (`Drafts`, `Ignored`) un-hide a category that is hidden by
  *   default. They ADD to the list rather than narrowing it, and a PR in both
  *   categories (an ignored draft) needs only ONE of them — see
@@ -15,9 +19,11 @@ import type { PrRole, PullRequest } from "./types";
  *   `Drafts (2)` / `Ignored (2)` pair show zero cards: the two PRs were ignored
  *   drafts, so each chip alone was vetoed by the other's gate.
  *
- * Chip badges are facet counts (`narrowFacetCount` / `revealDelta`): each one
- * answers "how many cards does clicking this chip get me, given everything else
- * that's active", so a badge can never advertise rows the click won't produce.
+ * Chip badges are facet counts (`narrowFacetCount` / `revealDelta` /
+ * `excludeDelta`): each one answers "what does clicking this chip do to the
+ * list, given everything else that's active" — rows you get for the narrowing
+ * chips, rows added or taken away for the two delta kinds — so a badge can never
+ * advertise rows the click won't produce.
  *
  * Kept free of `node:` builtins — unlike the rest of `shared`, which is why this
  * is one of the two modules the renderer value-imports — so it bundles into the
@@ -40,6 +46,7 @@ export interface FilterState {
   newOnly: boolean;
   mergeableOnly: boolean;
   noReviewsOnly: boolean;
+  hideApproved: boolean;
   showDrafts: boolean;
   showIgnored: boolean;
 }
@@ -56,6 +63,7 @@ export type FilterablePr = Pick<
   | "hasNewActivity"
   | "canBeMerged"
   | "hasNoReviews"
+  | "viewerApproved"
   | "title"
   | "repo"
   | "author"
@@ -125,6 +133,24 @@ export function isRevealed(
   return (showDrafts && pr.isDraft) || (showIgnored && pr.isIgnored);
 }
 
+/**
+ * What the `Hide my approvals` chip takes off the board: a PR whose last word
+ * from you was "approved" and which is not asking for you again.
+ *
+ * The second half is the whole subtlety. A re-request outranks your approval —
+ * if someone has asked for your review again, the PR is waiting on you no matter
+ * what you said last time, and hiding it would drop live work off the dashboard
+ * silently, which is the one thing a filter must never do. Your approval also
+ * un-sets itself (`viewerApproved`) when you supersede it with a change request
+ * or branch protection dismisses it on a new push, so nothing here has to track
+ * staleness.
+ */
+export function isFinishedApproval(
+  pr: Pick<PullRequest, "viewerApproved" | "roles">,
+): boolean {
+  return pr.viewerApproved && !pr.roles.includes("reviewer");
+}
+
 function matchesSearch(pr: FilterablePr, search: string): boolean {
   const q = search.trim().toLowerCase();
   if (!q) return true;
@@ -135,6 +161,7 @@ function matchesSearch(pr: FilterablePr, search: string): boolean {
 /** Whether a PR is rendered under the given view state. */
 export function isVisible(pr: FilterablePr, state: FilterState): boolean {
   if (!isRevealed(pr, state)) return false;
+  if (state.hideApproved && isFinishedApproval(pr)) return false;
   if (state.role !== "all" && !pr.roles.includes(state.role)) return false;
   if (state.host !== "all" && pr.hostLabel !== state.host) return false;
   for (const chip of NARROW_CHIPS) {
@@ -179,6 +206,19 @@ export function revealDelta(
   return shown - hidden;
 }
 
+/**
+ * Badge for the exclude chip: how many rows the click TAKES AWAY (or, while it
+ * is on, how many turning it off would bring back). The mirror of `revealDelta`,
+ * and a delta for the same reason — a PR already hidden by a narrowing chip or
+ * the draft gate isn't a row this click can remove, so counting the category
+ * itself would promise a change the click doesn't make.
+ */
+export function excludeDelta(prs: readonly FilterablePr[], state: FilterState): number {
+  const kept = filterPrs(prs, { ...state, hideApproved: false }).length;
+  const dropped = filterPrs(prs, { ...state, hideApproved: true }).length;
+  return kept - dropped;
+}
+
 /** Header summary: the standing "is there work for me" picture. */
 export interface BaselineStats {
   total: number;
@@ -208,17 +248,19 @@ export function baselineStats(
 }
 
 /**
- * How many filters currently NARROW the list — what `Clear filters` resets and
+ * How many filters currently SHRINK the list — what `Clear filters` resets and
  * badges. Derived from `NARROW_CHIPS`, so a sixth chip is counted without
- * touching this. `Drafts`/`Ignored` are left out on purpose: they REVEAL rows, so
- * clearing them would shrink the list and "Clear filters" would no longer mean
- * "show me more".
+ * touching this. `Hide my approvals` counts too: it removes rows, so clearing it
+ * means "show me more", the same promise the narrowing chips make.
+ * `Drafts`/`Ignored` are left out on purpose — they REVEAL rows, so clearing
+ * them would shrink the list and break that promise.
  */
 export function activeFilterCount(state: FilterState): number {
   let n = 0;
   if (state.search.trim()) n += 1;
   if (state.role !== "all") n += 1;
   if (state.host !== "all") n += 1;
+  if (state.hideApproved) n += 1;
   for (const chip of NARROW_CHIPS) {
     if (state[chip.flag]) n += 1;
   }

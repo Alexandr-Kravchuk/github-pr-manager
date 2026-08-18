@@ -821,6 +821,27 @@ test("mapPr.viewerHasReviewed: false for a different viewer", () =>
 test("mapPr.viewerHasReviewed: false when the viewer is unknown", () =>
   assert.strictEqual(github.mapPr(rawPr(), "GH", [], null).viewerHasReviewed, false));
 
+// viewerApproved is the narrower half: reviewed AND the verdict was approve.
+const changesRequestedByRev = {
+  author: { __typename: "User", login: "rev", avatarUrl: "" },
+  state: "CHANGES_REQUESTED",
+};
+test("mapPr.viewerApproved: true when the viewer's latest review approves", () =>
+  assert.strictEqual(github.mapPr(rawPr(), "GH", [], "rev").viewerApproved, true));
+test("mapPr.viewerApproved: false when the viewer asked for changes instead", () =>
+  assert.strictEqual(
+    github.mapPr(
+      rawPr({ latestOpinionatedReviews: { nodes: [changesRequestedByRev] } }),
+      "GH",
+      [],
+      "rev",
+    ).viewerApproved,
+    false,
+  ));
+test("mapPr.viewerApproved: someone else's approval is not yours", () =>
+  assert.strictEqual(github.mapPr(rawPr(), "GH", [], "someone-else").viewerApproved, false));
+test("mapPr.viewerApproved: false when the viewer is unknown", () =>
+  assert.strictEqual(github.mapPr(rawPr(), "GH", [], null).viewerApproved, false));
 // --- issue-key: the card's Jira link -------------------------------------
 // Returns null wherever a link can't be built, because the badge IS the link:
 // the card renders nothing rather than a dead one.
@@ -1049,6 +1070,7 @@ const mkPr = (over = {}) => ({
   hasNewActivity: false,
   canBeMerged: false,
   hasNoReviews: false,
+  viewerApproved: false,
   returnedToMe: false,
   ...over,
 });
@@ -1061,6 +1083,7 @@ const ST = {
   newOnly: false,
   mergeableOnly: false,
   noReviewsOnly: false,
+  hideApproved: false,
   showDrafts: false,
   showIgnored: false,
 };
@@ -1190,6 +1213,61 @@ for (const [key, flag] of Object.entries(prFilter.REVEAL_FLAG)) {
       );
     });
   }
+}
+
+// --- pr-filter: the exclude chip (Hide my approvals) -------------------------
+// The one chip that REMOVES rows. A re-request outranks your approval: the PR is
+// waiting on you again, and a filter that silently swallowed live work would be
+// worse than no filter at all.
+for (const [label, fixture, expected] of [
+  ["approved, nothing pending", mkPr({ viewerApproved: true, roles: ["reviewed"] }), true],
+  ["approved but re-requested", mkPr({ viewerApproved: true, roles: ["reviewer", "reviewed"] }), false],
+  ["reviewed without approving", mkPr({ viewerApproved: false, roles: ["reviewed"] }), false],
+  ["my own PR, approved by others", mkPr({ viewerApproved: false, roles: ["author"] }), false],
+]) {
+  test(`isFinishedApproval: ${label} -> ${expected}`, () =>
+    assert.strictEqual(prFilter.isFinishedApproval(fixture), expected));
+}
+
+const APPROVALS = [
+  mkPr({ viewerApproved: true, roles: ["reviewed"], title: "approved and quiet" }),
+  mkPr({ viewerApproved: true, roles: ["reviewer", "reviewed"], title: "approved then re-requested" }),
+  mkPr({ viewerApproved: true, roles: ["reviewed"], isDraft: true, title: "approved draft" }),
+  mkPr({ roles: ["reviewer"], needsAttention: true, title: "still waiting on me" }),
+  mkPr({ roles: ["author"], hasNewActivity: true, title: "mine" }),
+];
+test("filterPrs(hideApproved): drops finished approvals, keeps the re-requested one", () =>
+  assert.deepStrictEqual(
+    prFilter.filterPrs(APPROVALS, st({ hideApproved: true })).map((pr) => pr.title),
+    ["approved then re-requested", "still waiting on me", "mine"],
+  ));
+test("filterPrs(hideApproved): off by default — nothing disappears unasked", () =>
+  // Four of five: the approved draft is hidden by the draft gate, not by this chip.
+  assert.strictEqual(prFilter.filterPrs(APPROVALS, st()).length, 4));
+test("activeFilterCount: hideApproved counts, so Clear filters brings the rows back", () => {
+  assert.strictEqual(prFilter.activeFilterCount(st({ hideApproved: true })), 1);
+  assert.strictEqual(prFilter.activeFilterCount(st()), 0);
+});
+
+// The badge's promise, computed independently of excludeDelta's own expression:
+// the delta is exactly the rows that vanish when the chip goes on, and excluding
+// never adds one. Reused across FACET_STATES, so host / role / search / narrowing
+// / reveal combinations come along for free.
+for (const [i, state] of FACET_STATES.entries()) {
+  test(`excludeDelta equals the rows the click removes [state ${i}]`, () => {
+    const off = prFilter.filterPrs(APPROVALS, { ...state, hideApproved: false });
+    const on = prFilter.filterPrs(APPROVALS, { ...state, hideApproved: true });
+    const offNumbers = new Set(off.map((pr) => pr.number));
+    const onNumbers = new Set(on.map((pr) => pr.number));
+    assert.ok(
+      on.every((pr) => offNumbers.has(pr.number)),
+      "excluding must never add a row that wasn't already shown",
+    );
+    assert.strictEqual(
+      prFilter.excludeDelta(APPROVALS, state),
+      off.filter((pr) => !onNumbers.has(pr.number)).length,
+    );
+  });
 }
 
 // --- pr-filter: isPassiveReviewed (shared by the badge and the attention flag)
@@ -2279,6 +2357,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.notStrictEqual(
       poller.hashSnapshot(hsnap({ returnedToMe: false })),
       poller.hashSnapshot(hsnap({ returnedToMe: true })),
+    ));
+  // Unlike its neighbours, this field is read by the view filter rather than the
+  // notifier, so the Proxy guard below — which only compares against what
+  // `diffNotifications` reads — would not notice it being dropped from the
+  // tuple. Until that guard has a filter-side twin, this test is the only thing
+  // standing between a refactor and a "Hide my approvals" view that goes stale
+  // for a whole poll tick.
+  test("hashSnapshot: a viewerApproved-only delta changes the hash", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ viewerApproved: false })),
+      poller.hashSnapshot(hsnap({ viewerApproved: true })),
     ));
   test("hashSnapshot: identical PR fields hash equal, ignoring fetchedAt (no spurious re-emit)", () =>
     assert.strictEqual(

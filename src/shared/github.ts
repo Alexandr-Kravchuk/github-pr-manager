@@ -10,6 +10,33 @@ import type {
   Reviewer,
 } from "./types";
 
+/**
+ * The per-PR selection, shared by every search alias.
+ *
+ * `latestOpinionatedReviews(first: 15)` returns one node per reviewer — their
+ * latest approve / request-changes — and that cap is load-bearing well beyond
+ * the reviewer avatars. Six things are derived by scanning this one array:
+ * `hasUnaddressedChangeRequest` (and `canBeMerged` through it),
+ * `hasHumanApproval`, `hasNoReviews`, `viewerHasReviewed`, `viewerApproved` and
+ * the `reviewers` list itself. The one to keep in mind is `viewerApproved`,
+ * which decides whether "Hide my approvals" takes a card off the board: past 15
+ * distinct opinionated reviewers the viewer's own node can fall outside the page
+ * and read as "not approved". That is the fail-safe direction — the card stays
+ * visible, nothing is hidden that shouldn't be — but a false negative all the
+ * same.
+ *
+ * There is no viewer-keyed field to sidestep it. `viewerLatestOpinionatedReview`
+ * does not exist (introspected on github.com and GHE alike), and
+ * `viewerLatestReview` is the latest review of ANY kind, so a plain comment left
+ * after an approval would read as not-approved — worse, and far more common. The
+ * route that works is `reviews(author: <viewer login>, states: [APPROVED,
+ * CHANGES_REQUESTED])`, which needs the login as a query variable and therefore
+ * a cached per-host lookup, on the pattern of the team-slug cache.
+ *
+ * Deliberately out here rather than as a `#` comment inside the template: every
+ * byte in there is sent to GitHub on each poll, and prose inside a template
+ * literal is exactly how a stray backtick broke this build once.
+ */
 const PR_FIELDS_FRAGMENT = /* GraphQL */ `
 fragment PrFields on PullRequest {
   id
@@ -29,6 +56,7 @@ fragment PrFields on PullRequest {
     totalCount
     nodes { requestedReviewer { __typename ... on User { login avatarUrl } } }
   }
+  # 15 is load-bearing — see the note above this fragment before changing it.
   latestOpinionatedReviews(first: 15) {
     nodes { author { __typename login avatarUrl } state }
   }
@@ -365,6 +393,16 @@ export function mapPr(
   const viewerHasReviewed =
     viewerLogin != null &&
     pr.latestOpinionatedReviews.nodes.some((r) => r.author?.login === viewerLogin);
+  // The narrower half of the same signal: your latest word on this PR is
+  // "approved". `latestOpinionatedReviews` returns one node per reviewer, so a
+  // later change request of yours replaces the approval here rather than adding
+  // to it, and a dismissed approval stops being opinionated at all — both make
+  // this false again without any bookkeeping of ours.
+  const viewerApproved =
+    viewerLogin != null &&
+    pr.latestOpinionatedReviews.nodes.some(
+      (r) => r.author?.login === viewerLogin && r.state === "APPROVED",
+    );
   const hasNoReviews = pr.latestOpinionatedReviews.nodes.length === 0;
 
   const issueKey = parseIssueKey(pr.title, pr.headRefName);
@@ -437,6 +475,7 @@ export function mapPr(
     reviewDecision: pr.reviewDecision,
     roles,
     viewerHasReviewed,
+    viewerApproved,
     hasNoReviews,
     unresolvedThreads,
     unaddressedThreads,
