@@ -7,8 +7,13 @@ signed into — no OAuth, no stored credentials.
 Three layers:
 
 - **main** (`src/main`, Node / CommonJS) — window + lifecycle, the poller, IPC
-  handlers, settings (`userData/settings.json`), `gh` token resolution, and
-  auto-update (`electron-updater`).
+  handlers, settings (`userData/settings.json`), `gh` token resolution, the tray
+  icon (`tray.ts`), and auto-update (`electron-updater`). Window teardown runs
+  through two flags in `main.ts`: `closeHidesToTray` (the `closeToTray`
+  preference, but only ever true while a tray icon really exists — `ensureTray`
+  returning false must keep close quitting, or the window hides with nothing to
+  restore it) and `isQuitting`, set on `before-quit` so a real exit isn't
+  swallowed by the close handler.
 - **shared** (`src/shared`, Node) — domain logic used by main: `github.ts`
   (GraphQL query + mapping), `state.ts` (seen-state), `config.ts` (gh tokens +
   settings validation), `types.ts` (domain types **and** the renderer↔main

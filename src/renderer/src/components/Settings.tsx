@@ -55,6 +55,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [pollIntervalSeconds, setPollIntervalSeconds] = useState(60);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [autoUpdate, setAutoUpdate] = useState(true);
+  const [closeToTray, setCloseToTray] = useState(true);
   const [theme, setTheme] = useState<ThemePreference>("system");
   const [notifications, setNotifications] = useState<NotificationSettings>(DEFAULT_NOTIFICATIONS);
   const [hosts, setHosts] = useState<DraftHost[]>([]);
@@ -84,6 +85,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setPollIntervalSeconds(s.pollIntervalSeconds);
         setLaunchAtLogin(s.launchAtLogin);
         setAutoUpdate(s.autoUpdate);
+        setCloseToTray(s.closeToTray);
         setTheme(s.theme);
         setNotifications(s.notifications ?? DEFAULT_NOTIFICATIONS);
         setHosts(
@@ -140,6 +142,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         pollIntervalSeconds,
         launchAtLogin,
         autoUpdate,
+        closeToTray,
         theme,
         notifications,
         hosts: hosts.map((h) => ({
@@ -395,6 +398,21 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             <span className="block text-sm text-fg-secondary">Automatically check for updates</span>
             <span className="block text-xs text-fg-faint">
               Download and install new versions in the background.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={closeToTray}
+            onChange={(e) => setCloseToTray(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-sky-500"
+          />
+          <span>
+            <span className="block text-sm text-fg-secondary">Close to tray</span>
+            <span className="block text-xs text-fg-faint">
+              Closing the window hides it instead of quitting, so notifications keep coming. Quit
+              from the tray icon&apos;s menu.
             </span>
           </span>
         </label>

@@ -110,6 +110,12 @@ On first launch the dashboard is empty — open **Settings (⚙)** and add a hos
 The Settings screen also shows whether `gh` is installed and signed in for each
 host, with the exact `gh auth login` command if not.
 
+**Close to tray** (on by default, under Settings) turns the window's close
+button into "hide": the app stays in the tray, keeps polling and keeps sending
+notifications. Click the tray icon to bring the dashboard back; **Quit PR
+Dashboard** in its menu exits for real. Turn the preference off and the close
+button quits, as before.
+
 ## Build & package
 
 ```bash
@@ -182,6 +188,7 @@ src/
     settings.ts         # read/write userData/settings.json
     ipc-validation.ts   # validate renderer-supplied IPC arguments
     updater.ts          # electron-updater (check / download / restart)
+    tray.ts             # tray icon + menu (close-to-tray)
     cli-path.ts         # locate the gh binary across install layouts
     mock.ts             # PRD_MOCK fixture mode (dev-only, no network)
   shared/               # Node domain logic (renderer imports types only)

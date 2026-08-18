@@ -35,6 +35,7 @@ import {
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
 import { acquireSingleInstanceLock, createWindowReadyGate } from "./single-instance";
+import { destroyTray, ensureTray } from "./tray";
 import {
   acknowledgeVersion,
   ignoredStatePath,
@@ -48,6 +49,20 @@ import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./upd
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
 let systemSuspended = false;
+
+/**
+ * True once the app is genuinely on its way out (`before-quit`), so the close
+ * handler lets the window go instead of hiding it again. Without this a
+ * tray-mode app can never be quit: every teardown path closes the window first.
+ */
+let isQuitting = false;
+
+/**
+ * Whether the close button hides the window to the tray. Mirrors
+ * `settings.closeToTray` — but only ever true while a tray icon actually
+ * exists, so a tray we failed to create can't strand the window out of reach.
+ */
+let closeHidesToTray = false;
 
 // Signals the first time createWindow() assigns mainWindow. The second-instance
 // handler's deferred focus waits on THIS — a window actually existing — rather
@@ -296,10 +311,31 @@ function applyThemeSource(theme: Settings["theme"]): void {
   nativeTheme.themeSource = theme;
 }
 
-/** Applies user preferences (launch-at-login + auto-update + theme) to the OS/updater. */
+/**
+ * Turns the close button into "hide to tray", or back into "quit". The tray
+ * icon lives exactly as long as the preference is on. `ensureTray` returning
+ * false (no usable icon, or a platform that refused one) degrades to the plain
+ * close-quits behaviour rather than hiding the window with nothing left to
+ * bring it back.
+ */
+function applyCloseToTray(enabled: boolean): void {
+  if (enabled) {
+    closeHidesToTray = ensureTray({ open: focusMainWindow, quit: () => app.quit() });
+  } else {
+    destroyTray();
+    closeHidesToTray = false;
+  }
+  if (process.env.PRD_DEBUG) {
+    console.log("[main] closeToTray", enabled, "-> hides to tray", closeHidesToTray);
+  }
+}
+
+/** Applies user preferences (launch-at-login + auto-update + close-to-tray +
+ *  theme) to the OS/updater. */
 function applyPreferences(settings: Settings): void {
   applyLaunchAtLogin(settings.launchAtLogin);
   setAutoUpdateEnabled(settings.autoUpdate);
+  applyCloseToTray(settings.closeToTray);
   applyThemeSource(settings.theme);
 }
 
@@ -366,6 +402,17 @@ function createWindow(): void {
       // pings fire on their own, never off a user gesture.
       autoplayPolicy: "no-user-gesture-required",
     },
+  });
+
+  // In tray mode the close button hides the window instead of destroying it:
+  // the poller keeps running and notifications keep arriving, and the tray menu
+  // (or relaunching the app, which the single-instance handler routes to
+  // `focusMainWindow`) brings the dashboard back. `isQuitting` lets a real quit
+  // through — otherwise the app could never exit.
+  mainWindow.on("close", (event) => {
+    if (isQuitting || !closeHidesToTray) return;
+    event.preventDefault();
+    mainWindow?.hide();
   });
 
   mainWindow.on("closed", () => {
@@ -658,8 +705,13 @@ function startApp(): void {
   applyPreferences(prefs);
 
   app.on("activate", () => {
+    // A window may exist but be hidden in the tray — reactivating (dock click,
+    // relaunch) has to bring that one back, not leave the user staring at
+    // nothing because `getAllWindows()` was non-empty.
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+    } else {
+      focusMainWindow();
     }
   });
 }
@@ -691,9 +743,17 @@ const isPrimaryInstance = acquireSingleInstanceLock({
 if (isPrimaryInstance) {
   void app.whenReady().then(startApp);
 
-  // Plain window app (per product decision): closing the last window quits.
+  // Closing the last window quits — unless close-to-tray is on, in which case
+  // the window is hidden rather than closed and this never fires (see the
+  // `close` handler in createWindow).
   app.on("window-all-closed", () => {
     poller?.stop();
     app.quit();
+  });
+
+  // Any real exit — tray menu, updater install, OS logout — passes through
+  // here first, which releases the close handler's hold on the window.
+  app.on("before-quit", () => {
+    isQuitting = true;
   });
 }
