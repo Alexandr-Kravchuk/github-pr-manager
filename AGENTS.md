@@ -22,6 +22,11 @@ Three layers:
   quit / hide, with a leave-fullscreen-first hide for macOS); the three-way
   close decision is unit-tested in `tests/run-tests.cjs` against a mocked
   Electron, and the wiring registrations are asserted on the compiled `main.js`.
+  Close-to-tray makes hidden-but-alive the app's *normal* idle state, so the
+  "no always-running animation in the renderer" rule below applies with extra
+  force — a hidden renderer with an `infinite` animation burns CPU invisibly,
+  and snapshot pushes are already gated on window visibility for the same
+  reason.
 - **shared** (`src/shared`, Node) — domain logic used by main: `github.ts`
   (GraphQL query + mapping), `state.ts` (seen-state), `config.ts` (gh tokens +
   settings validation), `types.ts` (domain types **and** the renderer↔main

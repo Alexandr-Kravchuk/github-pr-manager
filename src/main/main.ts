@@ -403,12 +403,16 @@ function createWindow(): void {
     },
   });
 
-  // In tray mode the close button hides the window instead of destroying it:
-  // the poller keeps running and notifications keep arriving, and the tray menu
-  // (or relaunching the app, which the single-instance handler routes to
-  // `focusMainWindow`) brings the dashboard back. The three-way decision —
-  // hide / let a real quit through / no tray, so close as usual — lives in
-  // `trayController.handleClose` and is unit-tested there.
+  // In tray mode the close button hides the window instead of destroying it,
+  // and the tray menu (or relaunching the app, which the single-instance
+  // handler routes to `focusMainWindow`) brings the dashboard back. Background
+  // behavior while hidden is deliberately conditional: the idle gate keeps the
+  // poller running only while a notification could actually be delivered
+  // (`isPollingPaused`'s hidden-window carve-out) — with notifications off
+  // there is nothing a fetch could surface, so polling parks until the window
+  // is shown again and the show-wake refresh catches it up. The three-way
+  // close decision — hide / let a real quit through / no tray, so close as
+  // usual — lives in `trayController.handleClose` and is unit-tested there.
   mainWindow.on("close", (event) => trayController.handleClose(event));
 
   mainWindow.on("closed", () => {
