@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
+import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
 import { isPollingPaused } from "../shared/idle-gate";
@@ -21,6 +21,7 @@ import type {
   SaveSettingsResult,
   Settings,
 } from "../shared/types";
+import { loadAppIcon } from "./app-icon";
 import { ensureCliPath } from "./cli-path";
 import { clearParentCache } from "../shared/jira";
 import { buildParentEnricher, getJiraStatus, setJiraToken } from "./jira-store";
@@ -139,14 +140,26 @@ function focusMainWindow(): void {
 const trayController = createTrayController({
   open: () => focusMainWindow(),
   quit: () => app.quit(),
-  hide: () => mainWindow?.hide(),
+  hide: () => hideMainWindow(),
 });
 
-// Exported solely as the seam for the compiled-main.js wiring tests in
-// tests/run-tests.cjs: they boot this module with a mocked Electron and must
-// observe the before-quit latch/release through the SAME instance the window
-// handlers use. Nothing in production imports main.ts — it is the entry point.
-export { trayController };
+/**
+ * Hides the window for close-to-tray. A macOS window in native full-screen
+ * must leave full-screen first — hiding it directly is a long-standing
+ * Electron/macOS trap that can strand the user on an empty Space.
+ */
+function hideMainWindow(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  if (win.isFullScreen()) {
+    win.once("leave-full-screen", () => {
+      if (!win.isDestroyed()) win.hide();
+    });
+    win.setFullScreen(false);
+  } else {
+    win.hide();
+  }
+}
 
 /**
  * Shown notifications, retained until the OS is done with them. Electron can
@@ -347,8 +360,7 @@ function applyCsp(): void {
 function resolveAppIcon(): Electron.NativeImage | undefined {
   // Window icon (Windows/Linux taskbar + title bar). macOS uses the bundle icon.
   // Falls back to the default Electron icon if the file is missing.
-  const image = nativeImage.createFromPath(path.join(app.getAppPath(), "build", "icon.png"));
-  return image.isEmpty() ? undefined : image;
+  return loadAppIcon() ?? undefined;
 }
 
 /**
@@ -407,11 +419,23 @@ function createWindow(): void {
   // because it arrived before the first window. Resolving again is a no-op.
   windowGate.markWindowReady();
 
+  // Windows shutdown/restart/logout never emits `before-quit` (documented
+  // Electron behavior), so the quit latch must come from the window's own
+  // session-end signal — otherwise close-to-tray would intercept the OS's
+  // close and hold up the logout.
+  mainWindow.on("session-end", () => trayController.markQuitting());
+
   // Returning to the dashboard (focus / un-minimize / re-show) should refresh
-  // immediately rather than wait out the parked idle cadence.
+  // immediately rather than wait out the parked idle cadence. A visible window
+  // also re-arms the quit latch: if the user can see the dashboard, whatever
+  // exit was in flight was cancelled — at any stage of the quit pipeline.
   const wakePoller = (): void => void poller?.wake();
-  mainWindow.on("focus", wakePoller);
-  mainWindow.on("show", wakePoller);
+  const backFromHiding = (): void => {
+    trayController.cancelQuitting();
+    wakePoller();
+  };
+  mainWindow.on("focus", backFromHiding);
+  mainWindow.on("show", backFromHiding);
   mainWindow.on("restore", wakePoller);
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
@@ -535,6 +559,17 @@ function registerIpc(): void {
       // Apply immediately: a fresh poll re-resolves tokens and re-fetches, and
       // its snapshot/config-error is pushed to the renderer.
       await poller?.refresh();
+      // The tray preference is the one preference that can fail to take
+      // effect (no usable icon, or the platform refused a tray). Saying
+      // "saved" while close actually quits would strand the user believing
+      // the app watches in the background — surface it.
+      if (saved.closeToTray && !trayController.hidesToTray()) {
+        return {
+          ok: true,
+          warning:
+            "Close to tray couldn't be enabled — no tray icon could be created on this system, so the close button will quit the app.",
+        };
+      }
       return { ok: true };
     } catch (e) {
       if (e instanceof ConfigError) return { ok: false, error: e.message };
@@ -638,7 +673,14 @@ function startApp(): void {
           `[snapshot] prs=${snapshot.pullRequests.length} errors=${snapshot.errors.length} rate=${JSON.stringify(snapshot.rateLimits)}`,
         );
       }
-      sendToRenderer("snapshot", snapshot);
+      // A tray-hidden window can stay hidden for days; pushing snapshots at
+      // it pays a full-payload IPC clone plus an offscreen re-render for
+      // nothing. The renderer reloads on show (its visibilitychange/focus wake
+      // calls getDashboard) and the show handler wakes the poller, so a gated
+      // push loses nothing.
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+        sendToRenderer("snapshot", snapshot);
+      }
       handleNotifications(snapshot.pullRequests);
     },
     onConfigError: (message) => {
@@ -735,16 +777,20 @@ if (isPrimaryInstance) {
     app.quit();
   });
 
-  // Any real exit — tray menu, updater install, OS logout — passes through
-  // here first, which releases the close handler's hold on the window.
-  app.on("before-quit", (event) => {
-    trayController.markQuitting();
-    // A `before-quit` listener may cancel the quit. Nothing does today, but the
-    // latch must not survive a cancelled exit: the next close would destroy the
-    // window instead of hiding it. Re-check once the event has been dispatched
-    // to every listener.
-    setImmediate(() => {
-      if (event.defaultPrevented) trayController.cancelQuitting();
-    });
-  });
+  // A normal exit (tray menu Quit, Cmd+Q, app.quit()) passes through here,
+  // which releases the close handler's hold on the window. Two real exits do
+  // NOT: the updater's quitAndInstall on macOS closes windows BEFORE emitting
+  // before-quit (latched below via before-quit-for-update), and Windows
+  // shutdown/logout never emits before-quit at all (latched via the window's
+  // session-end in createWindow). If a quit is cancelled at any stage, the
+  // latch is re-armed when the window is next shown — a state-based reset
+  // instead of second-guessing the quit pipeline's event timing.
+  app.on("before-quit", () => trayController.markQuitting());
+
+  // electron-updater's quitAndInstall: emitted on Electron's native
+  // autoUpdater by Squirrel.Mac (which closes all windows first and only
+  // emits before-quit after they are gone — the close would be intercepted
+  // and the update would never install) and, for symmetry, by
+  // electron-updater's Windows path right before its app.quit().
+  nativeAutoUpdater.on("before-quit-for-update", () => trayController.markQuitting());
 }

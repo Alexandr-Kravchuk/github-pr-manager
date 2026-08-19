@@ -13,11 +13,15 @@ Three layers:
   the close decision together so they can't drift: close hides only while the
   `closeToTray` preference is on **and** an icon really exists (a tray that
   failed to appear must keep close quitting, or the window hides with nothing to
-  restore it), and a `before-quit` latch lets a real exit through. `main.ts`
-  only injects the live actions (focus / quit / hide); the three-way close
-  decision is unit-tested in `tests/run-tests.cjs` against a mocked Electron,
-  and the before-quit latch/release is wiring-tested against the compiled
-  `main.js` (which exports `trayController` solely as that test seam).
+  restore it). The quit latch is set from every exit signal the platform gives —
+  `before-quit`, the native autoUpdater's `before-quit-for-update` (macOS
+  quitAndInstall closes windows before `before-quit`), and the window's
+  `session-end` (Windows shutdown/logout never emits `before-quit`) — and is
+  re-armed state-based when the window is next shown, never by racing the quit
+  pipeline's event timing. `main.ts` only injects the live actions (focus /
+  quit / hide, with a leave-fullscreen-first hide for macOS); the three-way
+  close decision is unit-tested in `tests/run-tests.cjs` against a mocked
+  Electron, and the wiring registrations are asserted on the compiled `main.js`.
 - **shared** (`src/shared`, Node) — domain logic used by main: `github.ts`
   (GraphQL query + mapping), `state.ts` (seen-state), `config.ts` (gh tokens +
   settings validation), `types.ts` (domain types **and** the renderer↔main

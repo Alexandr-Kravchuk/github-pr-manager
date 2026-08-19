@@ -1,5 +1,6 @@
-import path from "node:path";
-import { app, Menu, nativeImage, Tray } from "electron";
+import { Menu, Tray } from "electron";
+
+import { loadAppIcon } from "./app-icon";
 
 /**
  * The app icon scaled for the tray. Windows/Linux want 16pt, the macOS menu bar
@@ -8,8 +9,8 @@ import { app, Menu, nativeImage, Tray } from "electron";
  * template would flatten it to a black silhouette.
  */
 function trayIcon(): Electron.NativeImage | null {
-  const image = nativeImage.createFromPath(path.join(app.getAppPath(), "build", "icon.png"));
-  if (image.isEmpty()) return null;
+  const image = loadAppIcon();
+  if (!image) return null;
   const size = process.platform === "darwin" ? 18 : 16;
   return image.resize({ width: size, height: size });
 }
@@ -44,9 +45,19 @@ export interface TrayController {
   setEnabled(enabled: boolean): boolean;
   /** Whether a `close` currently hides the window instead of destroying it. */
   hidesToTray(): boolean;
-  /** The app is on its way out (`before-quit`): stop intercepting close. */
+  /**
+   * The app is on its way out: stop intercepting close. Latched from every
+   * exit signal the platform gives us — `before-quit`, the updater's
+   * `before-quit-for-update`, and the window's `session-end` (Windows
+   * shutdown/logout, where Electron never emits `before-quit`).
+   */
   markQuitting(): void;
-  /** The quit was cancelled after all — resume intercepting close. */
+  /**
+   * Re-arm the latch. Called from the window's `show`/`focus`: a window the
+   * user can see means whatever exit was in flight did not happen, whichever
+   * stage cancelled it (`before-quit`, `will-quit`, a `beforeunload` veto) —
+   * a state-based reset instead of guessing at the quit pipeline's timing.
+   */
   cancelQuitting(): void;
   /** The window's `close` handler: hides to the tray, or lets the close through. */
   handleClose(event: CloseEvent): void;

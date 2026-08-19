@@ -382,22 +382,23 @@ test("main gates startup + window-all-closed on the acquired single-instance loc
 // This is a behavioral check: unlike the text guard, a refactor that drops the
 // lock gate would fail here regardless of how the source is shaped.
 // Boot the COMPILED dist/main/main/main.js with a fake `electron` injected into
-// the module cache, returning what the wiring did plus the module's own exports
-// (the tray controller instance the window handlers use). Each call boots a
-// fresh module graph; `cleanup()` restores the require cache to its pre-boot
-// shape. Shared by the sync lock-gate tests here and the async before-quit
-// tests in the runner tail.
+// the module cache, returning what the wiring did. Each call gets a fresh
+// module graph; `cleanup()` restores the require cache to its pre-boot shape.
+// Everything already cached before any boot — the test file's own module
+// graph, snapshotted ONCE so a boot that throws mid-require can never leak its
+// half-loaded graph into the next boot's baseline (each boot evicts everything
+// newer than this snapshot before requiring).
+const bootBaseline = new Set(Object.keys(require.cache));
+
 const bootCompiledMain = (lockGranted) => {
   const mainJs = path.join(__dirname, "../dist/main/main/main.js");
   const elPath = require.resolve("electron", { paths: [path.dirname(mainJs)] });
-  // Everything already cached before we touch main.js — the test file's own
-  // module graph. We only ever evict what requiring main.js adds, never these.
-  const preloaded = new Set(Object.keys(require.cache));
   for (const k of Object.keys(require.cache)) {
-    if (!preloaded.has(k)) delete require.cache[k]; // fresh main.js graph each boot
+    if (!bootBaseline.has(k)) delete require.cache[k]; // fresh main.js graph each boot
   }
   const events = [];
   const handlers = new Map();
+  const updaterEvents = [];
   let quits = 0;
   const fakeApp = {
     requestSingleInstanceLock: () => lockGranted,
@@ -440,6 +441,7 @@ const bootCompiledMain = (lockGranted) => {
     BrowserWindow: FakeBrowserWindow,
     Menu: { buildFromTemplate: (template) => template },
     Tray: FakeTray,
+    autoUpdater: { on: (event) => updaterEvents.push(event) },
     nativeTheme: { on() {} },
     powerMonitor: { on() {} },
     ipcMain: { handle() {}, on() {} },
@@ -450,18 +452,18 @@ const bootCompiledMain = (lockGranted) => {
     nativeImage: { createFromPath: () => ({ isEmpty: () => false, resize: () => ({}) }) },
   };
   require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: fakeElectron };
-  const main = require(mainJs);
+  require(mainJs);
   return {
     events,
     handlers,
-    main,
+    updaterEvents,
     get quits() {
       return quits;
     },
     cleanup() {
       // Restore the cache to its pre-boot shape so later tests see a clean graph.
       for (const k of Object.keys(require.cache)) {
-        if (!preloaded.has(k)) delete require.cache[k];
+        if (!bootBaseline.has(k)) delete require.cache[k];
       }
       delete require.cache[elPath];
     },
@@ -484,6 +486,10 @@ test("main.js wiring: lost lock -> quits, registers no ready/window handlers", (
       !r.events.includes("before-quit"),
       "a non-primary instance must not register before-quit",
     );
+    assert.ok(
+      !r.updaterEvents.includes("before-quit-for-update"),
+      "a non-primary instance must not register the updater quit latch",
+    );
   } finally {
     r.cleanup();
   }
@@ -498,6 +504,13 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     // before-quit is what releases the close-to-tray hold on the window; without
     // it a tray-mode app can be hidden but never quit.
     assert.ok(r.events.includes("before-quit"), "the primary registers before-quit");
+    // macOS quitAndInstall closes windows BEFORE before-quit; the tray latch
+    // must therefore also come from the native updater's signal, or a pending
+    // update deadlocks against close-to-tray forever.
+    assert.ok(
+      r.updaterEvents.includes("before-quit-for-update"),
+      "the primary latches quitting on the updater's before-quit-for-update",
+    );
     const secondInstance = r.handlers.get("second-instance");
     assert.strictEqual(
       typeof secondInstance,
@@ -1696,85 +1709,6 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 });
 
 (async () => {
-  // --- before-quit release, on the COMPILED main.js --------------------------
-  // markQuitting/cancelQuitting are unit-tested on the controller above; these
-  // two close the wiring gap: main.ts's actual before-quit listener must latch
-  // the quit, and its deferred re-check must release the latch when — and only
-  // when — another listener cancelled the quit. A polarity or ordering bug here
-  // would leave close destroying the window for the rest of the session after
-  // any cancelled exit (e.g. a declined updater install), which is exactly the
-  // regression these pin down.
-  await atest("main.js wiring: a cancelled before-quit releases the latch (close hides again)", async () => {
-    const r = bootCompiledMain(true);
-    try {
-      const tc = r.main.trayController;
-      let released = 0;
-      const realCancel = tc.cancelQuitting;
-      // Spy without changing behaviour — main.ts calls through this same object.
-      tc.cancelQuitting = () => {
-        released++;
-        realCancel();
-      };
-      assert.strictEqual(tc.setEnabled(true), true, "the fake tray must come up");
-      const beforeQuit = r.handlers.get("before-quit");
-      assert.strictEqual(typeof beforeQuit, "function", "before-quit must be registered");
-      const event = {
-        defaultPrevented: false,
-        preventDefault() {
-          this.defaultPrevented = true;
-        },
-      };
-      beforeQuit(event);
-      // A later listener in the same dispatch cancels the quit — Electron emits
-      // synchronously, which is why main.ts defers its re-check past the dispatch.
-      event.preventDefault();
-      await new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
-      assert.strictEqual(released, 1, "cancelQuitting must fire for a cancelled quit");
-      const close = {
-        prevented: false,
-        preventDefault() {
-          this.prevented = true;
-        },
-      };
-      tc.handleClose(close);
-      assert.strictEqual(close.prevented, true, "close hides again after the cancelled quit");
-    } finally {
-      r.cleanup();
-    }
-  });
-
-  await atest("main.js wiring: an uncancelled before-quit leaves the latch set (close proceeds)", async () => {
-    const r = bootCompiledMain(true);
-    try {
-      const tc = r.main.trayController;
-      let released = 0;
-      const realCancel = tc.cancelQuitting;
-      tc.cancelQuitting = () => {
-        released++;
-        realCancel();
-      };
-      assert.strictEqual(tc.setEnabled(true), true, "the fake tray must come up");
-      r.handlers.get("before-quit")({
-        defaultPrevented: false,
-        preventDefault() {
-          this.defaultPrevented = true;
-        },
-      });
-      await new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
-      assert.strictEqual(released, 0, "nothing cancelled the quit — the latch must hold");
-      const close = {
-        prevented: false,
-        preventDefault() {
-          this.prevented = true;
-        },
-      };
-      tc.handleClose(close);
-      assert.strictEqual(close.prevented, false, "a quitting app must let the window close");
-    } finally {
-      r.cleanup();
-    }
-  });
-
   await atest("handleSecondInstance: no window -> defers focus until a window is created", async () => {
     let focused = 0;
     let signalWindowReady;
