@@ -35,7 +35,7 @@ import {
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
 import { acquireSingleInstanceLock, createWindowReadyGate } from "./single-instance";
-import { destroyTray, ensureTray } from "./tray";
+import { createTrayController } from "./tray";
 import {
   acknowledgeVersion,
   ignoredStatePath,
@@ -49,20 +49,6 @@ import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./upd
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
 let systemSuspended = false;
-
-/**
- * True once the app is genuinely on its way out (`before-quit`), so the close
- * handler lets the window go instead of hiding it again. Without this a
- * tray-mode app can never be quit: every teardown path closes the window first.
- */
-let isQuitting = false;
-
-/**
- * Whether the close button hides the window to the tray. Mirrors
- * `settings.closeToTray` — but only ever true while a tray icon actually
- * exists, so a tray we failed to create can't strand the window out of reach.
- */
-let closeHidesToTray = false;
 
 // Signals the first time createWindow() assigns mainWindow. The second-instance
 // handler's deferred focus waits on THIS — a window actually existing — rather
@@ -143,6 +129,18 @@ function focusMainWindow(): void {
   win.show();
   win.focus();
 }
+
+/**
+ * The tray icon plus the close/quit state that hangs off it. Owning both in one
+ * place is what keeps "the close button hides" and "a tray icon exists" from
+ * drifting apart; `tray.ts` holds the logic so it is unit-testable against a
+ * mocked Electron, and this module only supplies the live window/app actions.
+ */
+const trayController = createTrayController({
+  open: () => focusMainWindow(),
+  quit: () => app.quit(),
+  hide: () => mainWindow?.hide(),
+});
 
 /**
  * Shown notifications, retained until the OS is done with them. Electron can
@@ -311,31 +309,14 @@ function applyThemeSource(theme: Settings["theme"]): void {
   nativeTheme.themeSource = theme;
 }
 
-/**
- * Turns the close button into "hide to tray", or back into "quit". The tray
- * icon lives exactly as long as the preference is on. `ensureTray` returning
- * false (no usable icon, or a platform that refused one) degrades to the plain
- * close-quits behaviour rather than hiding the window with nothing left to
- * bring it back.
- */
-function applyCloseToTray(enabled: boolean): void {
-  if (enabled) {
-    closeHidesToTray = ensureTray({ open: focusMainWindow, quit: () => app.quit() });
-  } else {
-    destroyTray();
-    closeHidesToTray = false;
-  }
-  if (process.env.PRD_DEBUG) {
-    console.log("[main] closeToTray", enabled, "-> hides to tray", closeHidesToTray);
-  }
-}
-
 /** Applies user preferences (launch-at-login + auto-update + close-to-tray +
  *  theme) to the OS/updater. */
 function applyPreferences(settings: Settings): void {
   applyLaunchAtLogin(settings.launchAtLogin);
   setAutoUpdateEnabled(settings.autoUpdate);
-  applyCloseToTray(settings.closeToTray);
+  // Creates or removes the tray icon; a failure to create one leaves close
+  // quitting (the controller says so) rather than hiding an unreachable window.
+  trayController.setEnabled(settings.closeToTray);
   applyThemeSource(settings.theme);
 }
 
@@ -407,13 +388,10 @@ function createWindow(): void {
   // In tray mode the close button hides the window instead of destroying it:
   // the poller keeps running and notifications keep arriving, and the tray menu
   // (or relaunching the app, which the single-instance handler routes to
-  // `focusMainWindow`) brings the dashboard back. `isQuitting` lets a real quit
-  // through — otherwise the app could never exit.
-  mainWindow.on("close", (event) => {
-    if (isQuitting || !closeHidesToTray) return;
-    event.preventDefault();
-    mainWindow?.hide();
-  });
+  // `focusMainWindow`) brings the dashboard back. The three-way decision —
+  // hide / let a real quit through / no tray, so close as usual — lives in
+  // `trayController.handleClose` and is unit-tested there.
+  mainWindow.on("close", (event) => trayController.handleClose(event));
 
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -753,7 +731,14 @@ if (isPrimaryInstance) {
 
   // Any real exit — tray menu, updater install, OS logout — passes through
   // here first, which releases the close handler's hold on the window.
-  app.on("before-quit", () => {
-    isQuitting = true;
+  app.on("before-quit", (event) => {
+    trayController.markQuitting();
+    // A `before-quit` listener may cancel the quit. Nothing does today, but the
+    // latch must not survive a cancelled exit: the next close would destroy the
+    // window instead of hiding it. Re-check once the event has been dispatched
+    // to every listener.
+    setImmediate(() => {
+      if (event.defaultPrevented) trayController.cancelQuitting();
+    });
   });
 }

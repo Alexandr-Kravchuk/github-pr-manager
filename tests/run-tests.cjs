@@ -475,120 +475,199 @@ test("main gates startup + window-all-closed on the acquired single-instance loc
   delete require.cache[elPath];
 }
 
-// --- tray, verified against a mocked Electron --------------------------------
-// `tray.ts` is Electron-only, so it is exercised the same way as the main.js
-// wiring above: require the COMPILED module with a fake `electron` in the module
-// cache. What matters here is the contract main.ts leans on — `ensureTray`
-// reports whether a tray actually exists, and a false return is what keeps the
-// close button quitting instead of hiding the window out of reach.
+// --- tray controller, verified against a mocked Electron --------------------
+// `tray.ts` is Electron-only, so it is exercised by requiring the COMPILED
+// module with a fake `electron` in the module cache. The controller owns both
+// the icon and the close/quit decision, so these tests cover the actual
+// production code path for the riskiest part of the feature: what a window
+// `close` does in each of its three states.
 {
   const trayJs = path.join(__dirname, "../dist/main/main/tray.js");
   const elPath = require.resolve("electron", { paths: [path.dirname(trayJs)] });
   const preloaded = new Set(Object.keys(require.cache));
 
-  const loadTray = ({ emptyIcon = false, failCreate = false } = {}) => {
-    for (const k of Object.keys(require.cache)) {
-      if (!preloaded.has(k)) delete require.cache[k]; // fresh module state each load
+  // One fake electron per scenario; the controller keeps its state per instance,
+  // so a single module load serves every test.
+  const trays = [];
+  let iconEmpty = false;
+  let trayThrows = false;
+
+  class FakeTray {
+    constructor(icon) {
+      if (trayThrows) throw new Error("tray unavailable");
+      this.icon = icon;
+      this.destroyed = false;
+      this.handlers = [];
+      this.menu = null;
+      trays.push(this);
     }
-    const created = [];
-    class FakeTray {
-      constructor(icon) {
-        if (failCreate) throw new Error("tray unavailable");
-        this.icon = icon;
-        this.destroyed = false;
-        this.handlers = [];
-        this.menu = null;
-        created.push(this);
-      }
-      isDestroyed() {
-        return this.destroyed;
-      }
-      destroy() {
-        this.destroyed = true;
-      }
-      setToolTip() {}
-      setContextMenu(menu) {
-        this.menu = menu;
-      }
-      on(event, cb) {
-        this.handlers.push([event, cb]);
-      }
+    isDestroyed() {
+      return this.destroyed;
     }
-    const fakeElectron = {
+    destroy() {
+      this.destroyed = true;
+    }
+    setToolTip() {}
+    setContextMenu(menu) {
+      this.menu = menu;
+    }
+    on(event, cb) {
+      this.handlers.push([event, cb]);
+    }
+  }
+
+  for (const k of Object.keys(require.cache)) {
+    if (!preloaded.has(k)) delete require.cache[k];
+  }
+  require.cache[elPath] = {
+    id: elPath,
+    filename: elPath,
+    loaded: true,
+    exports: {
       app: { getAppPath: () => path.join(__dirname, "..") },
       Menu: { buildFromTemplate: (template) => template },
       nativeImage: {
-        createFromPath: () => ({ isEmpty: () => emptyIcon, resize: (size) => ({ size }) }),
+        createFromPath: () => ({ isEmpty: () => iconEmpty, resize: (size) => ({ size }) }),
       },
       Tray: FakeTray,
-    };
-    require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: fakeElectron };
-    return { tray: require(trayJs), created };
+    },
   };
+  const { createTrayController } = require(trayJs);
 
   // The failure paths log through console.error; keep the test output clean.
   const quiet = (fn) => {
     const original = console.error;
-    console.error = () => {};
+    const lines = [];
+    console.error = (...args) => lines.push(args.join(" "));
     try {
-      return fn();
+      return { result: fn(), lines };
     } finally {
       console.error = original;
     }
   };
 
-  test("ensureTray: creates one tray and reports it exists", () => {
-    const { tray, created } = loadTray();
-    const handlers = { open: () => {}, quit: () => {} };
-    assert.strictEqual(tray.ensureTray(handlers), true);
-    assert.strictEqual(tray.hasTray(), true);
-    assert.strictEqual(created.length, 1, "exactly one Tray is constructed");
-    assert.strictEqual(tray.ensureTray(handlers), true, "a second call is a no-op");
-    assert.strictEqual(created.length, 1, "ensureTray is idempotent");
+  // A controller plus the calls it made, for one scenario.
+  const setup = () => {
+    trays.length = 0;
+    iconEmpty = false;
+    trayThrows = false;
+    const calls = { open: 0, quit: 0, hide: 0 };
+    const controller = createTrayController({
+      open: () => calls.open++,
+      quit: () => calls.quit++,
+      hide: () => calls.hide++,
+    });
+    return { controller, calls };
+  };
+
+  // A window `close` event, recording whether the close was intercepted.
+  const closeEvent = () => {
+    const event = { prevented: false, preventDefault: () => (event.prevented = true) };
+    return event;
+  };
+
+  test("tray controller: enabling creates exactly one icon, idempotently", () => {
+    const { controller } = setup();
+    assert.strictEqual(controller.setEnabled(true), true);
+    assert.strictEqual(controller.hidesToTray(), true);
+    assert.strictEqual(trays.length, 1, "exactly one Tray is constructed");
+    assert.strictEqual(controller.setEnabled(true), true, "a second call is a no-op");
+    assert.strictEqual(trays.length, 1);
   });
 
-  test("ensureTray: the menu opens and quits; a click restores the window", () => {
-    const { tray, created } = loadTray();
-    let opened = 0;
-    let quits = 0;
-    tray.ensureTray({ open: () => opened++, quit: () => quits++ });
-    const [instance] = created;
-    const labels = instance.menu.map((item) => item.label ?? item.type);
+  test("tray controller: disabling removes the icon; re-enabling builds a new one", () => {
+    const { controller } = setup();
+    controller.setEnabled(true);
+    assert.strictEqual(controller.setEnabled(false), false);
+    assert.strictEqual(controller.hidesToTray(), false);
+    assert.strictEqual(trays[0].destroyed, true);
+    assert.strictEqual(controller.setEnabled(true), true);
+    assert.strictEqual(trays.length, 2, "the preference can be toggled back on");
+  });
+
+  test("tray controller: the menu opens and quits; a click restores the window", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(true);
+    const [tray] = trays;
+    const labels = tray.menu.map((item) => item.label ?? item.type);
     assert.deepStrictEqual(labels, ["Open PR Dashboard", "separator", "Quit PR Dashboard"]);
-    instance.menu[0].click();
-    instance.menu[2].click();
-    assert.strictEqual(opened, 1);
-    assert.strictEqual(quits, 1);
-    for (const [event, cb] of instance.handlers) {
+    tray.menu[0].click();
+    tray.menu[2].click();
+    assert.strictEqual(calls.open, 1);
+    assert.strictEqual(calls.quit, 1);
+    for (const [event, cb] of tray.handlers) {
       assert.ok(["click", "double-click"].includes(event), "unexpected tray event: " + event);
       cb();
     }
-    assert.strictEqual(opened, 3, "both click gestures reopen the dashboard");
+    assert.strictEqual(calls.open, 3, "both click gestures reopen the dashboard");
   });
 
-  test("ensureTray: no usable icon -> false, so close keeps quitting", () => {
-    const { tray, created } = quiet(() => loadTray({ emptyIcon: true }));
-    assert.strictEqual(quiet(() => tray.ensureTray({ open: () => {}, quit: () => {} })), false);
-    assert.strictEqual(tray.hasTray(), false);
-    assert.strictEqual(created.length, 0, "an empty icon must not reach the Tray constructor");
+  // The three branches of the close decision — the invariant a refactor is most
+  // likely to break, and the reason the decision lives in a testable controller
+  // rather than inline in the window handler.
+  test("close: tray present and not quitting -> hidden, not destroyed", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(true);
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, true, "the close must be intercepted");
+    assert.strictEqual(calls.hide, 1, "the window is hidden instead");
   });
 
-  test("ensureTray: a throwing Tray constructor is reported, not propagated", () => {
-    const { tray } = quiet(() => loadTray({ failCreate: true }));
-    assert.strictEqual(quiet(() => tray.ensureTray({ open: () => {}, quit: () => {} })), false);
-    assert.strictEqual(tray.hasTray(), false);
+  test("close: quitting -> the close proceeds untouched", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(true);
+    controller.markQuitting();
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, false, "a real quit must not be intercepted");
+    assert.strictEqual(calls.hide, 0);
   });
 
-  test("destroyTray: removes the icon and is safe with none", () => {
-    const { tray, created } = loadTray();
-    tray.ensureTray({ open: () => {}, quit: () => {} });
-    tray.destroyTray();
-    assert.strictEqual(created[0].destroyed, true);
-    assert.strictEqual(tray.hasTray(), false);
-    assert.doesNotThrow(() => tray.destroyTray(), "destroying twice is a no-op");
-    // Turning the preference back on rebuilds the icon.
-    assert.strictEqual(tray.ensureTray({ open: () => {}, quit: () => {} }), true);
-    assert.strictEqual(created.length, 2);
+  test("close: no tray (preference off) -> the close proceeds even when not quitting", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(false);
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, false);
+    assert.strictEqual(calls.hide, 0);
+  });
+
+  test("close: a cancelled quit restores hiding (the latch is not one-way)", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(true);
+    controller.markQuitting();
+    controller.cancelQuitting();
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, true, "close hides again once the quit is cancelled");
+    assert.strictEqual(calls.hide, 1);
+  });
+
+  test("tray controller: no usable icon -> close keeps quitting, loudly", () => {
+    const { controller, calls } = setup();
+    iconEmpty = true;
+    const { result, lines } = quiet(() => controller.setEnabled(true));
+    assert.strictEqual(result, false, "the preference cannot be honored");
+    assert.strictEqual(controller.hidesToTray(), false);
+    assert.strictEqual(trays.length, 0, "an empty icon must not reach the Tray constructor");
+    assert.ok(
+      lines.some((l) => l.includes("close button will keep quitting")),
+      "the divergence from the saved preference must not be silent",
+    );
+    // The decisive part: with no icon, a close must still destroy the window.
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, false, "no tray icon must never trap the window");
+    assert.strictEqual(calls.hide, 0);
+  });
+
+  test("tray controller: a throwing Tray constructor is reported, not propagated", () => {
+    const { controller } = setup();
+    trayThrows = true;
+    const { result } = quiet(() => controller.setEnabled(true));
+    assert.strictEqual(result, false);
+    assert.strictEqual(controller.hidesToTray(), false);
   });
 
   for (const k of Object.keys(require.cache)) {
