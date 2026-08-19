@@ -55,12 +55,16 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [pollIntervalSeconds, setPollIntervalSeconds] = useState(60);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [autoUpdate, setAutoUpdate] = useState(true);
+  const [closeToTray, setCloseToTray] = useState(true);
   const [theme, setTheme] = useState<ThemePreference>("system");
   const [notifications, setNotifications] = useState<NotificationSettings>(DEFAULT_NOTIFICATIONS);
   const [hosts, setHosts] = useState<DraftHost[]>([]);
   const [gh, setGh] = useState<GhStatus | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A preference that saved fine but could not take effect (e.g. close-to-tray
+  // with no usable tray icon) — informational, not a failed save.
+  const [warning, setWarning] = useState<string | null>(null);
 
   // Jira (parent-task grouping). baseUrl/email persist in settings; the token is
   // write-only here — stored encrypted in the main process, never read back.
@@ -84,6 +88,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setPollIntervalSeconds(s.pollIntervalSeconds);
         setLaunchAtLogin(s.launchAtLogin);
         setAutoUpdate(s.autoUpdate);
+        setCloseToTray(s.closeToTray);
         setTheme(s.theme);
         setNotifications(s.notifications ?? DEFAULT_NOTIFICATIONS);
         setHosts(
@@ -133,6 +138,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const save = async () => {
     setSaving(true);
     setError(null);
+    setWarning(null);
     try {
       const baseUrl = jiraBaseUrl.trim();
       const email = jiraEmail.trim();
@@ -140,6 +146,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         pollIntervalSeconds,
         launchAtLogin,
         autoUpdate,
+        closeToTray,
         theme,
         notifications,
         hosts: hosts.map((h) => ({
@@ -155,6 +162,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setError(res.error);
         return;
       }
+      if (res.warning) setWarning(res.warning);
       // Store the token separately (encrypted) only if the user entered one.
       if (jiraToken.trim()) {
         const t = await window.api.setJiraToken(jiraToken.trim());
@@ -205,6 +213,12 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       {error && (
         <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/40 dark:text-red-200">
           {error}
+        </div>
+      )}
+
+      {warning && (
+        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-600/40 dark:bg-amber-950/40 dark:text-amber-200">
+          {warning}
         </div>
       )}
 
@@ -395,6 +409,21 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             <span className="block text-sm text-fg-secondary">Automatically check for updates</span>
             <span className="block text-xs text-fg-faint">
               Download and install new versions in the background.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={closeToTray}
+            onChange={(e) => setCloseToTray(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-sky-500"
+          />
+          <span>
+            <span className="block text-sm text-fg-secondary">Close to tray</span>
+            <span className="block text-xs text-fg-faint">
+              Closing the window hides it instead of quitting. With notifications enabled the app
+              keeps polling in the background; quit from the tray icon&apos;s menu.
             </span>
           </span>
         </label>

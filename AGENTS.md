@@ -7,8 +7,26 @@ signed into — no OAuth, no stored credentials.
 Three layers:
 
 - **main** (`src/main`, Node / CommonJS) — window + lifecycle, the poller, IPC
-  handlers, settings (`userData/settings.json`), `gh` token resolution, and
-  auto-update (`electron-updater`).
+  handlers, settings (`userData/settings.json`), `gh` token resolution, the tray
+  icon (`tray.ts`), and auto-update (`electron-updater`). Window teardown runs
+  through the tray controller (`createTrayController`), which owns the icon *and*
+  the close decision together so they can't drift: close hides only while the
+  `closeToTray` preference is on **and** an icon really exists (a tray that
+  failed to appear must keep close quitting, or the window hides with nothing to
+  restore it). The quit latch is set from every exit signal the platform gives —
+  `before-quit`, the native autoUpdater's `before-quit-for-update` (macOS
+  quitAndInstall closes windows before `before-quit`), and the window's
+  `session-end` (Windows shutdown/logout never emits `before-quit`) — and is
+  re-armed state-based when the window is next shown, never by racing the quit
+  pipeline's event timing. `main.ts` only injects the live actions (focus /
+  quit / hide, with a leave-fullscreen-first hide for macOS); the three-way
+  close decision is unit-tested in `tests/run-tests.cjs` against a mocked
+  Electron, and the wiring registrations are asserted on the compiled `main.js`.
+  Close-to-tray makes hidden-but-alive the app's *normal* idle state, so the
+  "no always-running animation in the renderer" rule below applies with extra
+  force — a hidden renderer with an `infinite` animation burns CPU invisibly,
+  and snapshot pushes are already gated on window visibility for the same
+  reason.
 - **shared** (`src/shared`, Node) — domain logic used by main: `github.ts`
   (GraphQL query + mapping), `state.ts` (seen-state), `config.ts` (gh tokens +
   settings validation), `types.ts` (domain types **and** the renderer↔main

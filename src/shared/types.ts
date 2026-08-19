@@ -120,6 +120,11 @@ export interface Settings {
   launchAtLogin: boolean;
   /** Periodically check for and install updates (electron-updater). */
   autoUpdate: boolean;
+  /**
+   * Closing the window hides it to the tray instead of quitting. The app keeps
+   * polling and notifying; Quit lives in the tray menu.
+   */
+  closeToTray: boolean;
   /** Light/dark appearance, or follow the OS. */
   theme: ThemePreference;
   /** Desktop-notification preferences. */
@@ -396,8 +401,9 @@ export type ConfigResult =
   | { ok: true; config: PublicConfig }
   | { ok: false; error: string };
 
-/** Result of `saveSettings`. */
-export type SaveSettingsResult = { ok: true } | { ok: false; error: string };
+/** Result of `saveSettings`. `warning` carries a preference that was saved
+ *  but could not take effect (today: close-to-tray with no usable tray). */
+export type SaveSettingsResult = { ok: true; warning?: string } | { ok: false; error: string };
 
 /** `gh` CLI availability + per-host authentication, for the settings UI. */
 export interface GhStatus {

@@ -263,6 +263,7 @@ const settings: Settings = {
   pollIntervalSeconds: 60,
   launchAtLogin: false,
   autoUpdate: false,
+  closeToTray: true,
   theme: "system",
   notifications: {
     enabled: true,

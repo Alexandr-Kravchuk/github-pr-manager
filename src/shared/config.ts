@@ -146,6 +146,9 @@ export function validateSettings(raw: unknown): Settings {
   // Launch-at-login defaults OFF (opt-in); auto-update defaults ON.
   const launchAtLogin = typeof obj.launchAtLogin === "boolean" ? obj.launchAtLogin : false;
   const autoUpdate = typeof obj.autoUpdate === "boolean" ? obj.autoUpdate : true;
+  // Close-to-tray defaults ON: the app is a background watcher, and a stray
+  // click on the close button shouldn't silence notifications for the day.
+  const closeToTray = typeof obj.closeToTray === "boolean" ? obj.closeToTray : true;
 
   // Appearance defaults to following the OS; anything unrecognized falls back.
   const theme = obj.theme === "light" || obj.theme === "dark" ? obj.theme : "system";
@@ -178,6 +181,7 @@ export function validateSettings(raw: unknown): Settings {
     pollIntervalSeconds,
     launchAtLogin,
     autoUpdate,
+    closeToTray,
     theme,
     notifications,
     hosts,
@@ -220,6 +224,7 @@ export function defaultSettings(): Settings {
     pollIntervalSeconds: DEFAULT_POLL_INTERVAL_SECONDS,
     launchAtLogin: false,
     autoUpdate: true,
+    closeToTray: true,
     theme: "system",
     notifications: defaultNotificationSettings(),
     hosts: [],

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
+import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
 import { isPollingPaused } from "../shared/idle-gate";
@@ -21,6 +21,7 @@ import type {
   SaveSettingsResult,
   Settings,
 } from "../shared/types";
+import { loadAppIcon } from "./app-icon";
 import { ensureCliPath } from "./cli-path";
 import { clearParentCache } from "../shared/jira";
 import { buildParentEnricher, getJiraStatus, setJiraToken } from "./jira-store";
@@ -35,6 +36,7 @@ import {
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
 import { acquireSingleInstanceLock, createWindowReadyGate } from "./single-instance";
+import { createTrayController } from "./tray";
 import {
   acknowledgeVersion,
   ignoredStatePath,
@@ -127,6 +129,36 @@ function focusMainWindow(): void {
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
+}
+
+/**
+ * The tray icon plus the close/quit state that hangs off it. Owning both in one
+ * place is what keeps "the close button hides" and "a tray icon exists" from
+ * drifting apart; `tray.ts` holds the logic so it is unit-testable against a
+ * mocked Electron, and this module only supplies the live window/app actions.
+ */
+const trayController = createTrayController({
+  open: () => focusMainWindow(),
+  quit: () => app.quit(),
+  hide: () => hideMainWindow(),
+});
+
+/**
+ * Hides the window for close-to-tray. A macOS window in native full-screen
+ * must leave full-screen first — hiding it directly is a long-standing
+ * Electron/macOS trap that can strand the user on an empty Space.
+ */
+function hideMainWindow(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  if (win.isFullScreen()) {
+    win.once("leave-full-screen", () => {
+      if (!win.isDestroyed()) win.hide();
+    });
+    win.setFullScreen(false);
+  } else {
+    win.hide();
+  }
 }
 
 /**
@@ -296,10 +328,14 @@ function applyThemeSource(theme: Settings["theme"]): void {
   nativeTheme.themeSource = theme;
 }
 
-/** Applies user preferences (launch-at-login + auto-update + theme) to the OS/updater. */
+/** Applies user preferences (launch-at-login + auto-update + close-to-tray +
+ *  theme) to the OS/updater. */
 function applyPreferences(settings: Settings): void {
   applyLaunchAtLogin(settings.launchAtLogin);
   setAutoUpdateEnabled(settings.autoUpdate);
+  // Creates or removes the tray icon; a failure to create one leaves close
+  // quitting (the controller says so) rather than hiding an unreachable window.
+  trayController.setEnabled(settings.closeToTray);
   applyThemeSource(settings.theme);
 }
 
@@ -324,8 +360,7 @@ function applyCsp(): void {
 function resolveAppIcon(): Electron.NativeImage | undefined {
   // Window icon (Windows/Linux taskbar + title bar). macOS uses the bundle icon.
   // Falls back to the default Electron icon if the file is missing.
-  const image = nativeImage.createFromPath(path.join(app.getAppPath(), "build", "icon.png"));
-  return image.isEmpty() ? undefined : image;
+  return loadAppIcon() ?? undefined;
 }
 
 /**
@@ -368,6 +403,18 @@ function createWindow(): void {
     },
   });
 
+  // In tray mode the close button hides the window instead of destroying it,
+  // and the tray menu (or relaunching the app, which the single-instance
+  // handler routes to `focusMainWindow`) brings the dashboard back. Background
+  // behavior while hidden is deliberately conditional: the idle gate keeps the
+  // poller running only while a notification could actually be delivered
+  // (`isPollingPaused`'s hidden-window carve-out) — with notifications off
+  // there is nothing a fetch could surface, so polling parks until the window
+  // is shown again and the show-wake refresh catches it up. The three-way
+  // close decision — hide / let a real quit through / no tray, so close as
+  // usual — lives in `trayController.handleClose` and is unit-tested there.
+  mainWindow.on("close", (event) => trayController.handleClose(event));
+
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -376,11 +423,23 @@ function createWindow(): void {
   // because it arrived before the first window. Resolving again is a no-op.
   windowGate.markWindowReady();
 
+  // Windows shutdown/restart/logout never emits `before-quit` (documented
+  // Electron behavior), so the quit latch must come from the window's own
+  // session-end signal — otherwise close-to-tray would intercept the OS's
+  // close and hold up the logout.
+  mainWindow.on("session-end", () => trayController.markQuitting());
+
   // Returning to the dashboard (focus / un-minimize / re-show) should refresh
-  // immediately rather than wait out the parked idle cadence.
+  // immediately rather than wait out the parked idle cadence. A visible window
+  // also re-arms the quit latch: if the user can see the dashboard, whatever
+  // exit was in flight was cancelled — at any stage of the quit pipeline.
   const wakePoller = (): void => void poller?.wake();
-  mainWindow.on("focus", wakePoller);
-  mainWindow.on("show", wakePoller);
+  const backFromHiding = (): void => {
+    trayController.cancelQuitting();
+    wakePoller();
+  };
+  mainWindow.on("focus", backFromHiding);
+  mainWindow.on("show", backFromHiding);
   mainWindow.on("restore", wakePoller);
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
@@ -504,6 +563,17 @@ function registerIpc(): void {
       // Apply immediately: a fresh poll re-resolves tokens and re-fetches, and
       // its snapshot/config-error is pushed to the renderer.
       await poller?.refresh();
+      // The tray preference is the one preference that can fail to take
+      // effect (no usable icon, or the platform refused a tray). Saying
+      // "saved" while close actually quits would strand the user believing
+      // the app watches in the background — surface it.
+      if (saved.closeToTray && !trayController.hidesToTray()) {
+        return {
+          ok: true,
+          warning:
+            "Close to tray couldn't be enabled — no tray icon could be created on this system, so the close button will quit the app.",
+        };
+      }
       return { ok: true };
     } catch (e) {
       if (e instanceof ConfigError) return { ok: false, error: e.message };
@@ -607,7 +677,14 @@ function startApp(): void {
           `[snapshot] prs=${snapshot.pullRequests.length} errors=${snapshot.errors.length} rate=${JSON.stringify(snapshot.rateLimits)}`,
         );
       }
-      sendToRenderer("snapshot", snapshot);
+      // A tray-hidden window can stay hidden for days; pushing snapshots at
+      // it pays a full-payload IPC clone plus an offscreen re-render for
+      // nothing. The renderer reloads on show (its visibilitychange/focus wake
+      // calls getDashboard) and the show handler wakes the poller, so a gated
+      // push loses nothing.
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+        sendToRenderer("snapshot", snapshot);
+      }
       handleNotifications(snapshot.pullRequests);
     },
     onConfigError: (message) => {
@@ -658,8 +735,13 @@ function startApp(): void {
   applyPreferences(prefs);
 
   app.on("activate", () => {
+    // A window may exist but be hidden in the tray — reactivating (dock click,
+    // relaunch) has to bring that one back, not leave the user staring at
+    // nothing because `getAllWindows()` was non-empty.
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+    } else {
+      focusMainWindow();
     }
   });
 }
@@ -691,9 +773,28 @@ const isPrimaryInstance = acquireSingleInstanceLock({
 if (isPrimaryInstance) {
   void app.whenReady().then(startApp);
 
-  // Plain window app (per product decision): closing the last window quits.
+  // Closing the last window quits — unless close-to-tray is on, in which case
+  // the window is hidden rather than closed and this never fires (see the
+  // `close` handler in createWindow).
   app.on("window-all-closed", () => {
     poller?.stop();
     app.quit();
   });
+
+  // A normal exit (tray menu Quit, Cmd+Q, app.quit()) passes through here,
+  // which releases the close handler's hold on the window. Two real exits do
+  // NOT: the updater's quitAndInstall on macOS closes windows BEFORE emitting
+  // before-quit (latched below via before-quit-for-update), and Windows
+  // shutdown/logout never emits before-quit at all (latched via the window's
+  // session-end in createWindow). If a quit is cancelled at any stage, the
+  // latch is re-armed when the window is next shown — a state-based reset
+  // instead of second-guessing the quit pipeline's event timing.
+  app.on("before-quit", () => trayController.markQuitting());
+
+  // electron-updater's quitAndInstall: emitted on Electron's native
+  // autoUpdater by Squirrel.Mac (which closes all windows first and only
+  // emits before-quit after they are gone — the close would be intercepted
+  // and the update would never install) and, for symmetry, by
+  // electron-updater's Windows path right before its app.quit().
+  nativeAutoUpdater.on("before-quit-for-update", () => trayController.markQuitting());
 }

@@ -381,60 +381,98 @@ test("main gates startup + window-all-closed on the acquired single-instance loc
 // (poller, window, auto-updater) never runs — only the bootstrap wiring does.
 // This is a behavioral check: unlike the text guard, a refactor that drops the
 // lock gate would fail here regardless of how the source is shaped.
-{
-  const Module = require("node:module");
+// Boot the COMPILED dist/main/main/main.js with a fake `electron` injected into
+// the module cache, returning what the wiring did. Each call gets a fresh
+// module graph; `cleanup()` restores the require cache to its pre-boot shape.
+// Everything already cached before any boot — the test file's own module
+// graph, snapshotted ONCE so a boot that throws mid-require can never leak its
+// half-loaded graph into the next boot's baseline (each boot evicts everything
+// newer than this snapshot before requiring).
+const bootBaseline = new Set(Object.keys(require.cache));
+
+const bootCompiledMain = (lockGranted) => {
   const mainJs = path.join(__dirname, "../dist/main/main/main.js");
   const elPath = require.resolve("electron", { paths: [path.dirname(mainJs)] });
-  // Everything already cached before we touch main.js — the test file's own
-  // module graph. We only ever evict what requiring main.js adds, never these.
-  const preloaded = new Set(Object.keys(require.cache));
-
-  // Boot main.js once with a fake electron and return what the wiring did.
-  const bootMain = (lockGranted) => {
-    for (const k of Object.keys(require.cache)) {
-      if (!preloaded.has(k)) delete require.cache[k]; // fresh main.js graph each boot
-    }
-    const events = [];
-    let secondInstanceHandler = null;
-    let quits = 0;
-    const fakeApp = {
-      requestSingleInstanceLock: () => lockGranted,
-      quit: () => quits++,
-      on: (event, cb) => {
-        events.push(event);
-        if (event === "second-instance") secondInstanceHandler = cb;
-      },
-      whenReady: () => new Promise(() => {}), // never resolves: startApp stays parked
-      getVersion: () => "0.0.0-test",
-      getPath: () => os.tmpdir(),
-      setAppUserModelId: () => {},
-      isReady: () => false,
-    };
-    class FakeBrowserWindow {
-      static getAllWindows() {
-        return [];
-      }
-      on() {}
-    }
-    const fakeElectron = {
-      app: fakeApp,
-      BrowserWindow: FakeBrowserWindow,
-      nativeTheme: { on() {} },
-      powerMonitor: { on() {} },
-      ipcMain: { handle() {}, on() {} },
-      session: {},
-      shell: {},
-      clipboard: {},
-      Notification: class {},
-      nativeImage: { createFromPath: () => ({}) },
-    };
-    require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: fakeElectron };
-    require(mainJs);
-    return { events, secondInstanceHandler, quits };
+  for (const k of Object.keys(require.cache)) {
+    if (!bootBaseline.has(k)) delete require.cache[k]; // fresh main.js graph each boot
+  }
+  const events = [];
+  const handlers = new Map();
+  const updaterEvents = [];
+  let quits = 0;
+  const fakeApp = {
+    requestSingleInstanceLock: () => lockGranted,
+    quit: () => quits++,
+    on: (event, cb) => {
+      events.push(event);
+      handlers.set(event, cb);
+    },
+    whenReady: () => new Promise(() => {}), // never resolves: startApp stays parked
+    getVersion: () => "0.0.0-test",
+    getPath: () => os.tmpdir(),
+    getAppPath: () => path.join(__dirname, ".."),
+    setAppUserModelId: () => {},
+    isReady: () => false,
   };
+  class FakeBrowserWindow {
+    static getAllWindows() {
+      return [];
+    }
+    on() {}
+  }
+  // A functional-enough tray surface so the booted module's own controller can
+  // be driven end-to-end (setEnabled(true) -> an icon really "exists").
+  class FakeTray {
+    constructor() {
+      this.destroyed = false;
+    }
+    isDestroyed() {
+      return this.destroyed;
+    }
+    destroy() {
+      this.destroyed = true;
+    }
+    setToolTip() {}
+    setContextMenu() {}
+    on() {}
+  }
+  const fakeElectron = {
+    app: fakeApp,
+    BrowserWindow: FakeBrowserWindow,
+    Menu: { buildFromTemplate: (template) => template },
+    Tray: FakeTray,
+    autoUpdater: { on: (event) => updaterEvents.push(event) },
+    nativeTheme: { on() {} },
+    powerMonitor: { on() {} },
+    ipcMain: { handle() {}, on() {} },
+    session: {},
+    shell: {},
+    clipboard: {},
+    Notification: class {},
+    nativeImage: { createFromPath: () => ({ isEmpty: () => false, resize: () => ({}) }) },
+  };
+  require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: fakeElectron };
+  require(mainJs);
+  return {
+    events,
+    handlers,
+    updaterEvents,
+    get quits() {
+      return quits;
+    },
+    cleanup() {
+      // Restore the cache to its pre-boot shape so later tests see a clean graph.
+      for (const k of Object.keys(require.cache)) {
+        if (!bootBaseline.has(k)) delete require.cache[k];
+      }
+      delete require.cache[elPath];
+    },
+  };
+};
 
-  test("main.js wiring: lost lock -> quits, registers no ready/window handlers", () => {
-    const r = bootMain(false);
+test("main.js wiring: lost lock -> quits, registers no ready/window handlers", () => {
+  const r = bootCompiledMain(false);
+  try {
     assert.strictEqual(r.quits, 1, "the non-primary instance quits exactly once");
     assert.ok(
       !r.events.includes("second-instance"),
@@ -444,24 +482,244 @@ test("main gates startup + window-all-closed on the acquired single-instance loc
       !r.events.includes("window-all-closed"),
       "a non-primary instance must not register window-all-closed",
     );
-  });
+    assert.ok(
+      !r.events.includes("before-quit"),
+      "a non-primary instance must not register before-quit",
+    );
+    assert.ok(
+      !r.updaterEvents.includes("before-quit-for-update"),
+      "a non-primary instance must not register the updater quit latch",
+    );
+  } finally {
+    r.cleanup();
+  }
+});
 
-  test("main.js wiring: won lock -> no quit, registers second-instance + window-all-closed", () => {
-    const r = bootMain(true);
+test("main.js wiring: won lock -> no quit, registers second-instance + window-all-closed", () => {
+  const r = bootCompiledMain(true);
+  try {
     assert.strictEqual(r.quits, 0, "the primary instance does not quit");
     assert.ok(r.events.includes("second-instance"), "the primary registers a second-instance handler");
     assert.ok(r.events.includes("window-all-closed"), "the primary registers window-all-closed");
+    // before-quit is what releases the close-to-tray hold on the window; without
+    // it a tray-mode app can be hidden but never quit.
+    assert.ok(r.events.includes("before-quit"), "the primary registers before-quit");
+    // macOS quitAndInstall closes windows BEFORE before-quit; the tray latch
+    // must therefore also come from the native updater's signal, or a pending
+    // update deadlocks against close-to-tray forever.
+    assert.ok(
+      r.updaterEvents.includes("before-quit-for-update"),
+      "the primary latches quitting on the updater's before-quit-for-update",
+    );
+    const secondInstance = r.handlers.get("second-instance");
     assert.strictEqual(
-      typeof r.secondInstanceHandler,
+      typeof secondInstance,
       "function",
       "the registered second-instance handler is callable",
     );
     // Exercise the wired handler: no window yet (startApp never ran), so it must
     // take the deferred path without throwing rather than focusing nothing.
-    assert.doesNotThrow(() => r.secondInstanceHandler(), "the wired handler runs cleanly with no window");
+    assert.doesNotThrow(() => secondInstance(), "the wired handler runs cleanly with no window");
+  } finally {
+    r.cleanup();
+  }
+});
+
+// --- tray controller, verified against a mocked Electron --------------------
+// `tray.ts` is Electron-only, so it is exercised by requiring the COMPILED
+// module with a fake `electron` in the module cache. The controller owns both
+// the icon and the close/quit decision, so these tests cover the actual
+// production code path for the riskiest part of the feature: what a window
+// `close` does in each of its three states.
+{
+  const trayJs = path.join(__dirname, "../dist/main/main/tray.js");
+  const elPath = require.resolve("electron", { paths: [path.dirname(trayJs)] });
+  const preloaded = new Set(Object.keys(require.cache));
+
+  // One fake electron per scenario; the controller keeps its state per instance,
+  // so a single module load serves every test.
+  const trays = [];
+  let iconEmpty = false;
+  let trayThrows = false;
+
+  class FakeTray {
+    constructor(icon) {
+      if (trayThrows) throw new Error("tray unavailable");
+      this.icon = icon;
+      this.destroyed = false;
+      this.handlers = [];
+      this.menu = null;
+      trays.push(this);
+    }
+    isDestroyed() {
+      return this.destroyed;
+    }
+    destroy() {
+      this.destroyed = true;
+    }
+    setToolTip() {}
+    setContextMenu(menu) {
+      this.menu = menu;
+    }
+    on(event, cb) {
+      this.handlers.push([event, cb]);
+    }
+  }
+
+  for (const k of Object.keys(require.cache)) {
+    if (!preloaded.has(k)) delete require.cache[k];
+  }
+  require.cache[elPath] = {
+    id: elPath,
+    filename: elPath,
+    loaded: true,
+    exports: {
+      app: { getAppPath: () => path.join(__dirname, "..") },
+      Menu: { buildFromTemplate: (template) => template },
+      nativeImage: {
+        createFromPath: () => ({ isEmpty: () => iconEmpty, resize: (size) => ({ size }) }),
+      },
+      Tray: FakeTray,
+    },
+  };
+  const { createTrayController } = require(trayJs);
+
+  // The failure paths log through console.error; keep the test output clean.
+  const quiet = (fn) => {
+    const original = console.error;
+    const lines = [];
+    console.error = (...args) => lines.push(args.join(" "));
+    try {
+      return { result: fn(), lines };
+    } finally {
+      console.error = original;
+    }
+  };
+
+  // A controller plus the calls it made, for one scenario.
+  const setup = () => {
+    trays.length = 0;
+    iconEmpty = false;
+    trayThrows = false;
+    const calls = { open: 0, quit: 0, hide: 0 };
+    const controller = createTrayController({
+      open: () => calls.open++,
+      quit: () => calls.quit++,
+      hide: () => calls.hide++,
+    });
+    return { controller, calls };
+  };
+
+  // A window `close` event, recording whether the close was intercepted.
+  const closeEvent = () => {
+    const event = { prevented: false, preventDefault: () => (event.prevented = true) };
+    return event;
+  };
+
+  test("tray controller: enabling creates exactly one icon, idempotently", () => {
+    const { controller } = setup();
+    assert.strictEqual(controller.setEnabled(true), true);
+    assert.strictEqual(controller.hidesToTray(), true);
+    assert.strictEqual(trays.length, 1, "exactly one Tray is constructed");
+    assert.strictEqual(controller.setEnabled(true), true, "a second call is a no-op");
+    assert.strictEqual(trays.length, 1);
   });
 
-  // Restore the cache to its pre-test shape so later tests see a clean graph.
+  test("tray controller: disabling removes the icon; re-enabling builds a new one", () => {
+    const { controller } = setup();
+    controller.setEnabled(true);
+    assert.strictEqual(controller.setEnabled(false), false);
+    assert.strictEqual(controller.hidesToTray(), false);
+    assert.strictEqual(trays[0].destroyed, true);
+    assert.strictEqual(controller.setEnabled(true), true);
+    assert.strictEqual(trays.length, 2, "the preference can be toggled back on");
+  });
+
+  test("tray controller: the menu opens and quits; a click restores the window", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(true);
+    const [tray] = trays;
+    const labels = tray.menu.map((item) => item.label ?? item.type);
+    assert.deepStrictEqual(labels, ["Open PR Dashboard", "separator", "Quit PR Dashboard"]);
+    tray.menu[0].click();
+    tray.menu[2].click();
+    assert.strictEqual(calls.open, 1);
+    assert.strictEqual(calls.quit, 1);
+    for (const [event, cb] of tray.handlers) {
+      assert.ok(["click", "double-click"].includes(event), "unexpected tray event: " + event);
+      cb();
+    }
+    assert.strictEqual(calls.open, 3, "both click gestures reopen the dashboard");
+  });
+
+  // The three branches of the close decision — the invariant a refactor is most
+  // likely to break, and the reason the decision lives in a testable controller
+  // rather than inline in the window handler.
+  test("close: tray present and not quitting -> hidden, not destroyed", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(true);
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, true, "the close must be intercepted");
+    assert.strictEqual(calls.hide, 1, "the window is hidden instead");
+  });
+
+  test("close: quitting -> the close proceeds untouched", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(true);
+    controller.markQuitting();
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, false, "a real quit must not be intercepted");
+    assert.strictEqual(calls.hide, 0);
+  });
+
+  test("close: no tray (preference off) -> the close proceeds even when not quitting", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(false);
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, false);
+    assert.strictEqual(calls.hide, 0);
+  });
+
+  test("close: a cancelled quit restores hiding (the latch is not one-way)", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(true);
+    controller.markQuitting();
+    controller.cancelQuitting();
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, true, "close hides again once the quit is cancelled");
+    assert.strictEqual(calls.hide, 1);
+  });
+
+  test("tray controller: no usable icon -> close keeps quitting, loudly", () => {
+    const { controller, calls } = setup();
+    iconEmpty = true;
+    const { result, lines } = quiet(() => controller.setEnabled(true));
+    assert.strictEqual(result, false, "the preference cannot be honored");
+    assert.strictEqual(controller.hidesToTray(), false);
+    assert.strictEqual(trays.length, 0, "an empty icon must not reach the Tray constructor");
+    assert.ok(
+      lines.some((l) => l.includes("close button will keep quitting")),
+      "the divergence from the saved preference must not be silent",
+    );
+    // The decisive part: with no icon, a close must still destroy the window.
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, false, "no tray icon must never trap the window");
+    assert.strictEqual(calls.hide, 0);
+  });
+
+  test("tray controller: a throwing Tray constructor is reported, not propagated", () => {
+    const { controller } = setup();
+    trayThrows = true;
+    const { result } = quiet(() => controller.setEnabled(true));
+    assert.strictEqual(result, false);
+    assert.strictEqual(controller.hidesToTray(), false);
+  });
+
   for (const k of Object.keys(require.cache)) {
     if (!preloaded.has(k)) delete require.cache[k];
   }
@@ -474,6 +732,7 @@ test("defaultSettings: empty + 60s + toggles", () => {
   assert.strictEqual(d.pollIntervalSeconds, 60);
   assert.strictEqual(d.launchAtLogin, false);
   assert.strictEqual(d.autoUpdate, true);
+  assert.strictEqual(d.closeToTray, true);
   assert.strictEqual(d.theme, "system");
   assert.deepStrictEqual(d.hosts, []);
 });
@@ -488,11 +747,23 @@ test("validateSettings: toggles default off/on when absent", () => {
   const s = cfg.validateSettings({ hosts: [] });
   assert.strictEqual(s.launchAtLogin, false);
   assert.strictEqual(s.autoUpdate, true);
+  // Close-to-tray defaults ON, so a settings.json written before the preference
+  // existed still gets tray behaviour instead of silently opting out.
+  assert.strictEqual(s.closeToTray, true);
 });
 test("validateSettings: toggles honored when present", () => {
-  const s = cfg.validateSettings({ launchAtLogin: true, autoUpdate: false, hosts: [] });
+  const s = cfg.validateSettings({
+    launchAtLogin: true,
+    autoUpdate: false,
+    closeToTray: false,
+    hosts: [],
+  });
   assert.strictEqual(s.launchAtLogin, true);
   assert.strictEqual(s.autoUpdate, false);
+  assert.strictEqual(s.closeToTray, false);
+});
+test("validateSettings: a non-boolean closeToTray falls back to the default", () => {
+  assert.strictEqual(cfg.validateSettings({ closeToTray: "yes", hosts: [] }).closeToTray, true);
 });
 test("validateSettings: theme defaults to system when absent/invalid", () => {
   assert.strictEqual(cfg.validateSettings({ hosts: [] }).theme, "system");
