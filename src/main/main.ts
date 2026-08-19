@@ -142,6 +142,12 @@ const trayController = createTrayController({
   hide: () => mainWindow?.hide(),
 });
 
+// Exported solely as the seam for the compiled-main.js wiring tests in
+// tests/run-tests.cjs: they boot this module with a mocked Electron and must
+// observe the before-quit latch/release through the SAME instance the window
+// handlers use. Nothing in production imports main.ts — it is the entry point.
+export { trayController };
+
 /**
  * Shown notifications, retained until the OS is done with them. Electron can
  * garbage-collect a `Notification` while its toast is still on screen, which

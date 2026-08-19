@@ -15,7 +15,9 @@ Three layers:
   failed to appear must keep close quitting, or the window hides with nothing to
   restore it), and a `before-quit` latch lets a real exit through. `main.ts`
   only injects the live actions (focus / quit / hide); the three-way close
-  decision is unit-tested in `tests/run-tests.cjs` against a mocked Electron.
+  decision is unit-tested in `tests/run-tests.cjs` against a mocked Electron,
+  and the before-quit latch/release is wiring-tested against the compiled
+  `main.js` (which exports `trayController` solely as that test seam).
 - **shared** (`src/shared`, Node) — domain logic used by main: `github.ts`
   (GraphQL query + mapping), `state.ts` (seen-state), `config.ts` (gh tokens +
   settings validation), `types.ts` (domain types **and** the renderer↔main
