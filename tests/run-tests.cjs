@@ -635,7 +635,19 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     assert.strictEqual(trays.length, 2, "the preference can be toggled back on");
   });
 
-  test("tray controller: the menu opens and quits; a click restores the window", () => {
+  // `ensureTray` reads `process.platform` at icon-creation time, so a per-test
+  // override is enough to exercise both branches of the click wiring from macOS.
+  const onPlatform = (value, fn) => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value, configurable: true });
+    try {
+      return fn();
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+  };
+
+  test("tray controller: the menu opens and quits", () => {
     const { controller, calls } = setup();
     controller.setEnabled(true);
     const [tray] = trays;
@@ -645,11 +657,38 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     tray.menu[2].click();
     assert.strictEqual(calls.open, 1);
     assert.strictEqual(calls.quit, 1);
-    for (const [event, cb] of tray.handlers) {
-      assert.ok(["click", "double-click"].includes(event), "unexpected tray event: " + event);
-      cb();
-    }
-    assert.strictEqual(calls.open, 3, "both click gestures reopen the dashboard");
+  });
+
+  test("tray controller: Windows/Linux -> both click gestures reopen the dashboard", () => {
+    const { controller, calls } = onPlatform("win32", () => {
+      const s = setup();
+      s.controller.setEnabled(true);
+      return s;
+    });
+    const [tray] = trays;
+    assert.deepStrictEqual(
+      tray.handlers.map(([event]) => event),
+      ["click", "double-click"],
+    );
+    for (const [, cb] of tray.handlers) cb();
+    assert.strictEqual(calls.open, 2);
+    assert.strictEqual(controller.hidesToTray(), true);
+  });
+
+  // macOS emits `click` even while it is opening the context menu, so a wired
+  // click handler reopened the window on any click on the menu bar icon —
+  // without the user ever choosing "Open PR Dashboard".
+  test("tray controller: macOS -> no click handler, only the menu opens the window", () => {
+    const { calls } = onPlatform("darwin", () => {
+      const s = setup();
+      s.controller.setEnabled(true);
+      return s;
+    });
+    const [tray] = trays;
+    assert.deepStrictEqual(tray.handlers, [], "no click gesture may reopen the window on macOS");
+    assert.strictEqual(calls.open, 0);
+    tray.menu[0].click();
+    assert.strictEqual(calls.open, 1, "the menu item is the only way in");
   });
 
   // The three branches of the close decision — the invariant a refactor is most
