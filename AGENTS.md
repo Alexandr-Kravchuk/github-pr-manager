@@ -63,6 +63,20 @@ Three layers:
 - New IPC channel: add the handler in `main.ts`, expose it in `preload.ts`, and
   type it on `PrManagerApi` in `shared/types.ts` (the single source of truth for
   the bridge). Validate any renderer-supplied argument in `ipc-validation.ts`.
+- Keyboard shortcuts live in the application menu (`menu.ts`), not in renderer
+  key handlers: a menu accelerator fires whatever has focus and it shows the
+  user what the shortcut is. Both items forward to the renderer over IPC
+  (`menu:open-settings`, `menu:refresh`) because the renderer owns the view and
+  the loading state. `CmdOrCtrl` covers both platforms — Cmd+, / Cmd+R on macOS,
+  Ctrl+, / Ctrl+R elsewhere. Two traps the template exists to avoid:
+  `setApplicationMenu` **replaces** Electron's default menu, so the role-based
+  menus have to be re-declared or Cmd+C/V/A in the search and Jira-token fields
+  disappear; and the macOS `windowMenu` role omits Close, so `{ role: "close" }`
+  is spelled out or Cmd+W (the close-to-tray gesture) silently stops working.
+  The `reload` role must stay out — it would claim CmdOrCtrl+R and shadow
+  Refresh. F5 is the second Refresh shortcut and is handled by a renderer
+  `keydown` listener, because one menu item carries exactly one accelerator and
+  a hidden duplicate item's accelerator is not reliable across platforms.
 - Settings never contain tokens; tokens are resolved per host via `gh` at fetch
   time (`config.ts`).
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes

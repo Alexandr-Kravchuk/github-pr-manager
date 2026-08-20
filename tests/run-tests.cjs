@@ -726,6 +726,160 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
   delete require.cache[elPath];
 }
 
+// --- application menu, verified against a mocked Electron -------------------
+// `menu.ts` is Electron-only, so it is exercised by requiring the COMPILED
+// module with a fake `electron` in the module cache. What matters here is not
+// cosmetic: `Menu.setApplicationMenu` REPLACES Electron's default menu, so the
+// template has to keep carrying the edit/window roles (Cmd+C/V/A in the search
+// and token fields, Cmd+Q/H/W) alongside the two shortcuts this app adds.
+{
+  const menuJs = path.join(__dirname, "../dist/main/main/menu.js");
+  const elPath = require.resolve("electron", { paths: [path.dirname(menuJs)] });
+  const preloaded = new Set(Object.keys(require.cache));
+
+  for (const k of Object.keys(require.cache)) {
+    if (!preloaded.has(k)) delete require.cache[k];
+  }
+  let installed = null;
+  require.cache[elPath] = {
+    id: elPath,
+    filename: elPath,
+    loaded: true,
+    exports: {
+      app: { name: "PR Dashboard", isPackaged: true },
+      Menu: {
+        buildFromTemplate: (template) => ({ template }),
+        setApplicationMenu: (menu) => {
+          installed = menu;
+        },
+      },
+    },
+  };
+  const { buildAppMenuTemplate, installAppMenu } = require(menuJs);
+
+  // Every item in the template, flattened across submenus.
+  const flatten = (template) =>
+    template.flatMap((item) => [
+      item,
+      ...(Array.isArray(item.submenu) ? flatten(item.submenu) : []),
+    ]);
+  const byAccelerator = (template, accelerator) =>
+    flatten(template).filter((item) => item.accelerator === accelerator);
+
+  const deps = () => {
+    const calls = { openSettings: 0, refresh: 0 };
+    return {
+      calls,
+      deps: {
+        openSettings: () => calls.openSettings++,
+        refresh: () => calls.refresh++,
+      },
+    };
+  };
+
+  test("app menu: Settings sits in the macOS app menu on CmdOrCtrl+,", () => {
+    const { deps: d, calls } = deps();
+    const template = buildAppMenuTemplate(d, { platform: "darwin" });
+    // macOS convention: Preferences lives in the application menu, not File.
+    const appSubmenu = template[0].submenu;
+    const settings = appSubmenu.find((item) => item.accelerator === "CmdOrCtrl+,");
+    assert.ok(settings, "the app menu carries the Settings item");
+    assert.match(settings.label, /^Settings/);
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+,").length, 1, "exactly one owner of the accelerator");
+    settings.click();
+    assert.strictEqual(calls.openSettings, 1, "the item forwards to openSettings");
+  });
+
+  test("app menu: Refresh sits in View on CmdOrCtrl+R, and nothing else claims it", () => {
+    const { deps: d, calls } = deps();
+    const template = buildAppMenuTemplate(d, { platform: "darwin", devItems: true });
+    const view = template.find((item) => item.label === "View");
+    assert.ok(view, "a View menu exists");
+    const refresh = view.submenu.find((item) => item.label === "Refresh");
+    assert.strictEqual(refresh.accelerator, "CmdOrCtrl+R");
+    // The `reload` role would claim CmdOrCtrl+R too and shadow Refresh; only
+    // forceReload may sit next to the DevTools toggle.
+    assert.ok(
+      !flatten(template).some((item) => item.role === "reload"),
+      "the reload role must not be present — it would shadow Refresh",
+    );
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R").length, 1, "exactly one owner of the accelerator");
+    refresh.click();
+    assert.strictEqual(calls.refresh, 1, "the item forwards to refresh");
+  });
+
+  test("app menu: the replaced default's roles are kept (copy/paste and window keys survive)", () => {
+    const template = buildAppMenuTemplate(deps().deps, { platform: "darwin" });
+    const roles = flatten(template).map((item) => item.role);
+    // `close` is spelled out because the macOS windowMenu role omits it and this
+    // app has no File menu there — without it Cmd+W stops working.
+    for (const role of ["editMenu", "close", "minimize", "quit", "hide", "about"]) {
+      assert.ok(roles.includes(role), `the ${role} role must stay in the template`);
+    }
+  });
+
+  test("app menu: Windows/Linux put Settings in File, still on CmdOrCtrl+,", () => {
+    const template = buildAppMenuTemplate(deps().deps, { platform: "win32" });
+    assert.strictEqual(template[0].label, "File");
+    // There the windowMenu role already carries Close, so it stays a role.
+    assert.ok(flatten(template).some((item) => item.role === "windowMenu"));
+    const settings = template[0].submenu.find((item) => item.accelerator === "CmdOrCtrl+,");
+    assert.ok(settings, "File carries the Settings item");
+    // Refresh is platform-independent: CmdOrCtrl resolves to Control here.
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R").length, 1);
+  });
+
+  test("app menu: DevTools items only in a dev run", () => {
+    const dev = flatten(buildAppMenuTemplate(deps().deps, { platform: "darwin", devItems: true }));
+    const packaged = flatten(buildAppMenuTemplate(deps().deps, { platform: "darwin", devItems: false }));
+    assert.ok(dev.some((item) => item.role === "toggleDevTools"), "a dev run keeps the DevTools toggle");
+    assert.ok(
+      !packaged.some((item) => item.role === "toggleDevTools"),
+      "a packaged run must not expose the DevTools toggle",
+    );
+  });
+
+  test("app menu: installAppMenu actually installs a built menu", () => {
+    installed = null;
+    installAppMenu(deps().deps, { platform: "darwin" });
+    assert.ok(installed && Array.isArray(installed.template), "setApplicationMenu got a built menu");
+  });
+
+  for (const k of Object.keys(require.cache)) {
+    if (!preloaded.has(k)) delete require.cache[k];
+  }
+  delete require.cache[elPath];
+}
+
+// --- hotkey wiring: menu -> IPC -> renderer --------------------------------
+// The accelerators are useless unless the two channels line up on both sides of
+// the bridge, and neither end can prove that alone. The compiled main.js must
+// SEND on exactly the channels the compiled preload.js LISTENS on.
+test("hotkey wiring: main sends the menu channels preload subscribes to", () => {
+  const fs = require("node:fs");
+  const mainJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+  const preloadJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
+  assert.match(mainJs, /installAppMenu/, "main installs the application menu");
+  for (const channel of ["menu:open-settings", "menu:refresh"]) {
+    assert.ok(mainJs.includes(channel), `main.js sends on ${channel}`);
+    assert.ok(preloadJs.includes(channel), `preload.js subscribes to ${channel}`);
+  }
+});
+
+// F5 is the second Refresh shortcut and is NOT a menu accelerator (one item
+// carries one accelerator), so it only works if the renderer keeps handling the
+// key itself. This guard fails if that listener is dropped in a refactor.
+test("hotkey wiring: the renderer still handles F5 itself", () => {
+  const src = require("node:fs").readFileSync(
+    path.join(__dirname, "../src/renderer/src/App.tsx"),
+    "utf8",
+  );
+  assert.match(src, /"F5"/, "App.tsx checks for the F5 key");
+  assert.match(src, /addEventListener\("keydown"/, "App.tsx registers a keydown listener");
+  assert.match(src, /onRefreshRequest/, "App.tsx subscribes to the menu's Refresh event");
+  assert.match(src, /onOpenSettings/, "App.tsx subscribes to the menu's Settings event");
+});
+
 // --- defaultSettings ---------------------------------------------------------
 test("defaultSettings: empty + 60s + toggles", () => {
   const d = cfg.defaultSettings();

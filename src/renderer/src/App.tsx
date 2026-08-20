@@ -345,6 +345,28 @@ export function App() {
     }
   }, [jiraStatus, groupBy]);
 
+  // Keyboard shortcuts. The accelerators themselves live in the application
+  // menu (main process), which is what makes them work no matter which element
+  // has focus and shows the user what they are; the menu forwards them here.
+  useEffect(() => window.api.onOpenSettings(() => setView("settings")), []);
+  useEffect(() => window.api.onRefreshRequest(() => void refresh()), [refresh]);
+
+  // F5 is the second Refresh shortcut. It is handled here rather than in the
+  // menu because one menu item carries exactly one accelerator, and a hidden
+  // duplicate item's accelerator is not reliable across platforms. Modifiers are
+  // excluded so combinations stay free for anything else.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "F5" || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+        return;
+      }
+      event.preventDefault();
+      void refresh();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [refresh]);
+
   // Sound pings from the main process (only when the user has sound on but
   // native notifications off — otherwise the OS notification plays its sound).
   useEffect(() => window.api.onNotifySound(() => playNotifySound()), []);

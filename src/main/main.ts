@@ -33,6 +33,7 @@ import {
   validateSeenItems,
   validateThemePreference,
 } from "./ipc-validation";
+import { installAppMenu } from "./menu";
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
 import { acquireSingleInstanceLock, createWindowReadyGate } from "./single-instance";
@@ -728,6 +729,22 @@ function startApp(): void {
   });
 
   createWindow();
+
+  // The application menu owns the keyboard shortcuts (Settings on CmdOrCtrl+,
+  // Refresh on CmdOrCtrl+R). Both actions belong to the renderer — it owns the
+  // view and the loading state — so the menu only forwards them over IPC.
+  // Installed after the window so the forwarded events have somewhere to land.
+  installAppMenu(
+    {
+      openSettings: () => {
+        focusMainWindow();
+        sendToRenderer("menu:open-settings", undefined);
+      },
+      refresh: () => sendToRenderer("menu:refresh", undefined),
+    },
+    { devItems: !app.isPackaged },
+  );
+
   initAutoUpdater((status) => sendToRenderer("update-status", status));
 
   // Apply the remaining prefs (launch-at-login + auto-update; theme re-applied
