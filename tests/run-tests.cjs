@@ -679,7 +679,7 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
   // click handler reopened the window on any click on the menu bar icon —
   // without the user ever choosing "Open PR Dashboard".
   test("tray controller: macOS -> no click handler, only the menu opens the window", () => {
-    const { calls } = onPlatform("darwin", () => {
+    const { controller, calls } = onPlatform("darwin", () => {
       const s = setup();
       s.controller.setEnabled(true);
       return s;
@@ -687,6 +687,13 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     const [tray] = trays;
     assert.deepStrictEqual(tray.handlers, [], "no click gesture may reopen the window on macOS");
     assert.strictEqual(calls.open, 0);
+    // The menu being the only way in is only safe while close really hides: an
+    // icon that exists but stops hiding to tray would leave nothing to restore.
+    assert.strictEqual(controller.hidesToTray(), true);
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, true);
+    assert.strictEqual(calls.hide, 1);
     tray.menu[0].click();
     assert.strictEqual(calls.open, 1, "the menu item is the only way in");
   });
