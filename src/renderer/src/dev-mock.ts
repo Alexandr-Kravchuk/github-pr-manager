@@ -307,6 +307,8 @@ const api: PrManagerApi = {
   onConfigError: () => () => {},
   onUpdateStatus: () => () => {},
   onNotifySound: () => () => {},
+  onOpenSettings: () => () => {},
+  onRefreshRequest: () => () => {},
 };
 
 (window as unknown as { api: PrManagerApi }).api = api;

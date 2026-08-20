@@ -483,6 +483,19 @@ export interface PrManagerApi {
   onConfigError(listener: (message: string) => void): () => void;
   /** Subscribe to auto-update progress. Returns an unsubscribe function. */
   onUpdateStatus(listener: (status: UpdateStatus) => void): () => void;
+  /**
+   * Subscribe to the menu's "Settings" item (CmdOrCtrl+,). The accelerator lives
+   * in the application menu (main process), so the renderer only learns about
+   * it through this event. Returns an unsubscribe function.
+   */
+  onOpenSettings(listener: () => void): () => void;
+  /**
+   * Subscribe to the menu's "Refresh" item (CmdOrCtrl+R). The renderer runs its
+   * own refresh so the loading state stays consistent with the header button.
+   * F5 never comes through here — the renderer sees that key directly.
+   * Returns an unsubscribe function.
+   */
+  onRefreshRequest(listener: () => void): () => void;
 }
 
 /** Auto-update lifecycle, pushed from main as electron-updater progresses. */
