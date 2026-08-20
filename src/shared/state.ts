@@ -162,14 +162,36 @@ export async function applyActivity(
   if (mutated) await writeState(statePath, state);
 }
 
-/** Updates the snapshot of the given PRs to the provided values (clears NEW). */
-export async function markSeen(items: SeenInput[], statePath: string): Promise<void> {
+/**
+ * Updates the snapshot of the given PRs to the provided values (clears NEW).
+ *
+ * `trackComments` is required and named for the same reason as in
+ * `applyActivity`, and it guards the comment count specifically. While tracking
+ * is off the renderer's `totalComments` goes stale on purpose — `hashSnapshot`
+ * stops hashing the count, so a comment-only tick pushes nothing — and writing
+ * that stale, lower number here would LOWER the baseline while stamping
+ * `viewedAt`. Turning tracking back on then re-reads those same comments as new:
+ * a NEW badge and a "back to you" toast for comments that landed while the user
+ * had the channel switched off, which is exactly what the off-path resync in
+ * `applyActivity` exists to prevent. Saving settings refreshes the poller
+ * immediately (`main.ts`), so there is no intervening tick to repair it.
+ *
+ * While off, the stored count is therefore left alone — `applyActivity` owns
+ * that field — and only the view stamps are advanced. With tracking on nothing
+ * changes: the renderer's copy is current, because the count is hashed.
+ */
+export async function markSeen(
+  items: SeenInput[],
+  statePath: string,
+  { trackComments }: { trackComments: boolean },
+): Promise<void> {
   if (items.length === 0) return;
   const state = await readState(statePath);
   const now = new Date().toISOString();
   for (const item of items) {
+    const previous = state[item.id];
     state[item.id] = {
-      comments: item.comments,
+      comments: trackComments ? item.comments : (previous?.comments ?? item.comments),
       updatedAt: item.updatedAt,
       seenAt: now,
       viewedAt: now,

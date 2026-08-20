@@ -141,9 +141,9 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
     // identical snapshot per comment: an IPC push, a full renderer re-render and
     // a live-dot blink into a window that close-to-tray keeps hidden, plus a
     // reset `unchangedStreak`, so the idle backoff would never stretch on a
-    // comment-active repo. Dropped while off — the mark-seen payload can then be
-    // up to one tick stale, which the next tick's own comment resync
-    // (`applyActivity`) overwrites anyway. `unresolvedThreads` below stays
+    // comment-active repo. Dropped while off — which makes the renderer's count
+    // stale, so `markSeen` must not write it back (it would lower the baseline;
+    // see markSeen, which takes the same flag). `unresolvedThreads` below stays
     // hashed: threads are work owed, and the setting deliberately leaves them on.
     trackComments ? p.totalComments : 0,
     p.unresolvedThreads,

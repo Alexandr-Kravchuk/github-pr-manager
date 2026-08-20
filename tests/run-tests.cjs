@@ -232,13 +232,19 @@ for (const mod of ["notify.js", "pr-filter.js", "issue-key.js"]) {
     const src = read("src/renderer/src/App.tsx");
     // Both halves matter: the import can survive while the call is refactored out.
     assert.match(src, /^\s*sanitizeFilterState,$/m, "must be imported from shared/pr-filter");
-    assert.match(src, /sanitizeFilterState\(filterState, \{ trackComments: config\.trackComments \}\)/);
+    // Structural, not literal: the call must be made and must be handed the flag.
+    // Pinning the exact argument spelling would fail on a reformat or an extracted
+    // variable while the behaviour is intact, and there is no formatter config
+    // here to make that spelling predictable.
+    assert.match(src, /sanitizeFilterState\([\s\S]{0,200}?trackComments/, "must be called with the flag");
   });
 
   test("App.tsx gates the New comments chip and the header count on trackComments", () => {
     const src = read("src/renderer/src/App.tsx");
-    assert.match(src, /\{trackComments && \(\s*<FilterChip/, "the chip must be conditional");
-    assert.match(src, /\{trackComments && ` · \$\{stats\.fresh\}/, "the header stat must be conditional");
+    // Same reasoning: assert the gate co-occurs with what it gates, not the
+    // exact JSX or the header wording.
+    assert.match(src, /trackComments &&[\s\S]{0,120}?<FilterChip/, "the chip must be conditional");
+    assert.match(src, /trackComments &&[\s\S]{0,120}?stats\.fresh/, "the header stat must be conditional");
   });
 }
 
@@ -894,6 +900,13 @@ test("toPublicConfig: strips graphqlUrl, keeps label + repos", () => {
     hosts: [{ label: "GH", repos: ["a/b"] }],
     trackComments: true,
   });
+});
+test("toPublicConfig: trackComments is propagated, not assumed", () => {
+  // The renderer's whole half of the feature reads this mirror, so asserting only
+  // the `true` case would pass for a hardcoded `true` while the chip, the header
+  // stat and the filter reset never turned off for anyone.
+  const pub = cfg.toPublicConfig({ pollIntervalSeconds: 60, trackComments: false, hosts: [] });
+  assert.strictEqual(pub.trackComments, false);
 });
 
 // --- poller: hostIntervalMs --------------------------------------------------
@@ -1935,6 +1948,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       await state.markSeen(
         [{ id: "PR_state_1", comments: 2, updatedAt: "2026-07-07T00:00:00Z", lastCommitPushedAt: "2026-07-07T00:00:00Z" }],
         file,
+        { trackComments: true },
       );
       const pushed = reviewPr({ viewerHasReviewed: false, lastCommitPushedAt: "2026-07-08T00:00:00Z" });
       await state.applyActivity([pushed], file, { trackComments: true });
@@ -2012,6 +2026,78 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const next = reviewPr({ totalComments: 2 });
       await state.applyActivity([next], file, { trackComments: true });
       assert.strictEqual(next.hasNewActivity, true);
+    }));
+
+  await atest("markSeen(trackComments=false): a stale renderer count must not lower the baseline", () =>
+    withTempStore(async (file) => {
+      // While tracking is off the tick stops pushing on a comment-only change
+      // (hashSnapshot drops the count), so the renderer's copy lags. Opening the
+      // PR still posts it. If that stale, lower number were stored, turning
+      // tracking back on would replay those comments as new — and saving settings
+      // refreshes the poller immediately, so no intervening tick repairs it.
+      await state.applyActivity([reviewPr()], file, { trackComments: false }); // baseline at 2
+      await state.applyActivity([reviewPr({ totalComments: 9 })], file, { trackComments: false }); // resync to 9
+      await state.markSeen(
+        // The renderer's stale payload: it never saw the snapshot that had 9.
+        [{ id: "PR_state_1", comments: 2, updatedAt: "2026-07-07T00:00:00Z", lastCommitPushedAt: "2026-07-07T00:00:00Z" }],
+        file,
+        { trackComments: false },
+      );
+      const back = reviewPr({ totalComments: 9 });
+      await state.applyActivity([back], file, { trackComments: true });
+      assert.strictEqual(back.hasNewActivity, false, "re-enabling must not replay comments seen while off");
+      assert.strictEqual(back.returnedToMe, false, "nor toast a return to you for them");
+      assert.strictEqual(typeof back.lastSeenAt, "string", "the view stamp is still recorded");
+      // The next real comment does count, so the guard didn't deafen the channel.
+      const next = reviewPr({ totalComments: 10 });
+      await state.applyActivity([next], file, { trackComments: true });
+      assert.strictEqual(next.hasNewActivity, true);
+    }));
+
+  await atest("markSeen(trackComments=true): the posted count still re-arms the baseline", () =>
+    withTempStore(async (file) => {
+      // The guard above must not change the tracked path: with tracking on the
+      // renderer's count IS current (the field is hashed), so it is authoritative.
+      await state.applyActivity([reviewPr()], file, { trackComments: true }); // baseline at 2
+      await state.markSeen(
+        [{ id: "PR_state_1", comments: 6, updatedAt: "2026-07-07T00:00:00Z", lastCommitPushedAt: "2026-07-07T00:00:00Z" }],
+        file,
+        { trackComments: true },
+      );
+      const same = reviewPr({ totalComments: 6 });
+      await state.applyActivity([same], file, { trackComments: true });
+      assert.strictEqual(same.hasNewActivity, false, "marking seen clears NEW at the posted count");
+      const more = reviewPr({ totalComments: 7 });
+      await state.applyActivity([more], file, { trackComments: true });
+      assert.strictEqual(more.hasNewActivity, true);
+    }));
+
+  // Reply mechanics stay live with the setting off — the claim the README, the
+  // Settings hint and the docblock all make. `needsAttention` is computed inside
+  // the function the setting gates, so a widened gate would break that claim
+  // silently; the fixtures are authored PRs (the default `reviewer` role would
+  // make needsAttention true on its own, and a passive `reviewed` one reduces it
+  // to `returnedToMe`, so neither term would ever be reached).
+  await atest("applyActivity(trackComments=false): an unresolved thread still claims attention", () =>
+    withTempStore(async (file) => {
+      const threaded = (o = {}) =>
+        reviewPr({ roles: ["author"], awaitingReview: false, unresolvedThreads: 3, ...o });
+      await state.applyActivity([threaded()], file, { trackComments: false });
+      const more = threaded({ totalComments: 9 });
+      await state.applyActivity([more], file, { trackComments: false });
+      assert.strictEqual(more.hasNewActivity, false, "the unread channel is muted");
+      assert.strictEqual(more.needsAttention, true, "but a thread to resolve is work owed");
+    }));
+
+  await atest("applyActivity(trackComments=false): a comment awaiting your reply still claims attention", () =>
+    withTempStore(async (file) => {
+      const unanswered = (o = {}) =>
+        reviewPr({ roles: ["author"], awaitingReview: false, hasUnaddressedComments: true, ...o });
+      await state.applyActivity([unanswered()], file, { trackComments: false });
+      const more = unanswered({ totalComments: 9 });
+      await state.applyActivity([more], file, { trackComments: false });
+      assert.strictEqual(more.hasNewActivity, false);
+      assert.strictEqual(more.needsAttention, true);
     }));
 
   // --- state: the passive `reviewed` role doesn't claim attention ------------

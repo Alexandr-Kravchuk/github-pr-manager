@@ -523,7 +523,12 @@ function registerIpc(): void {
   });
 
   ipcMain.handle("seen:mark", async (_event, items: unknown) => {
-    await markSeen(validateSeenItems(items), seenStatePath());
+    // The setting has to reach markSeen: while tracking is off the renderer's
+    // comment count is deliberately stale, and writing it would rebaseline
+    // downward — see markSeen.
+    await markSeen(validateSeenItems(items), seenStatePath(), {
+      trackComments: loadSettings().trackComments,
+    });
   });
 
   ipcMain.handle("ignored:set", async (_event, id: unknown, ignored: unknown) => {
