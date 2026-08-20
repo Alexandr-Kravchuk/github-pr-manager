@@ -6,8 +6,8 @@
  * PRD_MOCK value itself), so cases can be switched without a restart. The
  * seen-state goes to a separate `.mock` file to keep the real one clean.
  *
- * Cases: sad-ci, sad-changes, sad-comments, curious, mixed, waiting, busy,
- * approved, empty, draft-red, grid-many, grid-repos, grid-tall.
+ * Cases: re-review-due, sad-ci, sad-changes, sad-comments, curious, mixed,
+ * waiting, busy, approved, empty, draft-red, grid-many, grid-repos, grid-tall.
  *
  * Notification transitions: switch `.prd-mock` from `notif-quiet` (baseline) to
  * `notif-ci` / `notif-changes` / `notif-approved` to drive a single field
@@ -47,6 +47,21 @@ const reviewerApproved: Reviewer = {
   avatarUrl: TEAMMATE,
   reviewState: "approved",
 };
+/**
+ * Frozen once at import, unlike `pr()`'s defaults which call `Date.now()` on
+ * every tick. That drift is harmless for most cases but fatal here: a fixture
+ * whose `lastCommitPushedAt` advances each tick reads as a fresh push, so
+ * `returnedToMe` turns true on tick 2 and lights all three cards — masking the
+ * one signal this case exists to show.
+ */
+const RRD_AT = new Date(Date.now() - 36e5).toISOString();
+/** The viewer's own verdicts, for the passive-reviewed cases below. */
+const myBlockingReview: Reviewer = {
+  login: "me",
+  avatarUrl: OCTOCAT,
+  reviewState: "changes_requested",
+};
+const myApproval: Reviewer = { login: "me", avatarUrl: OCTOCAT, reviewState: "approved" };
 
 function pr(overrides: Partial<PullRequest> & { id: string; number: number }): PullRequest {
   return {
@@ -100,6 +115,63 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
 let tick = 0;
 
 const CASES: Record<string, () => PullRequest[]> = {
+  // The three passive-reviewed states side by side — a PR you already reviewed
+  // and were NOT re-requested on, which is the shape `myReReviewDue` exists for
+  // (issue #14). A real re-request would add the `reviewer` role and light the
+  // card through the ordinary path, hiding exactly what this case demonstrates,
+  // so all three deliberately carry `roles: ["reviewed"]` only.
+  "re-review-due": () => [
+    pr({
+      id: "mock-rrd-due",
+      updatedAt: RRD_AT,
+      lastCommitPushedAt: RRD_AT,
+      number: 301,
+      title: "Your change request is answered — your move",
+      author: { login: "teammate", avatarUrl: TEAMMATE },
+      roles: ["reviewed"],
+      reviewDecision: "CHANGES_REQUESTED",
+      viewerHasReviewed: true,
+      // The whole point: attention without any snapshot delta behind it.
+      myReReviewDue: true,
+      reviewers: [myBlockingReview],
+      unresolvedThreads: 0,
+      totalComments: 5,
+      hasNoReviews: false,
+    }),
+    pr({
+      id: "mock-rrd-waiting",
+      updatedAt: RRD_AT,
+      lastCommitPushedAt: RRD_AT,
+      number: 302,
+      title: "You asked for changes — still the author's turn",
+      author: { login: "teammate", avatarUrl: TEAMMATE },
+      roles: ["reviewed"],
+      reviewDecision: "CHANGES_REQUESTED",
+      viewerHasReviewed: true,
+      myReReviewDue: false,
+      reviewers: [myBlockingReview],
+      // Open threads are what says the author has not answered yet.
+      unresolvedThreads: 2,
+      totalComments: 3,
+      hasNoReviews: false,
+    }),
+    pr({
+      id: "mock-rrd-approved",
+      updatedAt: RRD_AT,
+      lastCommitPushedAt: RRD_AT,
+      number: 303,
+      title: "You approved it — done from your side",
+      author: { login: "teammate", avatarUrl: TEAMMATE },
+      roles: ["reviewed"],
+      reviewDecision: "APPROVED",
+      viewerHasReviewed: true,
+      viewerApproved: true,
+      myReReviewDue: false,
+      reviewers: [myApproval],
+      hasHumanApproval: true,
+      hasNoReviews: false,
+    }),
+  ],
   "sad-ci": () => [
     pr({
       id: "mock-sad-ci",
