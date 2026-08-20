@@ -8,6 +8,37 @@ export interface AppMenuDeps {
   refresh(): void;
 }
 
+/** What `createMenuActions` needs from the app to build those two actions. */
+export interface MenuActionDeps {
+  /** Bring the dashboard window back to the foreground (from hidden/minimized). */
+  focusWindow(): void;
+  /** Push an event to the renderer over the preload bridge. */
+  send(channel: string): void;
+}
+
+/**
+ * The two menu actions, as one testable unit.
+ *
+ * Both surface the window first. Close-to-tray makes hidden-but-alive the app's
+ * normal idle state, and on macOS the app can be frontmost with no window on
+ * screen — so a shortcut that only pushed an event to a hidden renderer would
+ * look dead while still spending a GraphQL request. Refresh therefore shows the
+ * window exactly like Settings does: the point of pressing it is to see the
+ * result.
+ */
+export function createMenuActions(deps: MenuActionDeps): AppMenuDeps {
+  return {
+    openSettings: () => {
+      deps.focusWindow();
+      deps.send("menu:open-settings");
+    },
+    refresh: () => {
+      deps.focusWindow();
+      deps.send("menu:refresh");
+    },
+  };
+}
+
 /** Extra knobs the template needs but that are not app actions. */
 export interface AppMenuOptions {
   /** darwin / win32 / linux — decides where Settings and Quit live. */

@@ -79,12 +79,12 @@ test("pickAppId: falls back on malformed JSON", () =>
 
 // --- shared value-import carve-outs stay Node-free (renderer imports them) ---
 // The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify,
-// the view-filter helpers from shared/pr-filter and the issue-link builder from
-// shared/issue-key. That's only safe while those modules pull in no node:
+// the view-filter helpers from shared/pr-filter, the issue-link builder from
+// shared/issue-key and the F5 decision from shared/hotkeys. That's only safe while those modules pull in no node:
 // builtin — a regression would break the Vite renderer build. Assert the
 // compiled output is clean so the AGENTS.md carve-out is enforced, not just
 // documented.
-for (const mod of ["notify.js", "pr-filter.js", "issue-key.js"]) {
+for (const mod of ["notify.js", "pr-filter.js", "issue-key.js", "hotkeys.js"]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
       path.join(__dirname, `../dist/main/shared/${mod}`),
@@ -755,7 +755,7 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
       },
     },
   };
-  const { buildAppMenuTemplate, installAppMenu } = require(menuJs);
+  const { buildAppMenuTemplate, createMenuActions, installAppMenu } = require(menuJs);
 
   // Every item in the template, flattened across submenus.
   const flatten = (template) =>
@@ -763,8 +763,43 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
       item,
       ...(Array.isArray(item.submenu) ? flatten(item.submenu) : []),
     ]);
+  // Roles bring accelerators of their own, which no `accelerator` field shows.
+  // Without this table the uniqueness assertions below would promise more than
+  // they check: a future role claiming CmdOrCtrl+R could shadow Refresh and
+  // still pass. Aggregate roles (editMenu / windowMenu) stand for the whole set
+  // their submenu installs.
+  const ROLE_ACCELERATORS = {
+    reload: ["CmdOrCtrl+R"],
+    forceReload: ["CmdOrCtrl+Shift+R"],
+    toggleDevTools: ["CmdOrCtrl+Alt+I"],
+    resetZoom: ["CmdOrCtrl+0"],
+    zoomIn: ["CmdOrCtrl+Plus"],
+    zoomOut: ["CmdOrCtrl+-"],
+    togglefullscreen: ["Ctrl+Cmd+F"],
+    minimize: ["CmdOrCtrl+M"],
+    close: ["CmdOrCtrl+W"],
+    quit: ["CmdOrCtrl+Q"],
+    hide: ["CmdOrCtrl+H"],
+    hideOthers: ["CmdOrCtrl+Alt+H"],
+    editMenu: [
+      "CmdOrCtrl+Z",
+      "CmdOrCtrl+Shift+Z",
+      "CmdOrCtrl+X",
+      "CmdOrCtrl+C",
+      "CmdOrCtrl+V",
+      "CmdOrCtrl+A",
+    ],
+    windowMenu: ["CmdOrCtrl+M", "CmdOrCtrl+W"],
+  };
+
+  /** Every accelerator the menu claims — explicit fields plus role-supplied. */
+  const claimedAccelerators = (template) =>
+    flatten(template).flatMap((item) => [
+      ...(item.accelerator ? [item.accelerator] : []),
+      ...(item.role && ROLE_ACCELERATORS[item.role] ? ROLE_ACCELERATORS[item.role] : []),
+    ]);
   const byAccelerator = (template, accelerator) =>
-    flatten(template).filter((item) => item.accelerator === accelerator);
+    claimedAccelerators(template).filter((claimed) => claimed === accelerator);
 
   const deps = () => {
     const calls = { openSettings: 0, refresh: 0 };
@@ -839,6 +874,46 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     );
   });
 
+  test("app menu: both actions surface the window, then forward their channel", () => {
+    const order = [];
+    const actions = createMenuActions({
+      focusWindow: () => order.push("focus"),
+      send: (channel) => order.push(channel),
+    });
+    actions.openSettings();
+    // The window comes first: with close-to-tray on, a hidden renderer would
+    // otherwise get the event with nothing on screen to show for it.
+    assert.deepStrictEqual(order, ["focus", "menu:open-settings"]);
+    order.length = 0;
+    actions.refresh();
+    // Refresh is deliberately symmetric with Settings — pressing it is a request
+    // to SEE fresh data, and a hidden refresh spends a GraphQL request for
+    // nothing visible.
+    assert.deepStrictEqual(order, ["focus", "menu:refresh"]);
+  });
+
+  test("app menu: the option defaults are the production call's shape", () => {
+    // The real call site passes no platform and omits devItems when packaged,
+    // so both fallbacks have to be exercised or a regression in either is
+    // invisible.
+    const template = buildAppMenuTemplate(deps().deps);
+    const items = flatten(template);
+    if (process.platform === "darwin") {
+      assert.ok(
+        !template.some((item) => item.label === "File"),
+        "macOS keeps Settings in the app menu, not a File menu",
+      );
+    } else {
+      assert.strictEqual(template[0].label, "File");
+    }
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+,").length, 1);
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R").length, 1);
+    assert.ok(
+      !items.some((item) => item.role === "toggleDevTools" || item.role === "forceReload"),
+      "an omitted devItems must mean no developer items",
+    );
+  });
+
   test("app menu: installAppMenu actually installs a built menu", () => {
     installed = null;
     installAppMenu(deps().deps, { platform: "darwin" });
@@ -858,13 +933,64 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
 test("hotkey wiring: main sends the menu channels preload subscribes to", () => {
   const fs = require("node:fs");
   const mainJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+  const menuJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/menu.js"), "utf8");
   const preloadJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
   assert.match(mainJs, /installAppMenu/, "main installs the application menu");
+  assert.match(mainJs, /createMenuActions/, "main builds the actions through the tested factory");
   for (const channel of ["menu:open-settings", "menu:refresh"]) {
-    assert.ok(mainJs.includes(channel), `main.js sends on ${channel}`);
+    assert.ok(menuJs.includes(channel), `menu.js sends on ${channel}`);
     assert.ok(preloadJs.includes(channel), `preload.js subscribes to ${channel}`);
   }
 });
+
+// --- the F5 refresh decision ------------------------------------------------
+// F5 is the ONLY shortcut the renderer decides for itself, so the decision is a
+// pure predicate rather than a branch buried in an event handler: these cases
+// are what actually holds criterion 3, where a source-text guard cannot.
+{
+  const hotkeys = require(path.join(__dirname, "../dist/main/shared/hotkeys.js"));
+  const press = (over = {}) => ({
+    key: "F5",
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    repeat: false,
+    ...over,
+  });
+
+  test("shouldRefreshOnKey: bare F5 refreshes", () => {
+    assert.strictEqual(hotkeys.shouldRefreshOnKey(press()), true);
+  });
+
+  test("shouldRefreshOnKey: any modifier leaves the combination alone", () => {
+    for (const modifier of ["metaKey", "ctrlKey", "altKey", "shiftKey"]) {
+      assert.strictEqual(
+        hotkeys.shouldRefreshOnKey(press({ [modifier]: true })),
+        false,
+        `F5 with ${modifier} must not refresh`,
+      );
+    }
+  });
+
+  test("shouldRefreshOnKey: auto-repeat does not chain forced polls", () => {
+    // Holding the key down otherwise queues one forced poll after another: the
+    // renderer's in-flight guard only drops presses that land DURING a poll,
+    // and every poll spends from an hourly GraphQL budget shared with every
+    // other client on the same token.
+    assert.strictEqual(hotkeys.shouldRefreshOnKey(press({ repeat: true })), false);
+  });
+
+  test("shouldRefreshOnKey: other keys are not refresh", () => {
+    for (const key of ["F4", "F6", "r", "R", "Enter", "F50", ""]) {
+      assert.strictEqual(
+        hotkeys.shouldRefreshOnKey(press({ key })),
+        false,
+        `${JSON.stringify(key)} must not refresh`,
+      );
+    }
+  });
+}
 
 // F5 is the second Refresh shortcut and is NOT a menu accelerator (one item
 // carries one accelerator), so it only works if the renderer keeps handling the
@@ -874,7 +1000,7 @@ test("hotkey wiring: the renderer still handles F5 itself", () => {
     path.join(__dirname, "../src/renderer/src/App.tsx"),
     "utf8",
   );
-  assert.match(src, /"F5"/, "App.tsx checks for the F5 key");
+  assert.match(src, /shouldRefreshOnKey\(event\)/, "App.tsx defers the F5 decision to the predicate");
   assert.match(src, /addEventListener\("keydown"/, "App.tsx registers a keydown listener");
   assert.match(src, /onRefreshRequest/, "App.tsx subscribes to the menu's Refresh event");
   assert.match(src, /onOpenSettings/, "App.tsx subscribes to the menu's Settings event");

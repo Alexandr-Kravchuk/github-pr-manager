@@ -35,11 +35,13 @@ Three layers:
   are `shared` modules kept strictly free of `node:` builtins (importing no
   module that uses them) so the renderer can value-import them: `notify.ts`
   (`DEFAULT_NOTIFICATION_SETTINGS`, the single source of truth for notification
-  defaults) and `pr-filter.ts` (the whole view-filter layer: the reveal gate, the
-  filter pipeline and the chips' facet counts). Keep any such
+  defaults), `pr-filter.ts` (the whole view-filter layer: the reveal gate, the
+  filter pipeline and the chips' facet counts) and `hotkeys.ts` (the F5 refresh
+  decision). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
-  `notify.js` and `pr-filter.js` stay free of `node:` builtin references, so the
+  `notify.js`, `pr-filter.js`, `issue-key.js` and `hotkeys.js` stay free of
+  `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
@@ -67,7 +69,10 @@ Three layers:
   key handlers: a menu accelerator fires whatever has focus and it shows the
   user what the shortcut is. Both items forward to the renderer over IPC
   (`menu:open-settings`, `menu:refresh`) because the renderer owns the view and
-  the loading state. `CmdOrCtrl` covers both platforms — Cmd+, / Cmd+R on macOS,
+  the loading state. Both actions surface the window first (`createMenuActions`,
+  unit-tested): close-to-tray makes hidden-but-alive the normal idle state, and
+  on macOS the app can be frontmost with no window on screen, so a shortcut that
+  only pushed an event would look dead while still spending a GraphQL request. `CmdOrCtrl` covers both platforms — Cmd+, / Cmd+R on macOS,
   Ctrl+, / Ctrl+R elsewhere. Two traps the template exists to avoid:
   `setApplicationMenu` **replaces** Electron's default menu, so the role-based
   menus have to be re-declared or Cmd+C/V/A in the search and Jira-token fields
@@ -76,7 +81,11 @@ Three layers:
   The `reload` role must stay out — it would claim CmdOrCtrl+R and shadow
   Refresh. F5 is the second Refresh shortcut and is handled by a renderer
   `keydown` listener, because one menu item carries exactly one accelerator and
-  a hidden duplicate item's accelerator is not reliable across platforms.
+  a hidden duplicate item's accelerator is not reliable across platforms. Its
+  decision lives in `shared/hotkeys.ts` (`shouldRefreshOnKey`, another Node-free
+  value-import carve-out) so it is unit-tested without a DOM — and it excludes
+  OS key auto-repeat, or holding F5 chains forced polls: the renderer's
+  in-flight guard drops only the presses that land *during* a poll.
 - Settings never contain tokens; tokens are resolved per host via `gh` at fetch
   time (`config.ts`).
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes

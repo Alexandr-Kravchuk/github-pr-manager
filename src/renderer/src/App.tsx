@@ -5,6 +5,7 @@ import { PrCard, prSignal } from "./components/PrCard";
 import { SettingsScreen } from "./components/Settings";
 import { cn, relativeTime } from "./format";
 import { playNotifySound } from "./notify-sound";
+import { shouldRefreshOnKey } from "../../shared/hotkeys";
 import {
   activeFilterCount,
   baselineStats,
@@ -353,13 +354,12 @@ export function App() {
 
   // F5 is the second Refresh shortcut. It is handled here rather than in the
   // menu because one menu item carries exactly one accelerator, and a hidden
-  // duplicate item's accelerator is not reliable across platforms. Modifiers are
-  // excluded so combinations stay free for anything else.
+  // duplicate item's accelerator is not reliable across platforms. The decision
+  // itself (bare F5, no modifiers, no auto-repeat) lives in `shouldRefreshOnKey`
+  // so it can be unit-tested without a DOM.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "F5" || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
-        return;
-      }
+      if (!shouldRefreshOnKey(event)) return;
       event.preventDefault();
       void refresh();
     };
