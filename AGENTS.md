@@ -36,8 +36,10 @@ Three layers:
   module that uses them) so the renderer can value-import them: `notify.ts`
   (`DEFAULT_NOTIFICATION_SETTINGS`, the single source of truth for notification
   defaults), `pr-filter.ts` (the whole view-filter layer: the reveal gate, the
-  filter pipeline and the chips' facet counts) and `hotkeys.ts` (the F5 refresh
-  decision). Keep any such
+  filter pipeline and the chips' facet counts), `issue-key.ts` (the Jira
+  issue-link builder used by `PrCard.tsx`) and `hotkeys.ts` (the F5 refresh
+  decision and the forced-refresh cooldown shared with CmdOrCtrl+R and the
+  header button). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js` and `hotkeys.js` stay free of
@@ -85,7 +87,15 @@ Three layers:
   decision lives in `shared/hotkeys.ts` (`shouldRefreshOnKey`, another Node-free
   value-import carve-out) so it is unit-tested without a DOM — and it excludes
   OS key auto-repeat, or holding F5 chains forced polls: the renderer's
-  in-flight guard drops only the presses that land *during* a poll.
+  in-flight guard drops only the presses that land *during* a poll. That guard
+  alone does not cover a burst of *distinct* presses (a fast double-tap, or
+  CmdOrCtrl+R held — the menu carries no `repeat` flag to filter on), so
+  `App.tsx`'s `refresh()` — shared by the header button, CmdOrCtrl+R and F5 —
+  additionally gates on `shouldAllowForcedRefresh`, a short shared cooldown
+  timestamp also in `hotkeys.ts`. Both shortcuts are suppressed while the
+  Settings screen is open: a refresh there would spend a GraphQL request behind
+  a screen that shows none of it, and switching the view out from under an
+  in-progress edit (a half-typed Jira token) was rejected instead.
 - Settings never contain tokens; tokens are resolved per host via `gh` at fetch
   time (`config.ts`).
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes

@@ -763,43 +763,92 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
       item,
       ...(Array.isArray(item.submenu) ? flatten(item.submenu) : []),
     ]);
-  // Roles bring accelerators of their own, which no `accelerator` field shows.
-  // Without this table the uniqueness assertions below would promise more than
-  // they check: a future role claiming CmdOrCtrl+R could shadow Refresh and
-  // still pass. Aggregate roles (editMenu / windowMenu) stand for the whole set
-  // their submenu installs.
+  // Roles bring accelerators of their own, which no `accelerator` field shows,
+  // and Electron's own role defaults differ per platform (`togglefullscreen` is
+  // Ctrl+Cmd+F on macOS but F11 elsewhere; `toggleDevTools` is Alt+Cmd+I vs
+  // Ctrl+Shift+I). Hand-maintained against Electron's documented role-accelerator
+  // defaults — extend both platform tables, and the coverage assertion below,
+  // before adding a role to the template. Roles with no default accelerator
+  // (`about`, `services`, `unhide`, `zoom`, `front`) get an explicit `[]` so an
+  // unlisted role fails loudly instead of silently contributing nothing.
   const ROLE_ACCELERATORS = {
-    reload: ["CmdOrCtrl+R"],
-    forceReload: ["CmdOrCtrl+Shift+R"],
-    toggleDevTools: ["CmdOrCtrl+Alt+I"],
-    resetZoom: ["CmdOrCtrl+0"],
-    zoomIn: ["CmdOrCtrl+Plus"],
-    zoomOut: ["CmdOrCtrl+-"],
-    togglefullscreen: ["Ctrl+Cmd+F"],
-    minimize: ["CmdOrCtrl+M"],
-    close: ["CmdOrCtrl+W"],
-    quit: ["CmdOrCtrl+Q"],
-    hide: ["CmdOrCtrl+H"],
-    hideOthers: ["CmdOrCtrl+Alt+H"],
-    editMenu: [
-      "CmdOrCtrl+Z",
-      "CmdOrCtrl+Shift+Z",
-      "CmdOrCtrl+X",
-      "CmdOrCtrl+C",
-      "CmdOrCtrl+V",
-      "CmdOrCtrl+A",
-    ],
-    windowMenu: ["CmdOrCtrl+M", "CmdOrCtrl+W"],
+    darwin: {
+      about: [],
+      services: [],
+      hide: ["CmdOrCtrl+H"],
+      hideOthers: ["CmdOrCtrl+Alt+H"],
+      unhide: [],
+      quit: ["CmdOrCtrl+Q"],
+      editMenu: [
+        "CmdOrCtrl+Z",
+        "CmdOrCtrl+Shift+Z",
+        "CmdOrCtrl+X",
+        "CmdOrCtrl+C",
+        "CmdOrCtrl+V",
+        "CmdOrCtrl+A",
+      ],
+      resetZoom: ["CmdOrCtrl+0"],
+      zoomIn: ["CmdOrCtrl+Plus"],
+      zoomOut: ["CmdOrCtrl+-"],
+      togglefullscreen: ["Ctrl+CmdOrCtrl+F"],
+      forceReload: ["CmdOrCtrl+Shift+R"],
+      toggleDevTools: ["Alt+CmdOrCtrl+I"],
+      minimize: ["CmdOrCtrl+M"],
+      zoom: [],
+      close: ["CmdOrCtrl+W"],
+      front: [],
+    },
+    other: {
+      quit: ["CmdOrCtrl+Q"],
+      editMenu: ["CmdOrCtrl+Z", "CmdOrCtrl+Y", "CmdOrCtrl+X", "CmdOrCtrl+C", "CmdOrCtrl+V", "CmdOrCtrl+A"],
+      resetZoom: ["CmdOrCtrl+0"],
+      zoomIn: ["CmdOrCtrl+Plus"],
+      zoomOut: ["CmdOrCtrl+-"],
+      togglefullscreen: ["F11"],
+      forceReload: ["CmdOrCtrl+Shift+R"],
+      toggleDevTools: ["Ctrl+Shift+I"],
+      windowMenu: ["CmdOrCtrl+M"],
+    },
+  };
+
+  // Order-insensitive, case-insensitive: Electron treats "Shift+CmdOrCtrl+R" and
+  // "CmdOrCtrl+Shift+R" as the same combination, so a plain string comparison
+  // would miss that collision.
+  const normalizeAccelerator = (accelerator) =>
+    accelerator
+      .split("+")
+      .map((part) => part.trim().toLowerCase())
+      .sort()
+      .join("+");
+
+  // Every distinct role the template actually uses must have an entry in the
+  // table above (possibly `[]`) — an omission is a gap in the check, not an
+  // absence of accelerators, and must fail loudly rather than pass silently.
+  const assertRoleTableCovers = (template, platformKey) => {
+    const table = ROLE_ACCELERATORS[platformKey];
+    for (const role of new Set(flatten(template).map((item) => item.role).filter(Boolean))) {
+      assert.ok(
+        Object.prototype.hasOwnProperty.call(table, role),
+        `ROLE_ACCELERATORS.${platformKey} has no entry for role "${role}" — add one (even []) before trusting the uniqueness checks`,
+      );
+    }
   };
 
   /** Every accelerator the menu claims — explicit fields plus role-supplied. */
-  const claimedAccelerators = (template) =>
-    flatten(template).flatMap((item) => [
+  const claimedAccelerators = (template, platformKey) => {
+    const table = ROLE_ACCELERATORS[platformKey];
+    assertRoleTableCovers(template, platformKey);
+    return flatten(template).flatMap((item) => [
       ...(item.accelerator ? [item.accelerator] : []),
-      ...(item.role && ROLE_ACCELERATORS[item.role] ? ROLE_ACCELERATORS[item.role] : []),
+      ...(item.role && table[item.role] ? table[item.role] : []),
     ]);
-  const byAccelerator = (template, accelerator) =>
-    claimedAccelerators(template).filter((claimed) => claimed === accelerator);
+  };
+  const byAccelerator = (template, accelerator, platformKey = "darwin") => {
+    const target = normalizeAccelerator(accelerator);
+    return claimedAccelerators(template, platformKey).filter(
+      (claimed) => normalizeAccelerator(claimed) === target,
+    );
+  };
 
   const deps = () => {
     const calls = { openSettings: 0, refresh: 0 };
@@ -821,6 +870,7 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     assert.ok(settings, "the app menu carries the Settings item");
     assert.match(settings.label, /^Settings/);
     assert.strictEqual(byAccelerator(template, "CmdOrCtrl+,").length, 1, "exactly one owner of the accelerator");
+    assert.strictEqual(byAccelerator(template, "F5").length, 0, "F5 must stay unclaimed — it is the renderer's own shortcut");
     settings.click();
     assert.strictEqual(calls.openSettings, 1, "the item forwards to openSettings");
   });
@@ -839,6 +889,9 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
       "the reload role must not be present — it would shadow Refresh",
     );
     assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R").length, 1, "exactly one owner of the accelerator");
+    // F5 is the renderer's own shortcut (App.tsx), not a menu accelerator; a
+    // future item or role claiming it here would silently kill F5 refresh.
+    assert.strictEqual(byAccelerator(template, "F5").length, 0, "F5 must stay unclaimed by the menu");
     refresh.click();
     assert.strictEqual(calls.refresh, 1, "the item forwards to refresh");
   });
@@ -861,7 +914,10 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     const settings = template[0].submenu.find((item) => item.accelerator === "CmdOrCtrl+,");
     assert.ok(settings, "File carries the Settings item");
     // Refresh is platform-independent: CmdOrCtrl resolves to Control here.
-    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R").length, 1);
+    // win32's own role accelerators (windowMenu's CmdOrCtrl+M, etc.) apply here,
+    // not the darwin table — hence the explicit platform key.
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R", "other").length, 1);
+    assert.strictEqual(byAccelerator(template, "F5", "other").length, 0, "F5 must stay unclaimed on Windows/Linux too");
   });
 
   test("app menu: DevTools items only in a dev run", () => {
@@ -906,8 +962,10 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     } else {
       assert.strictEqual(template[0].label, "File");
     }
-    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+,").length, 1);
-    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R").length, 1);
+    const platformKey = process.platform === "darwin" ? "darwin" : "other";
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+,", platformKey).length, 1);
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R", platformKey).length, 1);
+    assert.strictEqual(byAccelerator(template, "F5", platformKey).length, 0, "F5 must stay unclaimed");
     assert.ok(
       !items.some((item) => item.role === "toggleDevTools" || item.role === "forceReload"),
       "an omitted devItems must mean no developer items",
@@ -990,20 +1048,75 @@ test("hotkey wiring: main sends the menu channels preload subscribes to", () => 
       );
     }
   });
+
+  // --- the forced-refresh cooldown -------------------------------------------
+  // Shared by the header button, CmdOrCtrl+R and F5 — App.tsx's `refresh()`
+  // calls this before every one of them. `shouldRefreshOnKey` alone only
+  // screens an auto-repeated F5; a burst of distinct presses (double-tapping
+  // the button, or holding CmdOrCtrl+R, which carries no `repeat` flag) still
+  // needs this second gate or it chains forced polls against a shared hourly
+  // GraphQL budget.
+  test("shouldAllowForcedRefresh: refreshes once the cooldown has fully elapsed", () => {
+    assert.strictEqual(hotkeys.shouldAllowForcedRefresh(3000, 0, 3000), true);
+    assert.strictEqual(hotkeys.shouldAllowForcedRefresh(10_000, 5000, 3000), true);
+  });
+
+  test("shouldAllowForcedRefresh: a press inside the cooldown window is dropped", () => {
+    assert.strictEqual(hotkeys.shouldAllowForcedRefresh(1000, 0, 3000), false);
+    assert.strictEqual(hotkeys.shouldAllowForcedRefresh(2999, 0, 3000), false);
+  });
+
+  test("shouldAllowForcedRefresh: the very first refresh is never blocked", () => {
+    // lastForcedAt starts at 0 in App.tsx; a launch-time refresh at any
+    // realistic wall-clock `now` must not be mistaken for a repeat.
+    assert.strictEqual(hotkeys.shouldAllowForcedRefresh(Date.now(), 0, 3000), true);
+  });
 }
 
 // F5 is the second Refresh shortcut and is NOT a menu accelerator (one item
 // carries one accelerator), so it only works if the renderer keeps handling the
 // key itself. This guard fails if that listener is dropped in a refactor.
 test("hotkey wiring: the renderer still handles F5 itself", () => {
-  const src = require("node:fs").readFileSync(
+  const raw = require("node:fs").readFileSync(
     path.join(__dirname, "../src/renderer/src/App.tsx"),
     "utf8",
   );
-  assert.match(src, /shouldRefreshOnKey\(event\)/, "App.tsx defers the F5 decision to the predicate");
-  assert.match(src, /addEventListener\("keydown"/, "App.tsx registers a keydown listener");
-  assert.match(src, /onRefreshRequest/, "App.tsx subscribes to the menu's Refresh event");
-  assert.match(src, /onOpenSettings/, "App.tsx subscribes to the menu's Settings event");
+  // Comments blanked (offsets preserved) so a disabled/commented-out handler
+  // cannot satisfy the check the way a bare identifier match would — mirrors
+  // the renderer animation guard above, which exists for the same reason.
+  const src = raw
+    .replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length))
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+
+  assert.match(
+    src,
+    /addEventListener\("keydown",\s*onKeyDown\)/,
+    "App.tsx registers the F5 keydown listener",
+  );
+  assert.match(
+    src,
+    /removeEventListener\("keydown",\s*onKeyDown\)/,
+    "the F5 listener must be cleaned up on unmount/re-run, or repeated menu opens stack duplicate listeners",
+  );
+  // The handler body itself: decide via the predicate, prevent the browser's
+  // own F5 (reload), then actually refresh — a stub that dropped any one of
+  // these would pass a bare-identifier check but do the wrong thing.
+  const onKeyDown = src.match(/const onKeyDown = \(event: KeyboardEvent\) => \{([\s\S]*?)\};/);
+  assert.ok(onKeyDown, "App.tsx defines the onKeyDown handler for F5");
+  assert.match(onKeyDown[1], /shouldRefreshOnKey\(event\)/, "the handler defers the F5 decision to the predicate");
+  assert.match(onKeyDown[1], /event\.preventDefault\(\)/, "the handler prevents the browser's own F5 reload");
+  assert.match(onKeyDown[1], /void refresh\(\)/, "the handler actually calls refresh()");
+
+  assert.match(
+    src,
+    /onOpenSettings\(\(\) => setView\("settings"\)\)/,
+    "App.tsx subscribes to the menu's Settings event and switches the view",
+  );
+  assert.match(
+    src,
+    /onRefreshRequest\(\(\) => void refresh\(\)\)/,
+    "App.tsx subscribes to the menu's Refresh event and actually refreshes",
+  );
 });
 
 // --- defaultSettings ---------------------------------------------------------
