@@ -59,7 +59,10 @@ const ROLE_FILTERS = Object.keys(ROLE_FILTER_LABELS) as RoleFilter[];
 function actionRank(pr: PullRequest): number {
   const isReviewer = pr.roles.includes("reviewer");
   if (isReviewer && pr.lastSeenAt === null) return 0;
-  if (pr.returnedToMe) return 1;
+  // Ranked with returnedToMe: both mean "your move on someone else's PR", and a
+  // due re-review is blocking a merge, so it must not sort below plain reviewer
+  // duty that nobody is waiting on yet.
+  if (pr.returnedToMe || pr.myReReviewDue) return 1;
   if (isReviewer) return 2;
   if (prSignal(pr) === "blocked") return 3;
   return 4;

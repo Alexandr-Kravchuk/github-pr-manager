@@ -255,6 +255,24 @@ export interface PullRequest {
    */
   viewerApproved: boolean;
   /**
+   * true when YOUR change request still stands and the author has since acted
+   * (pushed a new commit, or replied and left nothing unresolved) — the merge is
+   * blocked on your re-review and GitHub will not ask you for it, because
+   * submitting a review cleared the request.
+   *
+   * The mirror of {@link viewerApproved}, and deliberately a STATE rather than a
+   * diff: unlike `returnedToMe` it is computed at fetch time from the PR alone
+   * and never consults the seen-snapshot, so opening the card cannot clear it.
+   * It stays true until you actually re-review — a plain "Comment" review does
+   * NOT clear it, since your change request goes on blocking the merge.
+   *
+   * Shares the `latestOpinionatedReviews(first: 15)` cap with its siblings, but
+   * note the failure direction is the opposite of `viewerApproved`'s: past 15
+   * distinct opinionated reviewers your own node can fall off the page, this
+   * reads false and the PR goes quiet — losing work rather than failing safe.
+   */
+  myReReviewDue: boolean;
+  /**
    * true when nobody has submitted an opinionated review yet — the "nobody has
    * looked at it" pile. Keys off opinionated reviews (approve / request-changes);
    * a plain "Comment" review does not clear it.

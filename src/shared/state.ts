@@ -120,8 +120,13 @@ export async function applyActivity(prs: PullRequest[], statePath: string): Prom
     // your attention would light up every PR you ever reviewed that is still
     // open. Only its return to your court counts, and `returnedToMe` already
     // folds in new comments and new pushes since your last snapshot.
+    // `myReReviewDue` is the one term here that does not come from the snapshot
+    // diff: your standing change request blocks the merge until you re-review,
+    // and marking the card seen must not clear that. Without it, a passive-
+    // reviewed PR whose author has done the work goes quiet the first time you
+    // open it and never speaks again — see issue #14.
     pr.needsAttention = isPassiveReviewed(pr)
-      ? pr.returnedToMe
+      ? pr.returnedToMe || pr.myReReviewDue
       : pr.roles.includes("reviewer") ||
         pr.returnedToMe ||
         pr.failingChecks.length > 0 ||
