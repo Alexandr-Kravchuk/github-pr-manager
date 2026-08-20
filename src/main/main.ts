@@ -525,10 +525,18 @@ function registerIpc(): void {
   ipcMain.handle("seen:mark", async (_event, items: unknown) => {
     // The setting has to reach markSeen: while tracking is off the renderer's
     // comment count is deliberately stale, and writing it would rebaseline
-    // downward — see markSeen.
-    await markSeen(validateSeenItems(items), seenStatePath(), {
-      trackComments: loadSettings().trackComments,
-    });
+    // downward — see markSeen. Read defensively: `loadSettings` throws on an
+    // invalid settings.json, a state the app deliberately survives (config-error
+    // banner, last snapshot still on screen and clickable), and the renderer
+    // swallows this call's rejection — so letting it throw here would silently
+    // stop mark-as-seen from working at all, which the handler never did before.
+    let trackComments = true;
+    try {
+      trackComments = loadSettings().trackComments;
+    } catch (e) {
+      if (process.env.PRD_DEBUG) console.log("[seen] settings unreadable, assuming tracking on:", e);
+    }
+    await markSeen(validateSeenItems(items), seenStatePath(), { trackComments });
   });
 
   ipcMain.handle("ignored:set", async (_event, id: unknown, ignored: unknown) => {

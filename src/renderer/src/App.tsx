@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Buddy, type BuddyMood } from "./components/Buddy";
-import { PrCard, prSignal } from "./components/PrCard";
+import { PrCard } from "./components/PrCard";
 import { SettingsScreen } from "./components/Settings";
 import { cn, relativeTime } from "./format";
 import { playNotifySound } from "./notify-sound";
@@ -14,6 +14,7 @@ import {
   hiddenAttentionCount,
   isBaselinePr,
   narrowFacetCount,
+  prSignal,
   revealDelta,
   sanitizeFilterState,
   type FilterState,
@@ -430,6 +431,15 @@ export function App() {
     ],
   );
 
+  // Whether the unread-comment channel exists at all (the `trackComments`
+  // setting). Off hides the chip and the header stat, drops a stored `newOnly`,
+  // and — via `hasNewActivity`, which the main process then never sets — the card
+  // badge with its `Mark as seen` button. Derived ONCE: two spellings with two
+  // implicit defaults would let the effect below treat an absent field as OFF
+  // (silently clearing a stored filter) while the chip stayed on. Defaults to on
+  // for the frame before `getConfig` answers, which is the original behavior.
+  const trackComments = config?.trackComments ?? true;
+
   // A stored filter the current config invalidates — the `New comments` chip's
   // flag under `trackComments: false`, which would otherwise empty the list with
   // its chip gone from the row. The decision lives in `sanitizeFilterState`
@@ -437,9 +447,9 @@ export function App() {
   // `filterState` because it reads it.
   useEffect(() => {
     if (!config) return;
-    const sanitized = sanitizeFilterState(filterState, { trackComments: config.trackComments });
+    const sanitized = sanitizeFilterState(filterState, { trackComments });
     if (sanitized !== filterState) setNewOnly(sanitized.newOnly);
-  }, [config, filterState]);
+  }, [config, filterState, trackComments]);
 
   // The standing "is there work for me" numbers: neither ignored nor drafts, and
   // deliberately independent of the filters.
@@ -615,12 +625,6 @@ export function App() {
 
   const noHosts = config !== null && config.hosts.length === 0;
 
-  // Whether the comment channel exists at all (the `trackComments` setting). Off
-  // hides the chip, the header stat and — via `hasNewActivity`, which the main
-  // process then never sets — the card badge with its `Mark as seen` button.
-  // Defaults to on for the frame before `getConfig` answers, which is the
-  // app's original behavior.
-  const trackComments = config?.trackComments ?? true;
 
   if (view === "settings") {
     return (

@@ -231,8 +231,9 @@ keeping a second unread state here. With it off:
 - no ✦ **New comments** chip, card badge or **Mark as seen** button, and the
   header stops counting them;
 - a new **push** is the only thing that brings a reviewed PR back to you;
-- a tick whose only change is a comment count no longer pushes a snapshot, so
-  the poll cadence is free to back off on comment-active repositories;
+- a comment count that moves on its own no longer pushes a snapshot to the UI
+  (a real new comment still does — GitHub bumps the PR's timestamp, which the
+  card shows);
 - your own PR that is awaiting review and picks up a comment keeps the grey
   **waiting** accent instead of turning amber — nothing is being asked of you
   until a reviewer actually blocks it;

@@ -27,7 +27,7 @@ interface SeenEntry {
 
 type StateFile = Record<string, SeenEntry>;
 
-/** Serializes writes to the file to avoid concurrent corruption. */
+/** Serializes access to the file to avoid concurrent corruption. */
 let writeChain: Promise<void> = Promise.resolve();
 
 async function readState(statePath: string): Promise<StateFile> {
@@ -40,8 +40,25 @@ async function readState(statePath: string): Promise<StateFile> {
   }
 }
 
-async function writeState(statePath: string, state: StateFile): Promise<void> {
+/**
+ * Runs a whole read-modify-write cycle as one chained task, and writes only when
+ * the mutator reports a change.
+ *
+ * The read has to be inside the chain, not just the write: `applyActivity` and
+ * `markSeen` touch the same entries, and a read taken before a concurrent
+ * `markSeen` lands would be written back afterwards, replaying the pre-mark
+ * state — `viewedAt` disappears, `lastSeenAt` reverts to null, and the PR loses
+ * the engagement `returnedToMe` needs. Rare while a write only happened on a
+ * PR's first encounter; the comment resync (below) writes far more often, which
+ * is what made this worth serializing properly.
+ */
+async function updateState(
+  statePath: string,
+  mutate: (state: StateFile) => boolean,
+): Promise<void> {
   const op = writeChain.then(async () => {
+    const state = await readState(statePath);
+    if (!mutate(state)) return;
     await mkdir(path.dirname(statePath), { recursive: true });
     await writeFile(statePath, JSON.stringify(state, null, 2), "utf8");
   });
@@ -81,85 +98,89 @@ export async function applyActivity(
   statePath: string,
   { trackComments }: { trackComments: boolean },
 ): Promise<void> {
-  const state = await readState(statePath);
-  let mutated = false;
+  await updateState(statePath, (state) => {
+    let mutated = false;
 
-  for (const pr of prs) {
-    const entry = state[pr.id];
-    if (!entry) {
-      state[pr.id] = {
-        comments: pr.totalComments,
-        updatedAt: pr.updatedAt,
-        seenAt: new Date().toISOString(),
-        lastCommitPushedAt: pr.lastCommitPushedAt,
-      };
-      mutated = true;
-      pr.hasNewActivity = false;
-      pr.returnedToMe = false;
-      pr.lastSeenAt = null;
-    } else {
-      // Signal specifically NEW COMMENTS: a change in updatedAt (your own commit
-      // push, labels, reviewer changes) does not count as new activity —
-      // otherwise it drowns out the signal on your own PRs, where pushes are frequent.
-      pr.hasNewActivity = trackComments && pr.totalComments > entry.comments;
-      if (!trackComments && entry.comments !== pr.totalComments) {
-        // Written only on an actual change, so an untracked poll doesn't rewrite
-        // the state file every tick. `lastCommitPushedAt` is deliberately left
-        // alone — it is what `newPush` below compares against.
-        entry.comments = pr.totalComments;
+    for (const pr of prs) {
+      const entry = state[pr.id];
+      if (!entry) {
+        state[pr.id] = {
+          comments: pr.totalComments,
+          updatedAt: pr.updatedAt,
+          seenAt: new Date().toISOString(),
+          lastCommitPushedAt: pr.lastCommitPushedAt,
+        };
         mutated = true;
-      }
-      // lastSeenAt reflects an ACTUAL view (viewedAt), not the auto-baseline —
-      // so a PR the user has never opened reports null.
-      pr.lastSeenAt = entry.viewedAt ?? null;
+        pr.hasNewActivity = false;
+        pr.returnedToMe = false;
+        pr.lastSeenAt = null;
+      } else {
+        // Signal specifically NEW COMMENTS: a change in updatedAt (your own commit
+        // push, labels, reviewer changes) does not count as new activity —
+        // otherwise it drowns out the signal on your own PRs, where pushes are frequent.
+        pr.hasNewActivity = trackComments && pr.totalComments > entry.comments;
+        if (!trackComments && entry.comments !== pr.totalComments) {
+          // Written only on an actual change, so an untracked poll doesn't rewrite
+          // the state file every tick. `lastCommitPushedAt` is deliberately left
+          // alone — it is what `newPush` below compares against.
+          entry.comments = pr.totalComments;
+          mutated = true;
+        }
+        // lastSeenAt reflects an ACTUAL view (viewedAt), not the auto-baseline —
+        // so a PR the user has never opened reports null.
+        pr.lastSeenAt = entry.viewedAt ?? null;
 
-      // "Returned to me": a PR you've engaged with (reviewed, or opened from the
-      // dashboard) that has new comments OR a newer push than the recorded
-      // snapshot — the ball is back in your court. Your own PRs are excluded so
-      // your pushes never trigger it.
-      //
-      // The `reviewed` role counts as engagement in its own right, and is the
-      // broader of the two review signals: it comes from `reviewed-by:@me`, which
-      // matches a plain "Comment" review, while `viewerHasReviewed` reads
-      // `latestOpinionatedReviews` and therefore only sees approve /
-      // request-changes. Observed live: 4 of 5 reviewed-role PRs had
-      // `viewerHasReviewed === false`. Without this term those PRs could never
-      // return to you, which for a passive-reviewed PR (whose attention flag is
-      // exactly `returnedToMe`, below) would mean a card that never speaks again.
+        // "Returned to me": a PR you've engaged with (reviewed, or opened from the
+        // dashboard) that has new comments OR a newer push than the recorded
+        // snapshot — the ball is back in your court. Your own PRs are excluded so
+        // your pushes never trigger it.
+        //
+        // The `reviewed` role counts as engagement in its own right, and is the
+        // broader of the two review signals: it comes from `reviewed-by:@me`, which
+        // matches a plain "Comment" review, while `viewerHasReviewed` reads
+        // `latestOpinionatedReviews` and therefore only sees approve /
+        // request-changes. Observed live: 4 of 5 reviewed-role PRs had
+        // `viewerHasReviewed === false`. Without this term those PRs could never
+        // return to you, which for a passive-reviewed PR (whose attention flag is
+        // exactly `returnedToMe`, below) would mean a card that never speaks again.
+        const isAuthor = pr.roles.includes("author");
+        const engaged =
+          pr.viewerHasReviewed ||
+          pr.roles.includes("reviewed") ||
+          entry.viewedAt != null;
+        const newPush =
+          pr.lastCommitPushedAt != null &&
+          entry.lastCommitPushedAt != null &&
+          pr.lastCommitPushedAt > entry.lastCommitPushedAt;
+        pr.returnedToMe =
+          !isAuthor && engaged && (pr.hasNewActivity || newPush);
+      }
+
+      // Mirrors the card accent: a review requested of you needs attention (your
+      // turn to act); a re-requested change request and "just awaiting someone
+      // else's review" (for your own PR) don't count as needing attention.
       const isAuthor = pr.roles.includes("author");
-      const engaged =
-        pr.viewerHasReviewed || pr.roles.includes("reviewed") || entry.viewedAt != null;
-      const newPush =
-        pr.lastCommitPushedAt != null &&
-        entry.lastCommitPushedAt != null &&
-        pr.lastCommitPushedAt > entry.lastCommitPushedAt;
-      pr.returnedToMe = !isAuthor && engaged && (pr.hasNewActivity || newPush);
+
+      // A PR you have ONLY already reviewed (see `isPassiveReviewed`) is on the
+      // dashboard so it doesn't vanish the moment you submit a review — not
+      // because someone is waiting on you. Its failing CI, open threads and
+      // pending change request are the author's business, and claiming they need
+      // your attention would light up every PR you ever reviewed that is still
+      // open. Only its return to your court counts, and `returnedToMe` already
+      // folds in new comments and new pushes since your last snapshot.
+      pr.needsAttention = isPassiveReviewed(pr)
+        ? pr.returnedToMe
+        : pr.roles.includes("reviewer") ||
+          pr.returnedToMe ||
+          pr.failingChecks.length > 0 ||
+          pr.hasUnaddressedChangeRequest ||
+          pr.hasUnaddressedComments ||
+          pr.hasNewActivity ||
+          (pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview));
     }
 
-    // Mirrors the card accent: a review requested of you needs attention (your
-    // turn to act); a re-requested change request and "just awaiting someone
-    // else's review" (for your own PR) don't count as needing attention.
-    const isAuthor = pr.roles.includes("author");
-
-    // A PR you have ONLY already reviewed (see `isPassiveReviewed`) is on the
-    // dashboard so it doesn't vanish the moment you submit a review — not
-    // because someone is waiting on you. Its failing CI, open threads and
-    // pending change request are the author's business, and claiming they need
-    // your attention would light up every PR you ever reviewed that is still
-    // open. Only its return to your court counts, and `returnedToMe` already
-    // folds in new comments and new pushes since your last snapshot.
-    pr.needsAttention = isPassiveReviewed(pr)
-      ? pr.returnedToMe
-      : pr.roles.includes("reviewer") ||
-        pr.returnedToMe ||
-        pr.failingChecks.length > 0 ||
-        pr.hasUnaddressedChangeRequest ||
-        pr.hasUnaddressedComments ||
-        pr.hasNewActivity ||
-        (pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview));
-  }
-
-  if (mutated) await writeState(statePath, state);
+    return mutated;
+  });
 }
 
 /**
@@ -167,9 +188,10 @@ export async function applyActivity(
  *
  * `trackComments` is required and named for the same reason as in
  * `applyActivity`, and it guards the comment count specifically. While tracking
- * is off the renderer's `totalComments` goes stale on purpose — `hashSnapshot`
- * stops hashing the count, so a comment-only tick pushes nothing — and writing
- * that stale, lower number here would LOWER the baseline while stamping
+ * is off the renderer's `totalComments` can lag: `hashSnapshot` no longer hashes
+ * the count, so a tick whose only delta is the count pushes nothing (a real new
+ * comment usually still pushes, via `updatedAt`). Writing a lagging, lower
+ * number here would LOWER the baseline while stamping
  * `viewedAt`. Turning tracking back on then re-reads those same comments as new:
  * a NEW badge and a "back to you" toast for comments that landed while the user
  * had the channel switched off, which is exactly what the off-path resync in
@@ -186,17 +208,20 @@ export async function markSeen(
   { trackComments }: { trackComments: boolean },
 ): Promise<void> {
   if (items.length === 0) return;
-  const state = await readState(statePath);
   const now = new Date().toISOString();
-  for (const item of items) {
-    const previous = state[item.id];
-    state[item.id] = {
-      comments: trackComments ? item.comments : (previous?.comments ?? item.comments),
-      updatedAt: item.updatedAt,
-      seenAt: now,
-      viewedAt: now,
-      lastCommitPushedAt: item.lastCommitPushedAt,
-    };
-  }
-  await writeState(statePath, state);
+  await updateState(statePath, (state) => {
+    for (const item of items) {
+      const previous = state[item.id];
+      state[item.id] = {
+        comments: trackComments
+          ? item.comments
+          : (previous?.comments ?? item.comments),
+        updatedAt: item.updatedAt,
+        seenAt: now,
+        viewedAt: now,
+        lastCommitPushedAt: item.lastCommitPushedAt,
+      };
+    }
+    return true;
+  });
 }

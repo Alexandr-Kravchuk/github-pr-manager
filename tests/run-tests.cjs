@@ -239,6 +239,16 @@ for (const mod of ["notify.js", "pr-filter.js", "issue-key.js"]) {
     assert.match(src, /sanitizeFilterState\([\s\S]{0,200}?trackComments/, "must be called with the flag");
   });
 
+  test("main.ts hands the seen:mark handler the live setting", () => {
+    const src = read("src/main/main.ts");
+    // `tsc` only proves the option is passed, not that it comes from settings: a
+    // hardcoded `true` here would silently undo the mark-seen guard (comments
+    // that landed while tracking was off replayed as NEW after re-enabling) with
+    // every test still green. Same reasoning as the renderer pins around it.
+    assert.match(src, /markSeen\([\s\S]{0,400}?trackComments/, "the handler must pass the flag");
+    assert.match(src, /loadSettings\(\)\.trackComments/, "and read it from settings, not hardcode it");
+  });
+
   test("App.tsx gates the New comments chip and the header count on trackComments", () => {
     const src = read("src/renderer/src/App.tsx");
     // Same reasoning: assert the gate co-occurs with what it gates, not the
@@ -1721,6 +1731,44 @@ test("activeFilterCount: every narrowing control at once", () =>
     3 + prFilter.NARROW_CHIPS.length,
   ));
 
+// --- pr-filter: prSignal under trackComments --------------------------------
+// The two card-colour promises the README and the `trackComments` docblock make.
+// `prSignal` reads `hasNewActivity` in two branches, so with the setting off (the
+// flag never set) the colours really do change — and that is a claim, not a side
+// effect, so it needs an assertion. Fixtures are the fields prSignal reads.
+{
+  const sigPr = (o = {}) => ({
+    roles: ["author"],
+    failingChecks: [],
+    pendingChecks: [],
+    hasUnaddressedChangeRequest: false,
+    hasUnaddressedComments: false,
+    hasConflicts: false,
+    returnedToMe: false,
+    awaitingReview: true,
+    hasNewActivity: false,
+    hasHumanApproval: false,
+    reviewDecision: null,
+    ciState: "success",
+    unresolvedThreads: 0,
+    ...o,
+  });
+
+  test("prSignal: your own awaiting-review PR with a new comment turns amber while tracking is on", () =>
+    assert.strictEqual(prFilter.prSignal(sigPr({ hasNewActivity: true })), "attention"));
+  test("prSignal: with tracking off (no flag set) the same PR keeps the grey waiting accent", () =>
+    // What the README promises: nothing is being asked of you until a reviewer
+    // actually blocks it, so the card stays quiet instead of turning amber.
+    assert.strictEqual(prFilter.prSignal(sigPr({ hasNewActivity: false })), "waiting"));
+  test("prSignal: an unresolved thread still colours the card with tracking off", () =>
+    // The other half of the promise: threads are work owed, and the amber branch
+    // ORs them with the unread flag, so muting the flag must not mute them.
+    assert.strictEqual(
+      prFilter.prSignal(sigPr({ awaitingReview: false, hasNewActivity: false, unresolvedThreads: 2 })),
+      "attention",
+    ));
+}
+
 // --- pr-filter: sanitizeFilterState ----------------------------------------
 // The persisted-preference guard behind App.tsx's reset effect. With
 // `trackComments` off no PR ever has `hasNewActivity`, so a stored
@@ -2070,6 +2118,35 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const more = reviewPr({ totalComments: 7 });
       await state.applyActivity([more], file, { trackComments: true });
       assert.strictEqual(more.hasNewActivity, true);
+    }));
+
+  await atest("applyActivity + markSeen concurrently: neither loses the other's change", () =>
+    withTempStore(async (file) => {
+      // Both touch the same entry, and the off-path resync now writes on every
+      // tick where a count moved, so the two really do overlap in normal use.
+      // Each read-modify-write cycle runs as ONE chained task; with only the
+      // write chained, both would act on the same copy and whichever wrote last
+      // would erase the other's change. Asserting that BOTH changes survive pins
+      // the serialization without depending on which of the two lands first.
+      await state.applyActivity([reviewPr()], file, { trackComments: false }); // baseline at 2
+      const resync = state.applyActivity([reviewPr({ totalComments: 9 })], file, {
+        trackComments: false,
+      });
+      const viewed = state.markSeen(
+        // The renderer's payload, carrying the count it last saw.
+        [{ id: "PR_state_1", comments: 2, updatedAt: "2026-07-07T00:00:00Z", lastCommitPushedAt: "2026-07-07T00:00:00Z" }],
+        file,
+        { trackComments: false },
+      );
+      await Promise.all([resync, viewed]);
+
+      const after = reviewPr({ totalComments: 9 });
+      await state.applyActivity([after], file, { trackComments: true });
+      // markSeen's change survived: the view stamp is there.
+      assert.strictEqual(typeof after.lastSeenAt, "string", "the view must not be erased");
+      // And so did the resync's: had the count been left at 2, turning tracking
+      // back on would read the 7 comments that landed while off as new.
+      assert.strictEqual(after.hasNewActivity, false, "the resynced count must not be erased");
     }));
 
   // Reply mechanics stay live with the setting off — the claim the README, the
@@ -2914,10 +2991,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       poller.hashSnapshot(hsnap({ hasUnaddressedComments: true })),
     ));
   // The comment count is the unread channel's raw input and renders nowhere, so
-  // with the setting off it must not drive a push: a visually identical snapshot
-  // per comment costs an IPC push, a full re-render and a live-dot blink into a
-  // hidden window, and resets the idle backoff so the poll cadence never
-  // stretches. With the setting on it must still push — the whole point.
+  // with the setting off a change in it alone must not drive a push. Narrow on
+  // purpose: a real new comment also bumps `updatedAt`, which stays hashed
+  // because the card renders it, so these cases pin the count's own contribution
+  // to the hash — not a claim that comment ticks stop pushing. With the setting
+  // on the count must still push, which is the whole point.
   test("hashSnapshot: a totalComments-only delta changes the hash while tracking is on", () =>
     assert.notStrictEqual(
       poller.hashSnapshot(hsnap({ totalComments: 2 }), { trackComments: true }),
@@ -2928,7 +3006,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       poller.hashSnapshot(hsnap({ totalComments: 2 })),
       poller.hashSnapshot(hsnap({ totalComments: 3 })),
     ));
-  test("hashSnapshot: a totalComments-only delta does NOT change the hash while tracking is off", () =>
+  test("hashSnapshot: the count's own contribution to the hash is dropped while tracking is off", () =>
     assert.strictEqual(
       poller.hashSnapshot(hsnap({ totalComments: 2 }), { trackComments: false }),
       poller.hashSnapshot(hsnap({ totalComments: 3 }), { trackComments: false }),

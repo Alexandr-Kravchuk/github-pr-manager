@@ -142,8 +142,10 @@ export interface Settings {
    * Two further consequences worth knowing before changing this: `prSignal`'s
    * `waiting` branch tests `!hasNewActivity`, so your own PR that is awaiting
    * review and picks up a comment keeps the grey `waiting` accent instead of
-   * turning amber; and `hashSnapshot` stops hashing `totalComments`, so a tick
-   * whose only delta is a comment count no longer pushes a snapshot at all.
+   * turning amber; and `hashSnapshot` stops hashing `totalComments`, so a comment
+   * count that moves on its own no longer pushes a snapshot — but a real new
+   * comment also bumps the PR's `updatedAt`, which stays hashed because the card
+   * renders it, so comment ticks are NOT silenced.
    *
    * For someone who reads comments in GitHub itself and doesn't want the
    * dashboard to keep a second unread state.

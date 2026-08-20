@@ -136,15 +136,21 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
     p.id,
     p.updatedAt,
     // The unread channel's raw input, and nothing renders it — the renderer's
-    // only read is the mark-seen payload. With the setting off `applyActivity`
-    // holds `hasNewActivity` false, so hashing the count would push a visually
-    // identical snapshot per comment: an IPC push, a full renderer re-render and
-    // a live-dot blink into a window that close-to-tray keeps hidden, plus a
-    // reset `unchangedStreak`, so the idle backoff would never stretch on a
-    // comment-active repo. Dropped while off — which makes the renderer's count
-    // stale, so `markSeen` must not write it back (it would lower the baseline;
-    // see markSeen, which takes the same flag). `unresolvedThreads` below stays
-    // hashed: threads are work owed, and the setting deliberately leaves them on.
+    // only read is the mark-seen payload — so with the setting off (where
+    // `applyActivity` holds `hasNewActivity` false) a change in it alone shows
+    // the user nothing. Dropped from the hash there.
+    //
+    // Do not read that as "comments stop pushing snapshots": GitHub bumps a PR's
+    // `updatedAt` when a comment lands, and `updatedAt` is hashed right above
+    // because the card renders it ("2h ago") and the sorts order by it. So a real
+    // new comment still re-emits, and this only covers a count that moves on its
+    // own. The load-bearing part of the flag is the envelope below, which makes
+    // toggling the setting push exactly one snapshot.
+    //
+    // Dropping the count does mean the renderer's copy can lag, so `markSeen`
+    // must not write it back — it would lower the baseline; see markSeen, which
+    // takes the same flag. `unresolvedThreads` below stays hashed: threads are
+    // work owed, and the setting deliberately leaves them live.
     trackComments ? p.totalComments : 0,
     p.unresolvedThreads,
     p.ciState,
