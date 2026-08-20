@@ -440,7 +440,12 @@ export function mapPr(
   // start, so keying off resolution alone would light the card up while the
   // ball is still with the author. `.some()` rather than `.every()` on the
   // replies: a thread where YOU commented last must not mask the author's
-  // replies on the others.
+  // replies on the others. The last commenter must be the PR author — a
+  // co-reviewer or a bot answering after your review does not move the ball
+  // back to you — and an unresolvable author (deleted account, or a PR with no
+  // author) reads as "no reply", the safe side for a signal that demands
+  // attention. This is the mirror image of `unaddressedThreads` above, where
+  // counting a null author is instead the safe side.
   //
   // The push comparison inherits the `committedDate` fallback caveat above — a
   // rebase that preserves old committer dates can read as "no push since your
@@ -449,7 +454,7 @@ export function mapPr(
     viewerReviewedAt != null &&
     threads.some((t) => {
       const last = t.comments.nodes[t.comments.nodes.length - 1];
-      return last != null && last.author?.login !== viewerLogin && last.createdAt > viewerReviewedAt;
+      return last != null && last.author?.login === authorLogin && last.createdAt > viewerReviewedAt;
     });
   const myReReviewDue =
     viewerRequestedChanges &&

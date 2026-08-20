@@ -207,6 +207,34 @@ for (const mod of ["notify.js", "pr-filter.js", "issue-key.js"]) {
       `infinite animations burn CPU whether or not the window is visible, found at: ${hits.join(", ")}`,
     );
   });
+
+  // state.ts documents that `needsAttention` mirrors the card accent, and
+  // `actionRank` ranks off the same "your move" idea. The harness cannot run the
+  // renderer, so that mirror is otherwise upheld by convention alone: a change
+  // that drops the term from state.ts would leave these two silently out of step
+  // and every test would still pass. A text scan is the cheapest thing that
+  // notices, on the pattern of the animation guard above.
+  test("renderer keeps prSignal and actionRank in step with the attention terms", () => {
+    const reads = (rel, fn) => {
+      const src = stripComments(fs.readFileSync(path.join(rendererRoot, rel), "utf8"));
+      const at = src.indexOf(fn);
+      assert.ok(at !== -1, `${rel} no longer defines ${fn} — update this guard`);
+      // The function body, bounded by the next top-level declaration rather than
+      // a fixed window — a magic length silently stops covering the tail of the
+      // function the moment a branch is added above the terms we check.
+      const rest = src.slice(at + fn.length);
+      const end = rest.search(/\n(?:export\s+)?(?:function|const|class|interface|type)\s/);
+      const body = end === -1 ? rest : rest.slice(0, end);
+      for (const term of ["returnedToMe", "myReReviewDue"]) {
+        assert.ok(
+          body.includes(term),
+          `${rel} ${fn} no longer reads ${term}; state.ts's needsAttention and the card accent must move together`,
+        );
+      }
+    };
+    reads("src/components/PrCard.tsx", "function prSignal");
+    reads("src/App.tsx", "function actionRank");
+  });
 }
 
 // --- single-instance decision logic (pure, unit-tested) ----------------------
@@ -1149,6 +1177,16 @@ test("mapPr.myReReviewDue: the author answering and leaving nothing unresolved c
     reReviewDue({ reviewThreads: { nodes: [thread(true, "auth", "2026-07-07T11:30:00Z")] } }),
     true,
   ));
+// The discriminating case for that predicate: it must be the PR AUTHOR, not
+// merely somebody other than you. A co-reviewer or a bot getting the last word
+// says nothing about the author having done the work, and every other fixture
+// here uses "auth" — which is also the fixture's author — so without this the
+// narrowing is untestable and a future edit could widen it back unnoticed.
+test("mapPr.myReReviewDue: a bot or third reviewer replying last is not the author acting", () =>
+  assert.strictEqual(
+    reReviewDue({ reviewThreads: { nodes: [thread(true, "copilot", "2026-07-07T11:30:00Z")] } }),
+    false,
+  ));
 // The body-only trap: such a review has no threads, so "nothing unresolved" is
 // true from the instant you submit it. Without the author-acted requirement the
 // card would light up while the ball is still with them.
@@ -1215,10 +1253,33 @@ test("mapPr.myReReviewDue: false when your review carries no timestamp", () =>
     false,
   ));
 // A plain "Comment" review never lands in latestOpinionatedReviews, so it can't
-// replace your change request — which is right: the merge is still blocked.
-// Non-obvious enough to pin, so nobody "fixes" it into clearing the signal.
-test("mapPr.myReReviewDue: a comment-only re-review does NOT clear it", () =>
-  assert.strictEqual(reReviewDue({ commits: commitAt("2026-07-07T11:00:00Z") }), true));
+// replace your change request — which is right: the merge is still blocked. At
+// the mapPr level such a re-review is therefore only two things: your change
+// request still standing, plus your own later comments on the threads. That is
+// exactly this fixture, so it also pins that your own later word doesn't clear
+// the signal. Non-obvious enough to pin, so nobody "fixes" it into clearing it.
+test("mapPr.myReReviewDue: a comment-only re-review does NOT clear it, own later comments included", () =>
+  assert.strictEqual(
+    reReviewDue({
+      commits: commitAt("2026-07-07T11:00:00Z"),
+      reviewThreads: { nodes: [thread(false, "rev", "2026-07-07T12:00:00Z")] },
+    }),
+    true,
+  ));
+// The other direction of the same timestamp comparison: a change request you
+// submitted AFTER the last push starts the clock over — nothing has answered it
+// yet, so the ball is with the author again.
+test("mapPr.myReReviewDue: a fresh change request clears it", () =>
+  assert.strictEqual(
+    reReviewDue({
+      latestOpinionatedReviews: {
+        nodes: [{ ...changesRequestedByRev, submittedAt: "2026-07-07T12:00:00Z" }],
+      },
+      commits: commitAt("2026-07-07T11:00:00Z"),
+      reviewThreads: { nodes: [thread(false, "auth", "2026-07-07T11:30:00Z")] },
+    }),
+    false,
+  ));
 // --- issue-key: the card's Jira link -------------------------------------
 // Returns null wherever a link can't be built, because the badge IS the link:
 // the card renders nothing rather than a dead one.
@@ -2046,6 +2107,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       );
       const seen = reviewedPr({ myReReviewDue: true });
       await state.applyActivity([seen], file);
+      // Asserted first: the passive branch is `returnedToMe || myReReviewDue`, so
+      // without pinning this to false the test could pass through the wrong term
+      // while the behaviour it guards had regressed.
+      assert.strictEqual(seen.returnedToMe, false);
       assert.strictEqual(seen.needsAttention, true);
     }));
 
