@@ -125,12 +125,27 @@ const IDLE_BACKOFF_MAX_FACTOR = 16;
  * Stable hash over the fields that drive the UI. Deliberately excludes
  * `fetchedAt` so that "nothing actually changed" ticks don't push a fresh
  * payload to the renderer.
+ *
+ * `trackComments` mirrors the setting of the same name and defaults to ON, which
+ * is the safe default here (unlike `applyActivity`, where a defaulted flag would
+ * silently re-enable the feature): hashing MORE can only cost an extra emit,
+ * never a lost one.
  */
-export function hashSnapshot(s: DashboardResponse): string {
+export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}): string {
   const lite = s.pullRequests.map((p) => [
     p.id,
     p.updatedAt,
-    p.totalComments,
+    // The unread channel's raw input, and nothing renders it — the renderer's
+    // only read is the mark-seen payload. With the setting off `applyActivity`
+    // holds `hasNewActivity` false, so hashing the count would push a visually
+    // identical snapshot per comment: an IPC push, a full renderer re-render and
+    // a live-dot blink into a window that close-to-tray keeps hidden, plus a
+    // reset `unchangedStreak`, so the idle backoff would never stretch on a
+    // comment-active repo. Dropped while off — the mark-seen payload can then be
+    // up to one tick stale, which the next tick's own comment resync
+    // (`applyActivity`) overwrites anyway. `unresolvedThreads` below stays
+    // hashed: threads are work owed, and the setting deliberately leaves them on.
+    trackComments ? p.totalComments : 0,
     p.unresolvedThreads,
     p.ciState,
     p.reviewDecision,
@@ -177,6 +192,10 @@ export function hashSnapshot(s: DashboardResponse): string {
     prs: lite,
     errors: s.errors,
     version: s.version,
+    // Hashed so flipping the setting pushes exactly one snapshot: turning
+    // tracking back on has to reach the renderer even on a tick where no PR
+    // field moved, or the chip would stay missing until something else changed.
+    trackComments,
     // Include the message, not just the state: an "error" whose text changes
     // between ticks must still push a fresh snapshot so the banner isn't stale.
     jira: { state: s.jiraHealth?.state, message: stableJiraMessage(s.jiraHealth?.message) },
@@ -536,7 +555,9 @@ export class Poller {
     }
 
     try {
-      await applyActivity(allPrs, this.options.statePath, settings.trackComments);
+      await applyActivity(allPrs, this.options.statePath, {
+        trackComments: settings.trackComments,
+      });
     } catch (e) {
       console.error("[poller] applyActivity failed:", e);
     }
@@ -584,7 +605,7 @@ export class Poller {
       jiraHealth,
     };
 
-    const hash = hashSnapshot(snapshot);
+    const hash = hashSnapshot(snapshot, { trackComments: settings.trackComments });
     this.currentSnapshot = snapshot;
     if (hash !== this.lastHash) {
       this.lastHash = hash;

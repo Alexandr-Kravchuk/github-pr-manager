@@ -209,6 +209,39 @@ for (const mod of ["notify.js", "pr-filter.js", "issue-key.js"]) {
   });
 }
 
+// --- renderer wiring for the trackComments setting ---------------------------
+// The renderer half of the setting has no other gate: this repo has no renderer
+// component tests, so without these the toggle could stop being persisted, or
+// App.tsx stop calling the sanitizer, and all the other tests would still pass.
+// Source-text assertions, the same tool the animation guard above uses — coarse
+// on purpose: they pin that the wiring EXISTS, not how it behaves (that part is
+// unit-tested in `sanitizeFilterState` and `validateSettings`).
+{
+  const fs = require("node:fs");
+  const read = (rel) => fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
+
+  test("Settings.tsx persists trackComments in the saved settings payload", () => {
+    const src = read("src/renderer/src/components/Settings.tsx");
+    // The checkbox's state must reach `saveSettings`, or the toggle looks like it
+    // works and silently reverts on reopen.
+    assert.match(src, /const settings: Settings = \{[\s\S]*?\btrackComments,[\s\S]*?\};/);
+    assert.match(src, /setTrackComments\(/, "the checkbox must be wired to state");
+  });
+
+  test("App.tsx runs a stored newOnly through sanitizeFilterState", () => {
+    const src = read("src/renderer/src/App.tsx");
+    // Both halves matter: the import can survive while the call is refactored out.
+    assert.match(src, /^\s*sanitizeFilterState,$/m, "must be imported from shared/pr-filter");
+    assert.match(src, /sanitizeFilterState\(filterState, \{ trackComments: config\.trackComments \}\)/);
+  });
+
+  test("App.tsx gates the New comments chip and the header count on trackComments", () => {
+    const src = read("src/renderer/src/App.tsx");
+    assert.match(src, /\{trackComments && \(\s*<FilterChip/, "the chip must be conditional");
+    assert.match(src, /\{trackComments && ` · \$\{stats\.fresh\}/, "the header stat must be conditional");
+  });
+}
+
 // --- single-instance decision logic (pure, unit-tested) ----------------------
 // The lock/second-instance branches live in single-instance.ts precisely so they
 // can run here without booting Electron (main.ts runs the real lock request at
@@ -1856,24 +1889,24 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   await atest("applyActivity.returnedToMe: false on the first-seen baseline", () =>
     withTempStore(async (file) => {
       const p = reviewPr();
-      await state.applyActivity([p], file);
+      await state.applyActivity([p], file, { trackComments: true });
       assert.strictEqual(p.returnedToMe, false);
       assert.strictEqual(p.lastSeenAt, null);
     }));
 
   await atest("applyActivity.returnedToMe: a new push after a review flips it on", () =>
     withTempStore(async (file) => {
-      await state.applyActivity([reviewPr()], file); // baseline at 07-07
+      await state.applyActivity([reviewPr()], file, { trackComments: true }); // baseline at 07-07
       const later = reviewPr({ lastCommitPushedAt: "2026-07-08T00:00:00Z" });
-      await state.applyActivity([later], file);
+      await state.applyActivity([later], file, { trackComments: true });
       assert.strictEqual(later.returnedToMe, true);
     }));
 
   await atest("applyActivity.returnedToMe: new comments flip it on too", () =>
     withTempStore(async (file) => {
-      await state.applyActivity([reviewPr()], file);
+      await state.applyActivity([reviewPr()], file, { trackComments: true });
       const more = reviewPr({ totalComments: 5 });
-      await state.applyActivity([more], file);
+      await state.applyActivity([more], file, { trackComments: true });
       assert.strictEqual(more.returnedToMe, true);
       assert.strictEqual(more.hasNewActivity, true);
     }));
@@ -1881,30 +1914,30 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   await atest("applyActivity.returnedToMe: never set on your own PR", () =>
     withTempStore(async (file) => {
       // Author who somehow also reviewed + pushed — the !author guard must win.
-      await state.applyActivity([reviewPr({ roles: ["author"] })], file);
+      await state.applyActivity([reviewPr({ roles: ["author"] })], file, { trackComments: true });
       const pushed = reviewPr({ roles: ["author"], lastCommitPushedAt: "2026-07-08T00:00:00Z" });
-      await state.applyActivity([pushed], file);
+      await state.applyActivity([pushed], file, { trackComments: true });
       assert.strictEqual(pushed.returnedToMe, false);
     }));
 
   await atest("applyActivity.returnedToMe: not set for an un-engaged reviewer request", () =>
     withTempStore(async (file) => {
       // Requested but never reviewed and never opened: a new push is not "back to me".
-      await state.applyActivity([reviewPr({ viewerHasReviewed: false })], file);
+      await state.applyActivity([reviewPr({ viewerHasReviewed: false })], file, { trackComments: true });
       const pushed = reviewPr({ viewerHasReviewed: false, lastCommitPushedAt: "2026-07-08T00:00:00Z" });
-      await state.applyActivity([pushed], file);
+      await state.applyActivity([pushed], file, { trackComments: true });
       assert.strictEqual(pushed.returnedToMe, false);
     }));
 
   await atest("markSeen then applyActivity: viewing sets lastSeenAt and re-arms the baseline", () =>
     withTempStore(async (file) => {
-      await state.applyActivity([reviewPr({ viewerHasReviewed: false })], file); // baseline
+      await state.applyActivity([reviewPr({ viewerHasReviewed: false })], file, { trackComments: true }); // baseline
       await state.markSeen(
         [{ id: "PR_state_1", comments: 2, updatedAt: "2026-07-07T00:00:00Z", lastCommitPushedAt: "2026-07-07T00:00:00Z" }],
         file,
       );
       const pushed = reviewPr({ viewerHasReviewed: false, lastCommitPushedAt: "2026-07-08T00:00:00Z" });
-      await state.applyActivity([pushed], file);
+      await state.applyActivity([pushed], file, { trackComments: true });
       assert.strictEqual(typeof pushed.lastSeenAt, "string"); // viewed → set
       assert.strictEqual(pushed.returnedToMe, true); // engaged via a view, new push
     }));
@@ -1916,9 +1949,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // knowing about the setting. A new push is what `returnedToMe` is left with.
   await atest("applyActivity(trackComments=false): new comments do not set hasNewActivity", () =>
     withTempStore(async (file) => {
-      await state.applyActivity([reviewPr()], file, false); // baseline
+      await state.applyActivity([reviewPr()], file, { trackComments: false }); // baseline
       const more = reviewPr({ totalComments: 9 });
-      await state.applyActivity([more], file, false);
+      await state.applyActivity([more], file, { trackComments: false });
       assert.strictEqual(more.hasNewActivity, false);
       assert.strictEqual(more.returnedToMe, false);
     }));
@@ -1926,43 +1959,43 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   await atest("applyActivity(trackComments=false): comments alone no longer claim attention", () =>
     withTempStore(async (file) => {
       const passive = (o = {}) => reviewPr({ roles: ["reviewed"], ...o });
-      await state.applyActivity([passive()], file, false); // passive role, quiet
+      await state.applyActivity([passive()], file, { trackComments: false }); // passive role, quiet
       const more = passive({ totalComments: 9 });
-      await state.applyActivity([more], file, false);
+      await state.applyActivity([more], file, { trackComments: false });
       assert.strictEqual(more.needsAttention, false);
     }));
 
   await atest("applyActivity(trackComments=false): a new push still returns the PR to you", () =>
     withTempStore(async (file) => {
-      await state.applyActivity([reviewPr()], file, false);
+      await state.applyActivity([reviewPr()], file, { trackComments: false });
       const pushed = reviewPr({ totalComments: 9, lastCommitPushedAt: "2026-07-08T00:00:00Z" });
-      await state.applyActivity([pushed], file, false);
+      await state.applyActivity([pushed], file, { trackComments: false });
       assert.strictEqual(pushed.returnedToMe, true);
       assert.strictEqual(pushed.hasNewActivity, false);
     }));
 
   await atest("applyActivity(trackComments=false): the comment baseline stays current, so re-enabling doesn't flood", () =>
     withTempStore(async (file) => {
-      await state.applyActivity([reviewPr()], file, false); // baseline at 2 comments
-      await state.applyActivity([reviewPr({ totalComments: 9 })], file, false); // untracked growth
+      await state.applyActivity([reviewPr()], file, { trackComments: false }); // baseline at 2 comments
+      await state.applyActivity([reviewPr({ totalComments: 9 })], file, { trackComments: false }); // untracked growth
       // Tracking back on: the 7 comments that landed while it was off are past,
       // not unread — only what arrives from here counts.
       const back = reviewPr({ totalComments: 9 });
-      await state.applyActivity([back], file, true);
+      await state.applyActivity([back], file, { trackComments: true });
       assert.strictEqual(back.hasNewActivity, false);
       const next = reviewPr({ totalComments: 10 });
-      await state.applyActivity([next], file, true);
+      await state.applyActivity([next], file, { trackComments: true });
       assert.strictEqual(next.hasNewActivity, true);
     }));
 
   await atest("applyActivity(trackComments=false): an unchanged comment count leaves the state file alone", () =>
     withTempStore(async (file) => {
-      await state.applyActivity([reviewPr()], file, false); // baseline written
+      await state.applyActivity([reviewPr()], file, { trackComments: false }); // baseline written
       const before = await fs.readFile(file, "utf8");
-      await state.applyActivity([reviewPr()], file, false); // nothing moved
+      await state.applyActivity([reviewPr()], file, { trackComments: false }); // nothing moved
       assert.strictEqual(await fs.readFile(file, "utf8"), before, "an untracked tick must not rewrite the store");
       // ...and a tick that does move the count writes, so the guard isn't just "never write".
-      await state.applyActivity([reviewPr({ totalComments: 3 })], file, false);
+      await state.applyActivity([reviewPr({ totalComments: 3 })], file, { trackComments: false });
       assert.notStrictEqual(await fs.readFile(file, "utf8"), before);
     }));
 
@@ -1971,13 +2004,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // Deleted comments while tracking was off: the baseline follows the count
       // either way (`!==`, not `>`), so re-enabling starts from what is actually
       // there — not from a stale higher number that would swallow the next comment.
-      await state.applyActivity([reviewPr({ totalComments: 5 })], file, false);
-      await state.applyActivity([reviewPr({ totalComments: 1 })], file, false);
+      await state.applyActivity([reviewPr({ totalComments: 5 })], file, { trackComments: false });
+      await state.applyActivity([reviewPr({ totalComments: 1 })], file, { trackComments: false });
       const back = reviewPr({ totalComments: 1 });
-      await state.applyActivity([back], file, true);
+      await state.applyActivity([back], file, { trackComments: true });
       assert.strictEqual(back.hasNewActivity, false);
       const next = reviewPr({ totalComments: 2 });
-      await state.applyActivity([next], file, true);
+      await state.applyActivity([next], file, { trackComments: true });
       assert.strictEqual(next.hasNewActivity, true);
     }));
 
@@ -1990,9 +2023,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
   await atest("applyActivity.needsAttention: an already-reviewed PR is quiet while nothing moves", () =>
     withTempStore(async (file) => {
-      await state.applyActivity([reviewedPr()], file); // baseline
+      await state.applyActivity([reviewedPr()], file, { trackComments: true }); // baseline
       const same = reviewedPr();
-      await state.applyActivity([same], file);
+      await state.applyActivity([same], file, { trackComments: true });
       assert.strictEqual(same.needsAttention, false);
     }));
 
@@ -2005,17 +2038,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           hasUnaddressedChangeRequest: true,
           hasUnaddressedComments: true,
         });
-      await state.applyActivity([noisy()], file); // baseline
+      await state.applyActivity([noisy()], file, { trackComments: true }); // baseline
       const again = noisy();
-      await state.applyActivity([again], file);
+      await state.applyActivity([again], file, { trackComments: true });
       assert.strictEqual(again.needsAttention, false);
     }));
 
   await atest("applyActivity.needsAttention: a reviewed PR wakes up when it comes back to me", () =>
     withTempStore(async (file) => {
-      await state.applyActivity([reviewedPr()], file); // baseline
+      await state.applyActivity([reviewedPr()], file, { trackComments: true }); // baseline
       const pushed = reviewedPr({ lastCommitPushedAt: "2026-07-08T00:00:00Z" });
-      await state.applyActivity([pushed], file);
+      await state.applyActivity([pushed], file, { trackComments: true });
       assert.strictEqual(pushed.returnedToMe, true);
       assert.strictEqual(pushed.needsAttention, true);
     }));
@@ -2028,9 +2061,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   await atest("applyActivity.returnedToMe: a comment-only review still counts as engaged", () =>
     withTempStore(async (file) => {
       const commentOnly = (o = {}) => reviewedPr({ viewerHasReviewed: false, ...o });
-      await state.applyActivity([commentOnly()], file); // baseline
+      await state.applyActivity([commentOnly()], file, { trackComments: true }); // baseline
       const more = commentOnly({ totalComments: 5 });
-      await state.applyActivity([more], file);
+      await state.applyActivity([more], file, { trackComments: true });
       assert.strictEqual(more.returnedToMe, true, "the reviewed role alone must prove engagement");
       assert.strictEqual(more.needsAttention, true);
     }));
@@ -2040,16 +2073,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // The guard the clause above must not weaken: asked to review, never
       // reviewed and never opened — a new push is not "back to me".
       const asked = (o = {}) => reviewPr({ roles: ["reviewer"], viewerHasReviewed: false, ...o });
-      await state.applyActivity([asked()], file);
+      await state.applyActivity([asked()], file, { trackComments: true });
       const pushed = asked({ lastCommitPushedAt: "2026-07-08T00:00:00Z" });
-      await state.applyActivity([pushed], file);
+      await state.applyActivity([pushed], file, { trackComments: true });
       assert.strictEqual(pushed.returnedToMe, false);
     }));
 
   await atest("applyActivity.needsAttention: a re-request alongside the past review is your turn again", () =>
     withTempStore(async (file) => {
       const reRequested = reviewPr({ roles: ["reviewer", "reviewed"] });
-      await state.applyActivity([reRequested], file);
+      await state.applyActivity([reRequested], file, { trackComments: true });
       assert.strictEqual(reRequested.needsAttention, true);
     }));
 
@@ -2058,7 +2091,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // reviewed-by:@me matches your own PRs too, so `author` and `reviewed`
       // co-occur — the passive branch must not swallow the author's failing CI.
       const mine = reviewPr({ roles: ["author", "reviewed"], failingChecks: ["build"] });
-      await state.applyActivity([mine], file);
+      await state.applyActivity([mine], file, { trackComments: true });
       assert.strictEqual(mine.needsAttention, true);
     }));
 
@@ -2660,14 +2693,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     p.stop();
   });
 
-  // --- poller: the trackComments setting reaches applyActivity ---------------
-  // The one call site where the setting meets the logic that writes
-  // hasNewActivity. `applyActivity`'s third parameter defaults to ON, so a
-  // dropped argument would silently restore comment tracking with every
-  // state-level test still green — those call applyActivity directly and never
-  // exercise the poller. This drives a real Poller over a real state file, so
-  // only the wiring can satisfy it.
-  await atest("Poller.tick: trackComments=false reaches applyActivity — the snapshot carries no new activity", () =>
+  // --- poller: the trackComments setting reaches the whole tick --------------
+  // The tick is where the setting meets both consumers: `applyActivity` (which
+  // writes hasNewActivity) and `hashSnapshot` (which decides whether the tick
+  // pushes at all). Neither has a test-visible seam of its own, so this drives a
+  // real Poller over a real state file. Every emission count is asserted before
+  // a snapshot is indexed — without that, a tick that stops emitting would make
+  // the off-branch read the baseline snapshot, which already carries
+  // `hasNewActivity: false`, and the case would pass while testing nothing.
+  await atest("Poller.tick: trackComments=false reaches applyActivity and hashSnapshot — no flag, no push", () =>
     withTempStore(async (file) => {
       const snapshots = [];
       let comments = 2;
@@ -2710,17 +2744,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       });
 
       await p.refresh(); // baseline tick at 2 comments
-      comments = 7; // comments landed while tracking is off
-      await p.refresh();
-      const off = snapshots[snapshots.length - 1].pullRequests[0];
+      assert.strictEqual(snapshots.length, 1, "the first tick always pushes");
+      const off = snapshots[0].pullRequests[0];
       assert.strictEqual(off.hasNewActivity, false, "trackComments=false must not reach the flag");
       assert.strictEqual(off.returnedToMe, false, "nor claim the PR came back to you");
 
-      // Same poller, same state file, setting flipped on: the next comment counts.
+      comments = 7; // comments landed while tracking is off
+      await p.refresh();
+      assert.strictEqual(
+        snapshots.length,
+        1,
+        "an untracked comment changes nothing the UI shows — the tick must not push",
+      );
+
+      // Same poller, same state file, setting flipped on. The off-path resync
+      // moved the baseline to 7, so this asserts the *next* comment counts —
+      // re-enabling deliberately does not replay the ones that landed while off.
       trackComments = true;
       comments = 8;
       await p.refresh();
-      const on = snapshots[snapshots.length - 1].pullRequests[0];
+      assert.strictEqual(snapshots.length, 2, "tracking back on must push");
+      const on = snapshots[1].pullRequests[0];
       assert.strictEqual(on.hasNewActivity, true, "trackComments=true must reach the flag");
 
       p.stop();
@@ -2782,6 +2826,40 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.notStrictEqual(
       poller.hashSnapshot(hsnap()),
       poller.hashSnapshot(hsnap({ hasUnaddressedComments: true })),
+    ));
+  // The comment count is the unread channel's raw input and renders nowhere, so
+  // with the setting off it must not drive a push: a visually identical snapshot
+  // per comment costs an IPC push, a full re-render and a live-dot blink into a
+  // hidden window, and resets the idle backoff so the poll cadence never
+  // stretches. With the setting on it must still push — the whole point.
+  test("hashSnapshot: a totalComments-only delta changes the hash while tracking is on", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ totalComments: 2 }), { trackComments: true }),
+      poller.hashSnapshot(hsnap({ totalComments: 3 }), { trackComments: true }),
+    ));
+  test("hashSnapshot: tracking on is the default, so an omitted flag hashes the count", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ totalComments: 2 })),
+      poller.hashSnapshot(hsnap({ totalComments: 3 })),
+    ));
+  test("hashSnapshot: a totalComments-only delta does NOT change the hash while tracking is off", () =>
+    assert.strictEqual(
+      poller.hashSnapshot(hsnap({ totalComments: 2 }), { trackComments: false }),
+      poller.hashSnapshot(hsnap({ totalComments: 3 }), { trackComments: false }),
+    ));
+  test("hashSnapshot: unresolvedThreads still moves the hash while tracking is off", () =>
+    // Threads are work owed, not unread marks — the setting leaves them live, so
+    // dropping the comment count must not take them with it.
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ unresolvedThreads: 0 }), { trackComments: false }),
+      poller.hashSnapshot(hsnap({ unresolvedThreads: 1 }), { trackComments: false }),
+    ));
+  test("hashSnapshot: flipping the setting alone changes the hash (so the chip comes back)", () =>
+    // Turning tracking back on has to reach the renderer even on a tick where no
+    // PR field moved, or the chip stays missing until something else changes.
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap(), { trackComments: false }),
+      poller.hashSnapshot(hsnap(), { trackComments: true }),
     ));
   test("hashSnapshot: a roles-only delta changes the hash (so review_requested fires)", () =>
     assert.notStrictEqual(

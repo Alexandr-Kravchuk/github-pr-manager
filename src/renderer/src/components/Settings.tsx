@@ -90,7 +90,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setLaunchAtLogin(s.launchAtLogin);
         setAutoUpdate(s.autoUpdate);
         setCloseToTray(s.closeToTray);
-        setTrackComments(s.trackComments ?? true);
+        setTrackComments(s.trackComments);
         setTheme(s.theme);
         setNotifications(s.notifications ?? DEFAULT_NOTIFICATIONS);
         setHosts(

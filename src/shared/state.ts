@@ -59,6 +59,11 @@ async function writeState(statePath: string, state: StateFile): Promise<void> {
  * doesn't light up on first run. Existing snapshots are not updated on read
  * (only mark-seen advances them).
  *
+ * The flag is required and named rather than a defaulted positional boolean: a
+ * default would have to be the permissive value, and dropping the argument at
+ * the single call site would then silently restore comment tracking with every
+ * test here still green. Required means `tsc` reports it instead.
+ *
  * `trackComments: false` (the `trackComments` setting off) drops the unread
  * channel: `hasNewActivity` stays false for every PR, so the `New comments` chip,
  * the card badge with its Mark-as-seen button and the `newOnly` filter go quiet,
@@ -74,7 +79,7 @@ async function writeState(statePath: string, state: StateFile): Promise<void> {
 export async function applyActivity(
   prs: PullRequest[],
   statePath: string,
-  trackComments = true,
+  { trackComments }: { trackComments: boolean },
 ): Promise<void> {
   const state = await readState(statePath);
   let mutated = false;

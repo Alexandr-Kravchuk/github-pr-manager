@@ -137,9 +137,16 @@ export interface Settings {
    * not promise that: a comment awaiting your reply (`hasUnaddressedComments`)
    * and unresolved threads (`unresolvedThreads`) are untouched, so they still
    * turn a card red, still count towards `needsAttention` and still notify.
-   * Those are reply mechanics — work you owe someone — not an unread marker. For
-   * someone who reads comments in GitHub itself and doesn't want the dashboard to
-   * keep a second unread state.
+   * Those are reply mechanics — work you owe someone — not an unread marker.
+   *
+   * Two further consequences worth knowing before changing this: `prSignal`'s
+   * `waiting` branch tests `!hasNewActivity`, so your own PR that is awaiting
+   * review and picks up a comment keeps the grey `waiting` accent instead of
+   * turning amber; and `hashSnapshot` stops hashing `totalComments`, so a tick
+   * whose only delta is a comment count no longer pushes a snapshot at all.
+   *
+   * For someone who reads comments in GitHub itself and doesn't want the
+   * dashboard to keep a second unread state.
    */
   trackComments: boolean;
   /** Desktop-notification preferences. */

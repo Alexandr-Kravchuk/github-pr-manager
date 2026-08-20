@@ -6,7 +6,8 @@ you're involved — author, requested reviewer, or a PR you have already
 reviewed — and highlights what needs attention:
 
 - ✗ **failing CI** — individual named checks (unit tests, Sonar, etc.) are shown by name;
-- ✦ **new comments** — comments added since the last time you viewed the PR;
+- ✦ **new comments** — comments added since the last time you viewed the PR
+  (switchable off in Settings — see [Track new comments](#track-new-comments));
 - 💬 **unresolved comments** — how many threads still need to be resolved;
 - review state (approved / changes requested / review required), drafts, author, last update.
 
@@ -45,7 +46,8 @@ Electron · Vite + React 19 + Tailwind CSS v4 (renderer) · TypeScript · Node
   you submit a review — even a plain "Comment" review — so without it a PR you
   reviewed disappears from the dashboard just as the author starts addressing
   your comments. Such a PR is tagged **Reviewed** and stays quiet until it comes
-  back to you (new comments or a new push since you last looked).
+  back to you (new comments or a new push since you last looked; with
+  **Track new comments** off, a new push alone).
 - The **renderer** (the dashboard UI) talks to main only through a typed
   `window.api` bridge (`contextIsolation` on, `nodeIntegration` off). It gets the
   initial snapshot via `invoke`, then live updates pushed on every real change —
@@ -219,3 +221,25 @@ scripts/                # dev launcher, mac release, icon generator
   get a "forest" of NEW badges on first run.
 - "New comments" is based on the comment count, not on `updatedAt` — pushing
   your own commit or changing labels does not flag a PR.
+
+### Track new comments
+
+The unread-comment channel can be switched off in **Settings → Track new
+comments** (on by default), for reading comments in GitHub itself rather than
+keeping a second unread state here. With it off:
+
+- no ✦ **New comments** chip, card badge or **Mark as seen** button, and the
+  header stops counting them;
+- a new **push** is the only thing that brings a reviewed PR back to you;
+- a tick whose only change is a comment count no longer pushes a snapshot, so
+  the poll cadence is free to back off on comment-active repositories;
+- your own PR that is awaiting review and picks up a comment keeps the grey
+  **waiting** accent instead of turning amber — nothing is being asked of you
+  until a reviewer actually blocks it;
+- 💬 **unresolved comments** and a comment awaiting your reply are untouched:
+  they still colour the card, still count towards "needs attention" and still
+  notify. Those are work you owe someone, not unread marks.
+
+While the setting is off the stored comment count is kept current, so turning it
+back on starts from what is there now instead of replaying everything that
+landed in the meantime.
