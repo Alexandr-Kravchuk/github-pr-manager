@@ -153,6 +153,10 @@ export function validateSettings(raw: unknown): Settings {
   // Appearance defaults to following the OS; anything unrecognized falls back.
   const theme = obj.theme === "light" || obj.theme === "dark" ? obj.theme : "system";
 
+  // Comment tracking defaults ON — it is the app's original behavior, so an
+  // existing settings file (which has no such key) must keep it.
+  const trackComments = typeof obj.trackComments === "boolean" ? obj.trackComments : true;
+
   const notifications = validateNotifications(obj.notifications);
 
   // An empty hosts list is valid — it's the first-run / unconfigured state, not
@@ -183,6 +187,7 @@ export function validateSettings(raw: unknown): Settings {
     autoUpdate,
     closeToTray,
     theme,
+    trackComments,
     notifications,
     hosts,
     jira: validateJira(obj.jira),
@@ -226,6 +231,7 @@ export function defaultSettings(): Settings {
     autoUpdate: true,
     closeToTray: true,
     theme: "system",
+    trackComments: true,
     notifications: defaultNotificationSettings(),
     hosts: [],
   };
@@ -250,6 +256,7 @@ export function toPublicConfig(settings: Settings): PublicConfig {
   return {
     pollIntervalSeconds: settings.pollIntervalSeconds,
     hosts: settings.hosts.map((h) => ({ label: h.label, repos: h.repos })),
+    trackComments: settings.trackComments,
   };
 }
 

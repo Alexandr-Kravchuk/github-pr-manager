@@ -56,6 +56,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [autoUpdate, setAutoUpdate] = useState(true);
   const [closeToTray, setCloseToTray] = useState(true);
+  const [trackComments, setTrackComments] = useState(true);
   const [theme, setTheme] = useState<ThemePreference>("system");
   const [notifications, setNotifications] = useState<NotificationSettings>(DEFAULT_NOTIFICATIONS);
   const [hosts, setHosts] = useState<DraftHost[]>([]);
@@ -89,6 +90,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setLaunchAtLogin(s.launchAtLogin);
         setAutoUpdate(s.autoUpdate);
         setCloseToTray(s.closeToTray);
+        setTrackComments(s.trackComments);
         setTheme(s.theme);
         setNotifications(s.notifications ?? DEFAULT_NOTIFICATIONS);
         setHosts(
@@ -148,6 +150,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         autoUpdate,
         closeToTray,
         theme,
+        trackComments,
         notifications,
         hosts: hosts.map((h) => ({
           label: h.label,
@@ -424,6 +427,24 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             <span className="block text-xs text-fg-faint">
               Closing the window hides it instead of quitting. With notifications enabled the app
               keeps polling in the background; quit from the tray icon&apos;s menu.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={trackComments}
+            onChange={(e) => setTrackComments(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-sky-500"
+          />
+          <span>
+            <span className="block text-sm text-fg-secondary">Track new comments</span>
+            <span className="block text-xs text-fg-faint">
+              Keeps an unread count per PR. Off drops that channel — no &ldquo;New comments&rdquo;
+              chip, badge or &ldquo;Mark as seen&rdquo; button, no unread count in the header, and a
+              new push is the only thing that brings a PR back to you. A comment awaiting your
+              reply and unresolved threads still show up and still notify. For reading comments in
+              GitHub itself.
             </span>
           </span>
         </label>

@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
-import { isPassiveReviewed } from "../../../shared/pr-filter";
+import { isPassiveReviewed, prSignal, type PrSignal } from "../../../shared/pr-filter";
 import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { CheckBadge } from "./CheckBadge";
@@ -20,81 +20,6 @@ interface Props {
    * sees no dead badge.
    */
   jiraBaseUrl?: string | null;
-}
-
-/** Card signal, in priority order — drives the left accent and the header buddy. */
-export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "approved" | "idle";
-
-/**
- * Classify a PR by signal priority.
- *  - blocked (red): your PR is blocked and needs your action — failing CI, a
- *    change request you haven't re-requested review on, a reviewer comment
- *    you haven't answered (an unresolved thread whose last comment isn't yours,
- *    even from a plain "Comment" review with green CI), or a merge conflict you
- *    must resolve (`hasConflicts`) — the latter blocks merge even when CI is
- *    green and the PR is approved, so it belongs here, not in `approved`. Only
- *    for PRs you authored.
- *  - myReview (violet): a review is being requested of you and you haven't
- *    submitted one yet — your turn to act. The `reviewer` role comes from
- *    GitHub's `review-requested:@me`, so it clears itself once you review.
- *    Also covers a PR that came back to you (`returnedToMe`) after you reviewed
- *    or opened it — GitHub drops the reviewer role once you review, so this is
- *    what keeps a re-review on your radar. Ranked right after your own blocked
- *    PRs so review requests never blend into the rest.
- *  - waiting (gray): your PR is awaiting someone else's review and nobody has
- *    approved yet (ball in their court) — nothing required from you, even with
- *    open threads.
- *  - approved (green): at least one human approval, CI isn't failing or
- *    running, and there are no open threads. A single human approve is enough —
- *    even if other reviewers are still pending, and even if the PR has no checks
- *    at all. We key off an actual approval rather than requiring
- *    `reviewDecision === "APPROVED"`, which stays null/REVIEW_REQUIRED on repos
- *    without required-review rules — but we still consult `reviewDecision` as a
- *    disqualifier: a live `CHANGES_REQUESTED` (e.g. a second reviewer whose
- *    change request gates the merge even after being re-requested) keeps the PR
- *    out of green, since it isn't actually mergeable. Ranked
- *    ABOVE attention: an approved, green PR stays green even when it has unread
- *    comments, so opening it (which clears `hasNewActivity`) doesn't flip the
- *    accent from amber to green. Open threads and running CI still demote it,
- *    since those are unfinished work.
- *  - attention (amber): new comments, open threads, CI running.
- */
-export function prSignal(pr: PullRequest): PrSignal {
-  const isAuthor = pr.roles.includes("author");
-
-  if (
-    isAuthor &&
-    (pr.failingChecks.length > 0 ||
-      pr.hasUnaddressedChangeRequest ||
-      pr.hasUnaddressedComments ||
-      pr.hasConflicts)
-  ) {
-    return "blocked";
-  }
-  // `myReReviewDue` belongs with these two: it is the same "your move" state,
-  // just reached by your own standing change request rather than by a request
-  // or new activity. Kept in step with `needsAttention` in state.ts, which this
-  // function mirrors — moving one without the other lets the count and the
-  // accent disagree.
-  if (pr.roles.includes("reviewer") || pr.returnedToMe || pr.myReReviewDue) {
-    return "myReview";
-  }
-  if (isAuthor && pr.awaitingReview && !pr.hasNewActivity && !pr.hasHumanApproval) {
-    return "waiting";
-  }
-  if (
-    pr.hasHumanApproval &&
-    pr.reviewDecision !== "CHANGES_REQUESTED" &&
-    pr.ciState !== "failure" &&
-    pr.ciState !== "pending" &&
-    pr.unresolvedThreads === 0
-  ) {
-    return "approved";
-  }
-  if (pr.hasNewActivity || pr.unresolvedThreads > 0 || pr.pendingChecks.length > 0) {
-    return "attention";
-  }
-  return "idle";
 }
 
 const ACCENT: Record<PrSignal, string> = {

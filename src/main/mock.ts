@@ -7,7 +7,20 @@
  * seen-state goes to a separate `.mock` file to keep the real one clean.
  *
  * Cases: re-review-due, sad-ci, sad-changes, sad-comments, curious, mixed,
- * waiting, busy, approved, empty, draft-red, grid-many, grid-repos, grid-tall.
+ * waiting, busy, approved, empty, draft-red, grid-many, grid-repos, grid-tall,
+ * track-a/track-b (see below).
+ *
+ * `track-a`/`track-b` are a manual QA pair for the `trackComments` setting: the
+ * same PR id at 2 vs. 3 comments with a real `updatedAt` bump between them
+ * (unlike the other cases, not `Date.now()`-derived, so ticks are stable until
+ * you switch on purpose) — switching between them simulates a genuine GitHub
+ * comment landing. Combine with editing `settings.json`'s `trackComments` under
+ * `--user-data-dir` to see the poller's own gate live: `hasNewActivity`/
+ * `returnedToMe` flip only when tracking is on, `needsAttention` doesn't move
+ * either way, and re-enabling after an off-path resync doesn't replay the
+ * comments that landed while off. Unlike every other setting here,
+ * `trackComments` is read from the REAL `settings.json` rather than pinned (see
+ * `mockPollerOverrides`), specifically so this works without a rebuild.
  *
  * Notification transitions: switch `.prd-mock` from `notif-quiet` (baseline) to
  * `notif-ci` / `notif-changes` / `notif-approved` to drive a single field
@@ -21,6 +34,7 @@ import path from "node:path";
 import { defaultSettings } from "../shared/config";
 import type { HostFetchResult } from "../shared/github";
 import type { CheckItem, HostConfig, PullRequest, Reviewer, Settings } from "../shared/types";
+import { loadSettings as loadRealSettings } from "./settings";
 
 export function isMockMode(): boolean {
   return Boolean(process.env.PRD_MOCK);
@@ -283,6 +297,34 @@ const CASES: Record<string, () => PullRequest[]> = {
       totalComments: 4,
     }),
   ],
+  // QA fixture for the `trackComments` setting — deliberately NOT derived from
+  // `Date.now()` like the cases above, so `updatedAt` is stable across ticks and
+  // only moves when switching case on purpose (simulating a real GitHub comment
+  // landing, which bumps both the count and the timestamp together).
+  "track-a": () => [
+    pr({
+      id: "mock-track",
+      number: 501,
+      title: "My PR awaiting review, 2 comments",
+      awaitingReview: true,
+      totalComments: 2,
+      updatedAt: "2026-08-20T10:00:00.000Z",
+      lastCommitPushedAt: "2026-08-20T10:00:00.000Z",
+      reviewers: [reviewerPending],
+    }),
+  ],
+  "track-b": () => [
+    pr({
+      id: "mock-track",
+      number: 501,
+      title: "My PR awaiting review, 3 comments",
+      awaitingReview: true,
+      totalComments: 3,
+      updatedAt: "2026-08-20T11:00:00.000Z",
+      lastCommitPushedAt: "2026-08-20T10:00:00.000Z",
+      reviewers: [reviewerPending],
+    }),
+  ],
   empty: () => [],
   // Notification transition fixtures — all share id "mock-notif" so switching
   // between them mutates one PR's fields (the transition the notifier diffs on).
@@ -440,11 +482,25 @@ export function mockPollerOverrides(userDataPath: string): {
   ignoredStatePath: string;
 } {
   return {
-    loadSettings: () => ({
-      ...defaultSettings(),
-      pollIntervalSeconds: 10,
-      hosts: [{ label: HOST_LABEL, graphqlUrl: "https://mock.invalid/graphql", repos: ["acme/widgets"] }],
-    }),
+    loadSettings: () => {
+      // Everything except trackComments is pinned for the fixture (fast cadence,
+      // a fake host) — but trackComments is exactly the preference this harness
+      // needs to exercise, so it is read from the REAL settings.json instead of
+      // pinned, letting the Settings screen's checkbox actually reach the poller
+      // in mock mode. Falls back to the default if settings.json is missing/bad.
+      let trackComments = defaultSettings().trackComments;
+      try {
+        trackComments = loadRealSettings().trackComments;
+      } catch {
+        // Invalid settings.json: keep the default rather than fail the tick.
+      }
+      return {
+        ...defaultSettings(),
+        pollIntervalSeconds: 10,
+        trackComments,
+        hosts: [{ label: HOST_LABEL, graphqlUrl: "https://mock.invalid/graphql", repos: ["acme/widgets"] }],
+      };
+    },
     toHostConfigs: () => [
       { label: HOST_LABEL, graphqlUrl: "https://mock.invalid/graphql", token: "mock", repos: ["acme/widgets"] },
     ],

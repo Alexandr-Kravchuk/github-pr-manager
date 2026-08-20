@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Buddy, type BuddyMood } from "./components/Buddy";
-import { PrCard, prSignal } from "./components/PrCard";
+import { PrCard } from "./components/PrCard";
 import { SettingsScreen } from "./components/Settings";
 import { cn, relativeTime } from "./format";
 import { playNotifySound } from "./notify-sound";
@@ -15,7 +15,9 @@ import {
   hiddenAttentionCount,
   isBaselinePr,
   narrowFacetCount,
+  prSignal,
   revealDelta,
+  sanitizeFilterState,
   type FilterState,
   type RoleFilter,
 } from "../../shared/pr-filter";
@@ -483,6 +485,26 @@ export function App() {
     ],
   );
 
+  // Whether the unread-comment channel exists at all (the `trackComments`
+  // setting). Off hides the chip and the header stat, drops a stored `newOnly`,
+  // and — via `hasNewActivity`, which the main process then never sets — the card
+  // badge with its `Mark as seen` button. Derived ONCE: two spellings with two
+  // implicit defaults would let the effect below treat an absent field as OFF
+  // (silently clearing a stored filter) while the chip stayed on. Defaults to on
+  // for the frame before `getConfig` answers, which is the original behavior.
+  const trackComments = config?.trackComments ?? true;
+
+  // A stored filter the current config invalidates — the `New comments` chip's
+  // flag under `trackComments: false`, which would otherwise empty the list with
+  // its chip gone from the row. The decision lives in `sanitizeFilterState`
+  // (unit-tested in `shared/pr-filter`); this only applies it. It sits after
+  // `filterState` because it reads it.
+  useEffect(() => {
+    if (!config) return;
+    const sanitized = sanitizeFilterState(filterState, { trackComments });
+    if (sanitized !== filterState) setNewOnly(sanitized.newOnly);
+  }, [config, filterState, trackComments]);
+
   // The standing "is there work for me" numbers: neither ignored nor drafts, and
   // deliberately independent of the filters.
   const stats = useMemo(() => baselineStats(allPrs), [allPrs]);
@@ -657,6 +679,7 @@ export function App() {
 
   const noHosts = config !== null && config.hosts.length === 0;
 
+
   if (view === "settings") {
     return (
       <SettingsScreen
@@ -687,8 +710,8 @@ export function App() {
             <div>
               <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
               <p className="text-xs text-fg-subtle">
-                {stats.total} PRs · {stats.attention} need attention · {stats.failing} failing CI ·{" "}
-                {stats.fresh} with new comments
+                {stats.total} PRs · {stats.attention} need attention · {stats.failing} failing CI
+                {trackComments && ` · ${stats.fresh} with new comments`}
                 {stats.returned > 0 && ` · ${stats.returned} back to you`}
                 {/* The stats describe the standing workload, so say so whenever the
                     rendered SET differs — otherwise "0 PRs" above two revealed
@@ -894,14 +917,19 @@ export function App() {
             >
               ✗ Failing CI
             </FilterChip>
-            <FilterChip
-              active={newOnly}
-              count={chipCounts.fresh}
-              onClick={() => setNewOnly((v) => !v)}
-              tone="violet"
-            >
-              ✦ New comments
-            </FilterChip>
+            {/* The one chip that can be absent: with `trackComments` off there is
+                no comment channel to filter on, so the chip is removed rather
+                than left at a permanent 0. */}
+            {trackComments && (
+              <FilterChip
+                active={newOnly}
+                count={chipCounts.fresh}
+                onClick={() => setNewOnly((v) => !v)}
+                tone="violet"
+              >
+                ✦ New comments
+              </FilterChip>
+            )}
             <FilterChip
               active={mergeableOnly}
               count={chipCounts.mergeable}

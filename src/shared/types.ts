@@ -127,6 +127,30 @@ export interface Settings {
   closeToTray: boolean;
   /** Light/dark appearance, or follow the OS. */
   theme: ThemePreference;
+  /**
+   * Whether an unread-comment count is kept per PR. Off drops that one channel:
+   * `hasNewActivity` never gets set, so the `New comments` chip, the card badge
+   * with its `Mark as seen` button, the header stat and the `newOnly` filter all
+   * go away, and `returnedToMe` is left with a new push as its only trigger.
+   *
+   * It is NOT a mute on everything comment-shaped, and the setting's wording must
+   * not promise that: a comment awaiting your reply (`hasUnaddressedComments`)
+   * and unresolved threads (`unresolvedThreads`) are untouched, so they still
+   * turn a card red, still count towards `needsAttention` and still notify.
+   * Those are reply mechanics — work you owe someone — not an unread marker.
+   *
+   * Two further consequences worth knowing before changing this: `prSignal`'s
+   * `waiting` branch tests `!hasNewActivity`, so your own PR that is awaiting
+   * review and picks up a comment keeps the grey `waiting` accent instead of
+   * turning amber; and `hashSnapshot` stops hashing `totalComments`, so a comment
+   * count that moves on its own no longer pushes a snapshot — but a real new
+   * comment also bumps the PR's `updatedAt`, which stays hashed because the card
+   * renders it, so comment ticks are NOT silenced.
+   *
+   * For someone who reads comments in GitHub itself and doesn't want the
+   * dashboard to keep a second unread state.
+   */
+  trackComments: boolean;
   /** Desktop-notification preferences. */
   notifications: NotificationSettings;
   hosts: SettingsHost[];
@@ -173,6 +197,11 @@ export interface JiraHealth {
 export interface PublicConfig {
   pollIntervalSeconds: number;
   hosts: Array<{ label: string; repos: string[] }>;
+  /**
+   * Mirror of {@link Settings.trackComments} — the renderer needs it to drop the
+   * comment-driven chip, badge and header stat, and it is not a secret.
+   */
+  trackComments: boolean;
 }
 
 /** State of an individual reviewer on a PR. */
