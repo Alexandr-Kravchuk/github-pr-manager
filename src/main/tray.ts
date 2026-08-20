@@ -105,11 +105,15 @@ export function createTrayController(deps: TrayControllerDeps): TrayController {
         { label: "Quit PR Dashboard", click: () => deps.quit() },
       ]),
     );
-    // Windows/Linux: a plain click should restore the window (the context menu is
-    // the right-click gesture there). On macOS a click opens the menu instead and
-    // this never fires.
-    tray.on("click", () => deps.open());
-    tray.on("double-click", () => deps.open());
+    // Windows/Linux only: a plain click should restore the window (the context
+    // menu is the right-click gesture there). On macOS a left click opens the
+    // context menu *and* still emits `click`, so registering these would reopen
+    // the dashboard on any click on the menu bar icon — without the user ever
+    // choosing "Open PR Dashboard". There the menu is the only way in.
+    if (process.platform !== "darwin") {
+      tray.on("click", () => deps.open());
+      tray.on("double-click", () => deps.open());
+    }
     return true;
   };
 

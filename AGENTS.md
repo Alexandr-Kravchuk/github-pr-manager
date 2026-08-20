@@ -18,7 +18,12 @@ Three layers:
   quitAndInstall closes windows before `before-quit`), and the window's
   `session-end` (Windows shutdown/logout never emits `before-quit`) — and is
   re-armed state-based when the window is next shown, never by racing the quit
-  pipeline's event timing. `main.ts` only injects the live actions (focus /
+  pipeline's event timing. The icon's `click`/`double-click` handlers are
+  registered **only off macOS**: macOS emits `click` while it is already opening
+  the context menu, so on darwin they reopened the window on any click on the
+  menu bar icon, bypassing the "Open PR Dashboard" item; there the menu is the
+  only way back in. Both branches are pinned in `tests/run-tests.cjs` with a
+  `process.platform` override. `main.ts` only injects the live actions (focus /
   quit / hide, with a leave-fullscreen-first hide for macOS); the three-way
   close decision is unit-tested in `tests/run-tests.cjs` against a mocked
   Electron, and the wiring registrations are asserted on the compiled `main.js`.
