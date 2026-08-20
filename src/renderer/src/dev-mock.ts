@@ -247,6 +247,26 @@ const FIXTURES: Record<string, PullRequest[]> = {
       createdAt: new Date(Date.now() - 9 * 864e5).toISOString(),
     }),
   ],
+  // Manual QA fixture for the `trackComments` accent promise: two authored,
+  // awaiting-review PRs — one with a new comment while tracking is on (amber),
+  // one identical except `hasNewActivity: false` (as it would be with tracking
+  // off) which must read as the grey `waiting` accent instead.
+  track: [
+    pr({
+      title: "Track test — hasNewActivity true (tracking ON)",
+      number: 501,
+      awaitingReview: true,
+      totalComments: 3,
+      hasNewActivity: true,
+    }),
+    pr({
+      title: "Track test — hasNewActivity false (tracking OFF)",
+      number: 502,
+      awaitingReview: true,
+      totalComments: 3,
+      hasNewActivity: false,
+    }),
+  ],
 };
 
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
