@@ -1113,6 +1113,112 @@ test("mapPr.viewerApproved: someone else's approval is not yours", () =>
   assert.strictEqual(github.mapPr(rawPr(), "GH", [], "someone-else").viewerApproved, false));
 test("mapPr.viewerApproved: false when the viewer is unknown", () =>
   assert.strictEqual(github.mapPr(rawPr(), "GH", [], null).viewerApproved, false));
+
+// --- myReReviewDue: your change request is blocking, and it's your move -----
+// The mirror of viewerApproved, and the one attention signal that must survive
+// being looked at: the merge stays blocked until you re-review, and GitHub asks
+// nobody. Author action is required, so the flag stays false while the ball is
+// still with them. See issue #14.
+const REVIEWED_AT = "2026-07-07T10:00:00Z";
+const myChangeRequest = { ...changesRequestedByRev, submittedAt: REVIEWED_AT };
+const myApproval = {
+  author: { __typename: "User", login: "rev", avatarUrl: "" },
+  state: "APPROVED",
+  submittedAt: REVIEWED_AT,
+};
+const commitAt = (at) => ({
+  nodes: [{ commit: { pushedDate: at, committedDate: at, statusCheckRollup: null } }],
+});
+// `comments(last: 1)` — one node per thread, the most recent comment on it.
+const thread = (isResolved, login, createdAt) => ({
+  isResolved,
+  comments: { totalCount: 1, nodes: [{ author: { login }, createdAt }] },
+});
+const reReviewDue = (overrides, viewer = "rev") =>
+  github.mapPr(
+    rawPr({ latestOpinionatedReviews: { nodes: [myChangeRequest] }, ...overrides }),
+    "GH",
+    [],
+    viewer,
+  ).myReReviewDue;
+
+test("mapPr.myReReviewDue: a push after your change request puts it back on you", () =>
+  assert.strictEqual(reReviewDue({ commits: commitAt("2026-07-07T11:00:00Z") }), true));
+test("mapPr.myReReviewDue: the author answering and leaving nothing unresolved counts too", () =>
+  assert.strictEqual(
+    reReviewDue({ reviewThreads: { nodes: [thread(true, "auth", "2026-07-07T11:30:00Z")] } }),
+    true,
+  ));
+// The body-only trap: such a review has no threads, so "nothing unresolved" is
+// true from the instant you submit it. Without the author-acted requirement the
+// card would light up while the ball is still with them.
+test("mapPr.myReReviewDue: a change request with no threads and no push stays with the author", () =>
+  assert.strictEqual(reReviewDue({}), false));
+test("mapPr.myReReviewDue: a push predating your review is not a response to it", () =>
+  assert.strictEqual(reReviewDue({ commits: commitAt("2026-07-07T09:00:00Z") }), false));
+test("mapPr.myReReviewDue: a reply while another thread is still open is the author's turn", () =>
+  assert.strictEqual(
+    reReviewDue({
+      reviewThreads: {
+        nodes: [
+          thread(true, "auth", "2026-07-07T11:30:00Z"),
+          thread(false, "auth", "2026-07-07T11:31:00Z"),
+        ],
+      },
+    }),
+    false,
+  ));
+// Resolving without answering says nothing about whether the point was handled,
+// and nothing else moved — deliberately silent, documented rather than fixed.
+test("mapPr.myReReviewDue: threads resolved with your own comment last stays false", () =>
+  assert.strictEqual(
+    reReviewDue({ reviewThreads: { nodes: [thread(true, "rev", "2026-07-07T09:30:00Z")] } }),
+    false,
+  ));
+// `.some()`, not `.every()`: a thread you answered last must not mask the
+// author's replies on the others.
+test("mapPr.myReReviewDue: your own last word on one thread doesn't hide the author's on another", () =>
+  assert.strictEqual(
+    reReviewDue({
+      reviewThreads: {
+        nodes: [
+          thread(true, "rev", "2026-07-07T09:30:00Z"),
+          thread(true, "auth", "2026-07-07T11:30:00Z"),
+        ],
+      },
+    }),
+    true,
+  ));
+test("mapPr.myReReviewDue: false once you approve on the re-review", () =>
+  assert.strictEqual(
+    reReviewDue({
+      latestOpinionatedReviews: { nodes: [myApproval] },
+      commits: commitAt("2026-07-07T11:00:00Z"),
+    }),
+    false,
+  ));
+test("mapPr.myReReviewDue: someone else's change request is not yours to clear", () =>
+  assert.strictEqual(
+    reReviewDue({ commits: commitAt("2026-07-07T11:00:00Z") }, "someone-else"),
+    false,
+  ));
+test("mapPr.myReReviewDue: false when the viewer is unknown", () =>
+  assert.strictEqual(reReviewDue({ commits: commitAt("2026-07-07T11:00:00Z") }, null), false));
+// A review whose submittedAt is absent gives nothing to compare the push
+// against; false rather than a guess.
+test("mapPr.myReReviewDue: false when your review carries no timestamp", () =>
+  assert.strictEqual(
+    reReviewDue({
+      latestOpinionatedReviews: { nodes: [changesRequestedByRev] },
+      commits: commitAt("2026-07-07T11:00:00Z"),
+    }),
+    false,
+  ));
+// A plain "Comment" review never lands in latestOpinionatedReviews, so it can't
+// replace your change request — which is right: the merge is still blocked.
+// Non-obvious enough to pin, so nobody "fixes" it into clearing the signal.
+test("mapPr.myReReviewDue: a comment-only re-review does NOT clear it", () =>
+  assert.strictEqual(reReviewDue({ commits: commitAt("2026-07-07T11:00:00Z") }), true));
 // --- issue-key: the card's Jira link -------------------------------------
 // Returns null wherever a link can't be built, because the badge IS the link:
 // the card renders nothing rather than a dead one.
@@ -1814,6 +1920,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     lastCommitPushedAt: "2026-07-07T00:00:00Z",
     roles: ["reviewer"],
     viewerHasReviewed: true,
+    myReReviewDue: false,
     failingChecks: [],
     hasUnaddressedChangeRequest: false,
     hasUnaddressedComments: false,
@@ -1915,6 +2022,31 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       await state.applyActivity([pushed], file);
       assert.strictEqual(pushed.returnedToMe, true);
       assert.strictEqual(pushed.needsAttention, true);
+    }));
+
+  // …with one exception, and it's the whole point of issue #14: your own change
+  // request blocks the merge until you re-review, and nothing on GitHub will ask
+  // you. That is a state, not activity, so — unlike returnedToMe — marking the
+  // card seen must not clear it.
+  await atest("applyActivity.needsAttention: a due re-review wakes a reviewed PR with nothing new", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewedPr({ myReReviewDue: true })], file); // baseline
+      const same = reviewedPr({ myReReviewDue: true });
+      await state.applyActivity([same], file);
+      assert.strictEqual(same.returnedToMe, false); // nothing moved since the snapshot
+      assert.strictEqual(same.needsAttention, true); // …yet it's still your move
+    }));
+
+  await atest("applyActivity.needsAttention: viewing the card does not clear a due re-review", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewedPr({ myReReviewDue: true })], file); // baseline
+      await state.markSeen(
+        [{ id: "PR_state_1", comments: 2, updatedAt: "2026-07-07T00:00:00Z", lastCommitPushedAt: "2026-07-07T00:00:00Z" }],
+        file,
+      );
+      const seen = reviewedPr({ myReReviewDue: true });
+      await state.applyActivity([seen], file);
+      assert.strictEqual(seen.needsAttention, true);
     }));
 
   // The role, not `viewerHasReviewed`, is what proves engagement: a plain
@@ -2639,6 +2771,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.notStrictEqual(
       poller.hashSnapshot(hsnap({ viewerApproved: false })),
       poller.hashSnapshot(hsnap({ viewerApproved: true })),
+    ));
+  // Same blind spot as viewerApproved — read by the view, not the notifier — with
+  // an extra reason it needs its own tuple entry: on a PR that already needs
+  // attention through returnedToMe this flag flips WITHOUT moving
+  // needsAttention, so nothing else in the tuple would carry the delta and the
+  // card accent plus the action-sort rank would lag a whole poll tick.
+  test("hashSnapshot: a myReReviewDue-only delta changes the hash", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ myReReviewDue: false })),
+      poller.hashSnapshot(hsnap({ myReReviewDue: true })),
+    ));
+  test("hashSnapshot: a myReReviewDue delta re-emits even while needsAttention stays true", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ needsAttention: true, myReReviewDue: false })),
+      poller.hashSnapshot(hsnap({ needsAttention: true, myReReviewDue: true })),
     ));
   test("hashSnapshot: identical PR fields hash equal, ignoring fetchedAt (no spurious re-emit)", () =>
     assert.strictEqual(

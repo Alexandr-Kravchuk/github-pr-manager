@@ -166,6 +166,12 @@ export function hashSnapshot(s: DashboardResponse): string {
     // hashing the field the consumer actually reads is what the two rules above
     // do, and it costs nothing.
     p.viewerApproved,
+    // Same reason as returnedToMe above, and it needs its own entry for the same
+    // reason: on a PR that already needs attention through returnedToMe, this
+    // flag can flip on its own without moving `needsAttention`, and it drives the
+    // card accent and the action sort — so without it the tick doesn't push and
+    // the card lags a poll behind.
+    p.myReReviewDue,
     p.isDraft,
     p.isIgnored,
     p.parentKey,

@@ -25,6 +25,13 @@ import type {
  * visible, nothing is hidden that shouldn't be — but a false negative all the
  * same.
  *
+ * `myReReviewDue` (with `viewerRequestedChanges` and `viewerReviewedAt`, which
+ * also read the viewer's node here) shares that cap and inverts its direction:
+ * past 15 reviewers it reads false, so a PR whose merge is blocked on your
+ * re-review stops claiming attention. That loses work rather than failing safe,
+ * which makes it the stronger argument for the `reviews(author:, states:)`
+ * route below — an extra cached per-host lookup buys both signals correctness.
+ *
  * There is no viewer-keyed field to sidestep it. `viewerLatestOpinionatedReview`
  * does not exist (introspected on github.com and GHE alike), and
  * `viewerLatestReview` is the latest review of ANY kind, so a plain comment left
@@ -58,13 +65,13 @@ fragment PrFields on PullRequest {
   }
   # 15 is load-bearing — see the note above this fragment before changing it.
   latestOpinionatedReviews(first: 15) {
-    nodes { author { __typename login avatarUrl } state }
+    nodes { author { __typename login avatarUrl } state submittedAt }
   }
   comments { totalCount }
   reviewThreads(first: 50) {
     nodes {
       isResolved
-      comments(last: 1) { totalCount nodes { author { login } } }
+      comments(last: 1) { totalCount nodes { author { login } createdAt } }
     }
   }
   commits(last: 1) {
@@ -166,13 +173,20 @@ interface RawPr {
     nodes: Array<{ requestedReviewer: { __typename: string; login?: string; avatarUrl?: string } | null }>;
   };
   latestOpinionatedReviews: {
-    nodes: Array<{ author: { __typename: string; login: string; avatarUrl: string } | null; state: string }>;
+    nodes: Array<{
+      author: { __typename: string; login: string; avatarUrl: string } | null;
+      state: string;
+      submittedAt: string | null;
+    }>;
   };
   comments: { totalCount: number };
   reviewThreads: {
     nodes: Array<{
       isResolved: boolean;
-      comments: { totalCount: number; nodes: Array<{ author: { login: string } | null }> };
+      comments: {
+        totalCount: number;
+        nodes: Array<{ author: { login: string } | null; createdAt: string }>;
+      };
     }>;
   };
   commits: {
@@ -405,6 +419,44 @@ export function mapPr(
     );
   const hasNoReviews = pr.latestOpinionatedReviews.nodes.length === 0;
 
+  // The other half of `viewerApproved`: your latest word is "request changes",
+  // so the merge is blocked on YOU re-reviewing. One node per reviewer means a
+  // later approval of yours replaces this rather than adding to it.
+  const viewerReview =
+    viewerLogin == null
+      ? undefined
+      : pr.latestOpinionatedReviews.nodes.find((r) => r.author?.login === viewerLogin);
+  const viewerRequestedChanges = viewerReview?.state === "CHANGES_REQUESTED";
+  const viewerReviewedAt = viewerReview?.submittedAt ?? null;
+
+  // "My re-review is due": your change request still stands AND the author has
+  // since acted, so the ball is back in your court. Deliberately computed here,
+  // at fetch time, from live PR state only — unlike `returnedToMe` it must NOT
+  // depend on the seen-snapshot, because opening the card is exactly what used
+  // to silence this case forever while the re-review stayed outstanding.
+  //
+  // Author action is required in BOTH branches. A change request left as a
+  // review body alone (no line threads) has zero unresolved threads from the
+  // start, so keying off resolution alone would light the card up while the
+  // ball is still with the author. `.some()` rather than `.every()` on the
+  // replies: a thread where YOU commented last must not mask the author's
+  // replies on the others.
+  //
+  // The push comparison inherits the `committedDate` fallback caveat above — a
+  // rebase that preserves old committer dates can read as "no push since your
+  // review". Same tradeoff `returnedToMe`'s newPush already lives with.
+  const authorRepliedAfterReview =
+    viewerReviewedAt != null &&
+    threads.some((t) => {
+      const last = t.comments.nodes[t.comments.nodes.length - 1];
+      return last != null && last.author?.login !== viewerLogin && last.createdAt > viewerReviewedAt;
+    });
+  const myReReviewDue =
+    viewerRequestedChanges &&
+    viewerReviewedAt != null &&
+    ((lastCommitPushedAt != null && lastCommitPushedAt > viewerReviewedAt) ||
+      (unresolvedThreads === 0 && authorRepliedAfterReview));
+
   const issueKey = parseIssueKey(pr.title, pr.headRefName);
 
   // Build reviewer list: pending first (requested but not yet reviewed, or re-requested),
@@ -476,6 +528,7 @@ export function mapPr(
     roles,
     viewerHasReviewed,
     viewerApproved,
+    myReReviewDue,
     hasNoReviews,
     unresolvedThreads,
     unaddressedThreads,

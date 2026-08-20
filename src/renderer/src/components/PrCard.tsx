@@ -71,7 +71,12 @@ export function prSignal(pr: PullRequest): PrSignal {
   ) {
     return "blocked";
   }
-  if (pr.roles.includes("reviewer") || pr.returnedToMe) {
+  // `myReReviewDue` belongs with these two: it is the same "your move" state,
+  // just reached by your own standing change request rather than by a request
+  // or new activity. Kept in step with `needsAttention` in state.ts, which this
+  // function mirrors — moving one without the other lets the count and the
+  // accent disagree.
+  if (pr.roles.includes("reviewer") || pr.returnedToMe || pr.myReReviewDue) {
     return "myReview";
   }
   if (isAuthor && pr.awaitingReview && !pr.hasNewActivity && !pr.hasHumanApproval) {

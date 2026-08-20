@@ -69,6 +69,7 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     roles: ["author"],
     viewerHasReviewed: false,
     viewerApproved: false,
+    myReReviewDue: false,
     hasNoReviews: true,
     unresolvedThreads: 0,
     unaddressedThreads: 0,
