@@ -265,6 +265,7 @@ const settings: Settings = {
   autoUpdate: false,
   closeToTray: true,
   theme: "system",
+  trackComments: true,
   notifications: {
     enabled: true,
     native: true,
@@ -279,7 +280,11 @@ const api: PrManagerApi = {
   refresh: async () => ({ ok: true, snapshot }),
   getConfig: async () => ({
     ok: true,
-    config: { pollIntervalSeconds: 60, hosts: [{ label: "GitHub", repos: ["acme/widgets"] }] },
+    config: {
+      pollIntervalSeconds: 60,
+      hosts: [{ label: "GitHub", repos: ["acme/widgets"] }],
+      trackComments: true,
+    },
   }),
   markSeen: async () => {},
   setIgnored: async () => {},

@@ -58,8 +58,20 @@ async function writeState(statePath: string, state: StateFile): Promise<void> {
  * current values and do NOT highlight it as new — so a "forest" of NEW badges
  * doesn't light up on first run. Existing snapshots are not updated on read
  * (only mark-seen advances them).
+ *
+ * `trackComments: false` (the `trackComments` setting off) makes the whole
+ * comment channel silent: `hasNewActivity` stays false for every PR, so the chip,
+ * the card badge and every filter stop reacting to comments, and `returnedToMe`
+ * is left with a new push as its only trigger. The stored comment count is then
+ * kept CURRENT instead — that snapshot field has no reader while tracking is off,
+ * and letting it go stale would turn re-enabling the setting into exactly the
+ * "forest of NEW badges" the first-run baseline exists to prevent.
  */
-export async function applyActivity(prs: PullRequest[], statePath: string): Promise<void> {
+export async function applyActivity(
+  prs: PullRequest[],
+  statePath: string,
+  trackComments = true,
+): Promise<void> {
   const state = await readState(statePath);
   let mutated = false;
 
@@ -80,7 +92,14 @@ export async function applyActivity(prs: PullRequest[], statePath: string): Prom
       // Signal specifically NEW COMMENTS: a change in updatedAt (your own commit
       // push, labels, reviewer changes) does not count as new activity —
       // otherwise it drowns out the signal on your own PRs, where pushes are frequent.
-      pr.hasNewActivity = pr.totalComments > entry.comments;
+      pr.hasNewActivity = trackComments && pr.totalComments > entry.comments;
+      if (!trackComments && entry.comments !== pr.totalComments) {
+        // Written only on an actual change, so an untracked poll doesn't rewrite
+        // the state file every tick. `lastCommitPushedAt` is deliberately left
+        // alone — it is what `newPush` below compares against.
+        entry.comments = pr.totalComments;
+        mutated = true;
+      }
       // lastSeenAt reflects an ACTUAL view (viewedAt), not the auto-baseline —
       // so a PR the user has never opened reports null.
       pr.lastSeenAt = entry.viewedAt ?? null;

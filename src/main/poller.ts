@@ -536,7 +536,7 @@ export class Poller {
     }
 
     try {
-      await applyActivity(allPrs, this.options.statePath);
+      await applyActivity(allPrs, this.options.statePath, settings.trackComments);
     } catch (e) {
       console.error("[poller] applyActivity failed:", e);
     }

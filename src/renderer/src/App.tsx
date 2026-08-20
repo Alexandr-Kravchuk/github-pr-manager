@@ -337,6 +337,14 @@ export function App() {
     }
   }, [config, host]);
 
+  // With comment tracking off nothing ever has new comments, so a persisted
+  // `New comments` filter would silently empty the list while its chip is gone
+  // from the row — the one thing a filter must never do. Same shape as the two
+  // effects around it: a stored preference the current config invalidates.
+  useEffect(() => {
+    if (config && !config.trackComments && newOnly) setNewOnly(false);
+  }, [config, newOnly]);
+
   // A persisted "parent" grouping is meaningless once Jira is disconnected —
   // fall back to grouping by repo.
   useEffect(() => {
@@ -603,6 +611,13 @@ export function App() {
 
   const noHosts = config !== null && config.hosts.length === 0;
 
+  // Whether the comment channel exists at all (the `trackComments` setting). Off
+  // hides the chip, the header stat and — via `hasNewActivity`, which the main
+  // process then never sets — the card badge with its `Mark as seen` button.
+  // Defaults to on for the frame before `getConfig` answers, which is the
+  // app's original behavior.
+  const trackComments = config?.trackComments ?? true;
+
   if (view === "settings") {
     return (
       <SettingsScreen
@@ -633,8 +648,8 @@ export function App() {
             <div>
               <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
               <p className="text-xs text-fg-subtle">
-                {stats.total} PRs · {stats.attention} need attention · {stats.failing} failing CI ·{" "}
-                {stats.fresh} with new comments
+                {stats.total} PRs · {stats.attention} need attention · {stats.failing} failing CI
+                {trackComments && ` · ${stats.fresh} with new comments`}
                 {stats.returned > 0 && ` · ${stats.returned} back to you`}
                 {/* The stats describe the standing workload, so say so whenever the
                     rendered SET differs — otherwise "0 PRs" above two revealed
@@ -840,14 +855,19 @@ export function App() {
             >
               ✗ Failing CI
             </FilterChip>
-            <FilterChip
-              active={newOnly}
-              count={chipCounts.fresh}
-              onClick={() => setNewOnly((v) => !v)}
-              tone="violet"
-            >
-              ✦ New comments
-            </FilterChip>
+            {/* The one chip that can be absent: with `trackComments` off there is
+                no comment channel to filter on, so the chip is removed rather
+                than left at a permanent 0. */}
+            {trackComments && (
+              <FilterChip
+                active={newOnly}
+                count={chipCounts.fresh}
+                onClick={() => setNewOnly((v) => !v)}
+                tone="violet"
+              >
+                ✦ New comments
+              </FilterChip>
+            )}
             <FilterChip
               active={mergeableOnly}
               count={chipCounts.mergeable}

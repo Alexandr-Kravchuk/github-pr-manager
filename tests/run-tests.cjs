@@ -734,6 +734,7 @@ test("defaultSettings: empty + 60s + toggles", () => {
   assert.strictEqual(d.autoUpdate, true);
   assert.strictEqual(d.closeToTray, true);
   assert.strictEqual(d.theme, "system");
+  assert.strictEqual(d.trackComments, true);
   assert.deepStrictEqual(d.hosts, []);
 });
 
@@ -750,20 +751,28 @@ test("validateSettings: toggles default off/on when absent", () => {
   // Close-to-tray defaults ON, so a settings.json written before the preference
   // existed still gets tray behaviour instead of silently opting out.
   assert.strictEqual(s.closeToTray, true);
+  // Same reason: comment tracking is the original behaviour, so an older
+  // settings.json must not read as "ignore comments".
+  assert.strictEqual(s.trackComments, true);
 });
 test("validateSettings: toggles honored when present", () => {
   const s = cfg.validateSettings({
     launchAtLogin: true,
     autoUpdate: false,
     closeToTray: false,
+    trackComments: false,
     hosts: [],
   });
   assert.strictEqual(s.launchAtLogin, true);
   assert.strictEqual(s.autoUpdate, false);
   assert.strictEqual(s.closeToTray, false);
+  assert.strictEqual(s.trackComments, false);
 });
 test("validateSettings: a non-boolean closeToTray falls back to the default", () => {
   assert.strictEqual(cfg.validateSettings({ closeToTray: "yes", hosts: [] }).closeToTray, true);
+});
+test("validateSettings: a non-boolean trackComments falls back to the default", () => {
+  assert.strictEqual(cfg.validateSettings({ trackComments: "no", hosts: [] }).trackComments, true);
 });
 test("validateSettings: theme defaults to system when absent/invalid", () => {
   assert.strictEqual(cfg.validateSettings({ hosts: [] }).theme, "system");
@@ -844,11 +853,13 @@ test("validateSettings: jira with invalid baseUrl throws", () =>
 test("toPublicConfig: strips graphqlUrl, keeps label + repos", () => {
   const pub = cfg.toPublicConfig({
     pollIntervalSeconds: 60,
+    trackComments: true,
     hosts: [{ label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"] }],
   });
   assert.deepStrictEqual(pub, {
     pollIntervalSeconds: 60,
     hosts: [{ label: "GH", repos: ["a/b"] }],
+    trackComments: true,
   });
 });
 
@@ -1876,6 +1887,52 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       await state.applyActivity([pushed], file);
       assert.strictEqual(typeof pushed.lastSeenAt, "string"); // viewed → set
       assert.strictEqual(pushed.returnedToMe, true); // engaged via a view, new push
+    }));
+
+  // --- state: trackComments off (the "ignore comments" setting) -------------
+  // The whole comment channel goes silent at its single source: `hasNewActivity`
+  // stays false, so every consumer (the chip, the card badge and its Mark-as-seen
+  // button, needsAttention, the filters) stops reacting to comments without
+  // knowing about the setting. A new push is what `returnedToMe` is left with.
+  await atest("applyActivity(trackComments=false): new comments do not set hasNewActivity", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewPr()], file, false); // baseline
+      const more = reviewPr({ totalComments: 9 });
+      await state.applyActivity([more], file, false);
+      assert.strictEqual(more.hasNewActivity, false);
+      assert.strictEqual(more.returnedToMe, false);
+    }));
+
+  await atest("applyActivity(trackComments=false): comments alone no longer claim attention", () =>
+    withTempStore(async (file) => {
+      const passive = (o = {}) => reviewPr({ roles: ["reviewed"], ...o });
+      await state.applyActivity([passive()], file, false); // passive role, quiet
+      const more = passive({ totalComments: 9 });
+      await state.applyActivity([more], file, false);
+      assert.strictEqual(more.needsAttention, false);
+    }));
+
+  await atest("applyActivity(trackComments=false): a new push still returns the PR to you", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewPr()], file, false);
+      const pushed = reviewPr({ totalComments: 9, lastCommitPushedAt: "2026-07-08T00:00:00Z" });
+      await state.applyActivity([pushed], file, false);
+      assert.strictEqual(pushed.returnedToMe, true);
+      assert.strictEqual(pushed.hasNewActivity, false);
+    }));
+
+  await atest("applyActivity(trackComments=false): the comment baseline stays current, so re-enabling doesn't flood", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewPr()], file, false); // baseline at 2 comments
+      await state.applyActivity([reviewPr({ totalComments: 9 })], file, false); // untracked growth
+      // Tracking back on: the 7 comments that landed while it was off are past,
+      // not unread — only what arrives from here counts.
+      const back = reviewPr({ totalComments: 9 });
+      await state.applyActivity([back], file, true);
+      assert.strictEqual(back.hasNewActivity, false);
+      const next = reviewPr({ totalComments: 10 });
+      await state.applyActivity([next], file, true);
+      assert.strictEqual(next.hasNewActivity, true);
     }));
 
   // --- state: the passive `reviewed` role doesn't claim attention ------------

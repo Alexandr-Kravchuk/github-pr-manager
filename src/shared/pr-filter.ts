@@ -7,7 +7,10 @@ import type { PrRole, PullRequest } from "./types";
  *
  * - **narrowing** chips (`Needs attention`, `Failing CI`, `New comments`,
  *   `Ready to merge`, `No reviews yet`) drop every PR that doesn't match — an
- *   AND over whatever is active;
+ *   AND over whatever is active. `New comments` is the one chip the renderer may
+ *   not render at all: with the `trackComments` setting off, `hasNewActivity` is
+ *   never set (see `applyActivity`), so the chip is removed and `newOnly` reset
+ *   rather than left as a filter that would match nothing;
  * - the **exclude** chip (`Hide my approvals`) is the mirror image: it takes a
  *   category OFF the board rather than narrowing to it. It isn't a sixth
  *   narrowing chip because "show me only what I approved" is not what anyone

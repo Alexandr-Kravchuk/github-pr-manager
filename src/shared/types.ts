@@ -127,6 +127,15 @@ export interface Settings {
   closeToTray: boolean;
   /** Light/dark appearance, or follow the OS. */
   theme: ThemePreference;
+  /**
+   * Whether new comments are tracked at all. Off makes the dashboard blind to
+   * comment activity: `hasNewActivity` never gets set, so the `New comments`
+   * chip, the card badge with its `Mark as seen` button and the header stat all
+   * disappear, no filter reacts to comments any more, and `returnedToMe` is left
+   * with new pushes as its only trigger. For someone who reads comments in
+   * GitHub itself and doesn't want the dashboard to keep a second unread state.
+   */
+  trackComments: boolean;
   /** Desktop-notification preferences. */
   notifications: NotificationSettings;
   hosts: SettingsHost[];
@@ -173,6 +182,11 @@ export interface JiraHealth {
 export interface PublicConfig {
   pollIntervalSeconds: number;
   hosts: Array<{ label: string; repos: string[] }>;
+  /**
+   * Mirror of {@link Settings.trackComments} — the renderer needs it to drop the
+   * comment-driven chip, badge and header stat, and it is not a secret.
+   */
+  trackComments: boolean;
 }
 
 /** State of an individual reviewer on a PR. */
