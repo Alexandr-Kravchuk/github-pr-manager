@@ -37,6 +37,7 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     roles: ["author"],
     viewerHasReviewed: false,
     viewerApproved: false,
+    myReReviewDue: false,
     hasNoReviews: true,
     unresolvedThreads: 0,
     unaddressedThreads: 0,
@@ -331,6 +332,8 @@ const api: PrManagerApi = {
   onConfigError: () => () => {},
   onUpdateStatus: () => () => {},
   onNotifySound: () => () => {},
+  onOpenSettings: () => () => {},
+  onRefreshRequest: () => () => {},
 };
 
 (window as unknown as { api: PrManagerApi }).api = api;

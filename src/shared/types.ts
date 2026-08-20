@@ -284,6 +284,24 @@ export interface PullRequest {
    */
   viewerApproved: boolean;
   /**
+   * true when YOUR change request still stands and the author has since acted
+   * (pushed a new commit, or replied and left nothing unresolved) — the merge is
+   * blocked on your re-review and GitHub will not ask you for it, because
+   * submitting a review cleared the request.
+   *
+   * The mirror of {@link viewerApproved}, and deliberately a STATE rather than a
+   * diff: unlike `returnedToMe` it is computed at fetch time from the PR alone
+   * and never consults the seen-snapshot, so opening the card cannot clear it.
+   * It stays true until you actually re-review — a plain "Comment" review does
+   * NOT clear it, since your change request goes on blocking the merge.
+   *
+   * Shares the `latestOpinionatedReviews(first: 15)` cap with its siblings, but
+   * note the failure direction is the opposite of `viewerApproved`'s: past 15
+   * distinct opinionated reviewers your own node can fall off the page, this
+   * reads false and the PR goes quiet — losing work rather than failing safe.
+   */
+  myReReviewDue: boolean;
+  /**
    * true when nobody has submitted an opinionated review yet — the "nobody has
    * looked at it" pile. Keys off opinionated reviews (approve / request-changes);
    * a plain "Comment" review does not clear it.
@@ -494,6 +512,19 @@ export interface PrManagerApi {
   onConfigError(listener: (message: string) => void): () => void;
   /** Subscribe to auto-update progress. Returns an unsubscribe function. */
   onUpdateStatus(listener: (status: UpdateStatus) => void): () => void;
+  /**
+   * Subscribe to the menu's "Settings" item (CmdOrCtrl+,). The accelerator lives
+   * in the application menu (main process), so the renderer only learns about
+   * it through this event. Returns an unsubscribe function.
+   */
+  onOpenSettings(listener: () => void): () => void;
+  /**
+   * Subscribe to the menu's "Refresh" item (CmdOrCtrl+R). The renderer runs its
+   * own refresh so the loading state stays consistent with the header button.
+   * F5 never comes through here — the renderer sees that key directly.
+   * Returns an unsubscribe function.
+   */
+  onRefreshRequest(listener: () => void): () => void;
 }
 
 /** Auto-update lifecycle, pushed from main as electron-updater progresses. */

@@ -98,16 +98,27 @@ npm run typecheck && npm test
 
 Don't skip `npm ci` reasoning: a worktree under `.claude/worktrees/` has no `node_modules`.
 
-## Step 3 — Create the GitHub Release (notes first, assets after)
+## Step 3 — Create the GitHub Release as a DRAFT (notes first, assets after)
 
 ```bash
-gh release create vX.Y.Z --title "Release X.Y.Z" --notes-file /path/notes.md
+gh release create vX.Y.Z --draft --title "Release X.Y.Z" --notes-file /path/notes.md
 ```
 
+**`--draft` is mandatory, and publishing happens only in Step 7, after both platforms'
+assets are in.** This repo has GitHub's *immutable releases* in effect: the moment a
+release is published it is frozen, every asset upload against it returns
+`HTTP 422 Cannot upload assets to an immutable release`, and — the part that costs a
+version — **its tag name is burned permanently, even after the release is deleted**.
+A later `gh release create`/`PATCH` on that tag fails with
+`tag_name was used by an immutable release`, so the only way out is to re-cut the whole
+release under a new version. That is exactly what turned v1.15.0 into v1.15.1: both
+platforms built and notarized fine, and every upload bounced off a release created
+without `--draft`.
+
 Both upload scripts resolve the release from the `/releases` LIST by tag (draft-aware) and
-upload **by ID**, so creating it first keeps mac + Windows on one release with no duplicate
-drafts. If it doesn't exist yet, each script creates its own draft — avoid that race by
-creating it here.
+upload **by ID**, so creating the draft first keeps mac + Windows on one release with no
+duplicate drafts. If it doesn't exist yet, each script creates its own draft — avoid that
+race by creating it here.
 
 Notes style: see **Release notes** below.
 
@@ -199,6 +210,14 @@ Note on `animate-pulse`: it legitimately appears in the built **CSS** as an unus
 because Tailwind's content scanner picks the string out of the *comments* in `App.tsx` /
 `styles.css` that document the ban. Dead CSS renders no frames. What matters is **0**
 occurrences in the built JS/HTML — that's what proves no element applies it.
+
+Then publish — **by ID**, not by tag (`gh release edit` is ambiguous if a duplicate draft
+ever appeared):
+
+```bash
+gh api --method PATCH repos/Alexandr-Kravchuk/github-pr-manager/releases/<id> \
+  -F draft=false -F make_latest=true
+```
 
 Finally, confirm the update is a real transition, not a version no-op:
 

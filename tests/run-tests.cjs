@@ -79,12 +79,12 @@ test("pickAppId: falls back on malformed JSON", () =>
 
 // --- shared value-import carve-outs stay Node-free (renderer imports them) ---
 // The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify,
-// the view-filter helpers from shared/pr-filter and the issue-link builder from
-// shared/issue-key. That's only safe while those modules pull in no node:
+// the view-filter helpers from shared/pr-filter, the issue-link builder from
+// shared/issue-key and the F5 decision from shared/hotkeys. That's only safe while those modules pull in no node:
 // builtin — a regression would break the Vite renderer build. Assert the
 // compiled output is clean so the AGENTS.md carve-out is enforced, not just
 // documented.
-for (const mod of ["notify.js", "pr-filter.js", "issue-key.js"]) {
+for (const mod of ["notify.js", "pr-filter.js", "issue-key.js", "hotkeys.js"]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
       path.join(__dirname, `../dist/main/shared/${mod}`),
@@ -206,6 +206,42 @@ for (const mod of ["notify.js", "pr-filter.js", "issue-key.js"]) {
       [],
       `infinite animations burn CPU whether or not the window is visible, found at: ${hits.join(", ")}`,
     );
+  });
+
+  // state.ts documents that `needsAttention` mirrors the card accent, and
+  // `actionRank` ranks off the same "your move" idea. The harness cannot run the
+  // renderer, so that mirror is otherwise upheld by convention alone: a change
+  // that drops the term from state.ts would leave these two silently out of step
+  // and every test would still pass. A text scan is the cheapest thing that
+  // notices, on the pattern of the animation guard above.
+  test("renderer keeps prSignal and actionRank in step with the attention terms", () => {
+    const reads = (abs, label, fn) => {
+      const src = stripComments(fs.readFileSync(abs, "utf8"));
+      const at = src.indexOf(fn);
+      assert.ok(at !== -1, `${label} no longer defines ${fn} — update this guard`);
+      // The function body, bounded by the next top-level declaration rather than
+      // a fixed window — a magic length silently stops covering the tail of the
+      // function the moment a branch is added above the terms we check.
+      const rest = src.slice(at + fn.length);
+      const end = rest.search(/\n(?:export\s+)?(?:function|const|class|interface|type)\s/);
+      const body = end === -1 ? rest : rest.slice(0, end);
+      for (const term of ["returnedToMe", "myReReviewDue"]) {
+        assert.ok(
+          body.includes(term),
+          `${label} ${fn} no longer reads ${term}; state.ts's needsAttention and the card accent must move together`,
+        );
+      }
+    };
+    // prSignal moved out of PrCard.tsx into shared/pr-filter.ts — a pure
+    // function of a PullRequest, so it lives in the renderer-importable,
+    // Node-free half of `shared` where it can be unit-tested directly (see the
+    // `prSignal:` tests below) instead of only through this text scan.
+    reads(
+      path.join(__dirname, "../src/shared/pr-filter.ts"),
+      "src/shared/pr-filter.ts",
+      "function prSignal",
+    );
+    reads(path.join(rendererRoot, "src/App.tsx"), "src/App.tsx", "function actionRank");
   });
 }
 
@@ -684,7 +720,19 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     assert.strictEqual(trays.length, 2, "the preference can be toggled back on");
   });
 
-  test("tray controller: the menu opens and quits; a click restores the window", () => {
+  // `ensureTray` reads `process.platform` at icon-creation time, so a per-test
+  // override is enough to exercise both branches of the click wiring from macOS.
+  const onPlatform = (value, fn) => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value, configurable: true });
+    try {
+      return fn();
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+  };
+
+  test("tray controller: the menu opens and quits", () => {
     const { controller, calls } = setup();
     controller.setEnabled(true);
     const [tray] = trays;
@@ -694,11 +742,45 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     tray.menu[2].click();
     assert.strictEqual(calls.open, 1);
     assert.strictEqual(calls.quit, 1);
-    for (const [event, cb] of tray.handlers) {
-      assert.ok(["click", "double-click"].includes(event), "unexpected tray event: " + event);
-      cb();
-    }
-    assert.strictEqual(calls.open, 3, "both click gestures reopen the dashboard");
+  });
+
+  test("tray controller: Windows/Linux -> both click gestures reopen the dashboard", () => {
+    const { controller, calls } = onPlatform("win32", () => {
+      const s = setup();
+      s.controller.setEnabled(true);
+      return s;
+    });
+    const [tray] = trays;
+    assert.deepStrictEqual(
+      tray.handlers.map(([event]) => event),
+      ["click", "double-click"],
+    );
+    for (const [, cb] of tray.handlers) cb();
+    assert.strictEqual(calls.open, 2);
+    assert.strictEqual(controller.hidesToTray(), true);
+  });
+
+  // macOS emits `click` even while it is opening the context menu, so a wired
+  // click handler reopened the window on any click on the menu bar icon —
+  // without the user ever choosing "Open PR Dashboard".
+  test("tray controller: macOS -> no click handler, only the menu opens the window", () => {
+    const { controller, calls } = onPlatform("darwin", () => {
+      const s = setup();
+      s.controller.setEnabled(true);
+      return s;
+    });
+    const [tray] = trays;
+    assert.deepStrictEqual(tray.handlers, [], "no click gesture may reopen the window on macOS");
+    assert.strictEqual(calls.open, 0);
+    // The menu being the only way in is only safe while close really hides: an
+    // icon that exists but stops hiding to tray would leave nothing to restore.
+    assert.strictEqual(controller.hidesToTray(), true);
+    const event = closeEvent();
+    controller.handleClose(event);
+    assert.strictEqual(event.prevented, true);
+    assert.strictEqual(calls.hide, 1);
+    tray.menu[0].click();
+    assert.strictEqual(calls.open, 1, "the menu item is the only way in");
   });
 
   // The three branches of the close decision — the invariant a refactor is most
@@ -774,6 +856,399 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
   }
   delete require.cache[elPath];
 }
+
+// --- application menu, verified against a mocked Electron -------------------
+// `menu.ts` is Electron-only, so it is exercised by requiring the COMPILED
+// module with a fake `electron` in the module cache. What matters here is not
+// cosmetic: `Menu.setApplicationMenu` REPLACES Electron's default menu, so the
+// template has to keep carrying the edit/window roles (Cmd+C/V/A in the search
+// and token fields, Cmd+Q/H/W) alongside the two shortcuts this app adds.
+{
+  const menuJs = path.join(__dirname, "../dist/main/main/menu.js");
+  const elPath = require.resolve("electron", { paths: [path.dirname(menuJs)] });
+  const preloaded = new Set(Object.keys(require.cache));
+
+  for (const k of Object.keys(require.cache)) {
+    if (!preloaded.has(k)) delete require.cache[k];
+  }
+  let installed = null;
+  require.cache[elPath] = {
+    id: elPath,
+    filename: elPath,
+    loaded: true,
+    exports: {
+      app: { name: "PR Dashboard", isPackaged: true },
+      Menu: {
+        buildFromTemplate: (template) => ({ template }),
+        setApplicationMenu: (menu) => {
+          installed = menu;
+        },
+      },
+    },
+  };
+  const { buildAppMenuTemplate, createMenuActions, installAppMenu } = require(menuJs);
+
+  // Every item in the template, flattened across submenus.
+  const flatten = (template) =>
+    template.flatMap((item) => [
+      item,
+      ...(Array.isArray(item.submenu) ? flatten(item.submenu) : []),
+    ]);
+  // Roles bring accelerators of their own, which no `accelerator` field shows,
+  // and Electron's own role defaults differ per platform (`togglefullscreen` is
+  // Ctrl+Cmd+F on macOS but F11 elsewhere; `toggleDevTools` is Alt+Cmd+I vs
+  // Ctrl+Shift+I). Hand-maintained against Electron's documented role-accelerator
+  // defaults — extend both platform tables, and the coverage assertion below,
+  // before adding a role to the template. Roles with no default accelerator
+  // (`about`, `services`, `unhide`, `zoom`, `front`) get an explicit `[]` so an
+  // unlisted role fails loudly instead of silently contributing nothing.
+  const ROLE_ACCELERATORS = {
+    darwin: {
+      about: [],
+      services: [],
+      hide: ["CmdOrCtrl+H"],
+      hideOthers: ["CmdOrCtrl+Alt+H"],
+      unhide: [],
+      quit: ["CmdOrCtrl+Q"],
+      editMenu: [
+        "CmdOrCtrl+Z",
+        "CmdOrCtrl+Shift+Z",
+        "CmdOrCtrl+X",
+        "CmdOrCtrl+C",
+        "CmdOrCtrl+V",
+        "CmdOrCtrl+A",
+      ],
+      resetZoom: ["CmdOrCtrl+0"],
+      zoomIn: ["CmdOrCtrl+Plus"],
+      zoomOut: ["CmdOrCtrl+-"],
+      togglefullscreen: ["Ctrl+CmdOrCtrl+F"],
+      forceReload: ["CmdOrCtrl+Shift+R"],
+      toggleDevTools: ["Alt+CmdOrCtrl+I"],
+      minimize: ["CmdOrCtrl+M"],
+      zoom: [],
+      close: ["CmdOrCtrl+W"],
+      front: [],
+    },
+    other: {
+      quit: ["CmdOrCtrl+Q"],
+      editMenu: ["CmdOrCtrl+Z", "CmdOrCtrl+Y", "CmdOrCtrl+X", "CmdOrCtrl+C", "CmdOrCtrl+V", "CmdOrCtrl+A"],
+      resetZoom: ["CmdOrCtrl+0"],
+      zoomIn: ["CmdOrCtrl+Plus"],
+      zoomOut: ["CmdOrCtrl+-"],
+      togglefullscreen: ["F11"],
+      forceReload: ["CmdOrCtrl+Shift+R"],
+      toggleDevTools: ["Ctrl+Shift+I"],
+      windowMenu: ["CmdOrCtrl+M"],
+    },
+  };
+
+  // Order-insensitive, case-insensitive: Electron treats "Shift+CmdOrCtrl+R" and
+  // "CmdOrCtrl+Shift+R" as the same combination, so a plain string comparison
+  // would miss that collision.
+  const normalizeAccelerator = (accelerator) =>
+    accelerator
+      .split("+")
+      .map((part) => part.trim().toLowerCase())
+      .sort()
+      .join("+");
+
+  // Every distinct role the template actually uses must have an entry in the
+  // table above (possibly `[]`) — an omission is a gap in the check, not an
+  // absence of accelerators, and must fail loudly rather than pass silently.
+  const assertRoleTableCovers = (template, platformKey) => {
+    const table = ROLE_ACCELERATORS[platformKey];
+    for (const role of new Set(flatten(template).map((item) => item.role).filter(Boolean))) {
+      assert.ok(
+        Object.prototype.hasOwnProperty.call(table, role),
+        `ROLE_ACCELERATORS.${platformKey} has no entry for role "${role}" — add one (even []) before trusting the uniqueness checks`,
+      );
+    }
+  };
+
+  /** Every accelerator the menu claims — explicit fields plus role-supplied. */
+  const claimedAccelerators = (template, platformKey) => {
+    const table = ROLE_ACCELERATORS[platformKey];
+    assertRoleTableCovers(template, platformKey);
+    return flatten(template).flatMap((item) => [
+      ...(item.accelerator ? [item.accelerator] : []),
+      ...(item.role && table[item.role] ? table[item.role] : []),
+    ]);
+  };
+  const byAccelerator = (template, accelerator, platformKey = "darwin") => {
+    const target = normalizeAccelerator(accelerator);
+    return claimedAccelerators(template, platformKey).filter(
+      (claimed) => normalizeAccelerator(claimed) === target,
+    );
+  };
+
+  const deps = () => {
+    const calls = { openSettings: 0, refresh: 0 };
+    return {
+      calls,
+      deps: {
+        openSettings: () => calls.openSettings++,
+        refresh: () => calls.refresh++,
+      },
+    };
+  };
+
+  test("app menu: Settings sits in the macOS app menu on CmdOrCtrl+,", () => {
+    const { deps: d, calls } = deps();
+    const template = buildAppMenuTemplate(d, { platform: "darwin" });
+    // macOS convention: Preferences lives in the application menu, not File.
+    const appSubmenu = template[0].submenu;
+    const settings = appSubmenu.find((item) => item.accelerator === "CmdOrCtrl+,");
+    assert.ok(settings, "the app menu carries the Settings item");
+    assert.match(settings.label, /^Settings/);
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+,").length, 1, "exactly one owner of the accelerator");
+    assert.strictEqual(byAccelerator(template, "F5").length, 0, "F5 must stay unclaimed — it is the renderer's own shortcut");
+    settings.click();
+    assert.strictEqual(calls.openSettings, 1, "the item forwards to openSettings");
+  });
+
+  test("app menu: Refresh sits in View on CmdOrCtrl+R, and nothing else claims it", () => {
+    const { deps: d, calls } = deps();
+    const template = buildAppMenuTemplate(d, { platform: "darwin", devItems: true });
+    const view = template.find((item) => item.label === "View");
+    assert.ok(view, "a View menu exists");
+    const refresh = view.submenu.find((item) => item.label === "Refresh");
+    assert.strictEqual(refresh.accelerator, "CmdOrCtrl+R");
+    // The `reload` role would claim CmdOrCtrl+R too and shadow Refresh; only
+    // forceReload may sit next to the DevTools toggle.
+    assert.ok(
+      !flatten(template).some((item) => item.role === "reload"),
+      "the reload role must not be present — it would shadow Refresh",
+    );
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R").length, 1, "exactly one owner of the accelerator");
+    // F5 is the renderer's own shortcut (App.tsx), not a menu accelerator; a
+    // future item or role claiming it here would silently kill F5 refresh.
+    assert.strictEqual(byAccelerator(template, "F5").length, 0, "F5 must stay unclaimed by the menu");
+    refresh.click();
+    assert.strictEqual(calls.refresh, 1, "the item forwards to refresh");
+  });
+
+  test("app menu: the replaced default's roles are kept (copy/paste and window keys survive)", () => {
+    const template = buildAppMenuTemplate(deps().deps, { platform: "darwin" });
+    const roles = flatten(template).map((item) => item.role);
+    // `close` is spelled out because the macOS windowMenu role omits it and this
+    // app has no File menu there — without it Cmd+W stops working.
+    for (const role of ["editMenu", "close", "minimize", "quit", "hide", "about"]) {
+      assert.ok(roles.includes(role), `the ${role} role must stay in the template`);
+    }
+  });
+
+  test("app menu: Windows/Linux put Settings in File, still on CmdOrCtrl+,", () => {
+    const template = buildAppMenuTemplate(deps().deps, { platform: "win32" });
+    assert.strictEqual(template[0].label, "File");
+    // There the windowMenu role already carries Close, so it stays a role.
+    assert.ok(flatten(template).some((item) => item.role === "windowMenu"));
+    const settings = template[0].submenu.find((item) => item.accelerator === "CmdOrCtrl+,");
+    assert.ok(settings, "File carries the Settings item");
+    // Refresh is platform-independent: CmdOrCtrl resolves to Control here.
+    // win32's own role accelerators (windowMenu's CmdOrCtrl+M, etc.) apply here,
+    // not the darwin table — hence the explicit platform key.
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R", "other").length, 1);
+    assert.strictEqual(byAccelerator(template, "F5", "other").length, 0, "F5 must stay unclaimed on Windows/Linux too");
+  });
+
+  test("app menu: DevTools items only in a dev run", () => {
+    const dev = flatten(buildAppMenuTemplate(deps().deps, { platform: "darwin", devItems: true }));
+    const packaged = flatten(buildAppMenuTemplate(deps().deps, { platform: "darwin", devItems: false }));
+    assert.ok(dev.some((item) => item.role === "toggleDevTools"), "a dev run keeps the DevTools toggle");
+    assert.ok(
+      !packaged.some((item) => item.role === "toggleDevTools"),
+      "a packaged run must not expose the DevTools toggle",
+    );
+  });
+
+  test("app menu: both actions surface the window, then forward their channel", () => {
+    const order = [];
+    const actions = createMenuActions({
+      focusWindow: () => order.push("focus"),
+      send: (channel) => order.push(channel),
+    });
+    actions.openSettings();
+    // The window comes first: with close-to-tray on, a hidden renderer would
+    // otherwise get the event with nothing on screen to show for it.
+    assert.deepStrictEqual(order, ["focus", "menu:open-settings"]);
+    order.length = 0;
+    actions.refresh();
+    // Refresh is deliberately symmetric with Settings — pressing it is a request
+    // to SEE fresh data, and a hidden refresh spends a GraphQL request for
+    // nothing visible.
+    assert.deepStrictEqual(order, ["focus", "menu:refresh"]);
+  });
+
+  test("app menu: the option defaults are the production call's shape", () => {
+    // The real call site passes no platform and omits devItems when packaged,
+    // so both fallbacks have to be exercised or a regression in either is
+    // invisible.
+    const template = buildAppMenuTemplate(deps().deps);
+    const items = flatten(template);
+    if (process.platform === "darwin") {
+      assert.ok(
+        !template.some((item) => item.label === "File"),
+        "macOS keeps Settings in the app menu, not a File menu",
+      );
+    } else {
+      assert.strictEqual(template[0].label, "File");
+    }
+    const platformKey = process.platform === "darwin" ? "darwin" : "other";
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+,", platformKey).length, 1);
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R", platformKey).length, 1);
+    assert.strictEqual(byAccelerator(template, "F5", platformKey).length, 0, "F5 must stay unclaimed");
+    assert.ok(
+      !items.some((item) => item.role === "toggleDevTools" || item.role === "forceReload"),
+      "an omitted devItems must mean no developer items",
+    );
+  });
+
+  test("app menu: installAppMenu actually installs a built menu", () => {
+    installed = null;
+    installAppMenu(deps().deps, { platform: "darwin" });
+    assert.ok(installed && Array.isArray(installed.template), "setApplicationMenu got a built menu");
+  });
+
+  for (const k of Object.keys(require.cache)) {
+    if (!preloaded.has(k)) delete require.cache[k];
+  }
+  delete require.cache[elPath];
+}
+
+// --- hotkey wiring: menu -> IPC -> renderer --------------------------------
+// The accelerators are useless unless the two channels line up on both sides of
+// the bridge, and neither end can prove that alone. The compiled main.js must
+// SEND on exactly the channels the compiled preload.js LISTENS on.
+test("hotkey wiring: main sends the menu channels preload subscribes to", () => {
+  const fs = require("node:fs");
+  const mainJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+  const menuJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/menu.js"), "utf8");
+  const preloadJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
+  assert.match(mainJs, /installAppMenu/, "main installs the application menu");
+  assert.match(mainJs, /createMenuActions/, "main builds the actions through the tested factory");
+  for (const channel of ["menu:open-settings", "menu:refresh"]) {
+    assert.ok(menuJs.includes(channel), `menu.js sends on ${channel}`);
+    assert.ok(preloadJs.includes(channel), `preload.js subscribes to ${channel}`);
+  }
+});
+
+// --- the F5 refresh decision ------------------------------------------------
+// F5 is the ONLY shortcut the renderer decides for itself, so the decision is a
+// pure predicate rather than a branch buried in an event handler: these cases
+// are what actually holds criterion 3, where a source-text guard cannot.
+{
+  const hotkeys = require(path.join(__dirname, "../dist/main/shared/hotkeys.js"));
+  const press = (over = {}) => ({
+    key: "F5",
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    repeat: false,
+    ...over,
+  });
+
+  test("shouldRefreshOnKey: bare F5 refreshes", () => {
+    assert.strictEqual(hotkeys.shouldRefreshOnKey(press()), true);
+  });
+
+  test("shouldRefreshOnKey: any modifier leaves the combination alone", () => {
+    for (const modifier of ["metaKey", "ctrlKey", "altKey", "shiftKey"]) {
+      assert.strictEqual(
+        hotkeys.shouldRefreshOnKey(press({ [modifier]: true })),
+        false,
+        `F5 with ${modifier} must not refresh`,
+      );
+    }
+  });
+
+  test("shouldRefreshOnKey: auto-repeat does not chain forced polls", () => {
+    // Holding the key down otherwise queues one forced poll after another: the
+    // renderer's in-flight guard only drops presses that land DURING a poll,
+    // and every poll spends from an hourly GraphQL budget shared with every
+    // other client on the same token.
+    assert.strictEqual(hotkeys.shouldRefreshOnKey(press({ repeat: true })), false);
+  });
+
+  test("shouldRefreshOnKey: other keys are not refresh", () => {
+    for (const key of ["F4", "F6", "r", "R", "Enter", "F50", ""]) {
+      assert.strictEqual(
+        hotkeys.shouldRefreshOnKey(press({ key })),
+        false,
+        `${JSON.stringify(key)} must not refresh`,
+      );
+    }
+  });
+
+  // --- the forced-refresh cooldown -------------------------------------------
+  // Shared by the header button, CmdOrCtrl+R and F5 — App.tsx's `refresh()`
+  // calls this before every one of them. `shouldRefreshOnKey` alone only
+  // screens an auto-repeated F5; a burst of distinct presses (double-tapping
+  // the button, or holding CmdOrCtrl+R, which carries no `repeat` flag) still
+  // needs this second gate or it chains forced polls against a shared hourly
+  // GraphQL budget.
+  test("shouldAllowForcedRefresh: refreshes once the cooldown has fully elapsed", () => {
+    assert.strictEqual(hotkeys.shouldAllowForcedRefresh(3000, 0, 3000), true);
+    assert.strictEqual(hotkeys.shouldAllowForcedRefresh(10_000, 5000, 3000), true);
+  });
+
+  test("shouldAllowForcedRefresh: a press inside the cooldown window is dropped", () => {
+    assert.strictEqual(hotkeys.shouldAllowForcedRefresh(1000, 0, 3000), false);
+    assert.strictEqual(hotkeys.shouldAllowForcedRefresh(2999, 0, 3000), false);
+  });
+
+  test("shouldAllowForcedRefresh: the very first refresh is never blocked", () => {
+    // lastForcedAt starts at 0 in App.tsx; a launch-time refresh at any
+    // realistic wall-clock `now` must not be mistaken for a repeat.
+    assert.strictEqual(hotkeys.shouldAllowForcedRefresh(Date.now(), 0, 3000), true);
+  });
+}
+
+// F5 is the second Refresh shortcut and is NOT a menu accelerator (one item
+// carries one accelerator), so it only works if the renderer keeps handling the
+// key itself. This guard fails if that listener is dropped in a refactor.
+test("hotkey wiring: the renderer still handles F5 itself", () => {
+  const raw = require("node:fs").readFileSync(
+    path.join(__dirname, "../src/renderer/src/App.tsx"),
+    "utf8",
+  );
+  // Comments blanked (offsets preserved) so a disabled/commented-out handler
+  // cannot satisfy the check the way a bare identifier match would — mirrors
+  // the renderer animation guard above, which exists for the same reason.
+  const src = raw
+    .replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length))
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+
+  assert.match(
+    src,
+    /addEventListener\("keydown",\s*onKeyDown\)/,
+    "App.tsx registers the F5 keydown listener",
+  );
+  assert.match(
+    src,
+    /removeEventListener\("keydown",\s*onKeyDown\)/,
+    "the F5 listener must be cleaned up on unmount/re-run, or repeated menu opens stack duplicate listeners",
+  );
+  // The handler body itself: decide via the predicate, prevent the browser's
+  // own F5 (reload), then actually refresh — a stub that dropped any one of
+  // these would pass a bare-identifier check but do the wrong thing.
+  const onKeyDown = src.match(/const onKeyDown = \(event: KeyboardEvent\) => \{([\s\S]*?)\};/);
+  assert.ok(onKeyDown, "App.tsx defines the onKeyDown handler for F5");
+  assert.match(onKeyDown[1], /shouldRefreshOnKey\(event\)/, "the handler defers the F5 decision to the predicate");
+  assert.match(onKeyDown[1], /event\.preventDefault\(\)/, "the handler prevents the browser's own F5 reload");
+  assert.match(onKeyDown[1], /void refresh\(\)/, "the handler actually calls refresh()");
+
+  assert.match(
+    src,
+    /onOpenSettings\(\(\) => setView\("settings"\)\)/,
+    "App.tsx subscribes to the menu's Settings event and switches the view",
+  );
+  assert.match(
+    src,
+    /onRefreshRequest\(\(\) => void refresh\(\)\)/,
+    "App.tsx subscribes to the menu's Refresh event and actually refreshes",
+  );
+});
 
 // --- defaultSettings ---------------------------------------------------------
 test("defaultSettings: empty + 60s + toggles", () => {
@@ -1180,6 +1655,145 @@ test("mapPr.viewerApproved: someone else's approval is not yours", () =>
   assert.strictEqual(github.mapPr(rawPr(), "GH", [], "someone-else").viewerApproved, false));
 test("mapPr.viewerApproved: false when the viewer is unknown", () =>
   assert.strictEqual(github.mapPr(rawPr(), "GH", [], null).viewerApproved, false));
+
+// --- myReReviewDue: your change request is blocking, and it's your move -----
+// The mirror of viewerApproved, and the one attention signal that must survive
+// being looked at: the merge stays blocked until you re-review, and GitHub asks
+// nobody. Author action is required, so the flag stays false while the ball is
+// still with them. See issue #14.
+const REVIEWED_AT = "2026-07-07T10:00:00Z";
+const myChangeRequest = { ...changesRequestedByRev, submittedAt: REVIEWED_AT };
+const myApproval = {
+  author: { __typename: "User", login: "rev", avatarUrl: "" },
+  state: "APPROVED",
+  submittedAt: REVIEWED_AT,
+};
+const commitAt = (at) => ({
+  nodes: [{ commit: { pushedDate: at, committedDate: at, statusCheckRollup: null } }],
+});
+// `comments(last: 1)` — one node per thread, the most recent comment on it.
+const thread = (isResolved, login, createdAt) => ({
+  isResolved,
+  comments: { totalCount: 1, nodes: [{ author: { login }, createdAt }] },
+});
+const reReviewDue = (overrides, viewer = "rev") =>
+  github.mapPr(
+    rawPr({ latestOpinionatedReviews: { nodes: [myChangeRequest] }, ...overrides }),
+    "GH",
+    [],
+    viewer,
+  ).myReReviewDue;
+
+test("mapPr.myReReviewDue: a push after your change request puts it back on you", () =>
+  assert.strictEqual(reReviewDue({ commits: commitAt("2026-07-07T11:00:00Z") }), true));
+test("mapPr.myReReviewDue: the author answering and leaving nothing unresolved counts too", () =>
+  assert.strictEqual(
+    reReviewDue({ reviewThreads: { nodes: [thread(true, "auth", "2026-07-07T11:30:00Z")] } }),
+    true,
+  ));
+// The discriminating case for that predicate: it must be the PR AUTHOR, not
+// merely somebody other than you. A co-reviewer or a bot getting the last word
+// says nothing about the author having done the work, and every other fixture
+// here uses "auth" — which is also the fixture's author — so without this the
+// narrowing is untestable and a future edit could widen it back unnoticed.
+test("mapPr.myReReviewDue: a bot or third reviewer replying last is not the author acting", () =>
+  assert.strictEqual(
+    reReviewDue({ reviewThreads: { nodes: [thread(true, "copilot", "2026-07-07T11:30:00Z")] } }),
+    false,
+  ));
+// The body-only trap: such a review has no threads, so "nothing unresolved" is
+// true from the instant you submit it. Without the author-acted requirement the
+// card would light up while the ball is still with them.
+test("mapPr.myReReviewDue: a change request with no threads and no push stays with the author", () =>
+  assert.strictEqual(reReviewDue({}), false));
+test("mapPr.myReReviewDue: a push predating your review is not a response to it", () =>
+  assert.strictEqual(reReviewDue({ commits: commitAt("2026-07-07T09:00:00Z") }), false));
+test("mapPr.myReReviewDue: a reply while another thread is still open is the author's turn", () =>
+  assert.strictEqual(
+    reReviewDue({
+      reviewThreads: {
+        nodes: [
+          thread(true, "auth", "2026-07-07T11:30:00Z"),
+          thread(false, "auth", "2026-07-07T11:31:00Z"),
+        ],
+      },
+    }),
+    false,
+  ));
+// Resolving without answering says nothing about whether the point was handled,
+// and nothing else moved — deliberately silent, documented rather than fixed.
+test("mapPr.myReReviewDue: threads resolved with your own comment last stays false", () =>
+  assert.strictEqual(
+    reReviewDue({ reviewThreads: { nodes: [thread(true, "rev", "2026-07-07T09:30:00Z")] } }),
+    false,
+  ));
+// `.some()`, not `.every()`: a thread you answered last must not mask the
+// author's replies on the others.
+test("mapPr.myReReviewDue: your own last word on one thread doesn't hide the author's on another", () =>
+  assert.strictEqual(
+    reReviewDue({
+      reviewThreads: {
+        nodes: [
+          thread(true, "rev", "2026-07-07T09:30:00Z"),
+          thread(true, "auth", "2026-07-07T11:30:00Z"),
+        ],
+      },
+    }),
+    true,
+  ));
+test("mapPr.myReReviewDue: false once you approve on the re-review", () =>
+  assert.strictEqual(
+    reReviewDue({
+      latestOpinionatedReviews: { nodes: [myApproval] },
+      commits: commitAt("2026-07-07T11:00:00Z"),
+    }),
+    false,
+  ));
+test("mapPr.myReReviewDue: someone else's change request is not yours to clear", () =>
+  assert.strictEqual(
+    reReviewDue({ commits: commitAt("2026-07-07T11:00:00Z") }, "someone-else"),
+    false,
+  ));
+test("mapPr.myReReviewDue: false when the viewer is unknown", () =>
+  assert.strictEqual(reReviewDue({ commits: commitAt("2026-07-07T11:00:00Z") }, null), false));
+// A review whose submittedAt is absent gives nothing to compare the push
+// against; false rather than a guess.
+test("mapPr.myReReviewDue: false when your review carries no timestamp", () =>
+  assert.strictEqual(
+    reReviewDue({
+      latestOpinionatedReviews: { nodes: [changesRequestedByRev] },
+      commits: commitAt("2026-07-07T11:00:00Z"),
+    }),
+    false,
+  ));
+// A plain "Comment" review never lands in latestOpinionatedReviews, so it can't
+// replace your change request — which is right: the merge is still blocked. At
+// the mapPr level such a re-review is therefore only two things: your change
+// request still standing, plus your own later comments on the threads. That is
+// exactly this fixture, so it also pins that your own later word doesn't clear
+// the signal. Non-obvious enough to pin, so nobody "fixes" it into clearing it.
+test("mapPr.myReReviewDue: a comment-only re-review does NOT clear it, own later comments included", () =>
+  assert.strictEqual(
+    reReviewDue({
+      commits: commitAt("2026-07-07T11:00:00Z"),
+      reviewThreads: { nodes: [thread(false, "rev", "2026-07-07T12:00:00Z")] },
+    }),
+    true,
+  ));
+// The other direction of the same timestamp comparison: a change request you
+// submitted AFTER the last push starts the clock over — nothing has answered it
+// yet, so the ball is with the author again.
+test("mapPr.myReReviewDue: a fresh change request clears it", () =>
+  assert.strictEqual(
+    reReviewDue({
+      latestOpinionatedReviews: {
+        nodes: [{ ...changesRequestedByRev, submittedAt: "2026-07-07T12:00:00Z" }],
+      },
+      commits: commitAt("2026-07-07T11:00:00Z"),
+      reviewThreads: { nodes: [thread(false, "auth", "2026-07-07T11:30:00Z")] },
+    }),
+    false,
+  ));
 // --- issue-key: the card's Jira link -------------------------------------
 // Returns null wherever a link can't be built, because the badge IS the link:
 // the card renders nothing rather than a dead one.
@@ -1939,6 +2553,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     lastCommitPushedAt: "2026-07-07T00:00:00Z",
     roles: ["reviewer"],
     viewerHasReviewed: true,
+    myReReviewDue: false,
     failingChecks: [],
     hasUnaddressedChangeRequest: false,
     hasUnaddressedComments: false,
@@ -2214,6 +2829,36 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       await state.applyActivity([pushed], file, { trackComments: true });
       assert.strictEqual(pushed.returnedToMe, true);
       assert.strictEqual(pushed.needsAttention, true);
+    }));
+
+  // …with one exception, and it's the whole point of issue #14: your own change
+  // request blocks the merge until you re-review, and nothing on GitHub will ask
+  // you. That is a state, not activity, so — unlike returnedToMe — marking the
+  // card seen must not clear it.
+  await atest("applyActivity.needsAttention: a due re-review wakes a reviewed PR with nothing new", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewedPr({ myReReviewDue: true })], file, { trackComments: true }); // baseline
+      const same = reviewedPr({ myReReviewDue: true });
+      await state.applyActivity([same], file, { trackComments: true });
+      assert.strictEqual(same.returnedToMe, false); // nothing moved since the snapshot
+      assert.strictEqual(same.needsAttention, true); // …yet it's still your move
+    }));
+
+  await atest("applyActivity.needsAttention: viewing the card does not clear a due re-review", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewedPr({ myReReviewDue: true })], file, { trackComments: true }); // baseline
+      await state.markSeen(
+        [{ id: "PR_state_1", comments: 2, updatedAt: "2026-07-07T00:00:00Z", lastCommitPushedAt: "2026-07-07T00:00:00Z" }],
+        file,
+        { trackComments: true },
+      );
+      const seen = reviewedPr({ myReReviewDue: true });
+      await state.applyActivity([seen], file, { trackComments: true });
+      // Asserted first: the passive branch is `returnedToMe || myReReviewDue`, so
+      // without pinning this to false the test could pass through the wrong term
+      // while the behaviour it guards had regressed.
+      assert.strictEqual(seen.returnedToMe, false);
+      assert.strictEqual(seen.needsAttention, true);
     }));
 
   // The role, not `viewerHasReviewed`, is what proves engagement: a plain
@@ -3050,6 +3695,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.notStrictEqual(
       poller.hashSnapshot(hsnap({ viewerApproved: false })),
       poller.hashSnapshot(hsnap({ viewerApproved: true })),
+    ));
+  // Same blind spot as viewerApproved — read by the view, not the notifier — with
+  // an extra reason it needs its own tuple entry: on a PR that already needs
+  // attention through returnedToMe this flag flips WITHOUT moving
+  // needsAttention, so nothing else in the tuple would carry the delta and the
+  // card accent plus the action-sort rank would lag a whole poll tick.
+  test("hashSnapshot: a myReReviewDue-only delta changes the hash", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ myReReviewDue: false })),
+      poller.hashSnapshot(hsnap({ myReReviewDue: true })),
+    ));
+  test("hashSnapshot: a myReReviewDue delta re-emits even while needsAttention stays true", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ needsAttention: true, myReReviewDue: false })),
+      poller.hashSnapshot(hsnap({ needsAttention: true, myReReviewDue: true })),
     ));
   test("hashSnapshot: identical PR fields hash equal, ignoring fetchedAt (no spurious re-emit)", () =>
     assert.strictEqual(

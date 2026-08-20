@@ -41,6 +41,20 @@ const api: PrManagerApi = {
       ipcRenderer.removeListener("update-status", handler);
     };
   },
+  onOpenSettings: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on("menu:open-settings", handler);
+    return () => {
+      ipcRenderer.removeListener("menu:open-settings", handler);
+    };
+  },
+  onRefreshRequest: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on("menu:refresh", handler);
+    return () => {
+      ipcRenderer.removeListener("menu:refresh", handler);
+    };
+  },
   onNotifySound: (listener) => {
     const handler = () => listener();
     ipcRenderer.on("notify-sound", handler);

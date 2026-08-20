@@ -5,6 +5,7 @@ import { PrCard } from "./components/PrCard";
 import { SettingsScreen } from "./components/Settings";
 import { cn, relativeTime } from "./format";
 import { playNotifySound } from "./notify-sound";
+import { shouldAllowForcedRefresh, shouldRefreshOnKey } from "../../shared/hotkeys";
 import {
   activeFilterCount,
   baselineStats,
@@ -30,6 +31,12 @@ import type {
 
 type SortKey = "action" | "waiting" | "active" | "newest";
 type GroupMode = "none" | "repo" | "issue" | "parent";
+
+// Minimum time between forced polls from `refresh()`, regardless of trigger.
+// Short enough that a deliberate second press barely notices, long enough that
+// a burst of presses (a fast double-tap, or CmdOrCtrl+R held) collapses to one
+// network round trip instead of a chain of them.
+const REFRESH_COOLDOWN_MS = 3000;
 
 const SORT_LABELS: Record<SortKey, string> = {
   action: "Needs my action",
@@ -61,7 +68,10 @@ const ROLE_FILTERS = Object.keys(ROLE_FILTER_LABELS) as RoleFilter[];
 function actionRank(pr: PullRequest): number {
   const isReviewer = pr.roles.includes("reviewer");
   if (isReviewer && pr.lastSeenAt === null) return 0;
-  if (pr.returnedToMe) return 1;
+  // Ranked with returnedToMe: both mean "your move on someone else's PR", and a
+  // due re-review is blocking a merge, so it must not sort below plain reviewer
+  // duty that nobody is waiting on yet.
+  if (pr.returnedToMe || pr.myReReviewDue) return 1;
   if (isReviewer) return 2;
   if (prSignal(pr) === "blocked") return 3;
   return 4;
@@ -165,6 +175,14 @@ export function App() {
   const [loading, setLoading] = useState(false);
   const [tick, setTick] = useState(0);
   const fetchingRef = useRef(false);
+  // Guards `refresh()` against rapid repeats — the menu's CmdOrCtrl+R, a held
+  // F5 (F5 itself excludes OS auto-repeat, but nothing stops fast manual taps),
+  // and the header button all end up here. `fetchingRef` alone only blocks a
+  // press that lands *during* a poll; it admits the next one the instant a poll
+  // finishes, so a burst of presses would still chain forced polls — each one
+  // bypasses per-host spacing and spends from an hourly GraphQL budget shared
+  // with every other client on the same token.
+  const lastForcedRefreshRef = useRef(0);
   const [whatsNew, setWhatsNew] = useState<{ version: string; url: string } | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
 
@@ -227,9 +245,14 @@ export function App() {
     }
   }, [applySnapshot]);
 
-  // Manual "Refresh": force an immediate poll in the main process.
+  // Manual "Refresh": force an immediate poll in the main process. Shared by
+  // the header button, the menu's CmdOrCtrl+R and the F5 handler, so the
+  // cooldown below applies uniformly no matter which one fired it.
   const refresh = useCallback(async () => {
     if (fetchingRef.current) return;
+    const now = Date.now();
+    if (!shouldAllowForcedRefresh(now, lastForcedRefreshRef.current, REFRESH_COOLDOWN_MS)) return;
+    lastForcedRefreshRef.current = now;
     fetchingRef.current = true;
     setLoading(true);
     try {
@@ -346,6 +369,37 @@ export function App() {
       setGroupBy("repo");
     }
   }, [jiraStatus, groupBy]);
+
+  // Keyboard shortcuts. The accelerators themselves live in the application
+  // menu (main process), which is what makes them work no matter which element
+  // has focus and shows the user what they are; the menu forwards them here.
+  useEffect(() => window.api.onOpenSettings(() => setView("settings")), []);
+  // Suppressed on the Settings screen: a refresh there would spend a GraphQL
+  // request and apply the snapshot behind a screen that shows none of it — no
+  // feedback that anything happened. Leaving Settings first was considered and
+  // rejected: unmounting it would discard an unsaved edit (a half-typed Jira
+  // token, an in-progress interval change).
+  useEffect(() => {
+    if (view === "settings") return;
+    return window.api.onRefreshRequest(() => void refresh());
+  }, [refresh, view]);
+
+  // F5 is the second Refresh shortcut. It is handled here rather than in the
+  // menu because one menu item carries exactly one accelerator, and a hidden
+  // duplicate item's accelerator is not reliable across platforms. The decision
+  // itself (bare F5, no modifiers, no auto-repeat) lives in `shouldRefreshOnKey`
+  // so it can be unit-tested without a DOM. Suppressed on the Settings screen
+  // for the same reason as CmdOrCtrl+R above.
+  useEffect(() => {
+    if (view === "settings") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!shouldRefreshOnKey(event)) return;
+      event.preventDefault();
+      void refresh();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [refresh, view]);
 
   // Sound pings from the main process (only when the user has sound on but
   // native notifications off — otherwise the OS notification plays its sound).
