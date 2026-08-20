@@ -92,6 +92,24 @@ export const NARROW_CHIPS: readonly NarrowChip[] = [
   { key: "noReviews", flag: "noReviewsOnly", matches: (pr) => pr.hasNoReviews },
 ];
 
+/**
+ * Drops the filters the current settings have made unreachable, so a persisted
+ * preference can't survive as a filter whose chip is gone from the row.
+ *
+ * Today that is `newOnly` under `trackComments: false`: with the setting off no
+ * PR ever has `hasNewActivity` (see `applyActivity`), so a stored `newOnly: true`
+ * would filter the list down to nothing with nothing on screen to switch off —
+ * the one thing a filter must never do. Returns the same object when there is
+ * nothing to clear, so a caller can use it as an "is a reset needed" check.
+ */
+export function sanitizeFilterState(
+  state: FilterState,
+  { trackComments }: { trackComments: boolean },
+): FilterState {
+  if (trackComments || !state.newOnly) return state;
+  return { ...state, newOnly: false };
+}
+
 /** The `FilterState` flag each reveal chip toggles — the reveal counterpart of `NARROW_CHIPS[].flag`. */
 export const REVEAL_FLAG: Record<RevealKey, "showDrafts" | "showIgnored"> = {
   drafts: "showDrafts",

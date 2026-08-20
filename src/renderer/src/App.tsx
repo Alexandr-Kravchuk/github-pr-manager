@@ -15,6 +15,7 @@ import {
   isBaselinePr,
   narrowFacetCount,
   revealDelta,
+  sanitizeFilterState,
   type FilterState,
   type RoleFilter,
 } from "../../shared/pr-filter";
@@ -337,14 +338,6 @@ export function App() {
     }
   }, [config, host]);
 
-  // With comment tracking off nothing ever has new comments, so a persisted
-  // `New comments` filter would silently empty the list while its chip is gone
-  // from the row — the one thing a filter must never do. Same shape as the two
-  // effects around it: a stored preference the current config invalidates.
-  useEffect(() => {
-    if (config && !config.trackComments && newOnly) setNewOnly(false);
-  }, [config, newOnly]);
-
   // A persisted "parent" grouping is meaningless once Jira is disconnected —
   // fall back to grouping by repo.
   useEffect(() => {
@@ -436,6 +429,17 @@ export function App() {
       showIgnored,
     ],
   );
+
+  // A stored filter the current config invalidates — the `New comments` chip's
+  // flag under `trackComments: false`, which would otherwise empty the list with
+  // its chip gone from the row. The decision lives in `sanitizeFilterState`
+  // (unit-tested in `shared/pr-filter`); this only applies it. It sits after
+  // `filterState` because it reads it.
+  useEffect(() => {
+    if (!config) return;
+    const sanitized = sanitizeFilterState(filterState, { trackComments: config.trackComments });
+    if (sanitized !== filterState) setNewOnly(sanitized.newOnly);
+  }, [config, filterState]);
 
   // The standing "is there work for me" numbers: neither ignored nor drafts, and
   // deliberately independent of the filters.

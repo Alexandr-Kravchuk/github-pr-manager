@@ -1675,6 +1675,26 @@ test("activeFilterCount: every narrowing control at once", () =>
     3 + prFilter.NARROW_CHIPS.length,
   ));
 
+// --- pr-filter: sanitizeFilterState ----------------------------------------
+// The persisted-preference guard behind App.tsx's reset effect. With
+// `trackComments` off no PR ever has `hasNewActivity`, so a stored
+// `newOnly: true` would filter the list down to nothing with its chip no longer
+// in the row to switch off.
+test("sanitizeFilterState: tracking off clears a stored newOnly", () => {
+  const sanitized = prFilter.sanitizeFilterState(st({ newOnly: true }), { trackComments: false });
+  assert.strictEqual(sanitized.newOnly, false);
+  // Nothing else is touched — it is a reset of one flag, not of the filter row.
+  assert.deepStrictEqual(sanitized, { ...st({ newOnly: true }), newOnly: false });
+});
+test("sanitizeFilterState: nothing to clear returns the same object", () => {
+  // Identity is the signal the caller uses to decide whether to set state at all,
+  // so returning a fresh copy would re-render on every pass.
+  const off = st();
+  assert.strictEqual(prFilter.sanitizeFilterState(off, { trackComments: false }), off);
+  const on = st({ newOnly: true });
+  assert.strictEqual(prFilter.sanitizeFilterState(on, { trackComments: true }), on);
+});
+
 test("emptyStateKind: an empty fetch is not a filter story", () =>
   assert.strictEqual(prFilter.emptyStateKind(st(), 0), "no-prs"));
 test("emptyStateKind: all-hidden when only the reveal chips could help", () => {
@@ -1931,6 +1951,32 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       await state.applyActivity([back], file, true);
       assert.strictEqual(back.hasNewActivity, false);
       const next = reviewPr({ totalComments: 10 });
+      await state.applyActivity([next], file, true);
+      assert.strictEqual(next.hasNewActivity, true);
+    }));
+
+  await atest("applyActivity(trackComments=false): an unchanged comment count leaves the state file alone", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewPr()], file, false); // baseline written
+      const before = await fs.readFile(file, "utf8");
+      await state.applyActivity([reviewPr()], file, false); // nothing moved
+      assert.strictEqual(await fs.readFile(file, "utf8"), before, "an untracked tick must not rewrite the store");
+      // ...and a tick that does move the count writes, so the guard isn't just "never write".
+      await state.applyActivity([reviewPr({ totalComments: 3 })], file, false);
+      assert.notStrictEqual(await fs.readFile(file, "utf8"), before);
+    }));
+
+  await atest("applyActivity(trackComments=false): a shrinking comment count rebaselines downward", () =>
+    withTempStore(async (file) => {
+      // Deleted comments while tracking was off: the baseline follows the count
+      // either way (`!==`, not `>`), so re-enabling starts from what is actually
+      // there — not from a stale higher number that would swallow the next comment.
+      await state.applyActivity([reviewPr({ totalComments: 5 })], file, false);
+      await state.applyActivity([reviewPr({ totalComments: 1 })], file, false);
+      const back = reviewPr({ totalComments: 1 });
+      await state.applyActivity([back], file, true);
+      assert.strictEqual(back.hasNewActivity, false);
+      const next = reviewPr({ totalComments: 2 });
       await state.applyActivity([next], file, true);
       assert.strictEqual(next.hasNewActivity, true);
     }));
@@ -2613,6 +2659,72 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     p.stop();
   });
+
+  // --- poller: the trackComments setting reaches applyActivity ---------------
+  // The one call site where the setting meets the logic that writes
+  // hasNewActivity. `applyActivity`'s third parameter defaults to ON, so a
+  // dropped argument would silently restore comment tracking with every
+  // state-level test still green — those call applyActivity directly and never
+  // exercise the poller. This drives a real Poller over a real state file, so
+  // only the wiring can satisfy it.
+  await atest("Poller.tick: trackComments=false reaches applyActivity — the snapshot carries no new activity", () =>
+    withTempStore(async (file) => {
+      const snapshots = [];
+      let comments = 2;
+      let trackComments = false;
+      const mkPr = () => ({
+        id: "PR_track_1",
+        updatedAt: "2026-07-07T00:00:00Z",
+        lastCommitPushedAt: "2026-07-07T00:00:00Z",
+        totalComments: comments,
+        unresolvedThreads: 0,
+        ciState: "success",
+        reviewDecision: null,
+        hasHumanApproval: false,
+        hasNewActivity: false,
+        needsAttention: false,
+        failingChecks: [],
+        pendingChecks: [],
+        checks: [],
+        awaitingReview: false,
+        hasUnaddressedChangeRequest: false,
+        hasUnaddressedComments: false,
+        viewerHasReviewed: true,
+        roles: ["reviewed"],
+        isDraft: false,
+        isIgnored: false,
+        parentKey: null,
+        parentSummary: null,
+      });
+      const p = new poller.Poller({
+        loadSettings: () => ({ ...cfg.defaultSettings(), trackComments }),
+        toHostConfigs: () => [
+          { label: "up", graphqlUrl: "https://up.test/graphql", token: "t", repos: ["o/r"] },
+        ],
+        statePath: file,
+        ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),
+        appVersion: "test",
+        onSnapshot: (s) => snapshots.push(s),
+        onConfigError: () => {},
+        fetchHostFn: async () => ({ pullRequests: [mkPr()], rateLimit: null }),
+      });
+
+      await p.refresh(); // baseline tick at 2 comments
+      comments = 7; // comments landed while tracking is off
+      await p.refresh();
+      const off = snapshots[snapshots.length - 1].pullRequests[0];
+      assert.strictEqual(off.hasNewActivity, false, "trackComments=false must not reach the flag");
+      assert.strictEqual(off.returnedToMe, false, "nor claim the PR came back to you");
+
+      // Same poller, same state file, setting flipped on: the next comment counts.
+      trackComments = true;
+      comments = 8;
+      await p.refresh();
+      const on = snapshots[snapshots.length - 1].pullRequests[0];
+      assert.strictEqual(on.hasNewActivity, true, "trackComments=true must reach the flag");
+
+      p.stop();
+    }));
 
   await atest("stableJiraMessage: strips the variable detail after the error separator", () => {
     // Change-detection view of jiraHealth.message: a Jira HTTP error appends a

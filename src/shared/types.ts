@@ -128,12 +128,18 @@ export interface Settings {
   /** Light/dark appearance, or follow the OS. */
   theme: ThemePreference;
   /**
-   * Whether new comments are tracked at all. Off makes the dashboard blind to
-   * comment activity: `hasNewActivity` never gets set, so the `New comments`
-   * chip, the card badge with its `Mark as seen` button and the header stat all
-   * disappear, no filter reacts to comments any more, and `returnedToMe` is left
-   * with new pushes as its only trigger. For someone who reads comments in
-   * GitHub itself and doesn't want the dashboard to keep a second unread state.
+   * Whether an unread-comment count is kept per PR. Off drops that one channel:
+   * `hasNewActivity` never gets set, so the `New comments` chip, the card badge
+   * with its `Mark as seen` button, the header stat and the `newOnly` filter all
+   * go away, and `returnedToMe` is left with a new push as its only trigger.
+   *
+   * It is NOT a mute on everything comment-shaped, and the setting's wording must
+   * not promise that: a comment awaiting your reply (`hasUnaddressedComments`)
+   * and unresolved threads (`unresolvedThreads`) are untouched, so they still
+   * turn a card red, still count towards `needsAttention` and still notify.
+   * Those are reply mechanics — work you owe someone — not an unread marker. For
+   * someone who reads comments in GitHub itself and doesn't want the dashboard to
+   * keep a second unread state.
    */
   trackComments: boolean;
   /** Desktop-notification preferences. */

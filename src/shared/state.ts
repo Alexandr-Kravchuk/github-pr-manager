@@ -59,13 +59,17 @@ async function writeState(statePath: string, state: StateFile): Promise<void> {
  * doesn't light up on first run. Existing snapshots are not updated on read
  * (only mark-seen advances them).
  *
- * `trackComments: false` (the `trackComments` setting off) makes the whole
- * comment channel silent: `hasNewActivity` stays false for every PR, so the chip,
- * the card badge and every filter stop reacting to comments, and `returnedToMe`
- * is left with a new push as its only trigger. The stored comment count is then
- * kept CURRENT instead — that snapshot field has no reader while tracking is off,
- * and letting it go stale would turn re-enabling the setting into exactly the
- * "forest of NEW badges" the first-run baseline exists to prevent.
+ * `trackComments: false` (the `trackComments` setting off) drops the unread
+ * channel: `hasNewActivity` stays false for every PR, so the `New comments` chip,
+ * the card badge with its Mark-as-seen button and the `newOnly` filter go quiet,
+ * and `returnedToMe` is left with a new push as its only trigger. Only that one
+ * flag — a comment awaiting a reply and unresolved threads still feed
+ * `needsAttention` below, deliberately: they are work owed, not unread marks.
+ *
+ * The stored comment count is then kept CURRENT instead — that snapshot field has
+ * no reader while tracking is off, and letting it go stale would turn re-enabling
+ * the setting into exactly the "forest of NEW badges" the first-run baseline
+ * exists to prevent.
  */
 export async function applyActivity(
   prs: PullRequest[],
