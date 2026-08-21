@@ -7,6 +7,8 @@ import {
   DEFAULT_WINDOW_WIDTH,
   parseWindowState,
   sanitizeWindowBounds,
+  snapshotWindowState,
+  type GeometrySource,
   type SavedWindowState,
   type WindowBounds,
 } from "../shared/window-bounds";
@@ -42,28 +44,14 @@ export function windowOptionsFrom(saved: SavedWindowState | null): Partial<Windo
   return bounds;
 }
 
-/** The part of a window this module reads. */
-export interface GeometrySource {
-  isDestroyed(): boolean;
-  isMinimized(): boolean;
-  isMaximized(): boolean;
-  isFullScreen(): boolean;
-  getNormalBounds(): WindowBounds;
-}
-
 /**
- * Snapshots the window and writes it. `getNormalBounds()` rather than
- * `getBounds()`, so a maximized or full-screen window still records the size to
- * come back to; a minimized window is skipped because its bounds are not
- * meaningful on every platform.
+ * Snapshots the window and writes it. The decision of *what* is worth writing
+ * — and when a window cannot answer — lives in `snapshotWindowState`, which is
+ * pure and unit-tested; this only does the file write.
  */
 export function saveWindowState(window: GeometrySource | null): void {
-  if (!window || window.isDestroyed() || window.isMinimized()) return;
-  const state: SavedWindowState = {
-    bounds: window.getNormalBounds(),
-    isMaximized: window.isMaximized(),
-    isFullScreen: window.isFullScreen(),
-  };
+  const state = snapshotWindowState(window);
+  if (!state) return;
   try {
     const file = windowStatePath();
     fs.mkdirSync(path.dirname(file), { recursive: true });

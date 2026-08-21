@@ -4615,6 +4615,46 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
   });
 
+  // A hidden window is neither destroyed nor minimized — close-to-tray makes
+  // that the normal idle state, so without the visibility guard the second
+  // `close` (the real quit) would overwrite the good record saved on the way in.
+  const fakeWindow = (over = {}) => ({
+    isDestroyed: () => false,
+    isVisible: () => true,
+    isMinimized: () => false,
+    isMaximized: () => false,
+    isFullScreen: () => false,
+    getNormalBounds: () => ({ x: 10, y: 20, width: 1280, height: 860 }),
+    ...over,
+  });
+
+  test("snapshotWindowState: a visible window yields its normal bounds and flags", () => {
+    assert.deepStrictEqual(windowBounds.snapshotWindowState(fakeWindow()), {
+      bounds: { x: 10, y: 20, width: 1280, height: 860 },
+      isMaximized: false,
+      isFullScreen: false,
+    });
+  });
+
+  test("snapshotWindowState: hidden (close-to-tray) -> null, so the good record stands", () => {
+    assert.strictEqual(windowBounds.snapshotWindowState(fakeWindow({ isVisible: () => false })), null);
+  });
+
+  test("snapshotWindowState: destroyed / minimized / absent -> null", () => {
+    assert.strictEqual(windowBounds.snapshotWindowState(fakeWindow({ isDestroyed: () => true })), null);
+    assert.strictEqual(windowBounds.snapshotWindowState(fakeWindow({ isMinimized: () => true })), null);
+    assert.strictEqual(windowBounds.snapshotWindowState(null), null);
+  });
+
+  test("snapshotWindowState: maximized keeps the normal bounds, not the screen-sized ones", () => {
+    const state = windowBounds.snapshotWindowState(
+      fakeWindow({ isMaximized: () => true, isFullScreen: () => true }),
+    );
+    assert.deepStrictEqual(state.bounds, { x: 10, y: 20, width: 1280, height: 860 });
+    assert.strictEqual(state.isMaximized, true);
+    assert.strictEqual(state.isFullScreen, true);
+  });
+
   test("main.js wiring: window geometry is restored on create and saved on move/resize/close", () => {
     const src = require("node:fs").readFileSync(
       path.join(__dirname, "../dist/main/main/main.js"),
@@ -4628,7 +4668,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         `a ${evt} listener must persist the new geometry`,
       );
     }
-    assert.match(src, /flush\(\)/, "close must flush before the window can be hidden to tray");
+    // macOS quitAndInstall closes windows before `before-quit`, so the update
+    // path only records geometry if the flush hangs off `close` itself.
+    const closeHandler = /mainWindow\.on\("close",[\s\S]{0,400}?\}\);/.exec(src);
+    assert.ok(closeHandler, "the close handler must still be registered");
+    assert.match(closeHandler[0], /flush\(\)/, "close must flush before the window can be hidden to tray");
+    assert.ok(
+      closeHandler[0].indexOf("flush()") < closeHandler[0].indexOf("trayController.handleClose"),
+      "the flush must run before handleClose, which may hide the window",
+    );
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

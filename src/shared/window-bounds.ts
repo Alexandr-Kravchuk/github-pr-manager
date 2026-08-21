@@ -117,3 +117,37 @@ export function sanitizeWindowBounds(
   const y = Math.round(Math.min(Math.max(saved.y, work.y), Math.max(work.y, work.y + work.height - height)));
   return { x, y, width, height };
 }
+
+/** The part of a window the snapshot reads. */
+export interface GeometrySource {
+  isDestroyed(): boolean;
+  isVisible(): boolean;
+  isMinimized(): boolean;
+  isMaximized(): boolean;
+  isFullScreen(): boolean;
+  getNormalBounds(): WindowBounds;
+}
+
+/**
+ * Reads the geometry worth persisting, or null when the window cannot give a
+ * meaningful answer. Hidden counts as "no answer": close-to-tray makes
+ * hidden-but-alive the normal idle state, so the window is neither destroyed
+ * nor minimized while it sits in the tray, and the bounds it reports there
+ * would overwrite the good record saved on the way in. Minimized is skipped for
+ * the same reason.
+ *
+ * `getNormalBounds()` rather than `getBounds()`, with the maximized/full-screen
+ * flags kept separately — otherwise a maximized window persists screen-sized
+ * bounds as the size to come back to.
+ */
+export function snapshotWindowState(window: GeometrySource | null): SavedWindowState | null {
+  if (!window) return null;
+  if (window.isDestroyed() || !window.isVisible() || window.isMinimized()) return null;
+  const bounds = readBounds(window.getNormalBounds());
+  if (!bounds) return null;
+  return {
+    bounds,
+    isMaximized: window.isMaximized() === true,
+    isFullScreen: window.isFullScreen() === true,
+  };
+}
