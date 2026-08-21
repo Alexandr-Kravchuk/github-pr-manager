@@ -21,6 +21,7 @@ const jiraHealth = require(path.join(__dirname, "../dist/main/shared/jira-health
 const issueKey = require(path.join(__dirname, "../dist/main/shared/issue-key.js"));
 const prFilter = require(path.join(__dirname, "../dist/main/shared/pr-filter.js"));
 const singleInstance = require(path.join(__dirname, "../dist/main/main/single-instance.js"));
+const windowBounds = require(path.join(__dirname, "../dist/main/shared/window-bounds.js"));
 
 let passed = 0;
 let failed = 0;
@@ -4535,6 +4536,99 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.strictEqual(seen, loaded, "isPaused must receive the very object loadSettings returned");
     assert.strictEqual(seen.notifications.enabled, true);
     assert.strictEqual(snapshots.length, 0, "a paused tick must not emit a snapshot — the gate must suppress, not just be consulted");
+  });
+
+
+  // --- window geometry (shared/window-bounds.ts) ------------------------------
+  // Window position used to reset on every launch (nothing was persisted); the
+  // sanitizer is what keeps a restored position from landing off-screen.
+  const DISPLAY = (x, y, width, height) => ({ workArea: { x, y, width, height } });
+  const LAPTOP = [DISPLAY(0, 25, 1728, 1085)];
+
+  test("sanitizeWindowBounds: bounds on the display come back unchanged", () => {
+    const saved = { x: 100, y: 120, width: 1280, height: 860 };
+    assert.deepStrictEqual(windowBounds.sanitizeWindowBounds(saved, LAPTOP), saved);
+  });
+
+  test("sanitizeWindowBounds: null/garbage saved bounds -> null (use the default)", () => {
+    assert.strictEqual(windowBounds.sanitizeWindowBounds(null, LAPTOP), null);
+    assert.strictEqual(windowBounds.sanitizeWindowBounds({ x: NaN, y: 0, width: 1280, height: 860 }, LAPTOP), null);
+    assert.strictEqual(windowBounds.sanitizeWindowBounds({ x: 0, y: 0, width: 0, height: 860 }, LAPTOP), null);
+    assert.strictEqual(windowBounds.sanitizeWindowBounds({ x: 0, y: 0, width: 1280, height: 860 }, []), null);
+  });
+
+  test("sanitizeWindowBounds: a display that is gone -> null, not an off-screen window", () => {
+    // Saved on a second monitor to the right; only the laptop screen is left.
+    const saved = { x: 2200, y: 300, width: 1280, height: 860 };
+    assert.strictEqual(windowBounds.sanitizeWindowBounds(saved, LAPTOP), null);
+  });
+
+  test("sanitizeWindowBounds: a sliver on screen is treated as off-screen", () => {
+    const saved = { x: 1690, y: 300, width: 1280, height: 860 };
+    assert.strictEqual(windowBounds.sanitizeWindowBounds(saved, LAPTOP), null);
+  });
+
+  test("sanitizeWindowBounds: partially off-screen is pulled back inside the work area", () => {
+    const out = windowBounds.sanitizeWindowBounds({ x: 900, y: 900, width: 1280, height: 860 }, LAPTOP);
+    assert.ok(out, "a mostly-visible window keeps its position rather than being dropped");
+    assert.strictEqual(out.x + out.width <= 1728, true);
+    assert.strictEqual(out.y + out.height <= 25 + 1085, true);
+    assert.strictEqual(out.y >= 25, true, "must not slide under the menu bar");
+  });
+
+  test("sanitizeWindowBounds: a size below the window minimum is raised to it", () => {
+    const out = windowBounds.sanitizeWindowBounds({ x: 10, y: 40, width: 300, height: 200 }, LAPTOP);
+    assert.strictEqual(out.width, windowBounds.MIN_WINDOW_WIDTH);
+    assert.strictEqual(out.height, windowBounds.MIN_WINDOW_HEIGHT);
+  });
+
+  test("sanitizeWindowBounds: a size larger than the current display is clamped to it", () => {
+    const small = [DISPLAY(0, 0, 1440, 900)];
+    const out = windowBounds.sanitizeWindowBounds({ x: 0, y: 0, width: 2560, height: 1400 }, small);
+    assert.deepStrictEqual(out, { x: 0, y: 0, width: 1440, height: 900 });
+  });
+
+  test("sanitizeWindowBounds: picks the display holding most of the window", () => {
+    const two = [DISPLAY(0, 0, 1440, 900), DISPLAY(1440, 0, 1920, 1080)];
+    const out = windowBounds.sanitizeWindowBounds({ x: 1500, y: 100, width: 1280, height: 860 }, two);
+    assert.deepStrictEqual(out, { x: 1500, y: 100, width: 1280, height: 860 });
+  });
+
+  test("parseWindowState: missing/garbage store -> null (first run, never a throw)", () => {
+    assert.strictEqual(windowBounds.parseWindowState(null), null);
+    assert.strictEqual(windowBounds.parseWindowState("nope"), null);
+    assert.strictEqual(windowBounds.parseWindowState({}), null);
+    assert.strictEqual(windowBounds.parseWindowState({ bounds: { x: 1 } }), null);
+  });
+
+  test("parseWindowState: keeps maximized/full-screen flags even without usable bounds", () => {
+    const state = windowBounds.parseWindowState({ isMaximized: true });
+    assert.deepStrictEqual(state, { bounds: null, isMaximized: true, isFullScreen: false });
+  });
+
+  test("parseWindowState: rounds bounds and defaults the flags to false", () => {
+    const state = windowBounds.parseWindowState({ bounds: { x: 10.4, y: 20.6, width: 1280, height: 860 } });
+    assert.deepStrictEqual(state, {
+      bounds: { x: 10, y: 21, width: 1280, height: 860 },
+      isMaximized: false,
+      isFullScreen: false,
+    });
+  });
+
+  test("main.js wiring: window geometry is restored on create and saved on move/resize/close", () => {
+    const src = require("node:fs").readFileSync(
+      path.join(__dirname, "../dist/main/main/main.js"),
+      "utf8",
+    );
+    assert.match(src, /loadWindowState\)\(\)/, "createWindow must read the saved geometry");
+    assert.match(src, /windowOptionsFrom\)\(/, "the saved geometry must feed the BrowserWindow options");
+    for (const evt of ["resize", "move", "maximize", "unmaximize"]) {
+      assert.ok(
+        src.includes(`"${evt}"`),
+        `a ${evt} listener must persist the new geometry`,
+      );
+    }
+    assert.match(src, /flush\(\)/, "close must flush before the window can be hidden to tray");
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

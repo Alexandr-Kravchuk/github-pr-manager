@@ -37,6 +37,7 @@ import { createMenuActions, installAppMenu } from "./menu";
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
 import { acquireSingleInstanceLock, createWindowReadyGate } from "./single-instance";
+import { createWindowStateSaver, loadWindowState, windowOptionsFrom } from "./window-state";
 import { createTrayController } from "./tray";
 import {
   acknowledgeVersion,
@@ -385,9 +386,12 @@ function resolveWindowsAppId(): string {
 }
 
 function createWindow(): void {
+  // Size and position are restored from the last run. Without this the window
+  // jumps back to the centered default on every launch — most visibly right
+  // after an update, which is simply the restart the user notices.
+  const savedWindowState = loadWindowState();
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    ...windowOptionsFrom(savedWindowState),
     minWidth: 960,
     minHeight: 640,
     title: "PR Dashboard",
@@ -414,7 +418,27 @@ function createWindow(): void {
   // is shown again and the show-wake refresh catches it up. The three-way
   // close decision — hide / let a real quit through / no tray, so close as
   // usual — lives in `trayController.handleClose` and is unit-tested there.
-  mainWindow.on("close", (event) => trayController.handleClose(event));
+  if (savedWindowState?.isFullScreen) mainWindow.setFullScreen(true);
+  else if (savedWindowState?.isMaximized) mainWindow.maximize();
+
+  // Geometry is written on a debounce while the window is dragged/resized, and
+  // flushed on close — close-to-tray makes hidden-but-alive the normal idle
+  // state, so a save-only-on-quit design would lose the last position whenever
+  // the process is killed while hidden.
+  const windowStateSaver = createWindowStateSaver(() => mainWindow);
+  mainWindow.on("resize", () => windowStateSaver.schedule());
+  mainWindow.on("move", () => windowStateSaver.schedule());
+  mainWindow.on("maximize", () => windowStateSaver.schedule());
+  mainWindow.on("unmaximize", () => windowStateSaver.schedule());
+  mainWindow.on("enter-full-screen", () => windowStateSaver.schedule());
+  mainWindow.on("leave-full-screen", () => windowStateSaver.schedule());
+
+  mainWindow.on("close", (event) => {
+    // Snapshot before the close decision: `handleClose` may hide the window,
+    // and a hidden window's bounds are not reliable.
+    windowStateSaver.flush();
+    trayController.handleClose(event);
+  });
 
   mainWindow.on("closed", () => {
     mainWindow = null;

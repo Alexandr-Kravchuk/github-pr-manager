@@ -103,6 +103,21 @@ Three layers:
   in-progress edit (a half-typed Jira token) was rejected instead.
 - Settings never contain tokens; tokens are resolved per host via `gh` at fetch
   time (`config.ts`).
+- Window size/position persist in `userData/window-state.json`
+  (`main/window-state.ts`), **not** in `settings.json`: `loadSettings()` throws
+  `ConfigError` on an unexpected shape and the poller surfaces that, so a stray
+  geometry value must never be able to make the app look unconfigured. The
+  geometry rules are pure in `shared/window-bounds.ts` — the display list is a
+  parameter, since `screen.getAllDisplays()` is only valid after
+  `app.whenReady()` and passing it in is what makes the off-screen cases
+  unit-testable. Saved bounds are dropped (back to the centered default) when no
+  display they still intersect exists, so a window from a disconnected monitor
+  cannot come back unreachable. `getNormalBounds()` plus separate
+  `isMaximized`/`isFullScreen` flags — `getBounds()` on a maximized window would
+  persist screen-sized bounds as the "normal" size. Writes are debounced on
+  move/resize and **flushed on `close` before `trayController.handleClose`**:
+  close-to-tray may hide the window, and a hidden window's bounds are not
+  reliable.
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes
   `electron .` self-quit after the renderer loads (a non-interactive boot check).
 - **No always-running animation in the renderer.** An `infinite` CSS animation —
