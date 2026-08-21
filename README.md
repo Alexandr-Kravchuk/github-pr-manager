@@ -228,9 +228,16 @@ The unread-comment channel can be switched off in **Settings → Track new
 comments** (on by default), for reading comments in GitHub itself rather than
 keeping a second unread state here. With it off:
 
-- no ✦ **New comments** chip, card badge or **Mark as seen** button, and the
-  header stops counting them;
-- a new **push** is the only thing that brings a reviewed PR back to you;
+- **opening a PR changes nothing on the dashboard.** The view is derived from
+  live GitHub state rather than from a stored "last seen" snapshot, so what you
+  see before the click is already the true state — not one that quietly corrects
+  itself once you look. Nothing is recorded when you open a card;
+- a new **push** is what brings a reviewed PR back to you, and it is measured
+  against **your last review** rather than against the app's snapshot: a push you
+  have already reviewed never lights the card up, and one that came after your
+  review keeps it lit until you re-review. On a PR where you left only a plain
+  "Comment" review there is no review timestamp to measure against, so it stays
+  quiet;
 - a comment count that moves on its own no longer pushes a snapshot to the UI
   (a real new comment still does — GitHub bumps the PR's timestamp, which the
   card shows);
@@ -244,6 +251,8 @@ keeping a second unread state here. With it off:
   renders (it's a count, not an attention flag), and they still send a
   notification (that channel is separate).
 
-While the setting is off the stored comment count is kept current, so turning it
-back on starts from what is there now instead of replaying everything that
-landed in the meantime.
+While the setting is off the stored snapshot is kept current anyway — both the
+comment count and the last push — so turning it back on starts from what is
+there now instead of replaying everything that landed in the meantime. The flip
+side is deliberate: activity that arrives while the setting is off is absorbed
+silently and never announced later.

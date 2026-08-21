@@ -533,6 +533,7 @@ export function mapPr(
     roles,
     viewerHasReviewed,
     viewerApproved,
+    viewerReviewedAt,
     myReReviewDue,
     hasNoReviews,
     unresolvedThreads,

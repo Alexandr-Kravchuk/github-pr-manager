@@ -441,10 +441,12 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             <span className="block text-sm text-fg-secondary">Track new comments</span>
             <span className="block text-xs text-fg-faint">
               Keeps an unread count per PR. Off drops that channel — no &ldquo;New comments&rdquo;
-              chip, badge or &ldquo;Mark as seen&rdquo; button, no unread count in the header, and a
-              new push is the only thing that brings a PR back to you. A comment awaiting your
-              reply and unresolved threads also stop counting towards &ldquo;Need attention&rdquo;
-              (they still send a notification). For reading comments in GitHub itself.
+              chip, badge or &ldquo;Mark as seen&rdquo; button, and no unread count in the header.
+              A comment awaiting your reply and unresolved threads also stop counting towards
+              &ldquo;Need attention&rdquo; (they still send a notification). Off, the dashboard is
+              read from GitHub rather than from what you have already looked at, so opening a PR
+              changes nothing on it, and a PR comes back to you when the author pushes after your
+              review. For reading comments in GitHub itself.
             </span>
           </span>
         </label>

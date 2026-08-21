@@ -2635,6 +2635,185 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(pushed.returnedToMe, false);
     }));
 
+  // --- state: a push you already reviewed is not "returned to me" (tracking ON)
+  // `entry.lastCommitPushedAt` is written only on first encounter and by
+  // markSeen, so it goes stale whenever the app isn't polling, and a push from
+  // BEFORE your own review then read as new. With tracking ON the snapshot diff
+  // is still the signal, so the guard is what keeps that case quiet.
+  await atest("applyActivity.returnedToMe: a push that predates my own review does not return the PR", () =>
+    withTempStore(async (file) => {
+      // Baseline recorded while the newest commit was still 07-06 (stale snapshot).
+      const stale = reviewPr({ lastCommitPushedAt: "2026-07-06T00:00:00Z" });
+      await state.applyActivity([stale], file, { trackComments: true });
+      // Live: the author pushed at 07-07, but I reviewed at 07-08 — after it.
+      const seenIt = reviewPr({
+        lastCommitPushedAt: "2026-07-07T00:00:00Z",
+        viewerReviewedAt: "2026-07-08T00:00:00Z",
+      });
+      await state.applyActivity([seenIt], file, { trackComments: true });
+      assert.strictEqual(seenIt.returnedToMe, false, "I already reviewed that push");
+    }));
+
+  await atest("applyActivity.returnedToMe: a push AFTER my review still returns the PR (tracking on)", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewPr()], file, { trackComments: true }); // baseline at 07-07
+      const pushed = reviewPr({
+        lastCommitPushedAt: "2026-07-09T00:00:00Z",
+        viewerReviewedAt: "2026-07-08T00:00:00Z",
+      });
+      await state.applyActivity([pushed], file, { trackComments: true });
+      assert.strictEqual(pushed.returnedToMe, true, "genuinely new work since my review");
+    }));
+
+  await atest("applyActivity.returnedToMe: the guard leaves a comment-only reviewer alone (tracking on)", () =>
+    withTempStore(async (file) => {
+      // The documented 4-of-5 case: `reviewed-by:@me` matches a plain "Comment"
+      // review, which leaves viewerReviewedAt null. The guard must not silence it.
+      await state.applyActivity([reviewPr({ viewerReviewedAt: null })], file, { trackComments: true });
+      const pushed = reviewPr({ viewerReviewedAt: null, lastCommitPushedAt: "2026-07-08T00:00:00Z" });
+      await state.applyActivity([pushed], file, { trackComments: true });
+      assert.strictEqual(pushed.returnedToMe, true);
+    }));
+
+  // --- state: with tracking OFF the push question is answered from GitHub -----
+  // The snapshot is not consulted at all: `returnedToMe` becomes "did the author
+  // push after my last review?", a fact about the PR rather than about when this
+  // app last looked. That is what makes the pre-open view already correct.
+  await atest("applyActivity(trackComments=false): a push after my review returns the PR, stale snapshot or not", () =>
+    withTempStore(async (file) => {
+      const stale = reviewPr({ lastCommitPushedAt: "2026-07-06T00:00:00Z" });
+      await state.applyActivity([stale], file, { trackComments: false });
+      const pushed = reviewPr({
+        lastCommitPushedAt: "2026-07-09T00:00:00Z",
+        viewerReviewedAt: "2026-07-08T00:00:00Z",
+      });
+      await state.applyActivity([pushed], file, { trackComments: false });
+      assert.strictEqual(pushed.returnedToMe, true);
+    }));
+
+  await atest("applyActivity(trackComments=false): a push I already reviewed never returns the PR", () =>
+    withTempStore(async (file) => {
+      // The stale baseline that used to drive this is now irrelevant by design.
+      const stale = reviewPr({ lastCommitPushedAt: "2026-07-06T00:00:00Z" });
+      await state.applyActivity([stale], file, { trackComments: false });
+      const seenIt = reviewPr({
+        lastCommitPushedAt: "2026-07-07T00:00:00Z",
+        viewerReviewedAt: "2026-07-08T00:00:00Z",
+      });
+      await state.applyActivity([seenIt], file, { trackComments: false });
+      assert.strictEqual(seenIt.returnedToMe, false);
+    }));
+
+  await atest("applyActivity(trackComments=false): a comment-only reviewer gets no push signal", () =>
+    withTempStore(async (file) => {
+      // The stated price of the invariant: with no opinionated review of mine
+      // there is no live yardstick, so such a PR stays quiet while off.
+      await state.applyActivity([reviewPr({ viewerReviewedAt: null })], file, { trackComments: false });
+      const pushed = reviewPr({ viewerReviewedAt: null, lastCommitPushedAt: "2026-07-08T00:00:00Z" });
+      await state.applyActivity([pushed], file, { trackComments: false });
+      assert.strictEqual(pushed.returnedToMe, false);
+    }));
+
+  await atest("applyActivity(trackComments=false): the snapshot is kept current for both fields", () =>
+    withTempStore(async (file) => {
+      await state.applyActivity([reviewPr()], file, { trackComments: false });
+      const moved = reviewPr({ totalComments: 9, lastCommitPushedAt: "2026-07-09T00:00:00Z" });
+      await state.applyActivity([moved], file, { trackComments: false });
+      const stored = JSON.parse(await fs.readFile(file, "utf8"))["PR_state_1"];
+      assert.strictEqual(stored.comments, 9, "comment baseline resynced");
+      assert.strictEqual(stored.lastCommitPushedAt, "2026-07-09T00:00:00Z", "push baseline resynced");
+      // …so flipping the setting back on starts from now, with no replay.
+      const after = reviewPr({ totalComments: 9, lastCommitPushedAt: "2026-07-09T00:00:00Z" });
+      await state.applyActivity([after], file, { trackComments: true });
+      assert.strictEqual(after.hasNewActivity, false, "no comment flood on re-enable");
+      assert.strictEqual(after.returnedToMe, false, "no push flood on re-enable");
+    }));
+
+  // === THE INVARIANT ==========================================================
+  // With tracking off, opening a PR must not change the dashboard: the view
+  // already shows the true state instead of one that silently corrects itself on
+  // a glance. Asserted on both halves — the flags the renderer reads AND the
+  // state file, since a write is the only way a later tick could diverge.
+  await atest("INVARIANT(trackComments=false): opening a PR changes neither the flags nor the state file", () =>
+    withTempStore(async (file) => {
+      const pr = (o = {}) =>
+        reviewPr({
+          roles: ["reviewed"],
+          viewerReviewedAt: "2026-07-08T00:00:00Z",
+          lastCommitPushedAt: "2026-07-09T00:00:00Z",
+          totalComments: 9,
+          unresolvedThreads: 2,
+          hasUnaddressedComments: true,
+          ...o,
+        });
+      await state.applyActivity([pr()], file, { trackComments: false }); // baseline
+      const before = pr();
+      await state.applyActivity([before], file, { trackComments: false });
+      const fileBefore = await fs.readFile(file, "utf8");
+      const flags = (p) => ({
+        hasNewActivity: p.hasNewActivity,
+        returnedToMe: p.returnedToMe,
+        needsAttention: p.needsAttention,
+        lastSeenAt: p.lastSeenAt,
+      });
+
+      // Open the card, exactly as the renderer does.
+      await state.markSeen(
+        [
+          {
+            id: "PR_state_1",
+            comments: 9,
+            updatedAt: "2026-07-07T00:00:00Z",
+            lastCommitPushedAt: "2026-07-09T00:00:00Z",
+          },
+        ],
+        file,
+        { trackComments: false },
+      );
+
+      const after = pr();
+      await state.applyActivity([after], file, { trackComments: false });
+      assert.deepStrictEqual(flags(after), flags(before), "the dashboard must not move on a glance");
+      assert.strictEqual(
+        await fs.readFile(file, "utf8"),
+        fileBefore,
+        "markSeen must write nothing while tracking is off",
+      );
+      // And the state it shows is the correct one, not a stale latch.
+      assert.strictEqual(after.returnedToMe, true, "the push after my review is real work");
+    }));
+
+  // The live numbers off PR #96 (Creatio-Platform/creatio-ai-app-development-toolkit),
+  // the report this work came from: passive-reviewed, my CHANGES_REQUESTED at
+  // 07:51:57 landing AFTER the author's 07:38:22 commit, two threads still open
+  // (so myReReviewDue's both branches are false) and a stale snapshot baseline.
+  // It must be out of Need attention BEFORE the card is opened — under either
+  // setting, and for a different reason in each: the live comparison while off,
+  // the pushPredatesMyReview guard while on.
+  for (const trackComments of [false, true]) {
+    await atest(`applyActivity.needsAttention: PR #96's exact shape stays out of Need attention (tracking ${trackComments ? "on" : "off"})`, () =>
+      withTempStore(async (file) => {
+        const pr96 = (o = {}) =>
+          reviewPr({
+            roles: ["reviewed"],
+            viewerHasReviewed: true,
+            viewerReviewedAt: "2026-08-21T07:51:57Z",
+            myReReviewDue: false,
+            unresolvedThreads: 2,
+            lastCommitPushedAt: "2026-08-21T07:38:22Z",
+            ...o,
+          });
+        // Snapshot from before that commit — exactly the stale state on disk.
+        await state.applyActivity([pr96({ lastCommitPushedAt: "2026-08-20T11:31:46Z" })], file, {
+          trackComments,
+        });
+        const live = pr96();
+        await state.applyActivity([live], file, { trackComments });
+        assert.strictEqual(live.returnedToMe, false);
+        assert.strictEqual(live.needsAttention, false, "nothing is owed by me here");
+      }));
+  }
+
   await atest("markSeen then applyActivity: viewing sets lastSeenAt and re-arms the baseline", () =>
     withTempStore(async (file) => {
       await state.applyActivity([reviewPr({ viewerHasReviewed: false })], file, { trackComments: true }); // baseline
@@ -2672,10 +2851,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(more.needsAttention, false);
     }));
 
-  await atest("applyActivity(trackComments=false): a new push still returns the PR to you", () =>
+  await atest("applyActivity(trackComments=false): a push after my review returns the PR, comments still muted", () =>
     withTempStore(async (file) => {
+      // Was "a new push still returns the PR to you", keyed off the snapshot
+      // diff. The trigger is now the live comparison against my own review, so
+      // the yardstick is stated explicitly instead of coming from the baseline.
       await state.applyActivity([reviewPr()], file, { trackComments: false });
-      const pushed = reviewPr({ totalComments: 9, lastCommitPushedAt: "2026-07-08T00:00:00Z" });
+      const pushed = reviewPr({
+        totalComments: 9,
+        lastCommitPushedAt: "2026-07-08T00:00:00Z",
+        viewerReviewedAt: "2026-07-07T12:00:00Z",
+      });
       await state.applyActivity([pushed], file, { trackComments: false });
       assert.strictEqual(pushed.returnedToMe, true);
       assert.strictEqual(pushed.hasNewActivity, false);
@@ -2721,13 +2907,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(next.hasNewActivity, true);
     }));
 
-  await atest("markSeen(trackComments=false): a stale renderer count must not lower the baseline", () =>
+  await atest("markSeen(trackComments=false): a stale renderer count cannot lower the baseline", () =>
     withTempStore(async (file) => {
       // While tracking is off the tick stops pushing on a comment-only change
       // (hashSnapshot drops the count), so the renderer's copy lags. Opening the
-      // PR still posts it. If that stale, lower number were stored, turning
-      // tracking back on would replay those comments as new — and saving settings
-      // refreshes the poller immediately, so no intervening tick repairs it.
+      // PR still posts that stale number. It is now discarded outright — markSeen
+      // writes nothing while off — so re-enabling cannot replay those comments.
       await state.applyActivity([reviewPr()], file, { trackComments: false }); // baseline at 2
       await state.applyActivity([reviewPr({ totalComments: 9 })], file, { trackComments: false }); // resync to 9
       await state.markSeen(
@@ -2740,8 +2925,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       await state.applyActivity([back], file, { trackComments: true });
       assert.strictEqual(back.hasNewActivity, false, "re-enabling must not replay comments seen while off");
       assert.strictEqual(back.returnedToMe, false, "nor toast a return to you for them");
-      assert.strictEqual(typeof back.lastSeenAt, "string", "the view stamp is still recorded");
-      // The next real comment does count, so the guard didn't deafen the channel.
+      // No view stamp: while off, opening the card deliberately records nothing
+      // (see the INVARIANT case above). lastSeenAt therefore stays null.
+      assert.strictEqual(back.lastSeenAt, null, "no view stamp is written while off");
+      // The next real comment does count, so nothing deafened the channel.
       const next = reviewPr({ totalComments: 10 });
       await state.applyActivity([next], file, { trackComments: true });
       assert.strictEqual(next.hasNewActivity, true);
@@ -2765,14 +2952,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(more.hasNewActivity, true);
     }));
 
-  await atest("applyActivity + markSeen concurrently: neither loses the other's change", () =>
+  await atest("applyActivity + markSeen concurrently while off: the resync is not clobbered", () =>
     withTempStore(async (file) => {
-      // Both touch the same entry, and the off-path resync now writes on every
-      // tick where a count moved, so the two really do overlap in normal use.
-      // Each read-modify-write cycle runs as ONE chained task; with only the
-      // write chained, both would act on the same copy and whichever wrote last
-      // would erase the other's change. Asserting that BOTH changes survive pins
-      // the serialization without depending on which of the two lands first.
+      // While off there is exactly ONE writer — the resync — because markSeen is
+      // a no-op, so the lost-update race this pins can no longer even occur
+      // through markSeen. Kept as a regression test: if markSeen ever starts
+      // writing again while off, its stale renderer payload lands here and drags
+      // the baseline back to 2, which is what makes re-enabling replay comments.
       await state.applyActivity([reviewPr()], file, { trackComments: false }); // baseline at 2
       const resync = state.applyActivity([reviewPr({ totalComments: 9 })], file, {
         trackComments: false,
@@ -2787,11 +2973,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
       const after = reviewPr({ totalComments: 9 });
       await state.applyActivity([after], file, { trackComments: true });
-      // markSeen's change survived: the view stamp is there.
-      assert.strictEqual(typeof after.lastSeenAt, "string", "the view must not be erased");
-      // And so did the resync's: had the count been left at 2, turning tracking
-      // back on would read the 7 comments that landed while off as new.
       assert.strictEqual(after.hasNewActivity, false, "the resynced count must not be erased");
+    }));
+
+  await atest("applyActivity + markSeen concurrently while ON: the read-modify-write cycle is serialized", () =>
+    withTempStore(async (file) => {
+      // The overlap that still exists with tracking on: a PR's first encounter
+      // creating its baseline while the user clicks the card in the same tick.
+      // Each cycle must run as ONE chained task, or the file is written from a
+      // copy read before the other landed and one of the two writes vanishes.
+      const first = state.applyActivity([reviewPr()], file, { trackComments: true });
+      const viewed = state.markSeen(
+        [{ id: "PR_state_1", comments: 4, updatedAt: "2026-07-07T00:00:00Z", lastCommitPushedAt: "2026-07-07T00:00:00Z" }],
+        file,
+        { trackComments: true },
+      );
+      await Promise.all([first, viewed]);
+      // Whichever landed last, the file must be one complete entry, not a torn mix.
+      const stored = JSON.parse(await fs.readFile(file, "utf8"))["PR_state_1"];
+      assert.ok(stored, "the entry exists");
+      assert.strictEqual(typeof stored.comments, "number");
+      assert.strictEqual(typeof stored.seenAt, "string");
     }));
 
   // The extended claim, per the README/Settings-hint/docblock update: turning

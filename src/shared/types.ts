@@ -131,7 +131,7 @@ export interface Settings {
    * Whether an unread-comment count is kept per PR. Off drops that one channel:
    * `hasNewActivity` never gets set, so the `New comments` chip, the card badge
    * with its `Mark as seen` button, the header stat and the `newOnly` filter all
-   * go away, and `returnedToMe` is left with a new push as its only trigger.
+   * go away.
    *
    * It also mutes the other two comment-shaped signals that would otherwise
    * still light a card up: a comment awaiting your reply (`hasUnaddressedComments`)
@@ -140,6 +140,16 @@ export interface Settings {
    * `applyActivity` and `prSignal`. They still `notify` (that channel is
    * separate — see `notify.ts`), and they still count as work owed once the
    * setting is back on.
+   *
+   * And it changes WHERE the view comes from: while off, no displayed signal is
+   * derived from the stored seen-snapshot. `returnedToMe`'s push term becomes
+   * "the author pushed after my last review" ({@link viewerReviewedAt}) instead
+   * of "newer than my snapshot", and `markSeen` writes nothing — so opening a PR
+   * cannot change the dashboard, and what it shows before the click is already
+   * the true state rather than one that corrects itself on a glance. The price,
+   * accepted deliberately: a PR where the viewer left only a plain "Comment"
+   * review has no review timestamp to measure against and stays quiet, and the
+   * `returned_to_me` notification is limited to the same live condition.
    *
    * Two further consequences worth knowing before changing this: `prSignal`'s
    * `waiting` branch tests `!hasNewActivity`, so your own PR that is awaiting
@@ -285,6 +295,18 @@ export interface PullRequest {
    * supersedes it, or when branch protection dismisses the approval on a push.
    */
   viewerApproved: boolean;
+  /**
+   * When the current user submitted their latest opinionated review, or null if
+   * they never did (including the common "Comment"-only review — see
+   * {@link viewerHasReviewed}).
+   *
+   * Read by `returnedToMe` in `state.ts` to reject a push you have ALREADY
+   * reviewed: that flag otherwise compares the push only against the stored
+   * snapshot, which goes stale while the app isn't polling, so a push that
+   * landed *before* your review still read as "back in your court" and latched
+   * the card into Need attention until you opened it.
+   */
+  viewerReviewedAt: string | null;
   /**
    * true when YOUR change request still stands and the author has since acted
    * (pushed a new commit, or replied and left nothing unresolved) — the merge is
