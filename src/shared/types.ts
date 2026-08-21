@@ -133,11 +133,13 @@ export interface Settings {
    * with its `Mark as seen` button, the header stat and the `newOnly` filter all
    * go away, and `returnedToMe` is left with a new push as its only trigger.
    *
-   * It is NOT a mute on everything comment-shaped, and the setting's wording must
-   * not promise that: a comment awaiting your reply (`hasUnaddressedComments`)
-   * and unresolved threads (`unresolvedThreads`) are untouched, so they still
-   * turn a card red, still count towards `needsAttention` and still notify.
-   * Those are reply mechanics — work you owe someone — not an unread marker.
+   * It also mutes the other two comment-shaped signals that would otherwise
+   * still light a card up: a comment awaiting your reply (`hasUnaddressedComments`)
+   * and unresolved threads (`unresolvedThreads`) stop turning a card red and
+   * stop counting towards `needsAttention` while the setting is off — see
+   * `applyActivity` and `prSignal`. They still `notify` (that channel is
+   * separate — see `notify.ts`), and they still count as work owed once the
+   * setting is back on.
    *
    * Two further consequences worth knowing before changing this: `prSignal`'s
    * `waiting` branch tests `!hasNewActivity`, so your own PR that is awaiting

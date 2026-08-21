@@ -2346,10 +2346,11 @@ test("activeFilterCount: every narrowing control at once", () =>
   ));
 
 // --- pr-filter: prSignal under trackComments --------------------------------
-// The two card-colour promises the README and the `trackComments` docblock make.
-// `prSignal` reads `hasNewActivity` in two branches, so with the setting off (the
-// flag never set) the colours really do change — and that is a claim, not a side
-// effect, so it needs an assertion. Fixtures are the fields prSignal reads.
+// The card-colour promises the README and the `trackComments` docblock make.
+// `prSignal` reads `hasNewActivity`, `hasUnaddressedComments` and
+// `unresolvedThreads`, all gated by the same flag, so with the setting off
+// every comment-shaped signal must stop colouring the card — not just the
+// unread one. Fixtures are the fields prSignal reads.
 {
   const sigPr = (o = {}) => ({
     roles: ["author"],
@@ -2369,17 +2370,46 @@ test("activeFilterCount: every narrowing control at once", () =>
   });
 
   test("prSignal: your own awaiting-review PR with a new comment turns amber while tracking is on", () =>
-    assert.strictEqual(prFilter.prSignal(sigPr({ hasNewActivity: true })), "attention"));
+    assert.strictEqual(
+      prFilter.prSignal(sigPr({ hasNewActivity: true }), { trackComments: true }),
+      "attention",
+    ));
   test("prSignal: with tracking off (no flag set) the same PR keeps the grey waiting accent", () =>
     // What the README promises: nothing is being asked of you until a reviewer
     // actually blocks it, so the card stays quiet instead of turning amber.
-    assert.strictEqual(prFilter.prSignal(sigPr({ hasNewActivity: false })), "waiting"));
-  test("prSignal: an unresolved thread still colours the card with tracking off", () =>
-    // The other half of the promise: threads are work owed, and the amber branch
-    // ORs them with the unread flag, so muting the flag must not mute them.
     assert.strictEqual(
-      prFilter.prSignal(sigPr({ awaitingReview: false, hasNewActivity: false, unresolvedThreads: 2 })),
+      prFilter.prSignal(sigPr({ hasNewActivity: false }), { trackComments: false }),
+      "waiting",
+    ));
+  test("prSignal: an unresolved thread still colours the card with tracking on", () =>
+    assert.strictEqual(
+      prFilter.prSignal(sigPr({ awaitingReview: false, hasNewActivity: false, unresolvedThreads: 2 }), {
+        trackComments: true,
+      }),
       "attention",
+    ));
+  test("prSignal: an unresolved thread stops colouring the card with tracking off", () =>
+    // The extended promise: the setting mutes every comment-shaped signal, so an
+    // open thread no longer paints the card amber while it's off.
+    assert.strictEqual(
+      prFilter.prSignal(sigPr({ awaitingReview: false, hasNewActivity: false, unresolvedThreads: 2 }), {
+        trackComments: false,
+      }),
+      "idle",
+    ));
+  test("prSignal: an unaddressed comment stops blocking your own PR with tracking off", () =>
+    assert.strictEqual(
+      prFilter.prSignal(sigPr({ awaitingReview: false, hasUnaddressedComments: true }), {
+        trackComments: false,
+      }),
+      "idle",
+    ));
+  test("prSignal: an unaddressed comment still blocks your own PR with tracking on", () =>
+    assert.strictEqual(
+      prFilter.prSignal(sigPr({ awaitingReview: false, hasUnaddressedComments: true }), {
+        trackComments: true,
+      }),
+      "blocked",
     ));
 }
 
@@ -2764,13 +2794,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(after.hasNewActivity, false, "the resynced count must not be erased");
     }));
 
-  // Reply mechanics stay live with the setting off — the claim the README, the
-  // Settings hint and the docblock all make. `needsAttention` is computed inside
-  // the function the setting gates, so a widened gate would break that claim
-  // silently; the fixtures are authored PRs (the default `reviewer` role would
-  // make needsAttention true on its own, and a passive `reviewed` one reduces it
-  // to `returnedToMe`, so neither term would ever be reached).
-  await atest("applyActivity(trackComments=false): an unresolved thread still claims attention", () =>
+  // The extended claim, per the README/Settings-hint/docblock update: turning
+  // the setting off mutes EVERY comment-shaped signal, not just the unread one.
+  // `needsAttention` is computed inside the function the setting gates, so a
+  // narrowed gate would break that claim silently; the fixtures are authored
+  // PRs (the default `reviewer` role would make needsAttention true on its own,
+  // and a passive `reviewed` one reduces it to `returnedToMe`, so neither term
+  // would ever be reached).
+  await atest("applyActivity(trackComments=false): an unresolved thread no longer claims attention", () =>
     withTempStore(async (file) => {
       const threaded = (o = {}) =>
         reviewPr({ roles: ["author"], awaitingReview: false, unresolvedThreads: 3, ...o });
@@ -2778,17 +2809,40 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const more = threaded({ totalComments: 9 });
       await state.applyActivity([more], file, { trackComments: false });
       assert.strictEqual(more.hasNewActivity, false, "the unread channel is muted");
-      assert.strictEqual(more.needsAttention, true, "but a thread to resolve is work owed");
+      assert.strictEqual(more.needsAttention, false, "and so is an open thread, while the setting is off");
     }));
 
-  await atest("applyActivity(trackComments=false): a comment awaiting your reply still claims attention", () =>
+  await atest("applyActivity(trackComments=true): an unresolved thread still claims attention", () =>
+    withTempStore(async (file) => {
+      const threaded = (o = {}) =>
+        reviewPr({ roles: ["author"], awaitingReview: false, unresolvedThreads: 3, ...o });
+      await state.applyActivity([threaded()], file, { trackComments: true });
+      const more = threaded({ totalComments: 9 });
+      await state.applyActivity([more], file, { trackComments: true });
+      assert.strictEqual(more.needsAttention, true, "a thread to resolve is work owed");
+    }));
+
+  await atest(
+    "applyActivity(trackComments=false): a comment awaiting your reply no longer claims attention",
+    () =>
+      withTempStore(async (file) => {
+        const unanswered = (o = {}) =>
+          reviewPr({ roles: ["author"], awaitingReview: false, hasUnaddressedComments: true, ...o });
+        await state.applyActivity([unanswered()], file, { trackComments: false });
+        const more = unanswered({ totalComments: 9 });
+        await state.applyActivity([more], file, { trackComments: false });
+        assert.strictEqual(more.hasNewActivity, false);
+        assert.strictEqual(more.needsAttention, false);
+      }),
+  );
+
+  await atest("applyActivity(trackComments=true): a comment awaiting your reply still claims attention", () =>
     withTempStore(async (file) => {
       const unanswered = (o = {}) =>
         reviewPr({ roles: ["author"], awaitingReview: false, hasUnaddressedComments: true, ...o });
-      await state.applyActivity([unanswered()], file, { trackComments: false });
+      await state.applyActivity([unanswered()], file, { trackComments: true });
       const more = unanswered({ totalComments: 9 });
-      await state.applyActivity([more], file, { trackComments: false });
-      assert.strictEqual(more.hasNewActivity, false);
+      await state.applyActivity([more], file, { trackComments: true });
       assert.strictEqual(more.needsAttention, true);
     }));
 

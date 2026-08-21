@@ -369,15 +369,20 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
  *    accent from amber to green. Open threads and running CI still demote it,
  *    since those are unfinished work.
  *  - attention (amber): new comments, open threads, CI running.
+ *
+ * `trackComments` mirrors the same flag in `state.ts`'s `needsAttention`: off,
+ * `hasUnaddressedComments` and `unresolvedThreads` stop feeding the accent too,
+ * or a card excluded from "Need attention" by the setting would still paint
+ * itself red/amber for the exact signal the setting just muted.
  */
-export function prSignal(pr: PullRequest): PrSignal {
+export function prSignal(pr: PullRequest, { trackComments }: { trackComments: boolean }): PrSignal {
   const isAuthor = pr.roles.includes("author");
 
   if (
     isAuthor &&
     (pr.failingChecks.length > 0 ||
       pr.hasUnaddressedChangeRequest ||
-      pr.hasUnaddressedComments ||
+      (trackComments && pr.hasUnaddressedComments) ||
       pr.hasConflicts)
   ) {
     return "blocked";
@@ -398,11 +403,11 @@ export function prSignal(pr: PullRequest): PrSignal {
     pr.reviewDecision !== "CHANGES_REQUESTED" &&
     pr.ciState !== "failure" &&
     pr.ciState !== "pending" &&
-    pr.unresolvedThreads === 0
+    (!trackComments || pr.unresolvedThreads === 0)
   ) {
     return "approved";
   }
-  if (pr.hasNewActivity || pr.unresolvedThreads > 0 || pr.pendingChecks.length > 0) {
+  if (pr.hasNewActivity || (trackComments && pr.unresolvedThreads > 0) || pr.pendingChecks.length > 0) {
     return "attention";
   }
   return "idle";

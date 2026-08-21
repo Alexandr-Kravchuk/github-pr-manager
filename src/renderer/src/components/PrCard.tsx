@@ -14,6 +14,8 @@ interface Props {
   onToggleIgnore: (pr: PullRequest) => void;
   /** Hide the host/repo line (redundant inside a per-repo group). */
   hideRepo?: boolean;
+  /** Mirrors the `trackComments` setting — see `prSignal`. */
+  trackComments: boolean;
   /**
    * The configured Jira site, or null when Jira isn't set up — the issue-key
    * link is rendered only when a real URL can be built, so a user without Jira
@@ -31,8 +33,8 @@ const ACCENT: Record<PrSignal, string> = {
   idle: "border-l-line-strong",
 };
 
-function accentClass(pr: PullRequest): string {
-  return ACCENT[prSignal(pr)];
+function accentClass(pr: PullRequest, trackComments: boolean): string {
+  return ACCENT[prSignal(pr, { trackComments })];
 }
 
 function reviewLabel(decision: ReviewDecision): { text: string; cls: string } | null {
@@ -159,6 +161,7 @@ export function PrCard({
   onToggleIgnore,
   hideRepo = false,
   jiraBaseUrl = null,
+  trackComments,
 }: Props) {
   const review = reviewLabel(pr.reviewDecision);
   // Null unless both a site and a parsed key exist — the badge is the link, so
@@ -193,7 +196,7 @@ export function PrCard({
     <div
       className={cn(
         "rounded-lg border border-line border-l-4 p-4 transition-colors hover:bg-surface bg-surface/60",
-        accentClass(pr),
+        accentClass(pr, trackComments),
         // Revealed by the Ignored chip: on screen, but not part of the workload
         // the header counts — so it reads as set aside rather than as normal.
         pr.isIgnored && "opacity-60 hover:opacity-100",

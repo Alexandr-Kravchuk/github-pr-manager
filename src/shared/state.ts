@@ -81,12 +81,15 @@ async function updateState(
  * the single call site would then silently restore comment tracking with every
  * test here still green. Required means `tsc` reports it instead.
  *
- * `trackComments: false` (the `trackComments` setting off) drops the unread
- * channel: `hasNewActivity` stays false for every PR, so the `New comments` chip,
- * the card badge with its Mark-as-seen button and the `newOnly` filter go quiet,
- * and `returnedToMe` is left with a new push as its only trigger. Only that one
- * flag — a comment awaiting a reply and unresolved threads still feed
- * `needsAttention` below, deliberately: they are work owed, not unread marks.
+ * `trackComments: false` (the `trackComments` setting off) drops ALL
+ * comment-shaped signals from `needsAttention`: `hasNewActivity` stays false for
+ * every PR, so the `New comments` chip, the card badge with its Mark-as-seen
+ * button and the `newOnly` filter go quiet, `returnedToMe` is left with a new
+ * push as its only trigger, and a comment awaiting a reply (`hasUnaddressedComments`)
+ * or an unresolved thread (`unresolvedThreads`) no longer turns the card red
+ * either. The setting means "don't make me look at this dashboard for
+ * comments" — a thread that still needs a reply doesn't stop being real work,
+ * but it stops being THIS app's job to surface it while the setting is off.
  *
  * The stored comment count is then kept CURRENT instead — that snapshot field has
  * no reader while tracking is off, and letting it go stale would turn re-enabling
@@ -173,15 +176,20 @@ export async function applyActivity(
       // and marking the card seen must not clear that. Without it, a passive-
       // reviewed PR whose author has done the work goes quiet the first time you
       // open it and never speaks again — see issue #14.
+      //
+      // `hasUnaddressedComments` and `unresolvedThreads` are gated by
+      // `trackComments` too: without it, someone who turned the setting off to
+      // stop comment noise kept seeing PRs light up (and disappear the moment
+      // they replied on GitHub) for the exact channel they'd just muted.
       pr.needsAttention = isPassiveReviewed(pr)
         ? pr.returnedToMe || pr.myReReviewDue
         : pr.roles.includes("reviewer") ||
           pr.returnedToMe ||
           pr.failingChecks.length > 0 ||
           pr.hasUnaddressedChangeRequest ||
-          pr.hasUnaddressedComments ||
+          (trackComments && pr.hasUnaddressedComments) ||
           pr.hasNewActivity ||
-          (pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview));
+          (trackComments && pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview));
     }
 
     return mutated;

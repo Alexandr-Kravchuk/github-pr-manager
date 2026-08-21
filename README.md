@@ -237,9 +237,12 @@ keeping a second unread state here. With it off:
 - your own PR that is awaiting review and picks up a comment keeps the grey
   **waiting** accent instead of turning amber — nothing is being asked of you
   until a reviewer actually blocks it;
-- 💬 **unresolved comments** and a comment awaiting your reply are untouched:
-  they still colour the card, still count towards "needs attention" and still
-  notify. Those are work you owe someone, not unread marks.
+- 💬 **unresolved comments** and a comment awaiting your reply also stop
+  colouring the card and counting towards "needs attention" — the setting mutes
+  every comment-shaped signal that drives the accent and the "Need attention"
+  filter, not just the unread one. The 💬 thread-count badge itself still
+  renders (it's a count, not an attention flag), and they still send a
+  notification (that channel is separate).
 
 While the setting is off the stored comment count is kept current, so turning it
 back on starts from what is there now instead of replaying everything that

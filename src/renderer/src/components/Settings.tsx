@@ -443,8 +443,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               Keeps an unread count per PR. Off drops that channel — no &ldquo;New comments&rdquo;
               chip, badge or &ldquo;Mark as seen&rdquo; button, no unread count in the header, and a
               new push is the only thing that brings a PR back to you. A comment awaiting your
-              reply and unresolved threads still show up and still notify. For reading comments in
-              GitHub itself.
+              reply and unresolved threads also stop counting towards &ldquo;Need attention&rdquo;
+              (they still send a notification). For reading comments in GitHub itself.
             </span>
           </span>
         </label>

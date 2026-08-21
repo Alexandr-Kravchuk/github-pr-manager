@@ -65,7 +65,7 @@ const ROLE_FILTERS = Object.keys(ROLE_FILTER_LABELS) as RoleFilter[];
  * need your action soonest: a review requested of you that you haven't opened,
  * then PRs that came back to you after you engaged, then the rest.
  */
-function actionRank(pr: PullRequest): number {
+function actionRank(pr: PullRequest, trackComments: boolean): number {
   const isReviewer = pr.roles.includes("reviewer");
   if (isReviewer && pr.lastSeenAt === null) return 0;
   // Ranked with returnedToMe: both mean "your move on someone else's PR", and a
@@ -73,7 +73,7 @@ function actionRank(pr: PullRequest): number {
   // duty that nobody is waiting on yet.
   if (pr.returnedToMe || pr.myReReviewDue) return 1;
   if (isReviewer) return 2;
-  if (prSignal(pr) === "blocked") return 3;
+  if (prSignal(pr, { trackComments }) === "blocked") return 3;
   return 4;
 }
 
@@ -513,11 +513,11 @@ export function App() {
   // predicate as `baselineStats`, so the mascot and the numbers can't disagree:
   // any red PR → sad, else a requested review → curious, else asleep.
   const buddyMood = useMemo<BuddyMood>(() => {
-    const signals = allPrs.filter(isBaselinePr).map(prSignal);
+    const signals = allPrs.filter(isBaselinePr).map((pr) => prSignal(pr, { trackComments }));
     if (signals.includes("blocked")) return "sad";
     if (signals.includes("myReview")) return "curious";
     return "sleeping";
-  }, [allPrs]);
+  }, [allPrs, trackComments]);
 
   const filtered = useMemo(() => filterPrs(allPrs, filterState), [allPrs, filterState]);
 
@@ -546,7 +546,11 @@ export function App() {
     switch (sortBy) {
       case "action":
         // Needs my action first, ties broken by most recent activity.
-        arr.sort((a, b) => actionRank(a) - actionRank(b) || b.updatedAt.localeCompare(a.updatedAt));
+        arr.sort(
+          (a, b) =>
+            actionRank(a, trackComments) - actionRank(b, trackComments) ||
+            b.updatedAt.localeCompare(a.updatedAt),
+        );
         break;
       case "waiting":
         // Longest-waiting first — the most stale, i.e. untouched the longest
@@ -561,7 +565,7 @@ export function App() {
         break;
     }
     return arr;
-  }, [filtered, sortBy]);
+  }, [filtered, sortBy, trackComments]);
 
   const groups = useMemo<Group[] | null>(() => {
     if (groupBy === "none") return null;
@@ -1057,6 +1061,7 @@ export function App() {
                         pr={pr}
                         hideRepo={groupBy === "repo"}
                         jiraBaseUrl={jiraStatus?.baseUrl ?? null}
+                        trackComments={trackComments}
                         onOpen={openPr}
                         onMarkSeen={(p) => postSeen([p])}
                         onToggleIgnore={toggleIgnore}
@@ -1075,6 +1080,7 @@ export function App() {
               key={pr.id}
               pr={pr}
               jiraBaseUrl={jiraStatus?.baseUrl ?? null}
+              trackComments={trackComments}
               onOpen={openPr}
               onMarkSeen={(p) => postSeen([p])}
               onToggleIgnore={toggleIgnore}

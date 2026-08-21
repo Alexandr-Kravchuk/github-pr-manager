@@ -8,7 +8,7 @@
  *
  * Cases: re-review-due, sad-ci, sad-changes, sad-comments, curious, mixed,
  * waiting, busy, approved, empty, draft-red, grid-many, grid-repos, grid-tall,
- * track-a/track-b (see below).
+ * track-a/track-b, track-thread (see below).
  *
  * `track-a`/`track-b` are a manual QA pair for the `trackComments` setting: the
  * same PR id at 2 vs. 3 comments with a real `updatedAt` bump between them
@@ -16,11 +16,18 @@
  * you switch on purpose) — switching between them simulates a genuine GitHub
  * comment landing. Combine with editing `settings.json`'s `trackComments` under
  * `--user-data-dir` to see the poller's own gate live: `hasNewActivity`/
- * `returnedToMe` flip only when tracking is on, `needsAttention` doesn't move
- * either way, and re-enabling after an off-path resync doesn't replay the
- * comments that landed while off. Unlike every other setting here,
- * `trackComments` is read from the REAL `settings.json` rather than pinned (see
- * `mockPollerOverrides`), specifically so this works without a rebuild.
+ * `returnedToMe` flip only when tracking is on, and re-enabling after an
+ * off-path resync doesn't replay the comments that landed while off. Unlike
+ * every other setting here, `trackComments` is read from the REAL
+ * `settings.json` rather than pinned (see `mockPollerOverrides`), specifically
+ * so this works without a rebuild.
+ *
+ * `track-thread` is the sibling QA fixture for the EXTENDED gate: an authored
+ * PR with an unresolved thread AND an unaddressed comment, neither pinned to
+ * `Date.now()`. With `trackComments` on it reads `blocked` (red) and claims
+ * "Need attention"; flip the setting off in the same `settings.json` and, on
+ * the next tick, it must go idle and drop out of "Need attention" — the two
+ * signals `needsAttention`/`prSignal` now gate alongside `hasNewActivity`.
  *
  * Notification transitions: switch `.prd-mock` from `notif-quiet` (baseline) to
  * `notif-ci` / `notif-changes` / `notif-approved` to drive a single field
@@ -323,6 +330,22 @@ const CASES: Record<string, () => PullRequest[]> = {
       updatedAt: "2026-08-20T11:00:00.000Z",
       lastCommitPushedAt: "2026-08-20T10:00:00.000Z",
       reviewers: [reviewerPending],
+    }),
+  ],
+  // QA fixture for the EXTENDED `trackComments` gate: an unresolved thread and
+  // an unaddressed comment on your own PR, not just a raw comment count. Not
+  // `awaitingReview` — that would route it into `waiting` before the
+  // blocked/attention branches this fixture exists to exercise are reached.
+  "track-thread": () => [
+    pr({
+      id: "mock-track-thread",
+      number: 502,
+      title: "My PR with an open thread nobody answered",
+      awaitingReview: false,
+      unresolvedThreads: 2,
+      hasUnaddressedComments: true,
+      updatedAt: "2026-08-20T10:00:00.000Z",
+      lastCommitPushedAt: "2026-08-20T10:00:00.000Z",
     }),
   ],
   empty: () => [],
