@@ -3171,12 +3171,19 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // Drives fetchHost against a stubbed transport and returns both the request it
   // sent and the PRs it produced. A fresh graphqlUrl per call: team discovery is
   // cached per host for 10 minutes and has no test-visible reset.
+  // `teams` is the list of team slugs the viewer belongs to (org `a`, matching
+  // the configured `a/b` repo, or `fetchHost` filters them out); `team0` holds
+  // the nodes the first team search returns.
   async function runFetchHost(searches) {
     const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
     let sent = null;
     global.fetch = async (url, init) => {
       if (url.includes("/user/teams")) {
-        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+        const teams = (searches.teams ?? []).map((slug) => ({
+          slug: slug.split("/")[1],
+          organization: { login: slug.split("/")[0] },
+        }));
+        return { ok: true, status: 200, statusText: "OK", json: async () => teams };
       }
       sent = JSON.parse(init.body);
       return {
@@ -3190,6 +3197,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
             authored: { nodes: searches.authored ?? [] },
             reviewing: { nodes: searches.reviewing ?? [] },
             reviewed: { nodes: searches.reviewed ?? [] },
+            team0: { nodes: searches.team0 ?? [] },
           },
         }),
       };
@@ -3241,6 +3249,35 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
     assert.strictEqual(result.pullRequests.length, 1);
     assert.ok(result.pullRequests[0].roles.includes("author"));
+  });
+
+  // A team review request matches your OWN PRs too, and a `reviewer` role there
+  // claims a review you can never submit: violet accent, "Reviewer" pill and a
+  // "Needs attention" count on a PR that is merely waiting for other people.
+  await atest("fetchHost: a team request on your own PR does not make you its reviewer", async () => {
+    const mine = rawPr({ id: "PR_mine_team", author: { login: "me", avatarUrl: "" } });
+    const { sent, result } = await runFetchHost({
+      teams: ["a/toolkit-contributors"],
+      authored: [mine],
+      team0: [mine],
+    });
+    // Without these two the assertion below would pass vacuously — no team
+    // search sent means the team branch of `addNodes` never runs at all.
+    assert.strictEqual(
+      sent.variables.teamQuery0,
+      "is:open is:pr repo:a/b team-review-requested:a/toolkit-contributors",
+    );
+    assert.ok(sent.query.includes("team0: search(query: $teamQuery0"));
+    assert.strictEqual(result.pullRequests.length, 1);
+    assert.deepStrictEqual(result.pullRequests[0].roles, ["author"]);
+  });
+
+  await atest("fetchHost: a team request on someone else's PR still makes you a reviewer", async () => {
+    const { result } = await runFetchHost({
+      teams: ["a/toolkit-contributors"],
+      team0: [rawPr({ id: "PR_theirs_team" })],
+    });
+    assert.deepStrictEqual(result.pullRequests[0].roles, ["reviewer"]);
   });
 
   global.fetch = realGithubFetch;

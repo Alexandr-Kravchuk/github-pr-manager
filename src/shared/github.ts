@@ -709,21 +709,35 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
   const byId = new Map<string, PullRequest>();
   const viewerLogin = json.data.viewer?.login ?? null;
 
+  // You cannot review your own PR, but a review requested of a TEAM you belong
+  // to matches `team-review-requested:` on your OWN pull requests as well — so
+  // the team searches were handing your authored PRs a `reviewer` role. That
+  // role is what paints the card violet (`prSignal` -> myReview), adds the
+  // "Reviewer" pill, and counts the PR into "Needs attention", i.e. it claimed a
+  // review from you that you can never submit. Keyed on the node's author rather
+  // than on an already-collected `author` role: the authored search is capped at
+  // `first: 25`, so your own PR can arrive from a team search with no entry yet,
+  // and it must still land as `author` (dropping it would lose the card).
+  const isOwnPr = (node: RawPr) =>
+    viewerLogin != null && node.author?.login.toLowerCase() === viewerLogin.toLowerCase();
+
   const addNodes = (nodes: Array<RawPr | Record<string, never>>, role: PrRole) => {
     for (const node of nodes) {
       if (!isRawPr(node)) continue;
+      const effectiveRole: PrRole = role === "reviewer" && isOwnPr(node) ? "author" : role;
       const existing = byId.get(node.id);
       if (existing) {
-        if (!existing.roles.includes(role)) existing.roles.push(role);
+        if (!existing.roles.includes(effectiveRole)) existing.roles.push(effectiveRole);
       } else {
-        byId.set(node.id, mapPr(node, host.label, [role], viewerLogin));
+        byId.set(node.id, mapPr(node, host.label, [effectiveRole], viewerLogin));
       }
     }
   };
 
   addNodes(json.data.authored.nodes, "author");
   addNodes(json.data.reviewing.nodes, "reviewer");
-  // Team-requested PRs count as a "reviewer" role, same as personal requests.
+  // Team-requested PRs count as a "reviewer" role, same as personal requests —
+  // except on your own PRs, where `isOwnPr` turns it back into `author`.
   for (let i = 0; i < teamSlugs.length; i++) {
     const teamResult = json.data[`team${i}`] as SearchNodes | undefined;
     if (teamResult?.nodes) addNodes(teamResult.nodes, "reviewer");
