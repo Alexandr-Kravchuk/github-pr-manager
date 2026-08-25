@@ -2528,6 +2528,26 @@ test("activeFilterCount: every narrowing control at once", () =>
       ];
 
       for (const [detectorName, file] of present) {
+        // These CLI scripts fetch live PRs from GitHub and call process.exit()
+        // on failure when run standalone (`node red-prs.cjs`); requiring them
+        // is meant to be side-effect-free only because each one guards its
+        // network call behind `require.main === module`. That guard lives in
+        // the OTHER repo, so nothing here enforces it — a version of these
+        // files without the guard would make this very test fire a live
+        // GitHub request (or exit the whole test process) the moment it's
+        // required, before any assertion runs. Check for the guard in the raw
+        // source FIRST, and refuse to `require()` the file at all if it's
+        // missing, rather than trusting it.
+        const source = fsSync.readFileSync(file, "utf8");
+        const guarded = source.includes("require.main === module");
+        test(`contract: ${detectorName} guards its CLI entry point behind require.main`, () =>
+          assert.ok(
+            guarded,
+            `${detectorName} has no "require.main === module" guard around its network call — ` +
+              `requiring it for this contract check would run that call as a side effect`,
+          ));
+        if (!guarded) continue;
+
         let mod;
         try {
           mod = require(file);
