@@ -2402,6 +2402,19 @@ test("activeFilterCount: every narrowing control at once", () =>
       }),
       "blocked",
     ));
+  test("prSignal: an unresolved thread on your own PR blocks it even while still awaiting review", () =>
+    // `blocked` is checked before `waiting`, so a PR you authored that is still
+    // awaiting its first review but already has an open thread returns
+    // `"blocked"`, never reaching the `waiting` branch's `awaitingReview` guard
+    // — exactly the invariant the `waiting` bullet in prSignal's docblock now
+    // states. `sigPr`'s default `awaitingReview: true` pins that directly,
+    // unlike the tests above which set it to `false`.
+    assert.strictEqual(
+      prFilter.prSignal(sigPr({ awaitingReview: true, hasNewActivity: false, unresolvedThreads: 2 }), {
+        trackComments: false,
+      }),
+      "blocked",
+    ));
   test("prSignal: an unresolved thread on a PR you're only reviewing (not authoring) still respects tracking off", () =>
     // The ungated term is scoped to `isAuthor` — a PR where your only role is
     // `reviewed` (not `author`) still goes quiet with tracking off, exactly as
