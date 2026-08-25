@@ -2382,21 +2382,66 @@ test("activeFilterCount: every narrowing control at once", () =>
       prFilter.prSignal(sigPr({ hasNewActivity: false }), { trackComments: false }),
       "waiting",
     ));
-  test("prSignal: an unresolved thread still colours the card with tracking on", () =>
+  test("prSignal: an unresolved thread on your own PR blocks it with tracking on", () =>
     assert.strictEqual(
       prFilter.prSignal(sigPr({ awaitingReview: false, hasNewActivity: false, unresolvedThreads: 2 }), {
         trackComments: true,
       }),
-      "attention",
+      "blocked",
     ));
-  test("prSignal: an unresolved thread stops colouring the card with tracking off", () =>
-    // The extended promise: the setting mutes every comment-shaped signal, so an
-    // open thread no longer paints the card amber while it's off.
+  // The one exception to the trackComments gate: an open thread on your own PR
+  // stays `blocked` even with tracking off. This is deliberately ungated — see
+  // the `blocked` bullet in prSignal's docblock — because a reviewing routine
+  // that authenticates as the PR author leaves its own login on the thread's
+  // last comment, so the thread never satisfies `hasUnaddressedComments`
+  // either; without this term such a thread would never colour the card at all.
+  test("prSignal: an unresolved thread on your own PR still blocks it with tracking off", () =>
     assert.strictEqual(
       prFilter.prSignal(sigPr({ awaitingReview: false, hasNewActivity: false, unresolvedThreads: 2 }), {
         trackComments: false,
       }),
+      "blocked",
+    ));
+  test("prSignal: an unresolved thread on your own PR blocks it even while still awaiting review", () =>
+    // `blocked` is checked before `waiting`, so a PR you authored that is still
+    // awaiting its first review but already has an open thread returns
+    // `"blocked"`, never reaching the `waiting` branch's `awaitingReview` guard
+    // — exactly the invariant the `waiting` bullet in prSignal's docblock now
+    // states. `sigPr`'s default `awaitingReview: true` pins that directly,
+    // unlike the tests above which set it to `false`.
+    assert.strictEqual(
+      prFilter.prSignal(sigPr({ awaitingReview: true, hasNewActivity: false, unresolvedThreads: 2 }), {
+        trackComments: false,
+      }),
+      "blocked",
+    ));
+  test("prSignal: an unresolved thread on a PR you're only reviewing (not authoring) still respects tracking off", () =>
+    // The ungated term is scoped to `isAuthor` — a PR where your only role is
+    // `reviewed` (not `author`) still goes quiet with tracking off, exactly as
+    // before this change.
+    assert.strictEqual(
+      prFilter.prSignal(
+        sigPr({ roles: ["reviewed"], awaitingReview: false, hasNewActivity: false, unresolvedThreads: 2 }),
+        { trackComments: false },
+      ),
       "idle",
+    ));
+  test("prSignal: an unresolved thread outranks a human approval on your own PR", () =>
+    // `approved` requires no open threads; `blocked` is checked first and now
+    // catches any open thread on your own PR unconditionally, so an approved-
+    // but-unresolved PR you authored is `blocked`, never `approved` — it never
+    // reaches the `approved` branch's own `unresolvedThreads` check at all.
+    assert.strictEqual(
+      prFilter.prSignal(
+        sigPr({
+          awaitingReview: false,
+          hasHumanApproval: true,
+          reviewDecision: "APPROVED",
+          unresolvedThreads: 1,
+        }),
+        { trackComments: false },
+      ),
+      "blocked",
     ));
   test("prSignal: an unaddressed comment stops blocking your own PR with tracking off", () =>
     assert.strictEqual(
@@ -2412,6 +2457,142 @@ test("activeFilterCount: every narrowing control at once", () =>
       }),
       "blocked",
     ));
+
+  // --- contract: the usercustom-ai-skills cron detectors mirror prSignal ------
+  // Three headless detectors (`red-prs.cjs`, `purple-prs.cjs`, `green-prs.cjs`
+  // in the sibling `usercustom-ai-skills` repo's `usercustom-dev` plugin) each
+  // carry a local fallback copy of this exact function, used only when the
+  // detector cannot `require` this repo's built `dist/main/shared/pr-filter.js`
+  // (e.g. before a build, or against an older dist). A copy is exactly the kind
+  // of thing that quietly drifts from its source — that drift is what let a
+  // conflicting PR skip the red queue in the first place (missing
+  // `hasConflicts`) and what will happen again to THIS change if the copies
+  // aren't updated in lockstep. This test is the tripwire: it runs each
+  // detector's copy against the real `prSignal` on a fixture set covering every
+  // branch, so a missed update fails here — in this repo's CI — instead of
+  // silently in a cron routine days later.
+  //
+  // Best-effort: skipped (not failed) when the sibling clone isn't present
+  // locally, since it isn't a dependency of this repo and CI here has no reason
+  // to check it out. It DOES run whenever the clone exists, which is the normal
+  // case on the machine that also runs the cron routines.
+  {
+    const fsSync = require("node:fs");
+    const os2 = require("node:os");
+    const siblingRoot = path.join(os2.homedir(), "Projects", "usercustom-ai-skills");
+    const detectors = [
+      ["red-prs.cjs", path.join(siblingRoot, "plugins/usercustom-dev/skills/drive-red-prs-green/red-prs.cjs")],
+      [
+        "purple-prs.cjs",
+        path.join(siblingRoot, "plugins/usercustom-dev/skills/review-purple-prs/purple-prs.cjs"),
+      ],
+      [
+        "green-prs.cjs",
+        path.join(siblingRoot, "plugins/usercustom-dev/skills/drive-green-prs-close/green-prs.cjs"),
+      ],
+    ];
+    const present = detectors.filter(([, file]) => fsSync.existsSync(file));
+
+    if (present.length === 0) {
+      console.log(
+        "  skip - contract: usercustom-ai-skills not found at ~/Projects/usercustom-ai-skills — clone it locally to run the detector-copy contract check",
+      );
+    } else {
+      // One fixture per prSignal branch, plus the specific case this whole
+      // change exists for (an own-PR unresolved thread, both trackComments
+      // states — see `sigPr` above for why "author" is the interesting role).
+      const contractFixtures = [
+        ["idle", sigPr()],
+        ["blocked: failing CI", sigPr({ failingChecks: [{ name: "build", kind: "check", state: "failure", url: null }] })],
+        ["blocked: unaddressed change request", sigPr({ hasUnaddressedChangeRequest: true })],
+        ["blocked: merge conflict", sigPr({ hasConflicts: true })],
+        [
+          "blocked: unresolved thread on your own PR",
+          sigPr({ awaitingReview: false, unresolvedThreads: 2 }),
+        ],
+        [
+          "not blocked: unresolved thread on a PR you only review",
+          sigPr({ roles: ["reviewed"], awaitingReview: false, unresolvedThreads: 2 }),
+        ],
+        ["myReview: reviewer role", sigPr({ roles: ["reviewer"] })],
+        ["myReview: returnedToMe", sigPr({ roles: ["reviewed"], returnedToMe: true })],
+        ["myReview: myReReviewDue", sigPr({ roles: ["reviewed"], myReReviewDue: true })],
+        ["waiting: awaiting review, no approval yet", sigPr()],
+        [
+          "approved: human approval, green CI, no open threads",
+          sigPr({
+            awaitingReview: false,
+            hasHumanApproval: true,
+            reviewDecision: "APPROVED",
+          }),
+        ],
+        [
+          "attention: new activity on a PR you're reviewing",
+          sigPr({ roles: ["reviewed"], awaitingReview: false, hasNewActivity: true }),
+        ],
+        [
+          "attention: a pending check on a PR you're reviewing",
+          sigPr({
+            roles: ["reviewed"],
+            awaitingReview: false,
+            pendingChecks: [{ name: "build", kind: "check", state: "pending", url: null }],
+          }),
+        ],
+      ];
+
+      for (const [detectorName, file] of present) {
+        // These CLI scripts fetch live PRs from GitHub and call process.exit()
+        // on failure when run standalone (`node red-prs.cjs`); requiring them
+        // is meant to be side-effect-free only because each one guards its
+        // network call behind `require.main === module`. That guard lives in
+        // the OTHER repo, so nothing here enforces it — a version of these
+        // files without the guard would make this very test fire a live
+        // GitHub request (or exit the whole test process) the moment it's
+        // required, before any assertion runs. Check for the guard in the raw
+        // source FIRST, and refuse to `require()` the file at all if it's
+        // missing, rather than trusting it.
+        const source = fsSync.readFileSync(file, "utf8");
+        const guarded = source.includes("require.main === module");
+        test(`contract: ${detectorName} guards its CLI entry point behind require.main`, () =>
+          assert.ok(
+            guarded,
+            `${detectorName} has no "require.main === module" guard around its network call — ` +
+              `requiring it for this contract check would run that call as a side effect`,
+          ));
+        if (!guarded) continue;
+
+        let mod;
+        try {
+          mod = require(file);
+        } catch (e) {
+          test(`contract: ${detectorName} loads as a module`, () => {
+            throw new Error(`require("${file}") threw: ${e.message}`);
+          });
+          continue;
+        }
+        test(`contract: ${detectorName} exports localPrSignal`, () =>
+          assert.strictEqual(
+            typeof mod.localPrSignal,
+            "function",
+            `${detectorName} must export its fallback copy as { localPrSignal } so this contract check can run it`,
+          ));
+        if (typeof mod.localPrSignal !== "function") continue;
+        for (const trackComments of [true, false]) {
+          for (const [label, pr] of contractFixtures) {
+            test(
+              `contract: ${detectorName}.localPrSignal matches prSignal — ${label} (trackComments=${trackComments})`,
+              () =>
+                assert.strictEqual(
+                  mod.localPrSignal(pr, { trackComments }),
+                  prFilter.prSignal(pr, { trackComments }),
+                  `${detectorName}'s fallback copy disagrees with prSignal for "${label}" — update the copy to match`,
+                ),
+            );
+          }
+        }
+      }
+    }
+  }
 }
 
 // --- pr-filter: sanitizeFilterState ----------------------------------------
@@ -3004,16 +3185,41 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // PRs (the default `reviewer` role would make needsAttention true on its own,
   // and a passive `reviewed` one reduces it to `returnedToMe`, so neither term
   // would ever be reached).
-  await atest("applyActivity(trackComments=false): an unresolved thread no longer claims attention", () =>
-    withTempStore(async (file) => {
-      const threaded = (o = {}) =>
-        reviewPr({ roles: ["author"], awaitingReview: false, unresolvedThreads: 3, ...o });
-      await state.applyActivity([threaded()], file, { trackComments: false });
-      const more = threaded({ totalComments: 9 });
-      await state.applyActivity([more], file, { trackComments: false });
-      assert.strictEqual(more.hasNewActivity, false, "the unread channel is muted");
-      assert.strictEqual(more.needsAttention, false, "and so is an open thread, while the setting is off");
-    }));
+  //
+  // One deliberate exception (mirrors `prSignal`'s `blocked` branch): an open
+  // thread on your OWN PR claims attention regardless of `trackComments`. A
+  // reviewing routine that authenticates as the PR author leaves its own login
+  // on the thread's last comment, so such a thread never satisfies
+  // `hasUnaddressedComments` either — without an ungated term it would never
+  // surface at all, on either setting.
+  await atest(
+    "applyActivity(trackComments=false): an unresolved thread on your own PR still claims attention",
+    () =>
+      withTempStore(async (file) => {
+        const threaded = (o = {}) =>
+          reviewPr({ roles: ["author"], awaitingReview: false, unresolvedThreads: 3, ...o });
+        await state.applyActivity([threaded()], file, { trackComments: false });
+        const more = threaded({ totalComments: 9 });
+        await state.applyActivity([more], file, { trackComments: false });
+        assert.strictEqual(more.hasNewActivity, false, "the unread channel is still muted");
+        assert.strictEqual(more.needsAttention, true, "but an open thread on your own PR is not comment noise");
+      }),
+  );
+
+  await atest(
+    "applyActivity(trackComments=false): an unresolved thread on a PR you're only reviewing stays quiet",
+    () =>
+      // The ungated exception is scoped to `isAuthor` — a passively-reviewed PR
+      // (role `reviewed`, not `author`) is unaffected and behaves as before.
+      withTempStore(async (file) => {
+        const threaded = (o = {}) =>
+          reviewPr({ roles: ["reviewed"], awaitingReview: false, unresolvedThreads: 3, ...o });
+        await state.applyActivity([threaded()], file, { trackComments: false });
+        const more = threaded({ totalComments: 9 });
+        await state.applyActivity([more], file, { trackComments: false });
+        assert.strictEqual(more.needsAttention, false);
+      }),
+  );
 
   await atest("applyActivity(trackComments=true): an unresolved thread still claims attention", () =>
     withTempStore(async (file) => {

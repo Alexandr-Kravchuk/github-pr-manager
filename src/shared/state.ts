@@ -236,6 +236,16 @@ export async function applyActivity(
       // `trackComments` too: without it, someone who turned the setting off to
       // stop comment noise kept seeing PRs light up (and disappear the moment
       // they replied on GitHub) for the exact channel they'd just muted.
+      //
+      // The one exception is the standalone `isAuthor && pr.unresolvedThreads > 0`
+      // term below, mirroring `prSignal`'s `blocked` branch (kept in step with it
+      // deliberately — see the comment there): a reviewing routine that
+      // authenticates as the PR author leaves every thread it opens with ITS OWN
+      // login as the last comment, so such a thread never satisfies
+      // `hasUnaddressedComments`'s "last comment isn't yours" check and would
+      // otherwise go unnoticed forever. This term reacts to `isResolved` alone,
+      // so it isn't gated by `trackComments` and doesn't carry the
+      // `!(isAuthor && pr.awaitingReview)` exception the gated term above does.
       pr.needsAttention = isPassiveReviewed(pr)
         ? pr.returnedToMe || pr.myReReviewDue
         : pr.roles.includes("reviewer") ||
@@ -244,7 +254,8 @@ export async function applyActivity(
           pr.hasUnaddressedChangeRequest ||
           (trackComments && pr.hasUnaddressedComments) ||
           pr.hasNewActivity ||
-          (trackComments && pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview));
+          (trackComments && pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview)) ||
+          (isAuthor && pr.unresolvedThreads > 0);
     }
 
     return mutated;
