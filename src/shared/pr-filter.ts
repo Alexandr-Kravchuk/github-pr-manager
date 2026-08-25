@@ -341,10 +341,20 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
  *  - blocked (red): your PR is blocked and needs your action — failing CI, a
  *    change request you haven't re-requested review on, a reviewer comment
  *    you haven't answered (an unresolved thread whose last comment isn't yours,
- *    even from a plain "Comment" review with green CI), or a merge conflict you
+ *    even from a plain "Comment" review with green CI), a merge conflict you
  *    must resolve (`hasConflicts`) — the latter blocks merge even when CI is
- *    green and the PR is approved, so it belongs here, not in `approved`. Only
- *    for PRs you authored.
+ *    green and the PR is approved, so it belongs here, not in `approved` — or
+ *    ANY open review thread at all (`unresolvedThreads > 0`, ungated by
+ *    `trackComments`, unlike `hasUnaddressedComments` above). The two thread
+ *    checks look redundant but aren't: `hasUnaddressedComments` requires the
+ *    thread's last comment to be from someone other than you, which reads as
+ *    "answered" the moment a reviewing agent posts under YOUR OWN account
+ *    (the automated review routines authenticate as the PR author) — the
+ *    thread is then open forever with your own name on the last comment and
+ *    never trips that check. An open thread is unfinished work regardless of
+ *    whose login is on it, so this term ignores the last-comment-author
+ *    question entirely and reacts to `isResolved` alone. Only for PRs you
+ *    authored.
  *  - myReview (violet): a review is being requested of you and you haven't
  *    submitted one yet — your turn to act. The `reviewer` role comes from
  *    GitHub's `review-requested:@me`, so it clears itself once you review.
@@ -353,8 +363,9 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
  *    what keeps a re-review on your radar. Ranked right after your own blocked
  *    PRs so review requests never blend into the rest.
  *  - waiting (gray): your PR is awaiting someone else's review and nobody has
- *    approved yet (ball in their court) — nothing required from you, even with
- *    open threads.
+ *    approved yet (ball in their court) — nothing required from you. Any open
+ *    thread on your own PR is caught by `blocked` above before reaching this
+ *    branch, so by the time a PR gets here it genuinely has none.
  *  - approved (green): at least one human approval, CI isn't failing or
  *    running, and there are no open threads. A single human approve is enough —
  *    even if other reviewers are still pending, and even if the PR has no checks
@@ -367,13 +378,19 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
  *    ABOVE attention: an approved, green PR stays green even when it has unread
  *    comments, so opening it (which clears `hasNewActivity`) doesn't flip the
  *    accent from amber to green. Open threads and running CI still demote it,
- *    since those are unfinished work.
+ *    since those are unfinished work. In practice this branch only reaches a
+ *    non-author PR you're reviewing: an approved PR you authored with open
+ *    threads was already caught by `blocked`.
  *  - attention (amber): new comments, open threads, CI running.
  *
  * `trackComments` mirrors the same flag in `state.ts`'s `needsAttention`: off,
  * `hasUnaddressedComments` and `unresolvedThreads` stop feeding the accent too,
  * or a card excluded from "Need attention" by the setting would still paint
- * itself red/amber for the exact signal the setting just muted.
+ * itself red/amber for the exact signal the setting just muted. The one
+ * exception is `blocked`'s own-PR `unresolvedThreads > 0` term above: it exists
+ * specifically to survive the login-collision case where `trackComments`-gated
+ * signals go quiet by design, so gating it the same way would defeat its
+ * purpose.
  */
 export function prSignal(pr: PullRequest, { trackComments }: { trackComments: boolean }): PrSignal {
   const isAuthor = pr.roles.includes("author");
@@ -383,7 +400,8 @@ export function prSignal(pr: PullRequest, { trackComments }: { trackComments: bo
     (pr.failingChecks.length > 0 ||
       pr.hasUnaddressedChangeRequest ||
       (trackComments && pr.hasUnaddressedComments) ||
-      pr.hasConflicts)
+      pr.hasConflicts ||
+      pr.unresolvedThreads > 0)
   ) {
     return "blocked";
   }

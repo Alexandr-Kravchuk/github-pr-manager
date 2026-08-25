@@ -249,7 +249,14 @@ keeping a second unread state here. With it off:
   every comment-shaped signal that drives the accent and the "Need attention"
   filter, not just the unread one. The 💬 thread-count badge itself still
   renders (it's a count, not an attention flag), and they still send a
-  notification (that channel is separate).
+  notification (that channel is separate). The one exception is an **open
+  review thread on your own PR**: it still turns the card red and counts
+  towards "needs attention" regardless of this setting. Unlike the unread-count
+  channel, this isn't about noise you can catch up on in GitHub — a thread the
+  setting muted here is still an open thread on GitHub, and unlike "unaddressed
+  comments" it doesn't require the thread's last comment to be someone else's,
+  so it still catches a thread whose last comment happens to be your own (for
+  example, one opened by a review posted under your own account).
 
 While the setting is off the stored snapshot is kept current anyway — both the
 comment count and the last push — so turning it back on starts from what is
