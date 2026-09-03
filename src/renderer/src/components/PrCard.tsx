@@ -210,8 +210,11 @@ export function PrCard({
           ) : (
             <>
               <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">{pr.hostLabel}</span>
-              <span className="truncate" title={pr.repo}>
-                {pr.repo} <span className="text-fg-faint">#{pr.number}</span>
+              {/* The number is the PR's identity — it must survive a long repo
+                  name, so only the repo part truncates and #number stays put. */}
+              <span className="flex min-w-0 items-center gap-1" title={`${pr.repo} #${pr.number}`}>
+                <span className="truncate">{pr.repo}</span>
+                <span className="shrink-0 text-fg-faint">#{pr.number}</span>
               </span>
             </>
           )}
