@@ -550,7 +550,8 @@ export function mapPr(
     hasHumanApproval,
     hasConflicts,
     canBeMerged,
-    // Resolved later by the poller's Jira parent enricher (null without Jira):
+    // Resolved later by the poller's Jira enricher (null without Jira):
+    issueSummary: null,
     parentKey: null,
     parentSummary: null,
     // Activity fields are overwritten in state.ts:

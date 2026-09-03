@@ -1,5 +1,5 @@
 /**
- * Jira API-token storage + the poller's parent enricher.
+ * Jira API-token storage + the poller's Jira enricher.
  *
  * The token is the one credential this app persists, so it is encrypted with the
  * OS keychain via Electron `safeStorage` and written to a separate file — never
@@ -18,7 +18,7 @@ import {
   healthFromError,
   healthFromResolution,
 } from "../shared/jira-health";
-import { clearParentCache, fetchParents } from "../shared/jira";
+import { clearJiraCaches, fetchIssues } from "../shared/jira";
 import type { JiraHealth, JiraStatus, PullRequest, Settings } from "../shared/types";
 
 function jiraTokenPath(): string {
@@ -46,13 +46,13 @@ export function hasJiraToken(): boolean {
 export function setJiraToken(token: string): { ok: boolean; error?: string } {
   const file = jiraTokenPath();
   // A token change invalidates every token-dependent cache: which API base works
-  // (a scoped vs classic token needs a different URL) and the resolved parents.
+  // (a scoped vs classic token needs a different URL) and the resolved issues.
   // Without this, switching token types in a running app keeps a stale/poisoned
   // base cached and the next lookup silently returns nothing.
   if (!token) {
     try {
       fs.rmSync(file, { force: true });
-      clearParentCache();
+      clearJiraCaches();
       return { ok: true };
     } catch (e) {
       return { ok: false, error: (e as Error).message };
@@ -64,7 +64,7 @@ export function setJiraToken(token: string): { ok: boolean; error?: string } {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, safeStorage.encryptString(token));
-    clearParentCache();
+    clearJiraCaches();
     return { ok: true };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
@@ -99,13 +99,14 @@ export function getJiraStatus(loadSettings: () => Settings): JiraStatus {
 }
 
 /**
- * Builds the poller's parent enricher: resolves Jira parents for the PRs' issue
- * keys and sets `parentKey` / `parentSummary` on each. Returns a `JiraHealth`
- * describing the pass so the UI can explain an empty/failed result instead of
- * showing silent empty groups; returns `undefined` when there was nothing to do
- * (Jira off, no token, or no issue keys). Best-effort — never throws.
+ * Builds the poller's Jira enricher: resolves the PRs' issue keys and sets
+ * `issueSummary` (the by-issue heading) plus `parentKey` / `parentSummary` (the
+ * by-parent heading) on each. Returns a `JiraHealth` describing the pass so the
+ * UI can explain an empty/failed result instead of showing silent empty groups;
+ * returns `undefined` when there was nothing to do (Jira off, no token, or no
+ * issue keys). Best-effort — never throws.
  */
-export function buildParentEnricher(
+export function buildJiraEnricher(
   loadSettings: () => Settings,
 ): (prs: PullRequest[]) => Promise<JiraHealth | undefined> {
   const debug = makeDebug("[jira]");
@@ -131,18 +132,25 @@ export function buildParentEnricher(
       return undefined;
     }
 
-    debug(() => `resolving parents for ${keys.length} keys: ${keys.join(", ")}`);
+    debug(() => `resolving ${keys.length} keys: ${keys.join(", ")}`);
     try {
-      const parents = await fetchParents(jira, token, keys);
-      debug(() => `resolved ${parents.size} parents: ${[...parents.entries()].map(([k, p]) => `${k}->${p.parentKey}`).join(", ") || "(none)"}`);
+      const issues = await fetchIssues(jira, token, keys);
+      debug(() => `resolved ${issues.size} issues: ${[...issues.entries()].map(([k, i]) => `${k}->${i.parentKey ?? "(no parent)"}`).join(", ") || "(none)"}`);
       for (const pr of prs) {
-        const parent = pr.issueKey ? parents.get(pr.issueKey) : undefined;
-        pr.parentKey = parent?.parentKey ?? null;
-        pr.parentSummary = parent?.parentSummary ?? null;
+        const issue = pr.issueKey ? issues.get(pr.issueKey) : undefined;
+        pr.issueSummary = issue?.summary ?? null;
+        pr.parentKey = issue?.parentKey ?? null;
+        pr.parentSummary = issue?.parentSummary ?? null;
       }
-      return healthFromResolution(keys.length, parents.size);
+      // `resolved` deliberately counts *parents*, not resolved issues: it feeds
+      // the "parent grouping may be incomplete/empty" banner, and a pass that
+      // resolved plenty of summaries but no parent is exactly the empty that
+      // banner exists to explain. A missing by-issue summary needs no banner —
+      // the heading just stays the bare key, as it does with Jira switched off.
+      const withParent = [...issues.values()].filter((i) => i.parentKey).length;
+      return healthFromResolution(keys.length, withParent);
     } catch (e) {
-      if (process.env.PRD_DEBUG) console.warn("[jira] parent resolution failed:", (e as Error).message);
+      if (process.env.PRD_DEBUG) console.warn("[jira] issue resolution failed:", (e as Error).message);
       return healthFromError(keys.length, e);
     }
   };

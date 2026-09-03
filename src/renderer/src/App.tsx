@@ -589,15 +589,20 @@ export function App() {
     //
     //  - "issue"  groups by the PR's own issue key (ENG-93374).
     //  - "parent" groups by the parent task resolved from Jira (ENG-93367), so
-    //    the subtasks of one task sit together; label shows the parent summary.
+    //    the subtasks of one task sit together.
+    // Either heading reads "KEY · Summary" once Jira has resolved the summary.
     const keyOf = (p: PullRequest) => (groupBy === "parent" ? p.parentKey : p.issueKey);
-    const summaryOf = (key: string): string =>
-      groupBy === "parent"
-        ? (() => {
-            const summary = sorted.find((p) => p.parentKey === key)?.parentSummary;
-            return summary ? `${key} · ${summary}` : key;
-          })()
-        : key;
+    const summaryOf = (p: PullRequest) => (groupBy === "parent" ? p.parentSummary : p.issueSummary);
+    // Takes the first non-empty summary in the cluster rather than `prs[0]`'s.
+    // Today the two are the same — every PR under one key is written from one
+    // Jira lookup in one pass, so a cluster agrees — but reading the whole
+    // cluster costs nothing and keeps the heading right without depending on
+    // that. Without Jira (or for a key it doesn't know) no PR has a summary and
+    // the heading stays the bare key, exactly as before.
+    const labelOf = (key: string, prs: PullRequest[]): string => {
+      const summary = prs.map(summaryOf).find((s): s is string => Boolean(s));
+      return summary ? `${key} · ${summary}` : key;
+    };
 
     const byKey = new Map<string, PullRequest[]>();
     for (const pr of sorted) {
@@ -610,12 +615,12 @@ export function App() {
     // `byKey` preserves first-appearance order, so clusters lead with the one
     // holding your most important PR under the active sort (not alphabetically).
     const multi = new Set([...byKey].filter(([, prs]) => prs.length >= 2).map(([k]) => k));
-    const clusters: Group[] = [...multi].map((key) => ({
-      key,
-      label: summaryOf(key),
-      hostLabel: null,
-      prs: sorted.filter((p) => keyOf(p) === key),
-    }));
+    const clusters: Group[] = [...multi].map((key) => {
+      // `byKey` already holds this key's PRs in `sorted` order — re-filtering
+      // `sorted` per cluster would just walk the list again for the same answer.
+      const prs = byKey.get(key) ?? [];
+      return { key, label: labelOf(key, prs), hostLabel: null, prs };
+    });
     const other = sorted.filter((p) => {
       const k = keyOf(p);
       return !k || !multi.has(k);

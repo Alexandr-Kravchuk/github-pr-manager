@@ -99,6 +99,7 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     lastCommitPushedAt: new Date(Date.now() - 36e5).toISOString(),
     headRefName: "feature/sample",
     issueKey: null,
+    issueSummary: null,
     parentKey: null,
     parentSummary: null,
     reviewDecision: null,

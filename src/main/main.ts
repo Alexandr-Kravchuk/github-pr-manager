@@ -23,8 +23,8 @@ import type {
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
 import { ensureCliPath } from "./cli-path";
-import { clearParentCache } from "../shared/jira";
-import { buildParentEnricher, getJiraStatus, setJiraToken } from "./jira-store";
+import { clearJiraCaches } from "../shared/jira";
+import { buildJiraEnricher, getJiraStatus, setJiraToken } from "./jira-store";
 import {
   validateClipboardText,
   validateExternalUrl,
@@ -595,7 +595,7 @@ function registerIpc(): void {
         saved.jira?.baseUrl !== previousJira?.baseUrl ||
         saved.jira?.email !== previousJira?.email
       ) {
-        clearParentCache();
+        clearJiraCaches();
       }
       applyPreferences(saved);
       // Apply immediately: a fresh poll re-resolves tokens and re-fetches, and
@@ -708,7 +708,7 @@ function startApp(): void {
     ignoredStatePath: ignoredStatePath(),
     appVersion: app.getVersion(),
     // No real Jira calls in fixture mode; the mock overrides below win anyway.
-    enrichParents: isMockMode() ? undefined : buildParentEnricher(loadSettings),
+    enrichJira: isMockMode() ? undefined : buildJiraEnricher(loadSettings),
     onSnapshot: (snapshot) => {
       if (process.env.PRD_DEBUG) {
         console.log(

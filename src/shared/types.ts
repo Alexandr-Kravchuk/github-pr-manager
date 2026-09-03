@@ -266,6 +266,14 @@ export interface PullRequest {
    */
   issueKey: string | null;
   /**
+   * Summary (title) of {@link issueKey} as Jira has it — what the "group by
+   * issue" heading shows next to the key, so a cluster reads as the work it is
+   * rather than as a number. Null when Jira isn't configured, the key is unknown
+   * to it, or resolution failed; the heading then falls back to the bare key.
+   * Set by the poller's Jira enricher, not by `github.ts`.
+   */
+  issueSummary: string | null;
+  /**
    * Parent issue key resolved from Jira for this PR's {@link issueKey}, e.g. the
    * task "ENG-93367" that "ENG-93374" is a subtask of — null when Jira isn't
    * configured, the key has no parent, or resolution failed. Set by the poller's

@@ -1,7 +1,8 @@
 /**
- * Minimal Jira Cloud client for parent-task grouping. Given a set of issue keys
- * parsed from PR titles (e.g. "ENG-93374"), it resolves each key's parent issue
- * (e.g. the task "ENG-93367" it is a subtask of) via one batched JQL search.
+ * Minimal Jira Cloud client for the grouped views. Given a set of issue keys
+ * parsed from PR titles (e.g. "ENG-93374"), one batched JQL search resolves each
+ * key's own summary (the "group by issue" heading) and its parent issue (e.g. the
+ * task "ENG-93367" it is a subtask of, for "group by parent task").
  *
  * Deliberately Electron-free (Node `fetch` + `Buffer`) so it stays testable and
  * runs in the poller. Auth is HTTP Basic with the user's Atlassian email + API
@@ -19,20 +20,28 @@
 import { makeDebug } from "./debug";
 import type { JiraSettings } from "./types";
 
-/** A resolved parent for one issue key. */
-export interface JiraParent {
-  parentKey: string;
+/** What one issue key resolved to. */
+export interface JiraIssue {
+  /** The issue's own summary — null when Jira returned the issue without one. */
+  summary: string | null;
+  /** The task this issue is a subtask of, or null when it has no parent. */
+  parentKey: string | null;
+  /** Summary of {@link parentKey}; null when there is no parent, or it has none. */
   parentSummary: string | null;
 }
 
 interface CacheEntry {
-  /** null = the key has no parent (a negative cache, so we don't re-query it). */
-  parent: JiraParent | null;
+  /**
+   * null = Jira didn't return this key at all (a negative cache, so we don't
+   * re-query it). An issue that simply has no parent is a *positive* entry with
+   * `parentKey: null` — it still carries its own summary.
+   */
+  issue: JiraIssue | null;
   fetchedAt: number;
 }
 
-/** Parent lookups cached per issue key — membership changes rarely. */
-const parentCache = new Map<string, CacheEntry>();
+/** Issue lookups cached per key — summaries and parentage change rarely. */
+const issueCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 10 * 60 * 1000;
 /** JQL `key in (...)` handles many keys per request; chunk defensively. */
 const CHUNK_SIZE = 50;
@@ -96,7 +105,7 @@ const GATEWAY_ORIGIN = "https://api.atlassian.com/";
 export const JIRA_ERROR_DETAIL_SEP = " — ";
 
 /**
- * Bumped by `clearParentCache()` so an enrichment pass that was already in
+ * Bumped by `clearJiraCaches()` so an enrichment pass that was already in
  * flight when the caches were cleared (e.g. the user saved a new token mid-tick)
  * can tell that its data belongs to the pre-clear world and must not be written
  * back — otherwise the resolving pass would silently re-pin the stale base and
@@ -105,9 +114,9 @@ export const JIRA_ERROR_DETAIL_SEP = " — ";
 let cacheEpoch = 0;
 
 /** Clears all caches (tests / a config change) and invalidates in-flight passes. */
-export function clearParentCache(): void {
+export function clearJiraCaches(): void {
   cacheEpoch++;
-  parentCache.clear();
+  issueCache.clear();
   cloudIdCache.clear();
   apiBaseCache.clear();
   gatewayBackoff.clear();
@@ -236,7 +245,7 @@ function resultIsTrustworthy(bases: string[], cleanFallback: boolean, pinned: bo
 interface RawSearchResponse {
   issues?: Array<{
     key: string;
-    fields?: { parent?: { key: string; fields?: { summary?: string } } };
+    fields?: { summary?: string; parent?: { key: string; fields?: { summary?: string } } };
   }>;
 }
 
@@ -256,7 +265,9 @@ async function fetchChunk(
       "Content-Type": "application/json",
       "User-Agent": "github-pr-manager",
     },
-    body: JSON.stringify({ jql, fields: ["parent"], maxResults: 100 }),
+    // `summary` is the issue's own title (the "group by issue" heading); `parent`
+    // brings the parent's key *and* its summary in the same round trip.
+    body: JSON.stringify({ jql, fields: ["summary", "parent"], maxResults: 100 }),
     cache: "no-store",
   };
 
@@ -270,7 +281,7 @@ async function fetchChunk(
   // Any other status (429/500/…) means the base answered but the call genuinely
   // failed: surfaced as an error, never retried on the site URL where a scoped
   // token would answer 200-but-empty and mask it as "no parents found".
-  // Snapshot the epoch first: if clearParentCache() runs while a fetch below is
+  // Snapshot the epoch first: if clearJiraCaches() runs while a fetch below is
   // awaited (a token/config change mid-tick), everything this pass learned is
   // about the old token and must not touch the caches.
   const epoch = cacheEpoch;
@@ -322,10 +333,10 @@ async function fetchChunk(
   // settled the token type cleanly. Both cases live inside resultIsTrustworthy so
   // the pinned steady-state can't silently fall through to "untrusted".
   const trusted = resultIsTrustworthy(bases, cleanFallback, pinned);
-  // A pass that raced a clearParentCache() (epoch moved while a fetch was
+  // A pass that raced a clearJiraCaches() (epoch moved while a fetch was
   // awaited) fetched with the old token: writing it back would re-pin the stale
   // base and repopulate the just-cleared caches, so it must not touch them.
-  // fetchParents then reports this pass as empty — a one-tick blip; the refresh
+  // fetchIssues then reports this pass as empty — a one-tick blip; the refresh
   // the token/settings change triggers re-resolves immediately with fresh state.
   const writable = epoch === cacheEpoch;
   if (winner && trusted && writable) apiBaseCache.set(config.baseUrl, winner);
@@ -335,8 +346,12 @@ async function fetchChunk(
     returned.add(issue.key);
     const p = issue.fields?.parent;
     if (!writable) continue;
-    parentCache.set(issue.key, {
-      parent: p ? { parentKey: p.key, parentSummary: p.fields?.summary ?? null } : null,
+    issueCache.set(issue.key, {
+      issue: {
+        summary: issue.fields?.summary ?? null,
+        parentKey: p?.key ?? null,
+        parentSummary: p?.fields?.summary ?? null,
+      },
       fetchedAt: now,
     });
   }
@@ -348,35 +363,37 @@ async function fetchChunk(
   // the next tick, once the gateway is reachable again.
   if (trusted && writable) {
     for (const key of keys) {
-      if (!returned.has(key)) parentCache.set(key, { parent: null, fetchedAt: now });
+      if (!returned.has(key)) issueCache.set(key, { issue: null, fetchedAt: now });
     }
   }
 }
 
 /**
- * Resolves parents for the given issue keys. Only keys not already fresh in the
- * cache hit the network. Returns a map of key → parent for keys that have one
- * (keys without a parent are simply absent). Throws on a network / auth error —
- * the caller treats it as best-effort.
+ * Resolves the given issue keys. Only keys not already fresh in the cache hit the
+ * network. Returns a map of key → issue for every key Jira actually returned;
+ * a key it didn't return (unknown, or invisible to this token) is simply absent,
+ * while a key that exists but has no parent IS present, with `parentKey: null` —
+ * its summary is still worth having for the by-issue heading. Throws on a
+ * network / auth error — the caller treats it as best-effort.
  */
-export async function fetchParents(
+export async function fetchIssues(
   config: JiraSettings,
   token: string,
   keys: string[],
-): Promise<Map<string, JiraParent>> {
+): Promise<Map<string, JiraIssue>> {
   const now = Date.now();
   const unique = [...new Set(keys)];
   const stale = unique.filter((k) => {
-    const c = parentCache.get(k);
+    const c = issueCache.get(k);
     return !c || now - c.fetchedAt >= CACHE_TTL_MS;
   });
   for (let i = 0; i < stale.length; i += CHUNK_SIZE) {
     await fetchChunk(config, token, stale.slice(i, i + CHUNK_SIZE), now);
   }
-  const result = new Map<string, JiraParent>();
+  const result = new Map<string, JiraIssue>();
   for (const key of unique) {
-    const parent = parentCache.get(key)?.parent;
-    if (parent) result.set(key, parent);
+    const issue = issueCache.get(key)?.issue;
+    if (issue) result.set(key, issue);
   }
   return result;
 }
