@@ -16,7 +16,7 @@ import {
   hasJiraConfig,
   jiraSiteState,
   healthFromError,
-  healthFromResolution,
+  healthFromIssues,
 } from "../shared/jira-health";
 import { clearJiraCaches, fetchIssues } from "../shared/jira";
 import type { JiraHealth, JiraStatus, PullRequest, Settings } from "../shared/types";
@@ -142,13 +142,10 @@ export function buildJiraEnricher(
         pr.parentKey = issue?.parentKey ?? null;
         pr.parentSummary = issue?.parentSummary ?? null;
       }
-      // `resolved` deliberately counts *parents*, not resolved issues: it feeds
-      // the "parent grouping may be incomplete/empty" banner, and a pass that
-      // resolved plenty of summaries but no parent is exactly the empty that
-      // banner exists to explain. A missing by-issue summary needs no banner —
-      // the heading just stays the bare key, as it does with Jira switched off.
-      const withParent = [...issues.values()].filter((i) => i.parentKey).length;
-      return healthFromResolution(keys.length, withParent);
+      // Counted in `healthFromIssues` (pure, and unit-tested for it): `resolved`
+      // means parents, not issues — see the rule there for why the distinction
+      // is load-bearing for the banner.
+      return healthFromIssues(keys.length, issues.values());
     } catch (e) {
       if (process.env.PRD_DEBUG) console.warn("[jira] issue resolution failed:", (e as Error).message);
       return healthFromError(keys.length, e);

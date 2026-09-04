@@ -1948,6 +1948,51 @@ test("healthFromResolution: ok when >=1 parent resolved", () =>
   assert.deepStrictEqual(jiraHealth.healthFromResolution(3, 2), { state: "ok", queried: 3, resolved: 2 }));
 test("healthFromResolution: empty when nothing resolved", () =>
   assert.deepStrictEqual(jiraHealth.healthFromResolution(3, 0), { state: "empty", queried: 3, resolved: 0 }));
+// `resolved` counts parents, not issues that came back — the two diverged when
+// the lookup started returning parentless issues for their own summaries. Get it
+// wrong and a Jira that resolves every summary but no parent reports `ok`,
+// silencing the one banner that explains an empty "Group by parent task".
+test("healthFromIssues: counts parents, not the issues that resolved", () =>
+  assert.deepStrictEqual(
+    jiraHealth.healthFromIssues(3, [
+      { parentKey: "ENG-1" },
+      { parentKey: null },
+      { parentKey: "ENG-1" },
+    ]),
+    { state: "ok", queried: 3, resolved: 2 },
+  ));
+test("healthFromIssues: every key resolved but none is a subtask -> empty", () =>
+  // The regression this guards: summaries came back, so the by-issue heading is
+  // fine and needs no banner — but by-parent has nothing to cluster and must say
+  // so. Counting issues here would report ok=2 and leave that view silently bare.
+  assert.deepStrictEqual(
+    jiraHealth.healthFromIssues(2, [{ parentKey: null }, { parentKey: null }]),
+    { state: "empty", queried: 2, resolved: 0 },
+  ));
+test("healthFromIssues: nothing resolved at all -> empty, with the queried count kept", () =>
+  assert.deepStrictEqual(jiraHealth.healthFromIssues(2, []), {
+    state: "empty",
+    queried: 2,
+    resolved: 0,
+  }));
+// The pure rule above is only worth anything if the enricher routes through it.
+// jira-store.ts imports electron, so the plain-Node runner can't call it — but it
+// can read the compiled file and refuse the shortcut that reintroduces the bug:
+// handing healthFromResolution an issue count directly.
+test("jira-store wiring: the enricher's health goes through healthFromIssues", () => {
+  const fs = require("node:fs");
+  const storeJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/jira-store.js"), "utf8");
+  // `\)?\(` matches a call in either shape: the TS source's `healthFromIssues(`
+  // and the CommonJS emit's `(0, jira_health_1.healthFromIssues)(`. Matching a
+  // call and not a bare mention keeps a future comment from passing (or failing)
+  // this on the strength of naming the function.
+  assert.match(storeJs, /healthFromIssues\)?\(/, "jira-store calls the parent-counting rule");
+  assert.doesNotMatch(
+    storeJs,
+    /healthFromResolution\)?\(/,
+    "jira-store must not call healthFromResolution with a count of its own — that is how `resolved` drifts back to counting issues",
+  );
+});
 test("healthFromError: error state carries the Error message", () =>
   assert.deepStrictEqual(jiraHealth.healthFromError(4, new Error("boom")), {
     state: "error",
@@ -4188,6 +4233,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // because the card renders it, so these cases pin the count's own contribution
   // to the hash — not a claim that comment ticks stop pushing. With the setting
   // on the count must still push, which is the whole point.
+  // The group heading is rendered from `issueSummary`/`parentSummary`, and both
+  // move on ticks where nothing else does: Jira resolving after an outage (or a
+  // first pass whose keys weren't cached yet), and a ticket someone renamed.
+  // Unhashed, either leaves the heading showing yesterday's title — or the bare
+  // key — until an unrelated PR field happens to change.
+  test("hashSnapshot: Jira resolving a summary changes the hash (the heading leaves the bare key)", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ issueSummary: null })),
+      poller.hashSnapshot(hsnap({ issueSummary: "Retry transient network errors" })),
+    ));
+  test("hashSnapshot: a renamed Jira issue changes the hash (the heading doesn't go stale)", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ issueSummary: "Old title" })),
+      poller.hashSnapshot(hsnap({ issueSummary: "New title" })),
+    ));
   test("hashSnapshot: a totalComments-only delta changes the hash while tracking is on", () =>
     assert.notStrictEqual(
       poller.hashSnapshot(hsnap({ totalComments: 2 }), { trackComments: true }),

@@ -4,6 +4,7 @@
  * logic — the PR's "no more silent empty groups" behaviour — is unit-testable in
  * the plain-Node test runner (which can't `require` anything importing electron).
  */
+import type { JiraIssue } from "./jira";
 import type { JiraHealth, JiraSettings, Settings } from "./types";
 
 /** Why a parent-enrichment pass has nothing to do; null when it should run. */
@@ -67,6 +68,29 @@ export function enrichmentSkipReason(
  */
 export function healthFromResolution(queried: number, resolved: number): JiraHealth {
   return { state: resolved > 0 ? "ok" : "empty", queried, resolved };
+}
+
+/**
+ * Health for a completed pass, counted from what the lookup returned. `resolved`
+ * is the number of keys that resolved a **parent**, not the number of issues that
+ * came back — the two diverged when the lookup started returning parentless
+ * issues for their own summaries. A batch can resolve every summary and still
+ * leave "Group by parent task" with nothing to cluster, which is exactly the
+ * `empty` the banner exists to name; counting issues here would report `ok` and
+ * silence it, while the by-issue heading needs no banner at all (it degrades to
+ * the bare key, as it does with Jira switched off).
+ *
+ * Lives beside the other health rules rather than in the Electron-bound
+ * `main/jira-store.ts` for this module's whole reason to exist: here the
+ * distinction is pinned by the plain-Node runner.
+ */
+export function healthFromIssues(
+  queried: number,
+  issues: Iterable<Pick<JiraIssue, "parentKey">>,
+): JiraHealth {
+  let withParent = 0;
+  for (const issue of issues) if (issue.parentKey) withParent++;
+  return healthFromResolution(queried, withParent);
 }
 
 /** Health for a failed pass — `error` carrying the failure detail. */
