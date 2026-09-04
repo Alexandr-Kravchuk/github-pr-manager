@@ -21,6 +21,7 @@ import {
   type FilterState,
   type RoleFilter,
 } from "../../shared/pr-filter";
+import { groupKeyOf, groupLabel, type IssueGroupMode } from "../../shared/pr-group";
 import type {
   DashboardResponse,
   JiraStatus,
@@ -589,15 +590,11 @@ export function App() {
     //
     //  - "issue"  groups by the PR's own issue key (ENG-93374).
     //  - "parent" groups by the parent task resolved from Jira (ENG-93367), so
-    //    the subtasks of one task sit together; label shows the parent summary.
-    const keyOf = (p: PullRequest) => (groupBy === "parent" ? p.parentKey : p.issueKey);
-    const summaryOf = (key: string): string =>
-      groupBy === "parent"
-        ? (() => {
-            const summary = sorted.find((p) => p.parentKey === key)?.parentSummary;
-            return summary ? `${key} · ${summary}` : key;
-          })()
-        : key;
+    //    the subtasks of one task sit together.
+    // Which key and what the heading above it says are `shared/pr-group.ts` —
+    // pure, and unit-tested there rather than eyeballed through the DOM.
+    const mode: IssueGroupMode = groupBy === "parent" ? "parent" : "issue";
+    const keyOf = (p: PullRequest) => groupKeyOf(p, mode);
 
     const byKey = new Map<string, PullRequest[]>();
     for (const pr of sorted) {
@@ -610,12 +607,12 @@ export function App() {
     // `byKey` preserves first-appearance order, so clusters lead with the one
     // holding your most important PR under the active sort (not alphabetically).
     const multi = new Set([...byKey].filter(([, prs]) => prs.length >= 2).map(([k]) => k));
-    const clusters: Group[] = [...multi].map((key) => ({
-      key,
-      label: summaryOf(key),
-      hostLabel: null,
-      prs: sorted.filter((p) => keyOf(p) === key),
-    }));
+    const clusters: Group[] = [...multi].map((key) => {
+      // `byKey` already holds this key's PRs in `sorted` order — re-filtering
+      // `sorted` per cluster would just walk the list again for the same answer.
+      const prs = byKey.get(key) ?? [];
+      return { key, label: groupLabel(key, prs, mode), hostLabel: null, prs };
+    });
     const other = sorted.filter((p) => {
       const k = keyOf(p);
       return !k || !multi.has(k);

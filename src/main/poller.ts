@@ -80,11 +80,12 @@ export interface PollerOptions {
   /** Host fetcher — defaults to the real GraphQL `fetchHost`; PRD_MOCK swaps in fixtures. */
   fetchHostFn?: typeof fetchHost;
   /**
-   * Optional enricher run over the assembled PRs each tick — used to resolve Jira
-   * parent keys for grouping. Best-effort: it must not throw (the poller calls it
-   * inside a try/catch regardless). No-op when omitted.
+   * Optional enricher run over the assembled PRs each tick — used to resolve the
+   * Jira summaries and parent keys the group headings show. Best-effort: it must
+   * not throw (the poller calls it inside a try/catch regardless). No-op when
+   * omitted.
    */
-  enrichParents?: (prs: PullRequest[]) => Promise<JiraHealth | undefined | void>;
+  enrichJira?: (prs: PullRequest[]) => Promise<JiraHealth | undefined | void>;
   /**
    * Cheap REST notifications detector — defaults to the real `probeNotifications`.
    * PRD_MOCK swaps in a no-op so mock mode never touches the network. Runs on the
@@ -196,9 +197,14 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
     p.isDraft,
     p.isIgnored,
     p.parentKey,
-    // The group heading renders "key · summary" — a renamed parent task must
-    // re-emit or the heading goes stale until an unrelated field changes.
+    // Both group headings render "key · summary" — a renamed issue or parent
+    // task must re-emit or the heading goes stale until an unrelated field
+    // changes. Same for the recovery direction: a tick where Jira was
+    // unreachable leaves these null, and the tick that resolves them may move
+    // nothing else at all, so unhashed the heading would sit on the bare key
+    // until some unrelated PR field happened to change.
     p.parentSummary,
+    p.issueSummary,
   ]);
   return JSON.stringify({
     prs: lite,
@@ -580,14 +586,14 @@ export class Poller {
       console.error("[poller] applyIgnored failed:", e);
     }
 
-    // Resolve Jira parent keys for grouping (best-effort; no-op without Jira).
+    // Resolve Jira summaries + parent keys for grouping (best-effort; no-op without Jira).
     let jiraHealth: JiraHealth | undefined;
-    if (this.options.enrichParents) {
+    if (this.options.enrichJira) {
       try {
-        jiraHealth = (await this.options.enrichParents(allPrs)) ?? undefined;
+        jiraHealth = (await this.options.enrichJira(allPrs)) ?? undefined;
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        console.error("[poller] enrichParents failed:", e);
+        console.error("[poller] enrichJira failed:", e);
         jiraHealth = { state: "error", message, queried: 0, resolved: 0 };
       }
     }

@@ -70,11 +70,13 @@ Electron · Vite + React 19 + Tailwind CSS v4 (renderer) · TypeScript · Node
 
    The token needs the **`repo` scope** (for private repositories).
 
-## Jira (optional — parent-task grouping)
+## Jira (optional — issue titles + parent-task grouping)
 
 The **Group by parent task** view clusters your review PRs under the Jira issue
-they belong to (e.g. subtasks `ENG-1234`, `ENG-1235` sit under their parent task).
-To enable it:
+they belong to (e.g. subtasks `ENG-1234`, `ENG-1235` sit under their parent task),
+and both grouped views title their headings with the issue's summary
+(`ENG-1234 · Retry transient network errors`) instead of the bare key. To enable
+it:
 
 1. Create a **read-only API token** at
    [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens).

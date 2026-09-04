@@ -81,11 +81,12 @@ test("pickAppId: falls back on malformed JSON", () =>
 // --- shared value-import carve-outs stay Node-free (renderer imports them) ---
 // The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify,
 // the view-filter helpers from shared/pr-filter, the issue-link builder from
-// shared/issue-key and the F5 decision from shared/hotkeys. That's only safe while those modules pull in no node:
+// shared/issue-key, the F5 decision from shared/hotkeys and the group-heading
+// rules from shared/pr-group. That's only safe while those modules pull in no node:
 // builtin — a regression would break the Vite renderer build. Assert the
 // compiled output is clean so the AGENTS.md carve-out is enforced, not just
 // documented.
-for (const mod of ["notify.js", "pr-filter.js", "issue-key.js", "hotkeys.js"]) {
+for (const mod of ["notify.js", "pr-filter.js", "issue-key.js", "hotkeys.js", "pr-group.js"]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
       path.join(__dirname, `../dist/main/shared/${mod}`),
@@ -1889,6 +1890,69 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
   assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", "eng-1"), null);
 });
 
+// --- pr-group: what a Jira-keyed group heading says --------------------------
+// The rendered heading is this PR's whole point, so it is a pure rule here rather
+// than a closure inside App.tsx's grouping memo: these cases are what actually
+// holds "KEY · Summary, or the bare key", where a DOM-less runner otherwise
+// could not look.
+{
+  const prGroup = require(path.join(__dirname, "../dist/main/shared/pr-group.js"));
+  const gpr = (over = {}) => ({
+    issueKey: "ENG-93374",
+    issueSummary: null,
+    parentKey: "ENG-93367",
+    parentSummary: null,
+    ...over,
+  });
+
+  test("groupKeyOf: issue mode clusters by the PR's own key, parent mode by the parent", () => {
+    assert.strictEqual(prGroup.groupKeyOf(gpr(), "issue"), "ENG-93374");
+    assert.strictEqual(prGroup.groupKeyOf(gpr(), "parent"), "ENG-93367");
+  });
+  test("groupKeyOf: no key in this mode -> null (the PR falls to the Other bucket)", () => {
+    assert.strictEqual(prGroup.groupKeyOf(gpr({ issueKey: null }), "issue"), null);
+    assert.strictEqual(prGroup.groupKeyOf(gpr({ parentKey: null }), "parent"), null);
+  });
+
+  test("groupLabel: by issue, a resolved summary titles the heading", () =>
+    assert.strictEqual(
+      prGroup.groupLabel("ENG-93374", [gpr({ issueSummary: "Retry transient network errors" })], "issue"),
+      "ENG-93374 · Retry transient network errors",
+    ));
+  test("groupLabel: by parent, the parent's summary is used and the issue's is ignored", () =>
+    // Swapping the two branches would still produce a plausible-looking heading,
+    // so pin which summary each mode reads: a PR carries both.
+    assert.strictEqual(
+      prGroup.groupLabel(
+        "ENG-93367",
+        [gpr({ issueSummary: "Retry transient network errors", parentSummary: "Analyze long app creating" })],
+        "parent",
+      ),
+      "ENG-93367 · Analyze long app creating",
+    ));
+  test("groupLabel: nothing resolved -> the bare key (Jira off, or a key it doesn't know)", () =>
+    // The pre-Jira behaviour, and the one every user without a Jira connection
+    // still gets: the heading must stay usable, never "ENG-93374 · null".
+    assert.strictEqual(
+      prGroup.groupLabel("ENG-93374", [gpr(), gpr()], "issue"),
+      "ENG-93374",
+    ));
+  test("groupLabel: an empty-string summary is no summary", () =>
+    assert.strictEqual(
+      prGroup.groupLabel("ENG-93374", [gpr({ issueSummary: "" })], "issue"),
+      "ENG-93374",
+    ));
+  test("groupLabel: takes the first summary in the cluster, not the first PR's", () =>
+    // The deliberate scan: one card without a summary must not blank a heading
+    // its siblings can title.
+    assert.strictEqual(
+      prGroup.groupLabel("ENG-93374", [gpr(), gpr({ issueSummary: "Retry transient network errors" })], "issue"),
+      "ENG-93374 · Retry transient network errors",
+    ));
+  test("groupLabel: an empty cluster is just the key (no crash, no separator)", () =>
+    assert.strictEqual(prGroup.groupLabel("ENG-93374", [], "issue"), "ENG-93374"));
+}
+
 // --- ignored: persistent ignore store ----------------------------------------
 async function withTempStore(fn) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "prd-ignored-"));
@@ -1948,6 +2012,36 @@ test("healthFromResolution: ok when >=1 parent resolved", () =>
   assert.deepStrictEqual(jiraHealth.healthFromResolution(3, 2), { state: "ok", queried: 3, resolved: 2 }));
 test("healthFromResolution: empty when nothing resolved", () =>
   assert.deepStrictEqual(jiraHealth.healthFromResolution(3, 0), { state: "empty", queried: 3, resolved: 0 }));
+// `resolved` counts parents, not issues that came back — the two diverged when
+// the lookup started returning parentless issues for their own summaries. Get it
+// wrong and a Jira that resolves every summary but no parent reports `ok`,
+// silencing the one banner that explains an empty "Group by parent task".
+test("healthFromIssues: counts parents, not the issues that resolved", () =>
+  assert.deepStrictEqual(
+    jiraHealth.healthFromIssues(3, [
+      { parentKey: "ENG-1" },
+      { parentKey: null },
+      { parentKey: "ENG-1" },
+    ]),
+    { state: "ok", queried: 3, resolved: 2 },
+  ));
+test("healthFromIssues: every key resolved but none is a subtask -> empty", () =>
+  // The regression this guards: summaries came back, so the by-issue heading is
+  // fine and needs no banner — but by-parent has nothing to cluster and must say
+  // so. Counting issues here would report ok=2 and leave that view silently bare.
+  assert.deepStrictEqual(
+    jiraHealth.healthFromIssues(2, [{ parentKey: null }, { parentKey: null }]),
+    { state: "empty", queried: 2, resolved: 0 },
+  ));
+test("healthFromIssues: nothing resolved at all -> empty, with the queried count kept", () =>
+  assert.deepStrictEqual(jiraHealth.healthFromIssues(2, []), {
+    state: "empty",
+    queried: 2,
+    resolved: 0,
+  }));
+// The pure rule above is only worth anything if the enricher routes through it,
+// which the behavioral `buildJiraEnricher` cases (further down, against a mocked
+// Electron) exercise through the enricher's real output.
 test("healthFromError: error state carries the Error message", () =>
   assert.deepStrictEqual(jiraHealth.healthFromError(4, new Error("boom")), {
     state: "error",
@@ -3488,7 +3582,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
   global.fetch = realGithubFetch;
 
-  // --- jira: fetchParents ----------------------------------------------------
+  // --- jira: fetchIssues ----------------------------------------------------
   const JIRA_CFG = { baseUrl: "https://org.atlassian.net", email: "me@x.com" };
   // Must be UUID-shaped: resolveCloudId rejects anything else (URL-injection guard).
   const CLOUD_ID = "158d8f10-2fb5-4b9b-9d0f-6a1c3f4b5e6d";
@@ -3501,8 +3595,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // Restore the real fetch after these tests.
   const realFetch = global.fetch;
 
-  await atest("fetchParents: resolves via the API gateway (scoped token)", async () => {
-    jira.clearParentCache();
+  await atest("fetchIssues: resolves via the API gateway (scoped token)", async () => {
+    jira.clearJiraCaches();
     let hitSite = false;
     global.fetch = async (url) => {
       if (isTenant(url)) return tenantOk();
@@ -3514,17 +3608,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       if (url === SITE) { hitSite = true; return okJson({ issues: [] }); }
       throw new Error("unexpected url " + url);
     };
-    const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-93373", "ENG-93374"]);
+    const map = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-93373", "ENG-93374"]);
     assert.strictEqual(map.get("ENG-93373").parentKey, "ENG-93367");
     assert.strictEqual(map.get("ENG-93374").parentSummary, "Analyze long app creating");
     assert.strictEqual(hitSite, false); // scoped path must never touch the site URL
   });
 
-  await atest("fetchParents: falls back to the site URL on 401/403 (classic token)", async () => {
+  await atest("fetchIssues: falls back to the site URL on 401/403 (classic token)", async () => {
     // Both statuses are "wrong token type for this base" — a regression narrowing
     // the condition to 401-only must fail here.
     for (const status of [401, 403]) {
-      jira.clearParentCache();
+      jira.clearJiraCaches();
       global.fetch = async (url) => {
         if (isTenant(url)) return tenantOk();
         if (url === GATEWAY) return errRes(status); // classic token → gateway rejects
@@ -3532,15 +3626,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0", fields: { summary: "P" } } } }] });
         throw new Error("unexpected url " + url);
       };
-      const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+      const map = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
       assert.strictEqual(map.get("ENG-1").parentKey, "ENG-0");
     }
   });
 
-  await atest("fetchParents: a non-UUID cloudId is rejected — site only, no gateway", async () => {
+  await atest("fetchIssues: a non-UUID cloudId is rejected — site only, no gateway", async () => {
     // tenant_info lives on a user-configured host; a malformed cloudId must not
     // be interpolated into the api.atlassian.com URL path.
-    jira.clearParentCache();
+    jira.clearJiraCaches();
     let hitGateway = false;
     global.fetch = async (url) => {
       if (isTenant(url)) return okJson({ cloudId: "../../oauth/token#" });
@@ -3549,13 +3643,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0" } } }] });
       throw new Error("unexpected url " + url);
     };
-    const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    const map = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
     assert.strictEqual(map.get("ENG-1").parentKey, "ENG-0");
     assert.strictEqual(hitGateway, false);
   });
 
-  await atest("fetchParents: uses site only when cloudId can't be resolved", async () => {
-    jira.clearParentCache();
+  await atest("fetchIssues: uses site only when cloudId can't be resolved", async () => {
+    jira.clearJiraCaches();
     let hitGateway = false;
     global.fetch = async (url) => {
       if (isTenant(url)) return errRes(404);
@@ -3564,47 +3658,94 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0" } } }] });
       throw new Error("unexpected url " + url);
     };
-    const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    const map = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
     assert.strictEqual(map.get("ENG-1").parentKey, "ENG-0");
     assert.strictEqual(hitGateway, false); // no cloudId → gateway never attempted
   });
 
-  await atest("fetchParents: a key with no parent is absent from the map", async () => {
-    jira.clearParentCache();
+  await atest("fetchIssues: an issue with no parent is still returned, with its own summary", async () => {
+    // "No parent" is not "no issue": the by-issue heading wants this key's summary
+    // even though by-parent grouping has nothing to cluster it under. Dropping it
+    // from the map (as the parent-only predecessor did) would leave every heading
+    // on a non-subtask ticket showing the bare key.
+    jira.clearJiraCaches();
     global.fetch = async (url) =>
-      isTenant(url) ? tenantOk() : okJson({ issues: [{ key: "ENG-1", fields: {} }] });
-    const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
-    assert.strictEqual(map.has("ENG-1"), false);
+      isTenant(url) ? tenantOk() : okJson({ issues: [{ key: "ENG-1", fields: { summary: "Ship the thing" } }] });
+    const map = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
+    assert.strictEqual(map.get("ENG-1").summary, "Ship the thing");
+    assert.strictEqual(map.get("ENG-1").parentKey, null);
+    assert.strictEqual(map.get("ENG-1").parentSummary, null);
   });
 
-  await atest("fetchParents: caches — a second call makes no request", async () => {
-    jira.clearParentCache();
+  await atest("fetchIssues: a key Jira doesn't return is absent from the map", async () => {
+    // The other half of the pair above: unknown to Jira (or invisible to this
+    // token) stays absent, so the enricher writes null rather than a stale value.
+    jira.clearJiraCaches();
+    global.fetch = async (url) => (isTenant(url) ? tenantOk() : okJson({ issues: [] }));
+    const map = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-404"]);
+    assert.strictEqual(map.has("ENG-404"), false);
+  });
+
+  await atest("fetchIssues: asks Jira for the summary field, not just the parent", async () => {
+    // The by-issue heading is only as good as the request: `fields` must carry
+    // `summary`, or every issue comes back titleless and the heading silently
+    // degrades to the bare key with nothing else failing.
+    jira.clearJiraCaches();
+    let fields = null;
+    global.fetch = async (url, init) => {
+      if (isTenant(url)) return tenantOk();
+      fields = JSON.parse(init.body).fields;
+      return okJson({ issues: [{ key: "ENG-1", fields: { summary: "S" } }] });
+    };
+    await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
+    assert.ok(fields.includes("summary"), `fields were ${JSON.stringify(fields)}`);
+    assert.ok(fields.includes("parent"), `fields were ${JSON.stringify(fields)}`);
+  });
+
+  await atest("fetchIssues: a summary-less issue resolves to null, not undefined", async () => {
+    // The renderer's label picks the first *non-empty* summary in a cluster, and
+    // the poller hashes the field — a missing `summary` must land as null, the
+    // same shape github.ts seeds, so neither sees `undefined`.
+    jira.clearJiraCaches();
+    global.fetch = async (url) =>
+      isTenant(url) ? tenantOk() : okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0" } } }] });
+    const map = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
+    assert.strictEqual(map.get("ENG-1").summary, null);
+    assert.strictEqual(map.get("ENG-1").parentKey, "ENG-0");
+  });
+
+  await atest("fetchIssues: caches — a second call makes no request", async () => {
+    jira.clearJiraCaches();
     let searchCalls = 0;
     global.fetch = async (url) => {
       if (isTenant(url)) return tenantOk();
       searchCalls++;
-      return okJson({ issues: [{ key: "ENG-100", fields: { parent: { key: "ENG-1", fields: { summary: "P" } } } }] });
+      return okJson({ issues: [{ key: "ENG-100", fields: { summary: "Cached title", parent: { key: "ENG-1", fields: { summary: "P" } } } }] });
     };
-    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-100"]);
-    const again = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-100"]);
+    await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-100"]);
+    const again = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-100"]);
     assert.strictEqual(searchCalls, 1);
     assert.strictEqual(again.get("ENG-100").parentKey, "ENG-1");
+    // The cached entry must carry the issue's own summary too — a cache that kept
+    // only the parent would blank every by-issue heading on the second tick, with
+    // no request left to notice it.
+    assert.strictEqual(again.get("ENG-100").summary, "Cached title");
   });
 
-  await atest("fetchParents: throws when every base rejects (401)", async () => {
-    jira.clearParentCache();
+  await atest("fetchIssues: throws when every base rejects (401)", async () => {
+    jira.clearJiraCaches();
     global.fetch = async (url) => (isTenant(url) ? tenantOk() : errRes(401));
-    await assert.rejects(() => jira.fetchParents(JIRA_CFG, "tok", ["ENG-5"]), /Jira HTTP 401/);
+    await assert.rejects(() => jira.fetchIssues(JIRA_CFG, "tok", ["ENG-5"]), /Jira HTTP 401/);
   });
 
-  await atest("fetchParents: recovers within the cloudId TTL after a transient blip (no 10-min negative poisoning)", async () => {
+  await atest("fetchIssues: recovers within the cloudId TTL after a transient blip (no 10-min negative poisoning)", async () => {
     // Regression: a transient tenant_info blip must not keep the banner 'empty'
     // for the full CACHE_TTL_MS. The failed cloudId is cached only ~60s, the
     // site-only base is left uncached, AND the untrusted 200-but-empty writes no
-    // negative parentCache entries — so the first pass after the 60s TTL re-probes
+    // negative issueCache entries — so the first pass after the 60s TTL re-probes
     // and the scoped token reaches the gateway, long before the 10-min TTL. This
     // advances the clock only 61s to exercise that intervening window.
-    jira.clearParentCache();
+    jira.clearJiraCaches();
     const realNow = Date.now;
     let clock = 1_000_000;
     Date.now = () => clock;
@@ -3627,17 +3768,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // First pass IS the in-blip fetch: cloudId lookup fails → site only → empty,
       // gateway never tried. This is where a negative WOULD be written if the
       // untrusted-base guard regressed.
-      const first = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-9"]);
+      const first = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-9"]);
       assert.strictEqual(first.has("ENG-9"), false);
       assert.strictEqual(gatewayHits, 0);
-      // Advance just past the 60s cloudId TTL — far short of the 10-min parentCache TTL.
+      // Advance just past the 60s cloudId TTL — far short of the 10-min issueCache TTL.
       clock += 61 * 1000;
       // Second pass: cloudId re-resolves, the gateway wins (site base not pinned,
       // no negatives cached), so recovery happens inside the 60s window. Recovering
       // here — well before CACHE_TTL_MS — is the proof that the blip wrote no
       // poisoning negative: a cached negative would still be fresh at +61s, keep
       // ENG-9 out of the stale set, and leave the map empty (failing the assert).
-      const second = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-9"]);
+      const second = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-9"]);
       assert.strictEqual(second.get("ENG-9").parentKey, "ENG-0");
       assert.ok(gatewayHits >= 1);
     } finally {
@@ -3646,12 +3787,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     }
   });
 
-  await atest("fetchParents: a 5xx/429 on the gateway throws and does NOT fall back to the site", async () => {
+  await atest("fetchIssues: a 5xx/429 on the gateway throws and does NOT fall back to the site", async () => {
     // The 401/403-only fallback is deliberate: a scoped token on the site URL
     // answers 200-but-empty, so silently retrying there on a 429/500 would mask a
     // real gateway error as "no parents found". Lock the invariant in.
     for (const status of [429, 500]) {
-      jira.clearParentCache();
+      jira.clearJiraCaches();
       let hitSite = false;
       global.fetch = async (url) => {
         if (isTenant(url)) return tenantOk();
@@ -3660,18 +3801,18 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         throw new Error("unexpected url " + url);
       };
       await assert.rejects(
-        () => jira.fetchParents(JIRA_CFG, "tok", ["ENG-7"]),
+        () => jira.fetchIssues(JIRA_CFG, "tok", ["ENG-7"]),
         new RegExp(`Jira HTTP ${status}`),
       );
       assert.strictEqual(hitSite, false);
     }
   });
 
-  await atest("fetchParents: a network throw on the gateway still falls back to the site", async () => {
+  await atest("fetchIssues: a network throw on the gateway still falls back to the site", async () => {
     // A thrown fetch (timeout/DNS, or a proxy blocking the gateway host while
     // allowing the site) must advance to the site like a 401 would, so a classic
     // token behind such a proxy isn't stranded on a hard error.
-    jira.clearParentCache();
+    jira.clearJiraCaches();
     let hitSite = false;
     global.fetch = async (url) => {
       if (isTenant(url)) return tenantOk();
@@ -3682,18 +3823,18 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
       throw new Error("unexpected url " + url);
     };
-    const map = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-2"]);
+    const map = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-2"]);
     assert.strictEqual(hitSite, true);
     assert.strictEqual(map.get("ENG-2").parentKey, "ENG-1");
   });
 
-  await atest("fetchParents: a thrown-gateway fallback neither pins the site nor caches negatives", async () => {
+  await atest("fetchIssues: a thrown-gateway fallback neither pins the site nor caches negatives", async () => {
     // The untrusted-fallback guard (`cleanFallback`): a 200-but-empty reached
     // past a thrown gateway might be a scoped token that belongs on the gateway.
     // If the site base got pinned or negatives written here, the dashboard would
     // stay silently empty long after the gateway recovers. Mutation guard:
     // replacing resultIsTrustworthy with `bases.length > 1` must fail this test.
-    jira.clearParentCache();
+    jira.clearJiraCaches();
     const realNow = Date.now;
     let clock = 5_000_000;
     Date.now = () => clock;
@@ -3710,14 +3851,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         throw new Error("unexpected url " + url);
       };
       // Pass 1: gateway throws, site answers empty → untrusted; nothing may be cached.
-      const first = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-11"]);
+      const first = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-11"]);
       assert.strictEqual(first.has("ENG-11"), false);
-      // Past the 60s gateway backoff but far inside the 10-min parentCache TTL: a
+      // Past the 60s gateway backoff but far inside the 10-min issueCache TTL: a
       // poisoning negative from pass 1 would still be fresh and keep the key out
       // of the stale set; a pinned site base would never retry the gateway.
       // Either regression leaves the map empty here.
       clock += 61 * 1000;
-      const second = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-11"]);
+      const second = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-11"]);
       assert.strictEqual(second.get("ENG-11").parentKey, "ENG-10");
       assert.strictEqual(gatewayCalls, 2);
     } finally {
@@ -3726,12 +3867,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     }
   });
 
-  await atest("fetchParents: a thrown gateway is backed off, not re-probed on every pass", async () => {
+  await atest("fetchIssues: a thrown gateway is backed off, not re-probed on every pass", async () => {
     // Recurring-timeout guard: after the gateway throws (proxy blocking
     // api.atlassian.com while allowing the site), later passes inside the backoff
     // window must go straight to the site — no repeated 10s timeout per chunk per
     // tick — and the gateway is re-attempted once the window lapses.
-    jira.clearParentCache();
+    jira.clearJiraCaches();
     const realNow = Date.now;
     let clock = 9_000_000;
     Date.now = () => clock;
@@ -3747,16 +3888,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         }
         throw new Error("unexpected url " + url);
       };
-      const first = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-21"]);
+      const first = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-21"]);
       assert.strictEqual(first.get("ENG-21").parentKey, "ENG-20");
       assert.strictEqual(gatewayAttempts, 1);
       // Inside the backoff window: the gateway must not be attempted again.
-      const second = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-22"]);
+      const second = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-22"]);
       assert.strictEqual(second.get("ENG-22").parentKey, "ENG-20");
       assert.strictEqual(gatewayAttempts, 1);
       // Past the window: the gateway candidate is back (and may throw again).
       clock += 61 * 1000;
-      const third = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-23"]);
+      const third = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-23"]);
       assert.strictEqual(third.get("ENG-23").parentKey, "ENG-20");
       assert.strictEqual(gatewayAttempts, 2);
     } finally {
@@ -3765,36 +3906,36 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     }
   });
 
-  await atest("fetchParents: a clearParentCache during an in-flight pass discards that pass's cache writes", async () => {
+  await atest("fetchIssues: a clearJiraCaches during an in-flight pass discards that pass's cache writes", async () => {
     // Token-change race: the user saves a new token while a pass built with the
     // old token is awaiting its fetch. When that pass resolves it must not re-pin
     // the base or repopulate the caches that were just cleared — otherwise the
     // new token would be sent to the old token's pinned base forever.
-    jira.clearParentCache();
+    jira.clearJiraCaches();
     let tenantCalls = 0;
     let searchCalls = 0;
     global.fetch = async (url) => {
       if (isTenant(url)) { tenantCalls++; return tenantOk(); }
       searchCalls++;
-      if (searchCalls === 1) jira.clearParentCache(); // the token save lands mid-flight
+      if (searchCalls === 1) jira.clearJiraCaches(); // the token save lands mid-flight
       return okJson({ issues: [{ key: "ENG-31", fields: { parent: { key: "ENG-30", fields: { summary: "P" } } } }] });
     };
     // The raced pass reports empty — its result belongs to the pre-clear world.
-    const first = await jira.fetchParents(JIRA_CFG, "old-token", ["ENG-31"]);
+    const first = await jira.fetchIssues(JIRA_CFG, "old-token", ["ENG-31"]);
     assert.strictEqual(first.has("ENG-31"), false);
     // The next pass must re-probe everything: nothing from the raced pass survived.
-    const second = await jira.fetchParents(JIRA_CFG, "new-token", ["ENG-31"]);
+    const second = await jira.fetchIssues(JIRA_CFG, "new-token", ["ENG-31"]);
     assert.strictEqual(second.get("ENG-31").parentKey, "ENG-30");
     assert.strictEqual(tenantCalls, 2); // cloudId re-resolved → cleared cache stayed cleared
     assert.strictEqual(searchCalls, 2); // parent re-fetched → no stale positive/pin survived
   });
 
-  await atest("fetchParents: negatives are still cached after the base is pinned (no per-tick re-query)", async () => {
+  await atest("fetchIssues: negatives are still cached after the base is pinned (no per-tick re-query)", async () => {
     // Regression: once the base is pinned, apiBasesFor returns a single-element
     // array. A `bases.length > 1` trust check alone would then treat every
     // steady-state call as untrusted and stop caching negatives, re-querying
     // no-parent keys on every tick. A pinned base must stay trusted.
-    jira.clearParentCache();
+    jira.clearJiraCaches();
     let searchCalls = 0;
     global.fetch = async (url) => {
       if (isTenant(url)) return tenantOk();
@@ -3802,20 +3943,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       return okJson({ issues: [{ key: "ENG-A", fields: { parent: { key: "ENG-P", fields: { summary: "P" } } } }] });
     };
     // Call 1 pins the gateway (bases.length === 2 here).
-    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-A"]);
+    await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-A"]);
     // Call 2 runs with the base already pinned (bases === [gateway]); ENG-B is not
     // returned, so its negative must still be written despite the single-element set.
-    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-B"]);
+    await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-B"]);
     const callsBefore = searchCalls;
     // Call 3 for the same no-parent key must make no new request — proving the
     // negative from call 2 was cached.
-    const again = await jira.fetchParents(JIRA_CFG, "tok", ["ENG-B"]);
+    const again = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-B"]);
     assert.strictEqual(again.has("ENG-B"), false);
     assert.strictEqual(searchCalls, callsBefore);
   });
 
-  await atest("clearParentCache: wipes parent + cloudId + apiBase caches (token change forces a full re-probe)", async () => {
-    jira.clearParentCache();
+  await atest("clearJiraCaches: wipes issue + cloudId + apiBase caches (token change forces a full re-probe)", async () => {
+    jira.clearJiraCaches();
     let tenantCalls = 0;
     let searchCalls = 0;
     global.fetch = async (url) => {
@@ -3823,21 +3964,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       searchCalls++;
       return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0", fields: { summary: "P" } } } }] });
     };
-    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
     assert.strictEqual(tenantCalls, 1); // cloudId resolved once
     assert.strictEqual(searchCalls, 1);
     // A repeat with everything cached hits the network for neither.
-    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
     assert.strictEqual(tenantCalls, 1);
     assert.strictEqual(searchCalls, 1);
     // Clearing (as setJiraToken does on a token change) forces a full re-probe.
-    jira.clearParentCache();
-    await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+    jira.clearJiraCaches();
+    await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
     assert.strictEqual(tenantCalls, 2); // cloudIdCache cleared → tenant_info re-probed
-    assert.strictEqual(searchCalls, 2); // parentCache + apiBaseCache cleared → re-queried
+    assert.strictEqual(searchCalls, 2); // issueCache + apiBaseCache cleared → re-queried
   });
 
-  await atest("fetchParents: the tenant_info probe uses a shorter timeout than the search", async () => {
+  await atest("fetchIssues: the tenant_info probe uses a shorter timeout than the search", async () => {
     // Cold-cache + full-outage guard: the enricher pays the cloudId probe and
     // the search as two sequential timeouts in one tick, so the lightweight
     // unauthenticated tenant_info probe must not hold the full per-request
@@ -3845,7 +3986,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     // Capture the AbortController deadline each fetch arms and assert the probe's
     // is materially shorter than the search's. Reverting the probe to the full
     // REQUEST_TIMEOUT_MS must fail here.
-    jira.clearParentCache();
+    jira.clearJiraCaches();
     const realSetTimeout = global.setTimeout;
     const realClearTimeout = global.clearTimeout;
     const delays = [];
@@ -3861,7 +4002,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           return okJson({ issues: [{ key: "ENG-1", fields: { parent: { key: "ENG-0", fields: { summary: "P" } } } }] });
         throw new Error("unexpected url " + url);
       };
-      await jira.fetchParents(JIRA_CFG, "tok", ["ENG-1"]);
+      await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
     } finally {
       global.setTimeout = realSetTimeout;
       global.clearTimeout = realClearTimeout;
@@ -3875,10 +4016,136 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.ok(probe * 2 <= search, `probe timeout (${probe}ms) should be materially shorter than the search (${search}ms)`);
   });
 
+  // --- the Jira enricher, verified against a mocked Electron -----------------
+  // `jira-store.ts` imports electron (`app`, `safeStorage`), so it is exercised
+  // the way `tray.ts` and `main.ts` are: require the COMPILED module with a fake
+  // electron in the require cache, over the same stubbed `fetch` as the cases
+  // above. That reaches what the pure rules can't — the enricher's real output:
+  // what it writes onto each PR, and the health it reports for a whole batch.
+  const withMockedElectron = async (fn) => {
+    const fsSync = require("node:fs");
+    const storeJs = path.join(__dirname, "../dist/main/main/jira-store.js");
+    const elPath = require.resolve("electron", { paths: [path.dirname(storeJs)] });
+    const storePath = require.resolve(storeJs);
+    const userData = fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-jira-store-"));
+    const hadElectron = require.cache[elPath];
+    require.cache[elPath] = {
+      id: elPath,
+      filename: elPath,
+      loaded: true,
+      exports: {
+        // A userData dir of our own, so the token file is real but disposable.
+        app: { getPath: () => userData },
+        // The keychain stands in as identity: setJiraToken/getJiraToken still run
+        // their real file paths, which is what carries the token through to fetch.
+        safeStorage: {
+          isEncryptionAvailable: () => true,
+          encryptString: (text) => Buffer.from(text, "utf8"),
+          decryptString: (buf) => buf.toString("utf8"),
+        },
+      },
+    };
+    delete require.cache[storePath];
+    try {
+      await fn(require(storeJs));
+    } finally {
+      delete require.cache[storePath];
+      if (hadElectron) require.cache[elPath] = hadElectron;
+      else delete require.cache[elPath];
+      fsSync.rmSync(userData, { recursive: true, force: true });
+    }
+  };
+  // Jira answers only the keys the JQL actually asked for, with the fields each
+  // case gives them — so a case controls parentage per key, and a key it omits
+  // is one Jira doesn't know.
+  const jiraAnswers = (byKey) => async (url, init) => {
+    if (isTenant(url)) return tenantOk();
+    const queried = JSON.parse(init.body).jql.match(/[A-Z]+-\d+/g) || [];
+    return okJson({
+      issues: queried.filter((k) => byKey[k]).map((k) => ({ key: k, fields: byKey[k] })),
+    });
+  };
+
+  await atest("buildJiraEnricher: writes each PR's summary and parent, and counts only parents as resolved", async () => {
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({
+      "ENG-1": { summary: "One", parent: { key: "ENG-0", fields: { summary: "The parent task" } } },
+      "ENG-2": { summary: "Two", parent: { key: "ENG-0", fields: { summary: "The parent task" } } },
+      "ENG-3": { summary: "Three" }, // resolves, but is not a subtask
+    });
+    await withMockedElectron(async (store) => {
+      assert.strictEqual(store.setJiraToken("tok").ok, true);
+      const prs = [
+        { issueKey: "ENG-1", issueSummary: null, parentKey: null, parentSummary: null },
+        { issueKey: "ENG-2", issueSummary: null, parentKey: null, parentSummary: null },
+        { issueKey: "ENG-3", issueSummary: null, parentKey: null, parentSummary: null },
+        { issueKey: null, issueSummary: null, parentKey: null, parentSummary: null },
+      ];
+      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      // The by-issue heading's input, on every PR that has a key — including the
+      // parentless one, which the parent-only lookup used to drop entirely.
+      assert.deepStrictEqual(
+        prs.map((p) => p.issueSummary),
+        ["One", "Two", "Three", null],
+      );
+      assert.deepStrictEqual(
+        prs.map((p) => p.parentKey),
+        ["ENG-0", "ENG-0", null, null],
+      );
+      assert.strictEqual(prs[0].parentSummary, "The parent task");
+      // `resolved` is 2, not the 3 issues that resolved: the regression the
+      // parent-only count exists to prevent, caught through the enricher's own
+      // output rather than through its source text.
+      assert.deepStrictEqual(health, { state: "ok", queried: 3, resolved: 2 });
+    });
+  });
+
+  await atest("buildJiraEnricher: every key resolves but none is a subtask -> empty health", async () => {
+    // Summaries came back, so the by-issue heading is fine and needs no banner —
+    // but "Group by parent task" has nothing to cluster and must say so. Counting
+    // issues instead of parents would report ok here and leave that view silently
+    // bare, which is the whole reason the banner exists.
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({ "ENG-4": { summary: "Four" }, "ENG-5": { summary: "Five" } });
+    await withMockedElectron(async (store) => {
+      assert.strictEqual(store.setJiraToken("tok").ok, true);
+      const prs = [
+        { issueKey: "ENG-4", issueSummary: null, parentKey: null, parentSummary: null },
+        { issueKey: "ENG-5", issueSummary: null, parentKey: null, parentSummary: null },
+      ];
+      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      assert.deepStrictEqual(
+        prs.map((p) => p.issueSummary),
+        ["Four", "Five"],
+      );
+      assert.deepStrictEqual(health, { state: "empty", queried: 2, resolved: 0 });
+    });
+  });
+
+  await atest("buildJiraEnricher: no token -> skipped, with no request and no health", async () => {
+    // The skip ordering is unit-tested pure; this pins that the enricher honours
+    // it against the real token store, so a missing token can never spend a call.
+    jira.clearJiraCaches();
+    let calls = 0;
+    const answer = jiraAnswers({ "ENG-6": { summary: "Six" } });
+    global.fetch = async (...args) => {
+      calls++;
+      return answer(...args);
+    };
+    await withMockedElectron(async (store) => {
+      assert.strictEqual(store.setJiraToken("").ok, true); // clears any stored token
+      const prs = [{ issueKey: "ENG-6", issueSummary: null, parentKey: null, parentSummary: null }];
+      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      assert.strictEqual(health, undefined);
+      assert.strictEqual(prs[0].issueSummary, null);
+      assert.strictEqual(calls, 0);
+    });
+  });
+
   global.fetch = realFetch;
 
   // --- poller: tick folds jiraHealth into the snapshot + change detection ----
-  await atest("Poller.tick: enrichParents throw → error health; message change re-emits, no-change dedups", async () => {
+  await atest("Poller.tick: enrichJira throw → error health; message change re-emits, no-change dedups", async () => {
     const snapshots = [];
     let enrichError = "boom A";
     const p = new poller.Poller({
@@ -3896,12 +4163,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       appVersion: "test",
       onSnapshot: (s) => snapshots.push(s),
       onConfigError: () => {},
-      enrichParents: async () => {
+      enrichJira: async () => {
         throw new Error(enrichError);
       },
     });
 
-    // Tick 1: enrichParents throws → jiraHealth defaults to the error state.
+    // Tick 1: enrichJira throws → jiraHealth defaults to the error state.
     await p.refresh();
     assert.strictEqual(snapshots.length, 1);
     assert.strictEqual(snapshots[0].jiraHealth.state, "error");
@@ -4141,6 +4408,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // because the card renders it, so these cases pin the count's own contribution
   // to the hash — not a claim that comment ticks stop pushing. With the setting
   // on the count must still push, which is the whole point.
+  // The group heading is rendered from `issueSummary`/`parentSummary`, and both
+  // move on ticks where nothing else does: Jira resolving after an outage (or a
+  // first pass whose keys weren't cached yet), and a ticket someone renamed.
+  // Unhashed, either leaves the heading showing yesterday's title — or the bare
+  // key — until an unrelated PR field happens to change.
+  test("hashSnapshot: Jira resolving a summary changes the hash (the heading leaves the bare key)", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ issueSummary: null })),
+      poller.hashSnapshot(hsnap({ issueSummary: "Retry transient network errors" })),
+    ));
+  test("hashSnapshot: a renamed Jira issue changes the hash (the heading doesn't go stale)", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ issueSummary: "Old title" })),
+      poller.hashSnapshot(hsnap({ issueSummary: "New title" })),
+    ));
   test("hashSnapshot: a totalComments-only delta changes the hash while tracking is on", () =>
     assert.notStrictEqual(
       poller.hashSnapshot(hsnap({ totalComments: 2 }), { trackComments: true }),
