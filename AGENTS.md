@@ -42,13 +42,16 @@ Three layers:
   (`DEFAULT_NOTIFICATION_SETTINGS`, the single source of truth for notification
   defaults), `pr-filter.ts` (the whole view-filter layer: the reveal gate, the
   filter pipeline and the chips' facet counts), `issue-key.ts` (the Jira
-  issue-link builder used by `PrCard.tsx`) and `hotkeys.ts` (the F5 refresh
+  issue-link builder used by `PrCard.tsx`), `hotkeys.ts` (the F5 refresh
   decision and the forced-refresh cooldown shared with CmdOrCtrl+R and the
-  header button). Keep any such
+  header button) and `pr-group.ts` (which Jira key a PR clusters under and what
+  the heading above that cluster says — `"KEY · Summary"`, or the bare key when
+  Jira resolved none; it lives here rather than as closures in `App.tsx` so the
+  rendered heading is unit-tested without a DOM). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
-  `notify.js`, `pr-filter.js`, `issue-key.js` and `hotkeys.js` stay free of
-  `node:` builtin references, so the
+  `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js` and `pr-group.js`
+  stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.

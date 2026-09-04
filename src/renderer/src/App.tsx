@@ -21,6 +21,7 @@ import {
   type FilterState,
   type RoleFilter,
 } from "../../shared/pr-filter";
+import { groupKeyOf, groupLabel, type IssueGroupMode } from "../../shared/pr-group";
 import type {
   DashboardResponse,
   JiraStatus,
@@ -590,19 +591,10 @@ export function App() {
     //  - "issue"  groups by the PR's own issue key (ENG-93374).
     //  - "parent" groups by the parent task resolved from Jira (ENG-93367), so
     //    the subtasks of one task sit together.
-    // Either heading reads "KEY · Summary" once Jira has resolved the summary.
-    const keyOf = (p: PullRequest) => (groupBy === "parent" ? p.parentKey : p.issueKey);
-    const summaryOf = (p: PullRequest) => (groupBy === "parent" ? p.parentSummary : p.issueSummary);
-    // Takes the first non-empty summary in the cluster rather than `prs[0]`'s.
-    // Today the two are the same — every PR under one key is written from one
-    // Jira lookup in one pass, so a cluster agrees — but reading the whole
-    // cluster costs nothing and keeps the heading right without depending on
-    // that. Without Jira (or for a key it doesn't know) no PR has a summary and
-    // the heading stays the bare key, exactly as before.
-    const labelOf = (key: string, prs: PullRequest[]): string => {
-      const summary = prs.map(summaryOf).find((s): s is string => Boolean(s));
-      return summary ? `${key} · ${summary}` : key;
-    };
+    // Which key and what the heading above it says are `shared/pr-group.ts` —
+    // pure, and unit-tested there rather than eyeballed through the DOM.
+    const mode: IssueGroupMode = groupBy === "parent" ? "parent" : "issue";
+    const keyOf = (p: PullRequest) => groupKeyOf(p, mode);
 
     const byKey = new Map<string, PullRequest[]>();
     for (const pr of sorted) {
@@ -619,7 +611,7 @@ export function App() {
       // `byKey` already holds this key's PRs in `sorted` order — re-filtering
       // `sorted` per cluster would just walk the list again for the same answer.
       const prs = byKey.get(key) ?? [];
-      return { key, label: labelOf(key, prs), hostLabel: null, prs };
+      return { key, label: groupLabel(key, prs, mode), hostLabel: null, prs };
     });
     const other = sorted.filter((p) => {
       const k = keyOf(p);

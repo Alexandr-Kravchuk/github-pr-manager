@@ -81,11 +81,12 @@ test("pickAppId: falls back on malformed JSON", () =>
 // --- shared value-import carve-outs stay Node-free (renderer imports them) ---
 // The renderer value-imports DEFAULT_NOTIFICATION_SETTINGS from shared/notify,
 // the view-filter helpers from shared/pr-filter, the issue-link builder from
-// shared/issue-key and the F5 decision from shared/hotkeys. That's only safe while those modules pull in no node:
+// shared/issue-key, the F5 decision from shared/hotkeys and the group-heading
+// rules from shared/pr-group. That's only safe while those modules pull in no node:
 // builtin — a regression would break the Vite renderer build. Assert the
 // compiled output is clean so the AGENTS.md carve-out is enforced, not just
 // documented.
-for (const mod of ["notify.js", "pr-filter.js", "issue-key.js", "hotkeys.js"]) {
+for (const mod of ["notify.js", "pr-filter.js", "issue-key.js", "hotkeys.js", "pr-group.js"]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
       path.join(__dirname, `../dist/main/shared/${mod}`),
@@ -1889,6 +1890,69 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
   assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", "eng-1"), null);
 });
 
+// --- pr-group: what a Jira-keyed group heading says --------------------------
+// The rendered heading is this PR's whole point, so it is a pure rule here rather
+// than a closure inside App.tsx's grouping memo: these cases are what actually
+// holds "KEY · Summary, or the bare key", where a DOM-less runner otherwise
+// could not look.
+{
+  const prGroup = require(path.join(__dirname, "../dist/main/shared/pr-group.js"));
+  const gpr = (over = {}) => ({
+    issueKey: "ENG-93374",
+    issueSummary: null,
+    parentKey: "ENG-93367",
+    parentSummary: null,
+    ...over,
+  });
+
+  test("groupKeyOf: issue mode clusters by the PR's own key, parent mode by the parent", () => {
+    assert.strictEqual(prGroup.groupKeyOf(gpr(), "issue"), "ENG-93374");
+    assert.strictEqual(prGroup.groupKeyOf(gpr(), "parent"), "ENG-93367");
+  });
+  test("groupKeyOf: no key in this mode -> null (the PR falls to the Other bucket)", () => {
+    assert.strictEqual(prGroup.groupKeyOf(gpr({ issueKey: null }), "issue"), null);
+    assert.strictEqual(prGroup.groupKeyOf(gpr({ parentKey: null }), "parent"), null);
+  });
+
+  test("groupLabel: by issue, a resolved summary titles the heading", () =>
+    assert.strictEqual(
+      prGroup.groupLabel("ENG-93374", [gpr({ issueSummary: "Retry transient network errors" })], "issue"),
+      "ENG-93374 · Retry transient network errors",
+    ));
+  test("groupLabel: by parent, the parent's summary is used and the issue's is ignored", () =>
+    // Swapping the two branches would still produce a plausible-looking heading,
+    // so pin which summary each mode reads: a PR carries both.
+    assert.strictEqual(
+      prGroup.groupLabel(
+        "ENG-93367",
+        [gpr({ issueSummary: "Retry transient network errors", parentSummary: "Analyze long app creating" })],
+        "parent",
+      ),
+      "ENG-93367 · Analyze long app creating",
+    ));
+  test("groupLabel: nothing resolved -> the bare key (Jira off, or a key it doesn't know)", () =>
+    // The pre-Jira behaviour, and the one every user without a Jira connection
+    // still gets: the heading must stay usable, never "ENG-93374 · null".
+    assert.strictEqual(
+      prGroup.groupLabel("ENG-93374", [gpr(), gpr()], "issue"),
+      "ENG-93374",
+    ));
+  test("groupLabel: an empty-string summary is no summary", () =>
+    assert.strictEqual(
+      prGroup.groupLabel("ENG-93374", [gpr({ issueSummary: "" })], "issue"),
+      "ENG-93374",
+    ));
+  test("groupLabel: takes the first summary in the cluster, not the first PR's", () =>
+    // The deliberate scan: one card without a summary must not blank a heading
+    // its siblings can title.
+    assert.strictEqual(
+      prGroup.groupLabel("ENG-93374", [gpr(), gpr({ issueSummary: "Retry transient network errors" })], "issue"),
+      "ENG-93374 · Retry transient network errors",
+    ));
+  test("groupLabel: an empty cluster is just the key (no crash, no separator)", () =>
+    assert.strictEqual(prGroup.groupLabel("ENG-93374", [], "issue"), "ENG-93374"));
+}
+
 // --- ignored: persistent ignore store ----------------------------------------
 async function withTempStore(fn) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "prd-ignored-"));
@@ -1975,24 +2039,9 @@ test("healthFromIssues: nothing resolved at all -> empty, with the queried count
     queried: 2,
     resolved: 0,
   }));
-// The pure rule above is only worth anything if the enricher routes through it.
-// jira-store.ts imports electron, so the plain-Node runner can't call it — but it
-// can read the compiled file and refuse the shortcut that reintroduces the bug:
-// handing healthFromResolution an issue count directly.
-test("jira-store wiring: the enricher's health goes through healthFromIssues", () => {
-  const fs = require("node:fs");
-  const storeJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/jira-store.js"), "utf8");
-  // `\)?\(` matches a call in either shape: the TS source's `healthFromIssues(`
-  // and the CommonJS emit's `(0, jira_health_1.healthFromIssues)(`. Matching a
-  // call and not a bare mention keeps a future comment from passing (or failing)
-  // this on the strength of naming the function.
-  assert.match(storeJs, /healthFromIssues\)?\(/, "jira-store calls the parent-counting rule");
-  assert.doesNotMatch(
-    storeJs,
-    /healthFromResolution\)?\(/,
-    "jira-store must not call healthFromResolution with a count of its own — that is how `resolved` drifts back to counting issues",
-  );
-});
+// The pure rule above is only worth anything if the enricher routes through it,
+// which the behavioral `buildJiraEnricher` cases (further down, against a mocked
+// Electron) exercise through the enricher's real output.
 test("healthFromError: error state carries the Error message", () =>
   assert.deepStrictEqual(jiraHealth.healthFromError(4, new Error("boom")), {
     state: "error",
@@ -3965,6 +4014,132 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const search = delays[delays.length - 1];
     assert.ok(probe < search, `probe timeout (${probe}ms) must be shorter than the search (${search}ms)`);
     assert.ok(probe * 2 <= search, `probe timeout (${probe}ms) should be materially shorter than the search (${search}ms)`);
+  });
+
+  // --- the Jira enricher, verified against a mocked Electron -----------------
+  // `jira-store.ts` imports electron (`app`, `safeStorage`), so it is exercised
+  // the way `tray.ts` and `main.ts` are: require the COMPILED module with a fake
+  // electron in the require cache, over the same stubbed `fetch` as the cases
+  // above. That reaches what the pure rules can't — the enricher's real output:
+  // what it writes onto each PR, and the health it reports for a whole batch.
+  const withMockedElectron = async (fn) => {
+    const fsSync = require("node:fs");
+    const storeJs = path.join(__dirname, "../dist/main/main/jira-store.js");
+    const elPath = require.resolve("electron", { paths: [path.dirname(storeJs)] });
+    const storePath = require.resolve(storeJs);
+    const userData = fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-jira-store-"));
+    const hadElectron = require.cache[elPath];
+    require.cache[elPath] = {
+      id: elPath,
+      filename: elPath,
+      loaded: true,
+      exports: {
+        // A userData dir of our own, so the token file is real but disposable.
+        app: { getPath: () => userData },
+        // The keychain stands in as identity: setJiraToken/getJiraToken still run
+        // their real file paths, which is what carries the token through to fetch.
+        safeStorage: {
+          isEncryptionAvailable: () => true,
+          encryptString: (text) => Buffer.from(text, "utf8"),
+          decryptString: (buf) => buf.toString("utf8"),
+        },
+      },
+    };
+    delete require.cache[storePath];
+    try {
+      await fn(require(storeJs));
+    } finally {
+      delete require.cache[storePath];
+      if (hadElectron) require.cache[elPath] = hadElectron;
+      else delete require.cache[elPath];
+      fsSync.rmSync(userData, { recursive: true, force: true });
+    }
+  };
+  // Jira answers only the keys the JQL actually asked for, with the fields each
+  // case gives them — so a case controls parentage per key, and a key it omits
+  // is one Jira doesn't know.
+  const jiraAnswers = (byKey) => async (url, init) => {
+    if (isTenant(url)) return tenantOk();
+    const queried = JSON.parse(init.body).jql.match(/[A-Z]+-\d+/g) || [];
+    return okJson({
+      issues: queried.filter((k) => byKey[k]).map((k) => ({ key: k, fields: byKey[k] })),
+    });
+  };
+
+  await atest("buildJiraEnricher: writes each PR's summary and parent, and counts only parents as resolved", async () => {
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({
+      "ENG-1": { summary: "One", parent: { key: "ENG-0", fields: { summary: "The parent task" } } },
+      "ENG-2": { summary: "Two", parent: { key: "ENG-0", fields: { summary: "The parent task" } } },
+      "ENG-3": { summary: "Three" }, // resolves, but is not a subtask
+    });
+    await withMockedElectron(async (store) => {
+      assert.strictEqual(store.setJiraToken("tok").ok, true);
+      const prs = [
+        { issueKey: "ENG-1", issueSummary: null, parentKey: null, parentSummary: null },
+        { issueKey: "ENG-2", issueSummary: null, parentKey: null, parentSummary: null },
+        { issueKey: "ENG-3", issueSummary: null, parentKey: null, parentSummary: null },
+        { issueKey: null, issueSummary: null, parentKey: null, parentSummary: null },
+      ];
+      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      // The by-issue heading's input, on every PR that has a key — including the
+      // parentless one, which the parent-only lookup used to drop entirely.
+      assert.deepStrictEqual(
+        prs.map((p) => p.issueSummary),
+        ["One", "Two", "Three", null],
+      );
+      assert.deepStrictEqual(
+        prs.map((p) => p.parentKey),
+        ["ENG-0", "ENG-0", null, null],
+      );
+      assert.strictEqual(prs[0].parentSummary, "The parent task");
+      // `resolved` is 2, not the 3 issues that resolved: the regression the
+      // parent-only count exists to prevent, caught through the enricher's own
+      // output rather than through its source text.
+      assert.deepStrictEqual(health, { state: "ok", queried: 3, resolved: 2 });
+    });
+  });
+
+  await atest("buildJiraEnricher: every key resolves but none is a subtask -> empty health", async () => {
+    // Summaries came back, so the by-issue heading is fine and needs no banner —
+    // but "Group by parent task" has nothing to cluster and must say so. Counting
+    // issues instead of parents would report ok here and leave that view silently
+    // bare, which is the whole reason the banner exists.
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({ "ENG-4": { summary: "Four" }, "ENG-5": { summary: "Five" } });
+    await withMockedElectron(async (store) => {
+      assert.strictEqual(store.setJiraToken("tok").ok, true);
+      const prs = [
+        { issueKey: "ENG-4", issueSummary: null, parentKey: null, parentSummary: null },
+        { issueKey: "ENG-5", issueSummary: null, parentKey: null, parentSummary: null },
+      ];
+      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      assert.deepStrictEqual(
+        prs.map((p) => p.issueSummary),
+        ["Four", "Five"],
+      );
+      assert.deepStrictEqual(health, { state: "empty", queried: 2, resolved: 0 });
+    });
+  });
+
+  await atest("buildJiraEnricher: no token -> skipped, with no request and no health", async () => {
+    // The skip ordering is unit-tested pure; this pins that the enricher honours
+    // it against the real token store, so a missing token can never spend a call.
+    jira.clearJiraCaches();
+    let calls = 0;
+    const answer = jiraAnswers({ "ENG-6": { summary: "Six" } });
+    global.fetch = async (...args) => {
+      calls++;
+      return answer(...args);
+    };
+    await withMockedElectron(async (store) => {
+      assert.strictEqual(store.setJiraToken("").ok, true); // clears any stored token
+      const prs = [{ issueKey: "ENG-6", issueSummary: null, parentKey: null, parentSummary: null }];
+      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      assert.strictEqual(health, undefined);
+      assert.strictEqual(prs[0].issueSummary, null);
+      assert.strictEqual(calls, 0);
+    });
   });
 
   global.fetch = realFetch;
