@@ -14,7 +14,7 @@ import {
   filterPrs,
   hiddenAttentionCount,
   isBaselinePr,
-  narrowFacetCount,
+  sourceFacetCount,
   prSignal,
   revealDelta,
   sanitizeFilterState,
@@ -522,18 +522,18 @@ export function App() {
 
   const filtered = useMemo(() => filterPrs(allPrs, filterState), [allPrs, filterState]);
 
-  // Chip badges are facet counts, with every other active filter applied: a
-  // narrowing chip reports the rows it yields while ON (so for one that is
-  // already on, that's what you currently see), a reveal chip reports the rows
+  // Chip badges are facet counts. A source chip reports how big that source is
+  // under role / host / search and the reveal gate — blind to the other sources,
+  // since they are OR-ed and can only add rows. A reveal chip reports the rows
   // toggling it changes — added when off, taken away when on. The exclude chip
   // reports the same delta in the other direction: rows the click removes.
   const chipCounts = useMemo(
     () => ({
-      attention: narrowFacetCount(allPrs, filterState, "attention"),
-      failing: narrowFacetCount(allPrs, filterState, "failing"),
-      fresh: narrowFacetCount(allPrs, filterState, "fresh"),
-      mergeable: narrowFacetCount(allPrs, filterState, "mergeable"),
-      noReviews: narrowFacetCount(allPrs, filterState, "noReviews"),
+      attention: sourceFacetCount(allPrs, filterState, "attention"),
+      failing: sourceFacetCount(allPrs, filterState, "failing"),
+      fresh: sourceFacetCount(allPrs, filterState, "fresh"),
+      mergeable: sourceFacetCount(allPrs, filterState, "mergeable"),
+      noReviews: sourceFacetCount(allPrs, filterState, "noReviews"),
       approved: excludeDelta(allPrs, filterState),
       drafts: revealDelta(allPrs, filterState, "drafts"),
       ignored: revealDelta(allPrs, filterState, "ignored"),
@@ -895,13 +895,16 @@ export function App() {
             )}
           </div>
 
-          {/* Row 2 — filters that narrow the list. */}
+          {/* Row 2 — the source chips, then what applies on top of them. */}
           <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
             <span className="mr-0.5 text-xs font-medium uppercase tracking-wide text-fg-muted">
               Filters
             </span>
-            {/* Every chip always renders, so the row never reflows under the cursor
-                and a persisted reveal can't hide as an invisible active filter. */}
+            {/* Three groups, separated by a hairline: the five OR-ed source chips,
+                then the one chip that removes rows, then the two reveal chips.
+                Every chip always renders, so the row never reflows under the
+                cursor and a persisted reveal can't hide as an invisible active
+                filter. */}
             <FilterChip
               active={attentionOnly}
               count={chipCounts.attention}
@@ -946,6 +949,7 @@ export function App() {
             >
               ◷ No reviews yet
             </FilterChip>
+            <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
             {/* The one chip that REMOVES rows: PRs you approved and that aren't
                 asking for you again. Its count is what the click takes away, and
                 like the reveal chips it stays clickable at 0 — a persisted "on"
@@ -959,6 +963,7 @@ export function App() {
             >
               ✓ Hide my approvals
             </FilterChip>
+            <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
             {/* Reveal chips stay clickable at 0 — the count is a delta, so it hits 0
                 whenever the other chip already revealed the same PRs, and their
                 state is a persisted preference you must always be able to flip. */}
@@ -1188,11 +1193,11 @@ const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
 };
 
 /**
- * A filter chip with its facet count. `count` is the rows this chip yields while
- * ON (narrowing chips) or the rows toggling it changes (reveal chips), so a chip
- * at 0 is dimmed — and disabled too, since turning it on would empty the list,
- * unless `neverDisable` marks it as a reveal chip whose state must stay togglable
- * at 0. `cn` is a plain join with no tailwind-merge, so the hover class is only
+ * A filter chip with its facet count. `count` is the size of the chip's source
+ * within the other narrowing (source chips) or the rows toggling it changes
+ * (reveal and exclude chips), so a chip at 0 is dimmed — and disabled too, since
+ * turning it on would contribute nothing, unless `neverDisable` marks it as a
+ * chip whose state must stay togglable at 0. `cn` is a plain join with no tailwind-merge, so the hover class is only
  * emitted when it can apply — two competing `hover:bg-*` rules would be resolved
  * by stylesheet order, not by which one we meant.
  */
@@ -1218,7 +1223,7 @@ function FilterChip({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      title={disabled ? "No PRs match this with the current filters" : undefined}
+      title={disabled ? "No PRs in this source under the current filters" : undefined}
       className={cn(
         "rounded-md border px-3 py-1.5 text-sm transition-colors",
         active

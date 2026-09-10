@@ -2210,7 +2210,9 @@ const MIXED = [
   mkPr({ isIgnored: true, failingChecks: ["test"], needsAttention: true, returnedToMe: true }),
   mkPr({ isDraft: true, isIgnored: true, hasNewActivity: true }),
 ];
-// The promise a badge makes: click this chip and you get exactly this many rows.
+// States a badge is measured under. For a source chip the badge is that source's
+// size under the non-source narrowing, so a state with a sibling source on (the
+// last two) must leave the number alone.
 const FACET_STATES = [
   st(),
   st({ showDrafts: true }),
@@ -2222,26 +2224,74 @@ const FACET_STATES = [
   st({ attentionOnly: true, showDrafts: true }),
   st({ failingOnly: true, showIgnored: true }),
 ];
-// Keys come from NARROW_CHIPS rather than a hardcoded list, so a sixth chip
-// cannot be added without inheriting the invariant.
-for (const chip of prFilter.NARROW_CHIPS) {
+// Keys come from SOURCE_CHIPS rather than a hardcoded list, so a sixth source
+// cannot be added without inheriting both invariants.
+const sourcesOff = (state) =>
+  prFilter.SOURCE_CHIPS.reduce((acc, c) => ({ ...acc, [c.flag]: false }), state);
+for (const chip of prFilter.SOURCE_CHIPS) {
   for (const [i, state] of FACET_STATES.entries()) {
-    test(`narrowFacetCount(${chip.key}) equals the rows it yields [state ${i}]`, () =>
+    // The badge is the source's own size under the non-source narrowing, which
+    // is exactly the row count with this source as the ONLY one active.
+    test(`sourceFacetCount(${chip.key}) is its size under the other narrowing [state ${i}]`, () =>
       assert.strictEqual(
-        prFilter.narrowFacetCount(MIXED, state, chip.key),
-        prFilter.filterPrs(MIXED, { ...state, [chip.flag]: true }).length,
+        prFilter.sourceFacetCount(MIXED, state, chip.key),
+        prFilter.filterPrs(MIXED, { ...sourcesOff(state), [chip.flag]: true }).length,
       ));
+    // And it never moves when a sibling source is toggled — the property that
+    // keeps every source chip clickable while another one is on.
+    test(`sourceFacetCount(${chip.key}) ignores the sibling sources [state ${i}]`, () => {
+      const base = prFilter.sourceFacetCount(MIXED, state, chip.key);
+      for (const other of prFilter.SOURCE_CHIPS) {
+        if (other.key === chip.key) continue;
+        assert.strictEqual(
+          prFilter.sourceFacetCount(MIXED, { ...state, [other.flag]: !state[other.flag] }, chip.key),
+          base,
+        );
+      }
+    });
   }
 }
-test("narrowFacetCount: counts hidden drafts only once the chip reveals them", () => {
+test("sourceFacetCount: counts hidden drafts only once a reveal chip surfaces them", () => {
   // Two PRs have hasNoReviews; one of them is a draft, hidden by default.
-  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st(), "noReviews"), 1);
-  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ showDrafts: true }), "noReviews"), 2);
+  assert.strictEqual(prFilter.sourceFacetCount(MIXED, st(), "noReviews"), 1);
+  assert.strictEqual(prFilter.sourceFacetCount(MIXED, st({ showDrafts: true }), "noReviews"), 2);
 });
-test("narrowFacetCount: honours host, role and search", () => {
-  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ host: "GHE" }), "attention"), 1);
-  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ role: "reviewer" }), "noReviews"), 1);
-  assert.strictEqual(prFilter.narrowFacetCount(MIXED, st({ search: "bump" }), "noReviews"), 1);
+test("sourceFacetCount: honours host, role and search", () => {
+  assert.strictEqual(prFilter.sourceFacetCount(MIXED, st({ host: "GHE" }), "attention"), 1);
+  assert.strictEqual(prFilter.sourceFacetCount(MIXED, st({ role: "reviewer" }), "noReviews"), 1);
+  assert.strictEqual(prFilter.sourceFacetCount(MIXED, st({ search: "bump" }), "noReviews"), 1);
+});
+
+// --- pr-filter: the sources are a union, not an intersection -----------------
+// The bug report: Needs attention + Ready to merge showed (almost) nothing,
+// because the two chips were AND-ed. MIXED[0] needs attention only, MIXED[1]
+// needs attention AND is mergeable.
+test("filterPrs: two sources show both piles, not their intersection", () =>
+  assert.strictEqual(
+    prFilter.filterPrs(MIXED, st({ attentionOnly: true, mergeableOnly: true })).length,
+    2,
+  ));
+test("filterPrs: a PR in both sources is listed once", () => {
+  const both = prFilter.filterPrs(MIXED, st({ attentionOnly: true, mergeableOnly: true }));
+  assert.strictEqual(new Set(both.map((pr) => pr.number)).size, both.length);
+});
+test("filterPrs: no source active is still the plain baseline", () =>
+  assert.strictEqual(prFilter.filterPrs(MIXED, st()).length, 3));
+test("filterPrs: role, host and search narrow the union rather than the other way round", () => {
+  const sources = { attentionOnly: true, noReviewsOnly: true };
+  assert.strictEqual(prFilter.filterPrs(MIXED, st(sources)).length, 3);
+  assert.strictEqual(prFilter.filterPrs(MIXED, st({ ...sources, role: "reviewer" })).length, 1);
+  assert.strictEqual(prFilter.filterPrs(MIXED, st({ ...sources, host: "GHE" })).length, 1);
+  assert.strictEqual(prFilter.filterPrs(MIXED, st({ ...sources, search: "bump" })).length, 1);
+});
+test("filterPrs: Hide my approvals applies on top of the union", () => {
+  const prs = [
+    mkPr({ canBeMerged: true, viewerApproved: true, roles: ["reviewed"] }),
+    mkPr({ needsAttention: true }),
+  ];
+  const sources = { attentionOnly: true, mergeableOnly: true };
+  assert.strictEqual(prFilter.filterPrs(prs, st(sources)).length, 2);
+  assert.strictEqual(prFilter.filterPrs(prs, st({ ...sources, hideApproved: true })).length, 1);
 });
 
 // The reveal side, over the partially-overlapping MIXED fixture. On IGNORED_DRAFTS
@@ -2438,7 +2488,7 @@ for (const over of [
   { search: "bump" },
   { role: "reviewer" },
   { host: "GHE" },
-  ...prFilter.NARROW_CHIPS.map((chip) => ({ [chip.flag]: true })),
+  ...prFilter.SOURCE_CHIPS.map((chip) => ({ [chip.flag]: true })),
 ]) {
   test(`activeFilterCount: ${Object.keys(over)[0]} adds exactly 1`, () =>
     assert.strictEqual(prFilter.activeFilterCount(st(over)), 1));
@@ -2457,7 +2507,7 @@ test("activeFilterCount: every narrowing control at once", () =>
         noReviewsOnly: true,
       }),
     ),
-    3 + prFilter.NARROW_CHIPS.length,
+    3 + prFilter.SOURCE_CHIPS.length,
   ));
 
 // --- pr-filter: prSignal under trackComments --------------------------------

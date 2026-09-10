@@ -41,7 +41,13 @@ Three layers:
   module that uses them) so the renderer can value-import them: `notify.ts`
   (`DEFAULT_NOTIFICATION_SETTINGS`, the single source of truth for notification
   defaults), `pr-filter.ts` (the whole view-filter layer: the reveal gate, the
-  filter pipeline and the chips' facet counts), `issue-key.ts` (the Jira
+  filter pipeline and the chips' facet counts — the five `SOURCE_CHIPS`
+  (`Needs attention`, `Failing CI`, `New comments`, `Ready to merge`,
+  `No reviews yet`) are OR-ed **sources**, and role / host / search /
+  `Hide my approvals` / the reveal gate narrow whatever union they produced;
+  they were AND-ed until a pair like attention + mergeable turned out to show
+  nothing and to disable the second chip through its own 0 badge, which is why
+  `sourceFacetCount` is blind to the sibling sources), `issue-key.ts` (the Jira
   issue-link builder used by `PrCard.tsx`), `hotkeys.ts` (the F5 refresh
   decision and the forced-refresh cooldown shared with CmdOrCtrl+R and the
   header button) and `pr-group.ts` (which Jira key a PR clusters under and what

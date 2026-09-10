@@ -3,30 +3,39 @@ import type { PrRole, PullRequest } from "./types";
 /**
  * The dashboard's view-filter logic, kept pure so it can be unit-tested.
  *
- * Two kinds of chips sit in the Filters row and they behave differently:
+ * Three kinds of chips sit in the Filters row and they behave differently:
  *
- * - **narrowing** chips (`Needs attention`, `Failing CI`, `New comments`,
- *   `Ready to merge`, `No reviews yet`) drop every PR that doesn't match — an
- *   AND over whatever is active. `New comments` is the one chip the renderer may
- *   not render at all: with the `trackComments` setting off, `hasNewActivity` is
- *   never set (see `applyActivity`), so the chip is removed and `newOnly` reset
- *   rather than left as a filter that would match nothing;
- * - the **exclude** chip (`Hide my approvals`) is the mirror image: it takes a
- *   category OFF the board rather than narrowing to it. It isn't a sixth
- *   narrowing chip because "show me only what I approved" is not what anyone
- *   wants from it — see `isFinishedApproval`;
+ * - **source** chips (`Needs attention`, `Failing CI`, `New comments`,
+ *   `Ready to merge`, `No reviews yet`) each name a set of PRs, and the active
+ *   ones are OR-ed: a PR is in the list when it belongs to ANY of them, so
+ *   `Needs attention` + `Ready to merge` shows both piles instead of their
+ *   (usually empty) intersection. No source active means the baseline: every PR.
+ *   They were an AND until the union replaced it — an AND made most pairs
+ *   render nothing and, worse, made the second chip unclickable, because its
+ *   badge counted the intersection and hit 0. `New comments` is the one chip
+ *   the renderer may not render at all: with the `trackComments` setting off,
+ *   `hasNewActivity` is never set (see `applyActivity`), so the chip is removed
+ *   and `newOnly` reset rather than left as a source that would match nothing;
+ * - the **exclude** chip (`Hide my approvals`) applies on top of that union: it
+ *   takes a category OFF the board rather than contributing one. It isn't a
+ *   sixth source because "show me what I approved" is not what anyone wants
+ *   from it — see `isFinishedApproval`;
  * - **reveal** chips (`Drafts`, `Ignored`) un-hide a category that is hidden by
- *   default. They ADD to the list rather than narrowing it, and a PR in both
- *   categories (an ignored draft) needs only ONE of them — see
- *   `isRevealed`. Requiring both is what made a live
- *   `Drafts (2)` / `Ignored (2)` pair show zero cards: the two PRs were ignored
- *   drafts, so each chip alone was vetoed by the other's gate.
+ *   default. They ADD to the list, and a PR in both categories (an ignored
+ *   draft) needs only ONE of them — see `isRevealed`. Requiring both is what
+ *   made a live `Drafts (2)` / `Ignored (2)` pair show zero cards: the two PRs
+ *   were ignored drafts, so each chip alone was vetoed by the other's gate.
  *
- * Chip badges are facet counts (`narrowFacetCount` / `revealDelta` /
- * `excludeDelta`): each one answers "what does clicking this chip do to the
- * list, given everything else that's active" — rows you get for the narrowing
- * chips, rows added or taken away for the two delta kinds — so a badge can never
- * advertise rows the click won't produce.
+ * `role`, `host` and `search` are plain narrowing gates: they apply to whatever
+ * the sources produced, so a source never smuggles a PR past them.
+ *
+ * Chip badges are facet counts (`sourceFacetCount` / `revealDelta` /
+ * `excludeDelta`). A source badge is the size of that source within the
+ * non-source narrowing (role / host / search / the reveal gate), so it is
+ * unaffected by which sibling sources are on — the property that keeps every
+ * source clickable while another one is active. The two delta badges answer
+ * "what does clicking change", rows added or taken away, so they can never
+ * advertise a change the click won't make.
  *
  * Kept free of `node:` builtins — unlike the rest of `shared`, which is why this
  * is one of the two modules the renderer value-imports — so it bundles into the
@@ -73,18 +82,18 @@ export type FilterablePr = Pick<
   | "number"
 >;
 
-export type NarrowKey = "attention" | "failing" | "fresh" | "mergeable" | "noReviews";
+export type SourceKey = "attention" | "failing" | "fresh" | "mergeable" | "noReviews";
 export type RevealKey = "drafts" | "ignored";
 
-interface NarrowChip {
-  readonly key: NarrowKey;
+interface SourceChip {
+  readonly key: SourceKey;
   /** The `FilterState` flag this chip toggles. */
   readonly flag: "attentionOnly" | "failingOnly" | "newOnly" | "mergeableOnly" | "noReviewsOnly";
   readonly matches: (pr: FilterablePr) => boolean;
 }
 
-/** The five narrowing chips, in the order they render. */
-export const NARROW_CHIPS: readonly NarrowChip[] = [
+/** The five source chips, in the order they render. Their sets are OR-ed. */
+export const SOURCE_CHIPS: readonly SourceChip[] = [
   { key: "attention", flag: "attentionOnly", matches: (pr) => pr.needsAttention },
   { key: "failing", flag: "failingOnly", matches: (pr) => pr.failingChecks.length > 0 },
   { key: "fresh", flag: "newOnly", matches: (pr) => pr.hasNewActivity },
@@ -110,7 +119,7 @@ export function sanitizeFilterState(
   return { ...state, newOnly: false };
 }
 
-/** The `FilterState` flag each reveal chip toggles — the reveal counterpart of `NARROW_CHIPS[].flag`. */
+/** The `FilterState` flag each reveal chip toggles — the reveal counterpart of `SOURCE_CHIPS[].flag`. */
 export const REVEAL_FLAG: Record<RevealKey, "showDrafts" | "showIgnored"> = {
   drafts: "showDrafts",
   ignored: "showIgnored",
@@ -185,9 +194,8 @@ export function isVisible(pr: FilterablePr, state: FilterState): boolean {
   if (state.hideApproved && isFinishedApproval(pr)) return false;
   if (state.role !== "all" && !pr.roles.includes(state.role)) return false;
   if (state.host !== "all" && pr.hostLabel !== state.host) return false;
-  for (const chip of NARROW_CHIPS) {
-    if (state[chip.flag] && !chip.matches(pr)) return false;
-  }
+  const sources = SOURCE_CHIPS.filter((chip) => state[chip.flag]);
+  if (sources.length > 0 && !sources.some((chip) => chip.matches(pr))) return false;
   return matchesSearch(pr, state.search);
 }
 
@@ -195,19 +203,33 @@ export function filterPrs<T extends FilterablePr>(prs: readonly T[], state: Filt
   return prs.filter((pr) => isVisible(pr, state));
 }
 
+/** `state` with every source off — the base a source badge is measured against. */
+function withoutSources(state: FilterState): FilterState {
+  return SOURCE_CHIPS.reduce<FilterState>(
+    (acc, chip) => ({ ...acc, [chip.flag]: false }),
+    state,
+  );
+}
+
 /**
- * Badge for a narrowing chip: how many rows remain once this chip is on, with
- * every other active filter still applied. Equals `filterPrs(state with the flag
- * on).length` by construction, which is the invariant the badge promises.
+ * Badge for a source chip: how many PRs that source holds within the narrowing
+ * that is not itself a source — role, host, search and the draft/ignored reveal
+ * gate. Deliberately blind to the OTHER sources, because they are OR-ed: a
+ * sibling source can only add rows, never take this source's away, so counting
+ * the intersection (what this did while the chips were AND-ed) reported 0 and
+ * left the chip disabled exactly when the user wanted to combine the two.
+ *
+ * Not a delta either (unlike `revealDelta`): a source already covered by a
+ * sibling would read 0 and disable the chip again, in a new disguise.
  */
-export function narrowFacetCount(
+export function sourceFacetCount(
   prs: readonly FilterablePr[],
   state: FilterState,
-  key: NarrowKey,
+  key: SourceKey,
 ): number {
-  const chip = NARROW_CHIPS.find((c) => c.key === key);
+  const chip = SOURCE_CHIPS.find((c) => c.key === key);
   if (!chip) return 0;
-  return filterPrs(prs, { ...state, [chip.flag]: false }).filter(chip.matches).length;
+  return filterPrs(prs, withoutSources(state)).filter(chip.matches).length;
 }
 
 /**
@@ -230,7 +252,7 @@ export function revealDelta(
 /**
  * Badge for the exclude chip: how many rows the click TAKES AWAY (or, while it
  * is on, how many turning it off would bring back). The mirror of `revealDelta`,
- * and a delta for the same reason — a PR already hidden by a narrowing chip or
+ * and a delta for the same reason — a PR already hidden by the sources or
  * the draft gate isn't a row this click can remove, so counting the category
  * itself would promise a change the click doesn't make.
  */
@@ -270,9 +292,9 @@ export function baselineStats(
 
 /**
  * How many filters currently SHRINK the list — what `Clear filters` resets and
- * badges. Derived from `NARROW_CHIPS`, so a sixth chip is counted without
+ * badges. Derived from `SOURCE_CHIPS`, so a sixth chip is counted without
  * touching this. `Hide my approvals` counts too: it removes rows, so clearing it
- * means "show me more", the same promise the narrowing chips make.
+ * means "show me more", the same promise clearing a source makes.
  * `Drafts`/`Ignored` are left out on purpose — they REVEAL rows, so clearing
  * them would shrink the list and break that promise.
  */
@@ -282,7 +304,7 @@ export function activeFilterCount(state: FilterState): number {
   if (state.role !== "all") n += 1;
   if (state.host !== "all") n += 1;
   if (state.hideApproved) n += 1;
-  for (const chip of NARROW_CHIPS) {
+  for (const chip of SOURCE_CHIPS) {
     if (state[chip.flag]) n += 1;
   }
   return n;
