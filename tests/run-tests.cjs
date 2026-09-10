@@ -2419,6 +2419,49 @@ test("filterPrs(role): 'reviewer' still means an outstanding request, not a past
 test("filterPrs(role): 'author' is unaffected by the new role", () =>
   assert.deepStrictEqual(titlesFor("author"), ["mine"]));
 
+// The role switch's four badges. Numbers are written out rather than derived
+// from filterPrs, so the test would notice a helper that agrees with itself.
+test("roleFacetCounts: each segment promises the rows it would leave", () =>
+  assert.deepStrictEqual(prFilter.roleFacetCounts(BY_ROLE, st()), {
+    all: 4,
+    author: 1,
+    // The re-requested PR carries both roles, so it counts towards both.
+    reviewer: 2,
+    reviewed: 2,
+  }));
+// The badge invariant, checked against the pipeline itself: the helper counts in
+// one pass over the `role: "all"` result, so this is a real comparison of two
+// implementations and it proves the pass doesn't drop the other filters.
+for (const [i, state] of FACET_STATES.entries()) {
+  test(`roleFacetCounts equals filterPrs under each role [state ${i}]`, () => {
+    const counts = prFilter.roleFacetCounts(MIXED, state);
+    for (const role of ["all", "author", "reviewer", "reviewed"]) {
+      assert.strictEqual(counts[role], prFilter.filterPrs(MIXED, { ...state, role }).length);
+    }
+  });
+}
+test("roleFacetCounts: the reveal gate and Hide my approvals apply to the badge", () => {
+  const prs = [
+    mkPr({ roles: ["author"] }),
+    mkPr({ roles: ["author"], isDraft: true }),
+    mkPr({ roles: ["reviewed"], viewerApproved: true }),
+  ];
+  // The draft is hidden and the approved PR is excluded, so `all` and `author`
+  // report one row each and `reviewed` none.
+  assert.deepStrictEqual(prFilter.roleFacetCounts(prs, st({ hideApproved: true })), {
+    all: 1,
+    author: 1,
+    reviewer: 0,
+    reviewed: 0,
+  });
+  assert.deepStrictEqual(prFilter.roleFacetCounts(prs, st({ showDrafts: true })), {
+    all: 3,
+    author: 2,
+    reviewer: 0,
+    reviewed: 1,
+  });
+});
+
 // --- pr-filter: matchesSearch (via filterPrs) -------------------------------
 // The haystack spans title, repo, author login and #number, and the needle is
 // trimmed. Fixed numbers rather than the shared prSeq counter, so the "#" cases

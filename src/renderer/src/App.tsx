@@ -17,6 +17,7 @@ import {
   sourceFacetCount,
   prSignal,
   revealDelta,
+  roleFacetCounts,
   sanitizeFilterState,
   type FilterState,
   type RoleFilter,
@@ -47,13 +48,23 @@ const SORT_LABELS: Record<SortKey, string> = {
 };
 
 /**
- * The role selector's options, in render order. A `Record` keyed by `RoleFilter`
+ * The role switch's segments, in render order. A `Record` keyed by `RoleFilter`
  * rather than a hand-kept array, so a new `PrRole` fails the build here instead
- * of silently missing from the dropdown and from the persisted-prefs allowlist —
+ * of silently missing from the switch and from the persisted-prefs allowlist —
  * the same exhaustiveness guarantee `notify.ts` gets from `_priorityIsExhaustive`,
  * with the label as the thing that must be supplied.
+ *
+ * Two labels per role: the short one fits four segments side by side, the long
+ * one carries the meaning and goes to `title` + `aria-label`, so the shortening
+ * costs nothing to a screen reader or to someone who hovers.
  */
 const ROLE_FILTER_LABELS: Record<RoleFilter, string> = {
+  all: "All",
+  author: "Mine",
+  reviewer: "To review",
+  reviewed: "Reviewed",
+};
+const ROLE_FILTER_TITLES: Record<RoleFilter, string> = {
   all: "All roles",
   author: "I'm the author",
   reviewer: "I'm a reviewer",
@@ -541,6 +552,10 @@ export function App() {
     [allPrs, filterState],
   );
 
+  // The role switch's four badges: how many rows each segment would leave, with
+  // everything else still applied. One pass over the list, not four.
+  const roleCounts = useMemo(() => roleFacetCounts(allPrs, filterState), [allPrs, filterState]);
+
   // Ordering applies to the flat list and within each group alike.
   const sorted = useMemo(() => {
     const arr = [...filtered];
@@ -826,17 +841,52 @@ export function App() {
               className="min-w-[14rem] flex-1 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none"
             />
 
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value as RoleFilter)}
-              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
+            {/* Role is one exclusive choice, so it is a segmented switch rather
+                than chips: four buttons in one bordered group read as "pick one"
+                where separate chips would read as "combine these". It was a
+                <select> until the two clicks and the hidden labels made the one
+                filter you flip most often the slowest one to reach. */}
+            <div
+              role="group"
+              aria-label="Role filter"
+              className="inline-flex overflow-hidden rounded-md border border-line-strong"
             >
-              {ROLE_FILTERS.map((key) => (
-                <option key={key} value={key}>
-                  {ROLE_FILTER_LABELS[key]}
-                </option>
-              ))}
-            </select>
+              {ROLE_FILTERS.map((key, i) => {
+                const active = role === key;
+                const count = roleCounts[key];
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    // Clicking the active segment goes back to `all`, so the
+                    // switch is never a choice you can't undo from itself.
+                    onClick={() => setRole(active && key !== "all" ? "all" : key)}
+                    title={ROLE_FILTER_TITLES[key]}
+                    aria-label={ROLE_FILTER_TITLES[key]}
+                    aria-pressed={active}
+                    className={cn(
+                      "px-3 py-1.5 text-sm transition-colors",
+                      i > 0 && "border-l border-line",
+                      // A separate constant, not CHIP_TONE_ACTIVE.sky: that one
+                      // carries its own border and `cn` is a plain join, so the
+                      // group's border would end up fighting the segment's.
+                      // Stronger than a chip's `/15` fill and bolder: a chip
+                      // carries its own border to mark itself active, a segment
+                      // sits inside the group's border and has only the fill.
+                      active
+                        ? "bg-sky-500/30 font-medium text-sky-800 dark:text-sky-100"
+                        : "bg-surface text-fg-muted hover:bg-elevated",
+                      count === 0 && !active && "opacity-50",
+                    )}
+                  >
+                    {ROLE_FILTER_LABELS[key]}{" "}
+                    <span className={active ? "text-sky-800/70 dark:text-sky-100/70" : "text-fg-faint"}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
 
             <select
               value={sortBy}

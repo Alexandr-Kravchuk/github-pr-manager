@@ -47,8 +47,10 @@ Three layers:
   `Hide my approvals` / the reveal gate narrow whatever union they produced;
   they were AND-ed until a pair like attention + mergeable turned out to show
   nothing and to disable the second chip through its own 0 badge, which is why
-  `sourceFacetCount` is blind to the sibling sources), `issue-key.ts` (the Jira
-  issue-link builder used by `PrCard.tsx`), `hotkeys.ts` (the F5 refresh
+  `sourceFacetCount` is blind to the sibling sources; `roleFacetCounts` badges
+  the role switch's four segments in one pass, since role is a plain AND gate),
+  `issue-key.ts` (the Jira issue-link builder used by `PrCard.tsx`),
+  `hotkeys.ts` (the F5 refresh
   decision and the forced-refresh cooldown shared with CmdOrCtrl+R and the
   header button) and `pr-group.ts` (which Jira key a PR clusters under and what
   the heading above that cluster says — `"KEY · Summary"`, or the bare key when

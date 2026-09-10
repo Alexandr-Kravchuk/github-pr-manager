@@ -233,6 +233,36 @@ export function sourceFacetCount(
 }
 
 /**
+ * Badges for the role switch: how many rows each of its four buttons would
+ * leave, with every other filter still applied. A plain count, not a delta like
+ * `revealDelta`, because the role buttons are one exclusive choice — a click
+ * REPLACES the role rather than adding to it, so "what you'd be left with" is
+ * exactly what the button promises.
+ *
+ * One pass rather than four `filterPrs` calls: `isVisible` gates the role as a
+ * plain AND, so a PR is visible under `role: X` exactly when it is visible under
+ * `role: "all"` and carries X. The `roles` array can hold two of them at once
+ * (a re-requested review is both `reviewer` and `reviewed`), which is why a PR
+ * can count towards more than one button.
+ */
+export function roleFacetCounts(
+  prs: readonly FilterablePr[],
+  state: FilterState,
+): Record<RoleFilter, number> {
+  const base = filterPrs(prs, { ...state, role: "all" });
+  const counts: Record<RoleFilter, number> = {
+    all: base.length,
+    author: 0,
+    reviewer: 0,
+    reviewed: 0,
+  };
+  for (const pr of base) {
+    for (const role of pr.roles) counts[role] += 1;
+  }
+  return counts;
+}
+
+/**
  * Badge for a reveal chip: how many rows the click ADDS (or, when the chip is
  * already on, how many turning it off would take away). Delta rather than
  * category size, so a category already revealed by the other chip reads as 0
