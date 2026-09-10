@@ -10,11 +10,14 @@
  * this app — and a github.com tick costs many tens of points, observed ~35–100
  * depending on repo/PR volume, vs only a few on a GHE host):
  *
- *  - **Idle gating** — when the injected `isPaused()` says the machine is asleep
- *    or the user is genuinely away, ticks skip the network entirely. A merely
- *    hidden / minimized window also pauses *unless* a notification could actually
- *    reach the user — then polling continues in the background so the notifier
- *    can see a transition (see `isPollingPaused` in `shared/idle-gate.ts`).
+ *  - **Idle gating** — the injected `planPoll()` either parks a tick (machine
+ *    asleep, or a hidden / minimized window with no notification able to reach
+ *    the user — nothing a fetch found could be shown to anybody) or lets it run
+ *    with a `presenceFactor` that stretches the unforced floors as input-idle
+ *    time grows (see `shared/idle-gate.ts`). It is deliberately a ramp and not a
+ *    cutoff: input idle time cannot tell "reading the dashboard hands-free"
+ *    apart from "left the building", and the old cutoff made the first look like
+ *    the second — the window sat on arbitrarily stale data while being read.
  *    `wake()` (wired to focus/resume) forces an immediate fetch on return.
  *  - **Per-host spacing** — each host is fetched on its own cadence; expensive
  *    hosts (high GraphQL cost) get a higher minimum interval so the shared
@@ -38,6 +41,7 @@
 
 import { ConfigError } from "../shared/config";
 import { fetchHost } from "../shared/github";
+import type { PollPlan } from "../shared/idle-gate";
 import { JIRA_ERROR_DETAIL_SEP } from "../shared/jira";
 import { applyIgnored } from "../shared/ignored";
 import { DEFAULT_POLL_INTERVAL_MS, probeNotifications } from "../shared/notifications";
@@ -69,14 +73,16 @@ export interface PollerOptions {
   /** Called when configuration is broken (e.g. a host isn't authenticated). */
   onConfigError: (message: string) => void;
   /**
-   * Optional idle gate. When it returns true (window hidden/minimized, machine
-   * asleep or user idle), a tick skips the network fetch — sparing the rate-limit
-   * budget while nobody is looking. `wake()` forces a fetch when the user returns.
+   * Optional idle gate. `park` skips the network entirely (machine asleep, or a
+   * hidden window with no deliverable notification) — `wake()` forces a catch-up
+   * fetch when the user returns. `run` carries a `presenceFactor` that stretches
+   * every unforced per-host floor, so freshness degrades gradually with
+   * input-idle time instead of stopping dead. Omitted → always full cadence.
    *
    * Receives the settings this tick already loaded, so the gate can read
    * notification preferences without a second synchronous `settings.json` read.
    */
-  isPaused?: (settings: Settings) => boolean;
+  planPoll?: (settings: Settings) => PollPlan;
   /** Host fetcher — defaults to the real GraphQL `fetchHost`; PRD_MOCK swaps in fixtures. */
   fetchHostFn?: typeof fetchHost;
   /**
@@ -242,6 +248,13 @@ export function stableJiraMessage(message: string | undefined): string | undefin
  * floor. Expensive hosts use `EXPENSIVE_FLOOR_MS` as floor regardless of
  * backoff — the 5-min cadence was chosen as the right budget/freshness trade-off
  * and should not be stretched by the backoff multiplier.
+ *
+ * The idle gate's presence factor deliberately does NOT belong here: it is
+ * applied when a slot's due-time is *evaluated* (`isHostDue`), never baked into
+ * the stored interval. Baking it in would survive the user's return — a host
+ * scheduled an hour out while the machine sat idle would still read as "not
+ * due" after `wake()`, leaving the dashboard on hour-old data until the
+ * stretched timer happened to fire.
  */
 export function hostIntervalMs(rl: RateLimitInfo | null, baseMs: number, hot = true): number {
   // No reading yet (host not fetched, or no repos so no GraphQL spend): base.
@@ -287,13 +300,30 @@ export function hostHasHotPr(prs: PullRequest[], now: number): boolean {
   return prs.some((pr) => isHotPr(pr, now));
 }
 
+/**
+ * How long a stretched tick may sleep before waking just to re-read the idle
+ * time. Without it a host scheduled an hour out would keep the whole loop
+ * asleep for that hour, and returning to the machine without generating a
+ * focus event (moving the mouse over an already-focused window — exactly the
+ * case this ramp exists for) would go unnoticed until the timer fired. Matches
+ * the notifications probe's own floor, so a recheck tick doubles as the cheap
+ * "did anything move?" probe rather than being pure overhead.
+ */
+const PRESENCE_RECHECK_MS = 60_000;
+
 /** Last known result for one host, kept between its (spaced-out) fetches. */
 interface HostSlot {
   prs: PullRequest[];
   rateLimit: RateLimitInfo | null;
   error: HostError | null;
-  /** Epoch ms before which this host should not be fetched again. */
-  nextDueAt: number;
+  /** Epoch ms this host's spacing started counting from (its last fetch attempt). */
+  dueFromMs: number;
+  /**
+   * Spacing this host earned at its last fetch, BEFORE any presence stretch.
+   * Kept unstretched so a factor that no longer applies can't hold the host
+   * back — see `isHostDue`.
+   */
+  baseIntervalMs: number;
   /** When this host's data was last actually fetched from the network. */
   fetchedAt: string;
   /** Conditional-request + watermark state for the notifications detector. */
@@ -307,6 +337,49 @@ interface HostSlot {
 /** Fresh per-host detector state (before the first probe). */
 function initialNotif(): NotifState {
   return { lastModified: null, watermark: null };
+}
+
+/**
+ * Whether a host's spacing has elapsed, with the presence factor applied at
+ * evaluation time rather than at scheduling time. That ordering is the whole
+ * point: when the user comes back, the factor drops to 1 and the host is
+ * measured against its own unstretched interval again, so it becomes due
+ * immediately instead of waiting out a stretch that no longer describes
+ * reality.
+ */
+export function isHostDue(slot: HostSlot, now: number, presenceFactor: number): boolean {
+  const stretched = Math.min(MAX_INTERVAL_MS, slot.baseIntervalMs * presenceFactor);
+  return now >= slot.dueFromMs + stretched;
+}
+
+/**
+ * How long the loop may sleep: the soonest per-host due time under the current
+ * stretch, clamped to [MIN, MAX]; `fallbackMs` when there are no hosts.
+ *
+ * While a stretch is in effect the wait is additionally capped at
+ * `PRESENCE_RECHECK_MS`. Without that cap a deeply stretched host would hold
+ * the whole loop asleep for an hour, and returning to an already-focused
+ * window — which fires no `focus` event, so no `wake()`, which is exactly the
+ * hands-free case this ramp exists for — would go unnoticed until the timer
+ * fired. The recheck tick re-reads the idle time and runs the cheap
+ * notifications probe, so it is not pure overhead: it is what keeps the probe
+ * at its own ~60s cadence instead of inheriting the stretched one.
+ */
+export function computeNextWakeMs(
+  slots: Iterable<Pick<HostSlot, "dueFromMs" | "baseIntervalMs">>,
+  now: number,
+  presenceFactor: number,
+  fallbackMs: number,
+): number {
+  let soonest: number | null = null;
+  for (const slot of slots) {
+    const stretched = Math.min(MAX_INTERVAL_MS, slot.baseIntervalMs * presenceFactor);
+    const wait = Math.max(0, slot.dueFromMs + stretched - now);
+    if (soonest === null || wait < soonest) soonest = wait;
+  }
+  if (soonest === null) return Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, fallbackMs));
+  if (presenceFactor > 1) soonest = Math.min(soonest, PRESENCE_RECHECK_MS);
+  return Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, soonest));
 }
 
 export class Poller {
@@ -436,11 +509,21 @@ export class Poller {
       return this.intervalMs;
     }
 
-    // Idle gate: skip all gh/network work while nobody is looking. A forced
-    // tick (manual refresh) always runs. Cheap re-check cadence until we wake.
-    if (!force && !skipIdleGate && this.options.isPaused?.(settings)) {
-      this.resolveFirst();
-      return PARKED_INTERVAL_MS;
+    // Idle gate. `park` skips all gh/network work — nothing a fetch found could
+    // reach anyone — and re-checks cheaply until we wake. Otherwise the plan's
+    // presenceFactor stretches the unforced floors below rather than stopping:
+    // input-idle time is the only "is the user there?" proxy available, and
+    // treating it as a cutoff left the window sitting on arbitrarily old data
+    // while the user was reading it. A forced tick (manual refresh) always runs
+    // at full cadence.
+    let presenceFactor = 1;
+    if (!force && !skipIdleGate) {
+      const plan = this.options.planPoll?.(settings) ?? { mode: "run" as const, presenceFactor: 1 };
+      if (plan.mode === "park") {
+        this.resolveFirst();
+        return PARKED_INTERVAL_MS;
+      }
+      presenceFactor = plan.presenceFactor;
     }
 
     let hosts: HostConfig[];
@@ -514,12 +597,25 @@ export class Poller {
     }
 
     // Due = never fetched, overdue, forced by the detector, or a forced tick.
-    // Others reuse their last result.
+    // Others reuse their last result. The presence stretch is applied HERE, not
+    // when the slot was scheduled, so a factor that has since dropped back to 1
+    // stops holding the host back the moment the user is active again.
     const due = hosts.filter((h) => {
       if (force || forced.has(h.graphqlUrl)) return true;
       const slot = this.hostSlots.get(h.graphqlUrl);
-      return !slot || now >= slot.nextDueAt;
+      return !slot || isHostDue(slot, now, presenceFactor);
     });
+
+    // A recheck tick: nothing is due, so there is no network work and no new
+    // data to assemble. Returning before the snapshot pass keeps these cheap
+    // wake-ups from inflating `unchangedStreak` — 60 of them an hour would
+    // drive the no-change backoff to its cap on a dashboard that simply hasn't
+    // been polled yet. Guarded on an existing snapshot so a zero-host first
+    // tick still emits its (empty) one.
+    if (!force && !skipIdleGate && due.length === 0 && this.currentSnapshot !== null) {
+      this.resolveFirst();
+      return computeNextWakeMs(this.hostSlots.values(), now, presenceFactor, this.intervalMs);
+    }
 
     const results = await Promise.allSettled(
       due.map((h) => (this.options.fetchHostFn ?? fetchHost)(h)),
@@ -535,7 +631,8 @@ export class Poller {
           prs,
           rateLimit,
           error: null,
-          nextDueAt: now + hostIntervalMs(rateLimit, effectiveBase, hostHasHotPr(prs, now)),
+          dueFromMs: now,
+          baseIntervalMs: hostIntervalMs(rateLimit, effectiveBase, hostHasHotPr(prs, now)),
           fetchedAt: fetchedNow,
           notif: prev?.notif ?? initialNotif(),
           notifNextProbeAt: prev?.notifNextProbeAt ?? now + DEFAULT_POLL_INTERVAL_MS,
@@ -553,7 +650,8 @@ export class Poller {
           prs,
           rateLimit: prev?.rateLimit ?? null,
           error: { hostLabel: host.label, message },
-          nextDueAt: now + hostIntervalMs(prev?.rateLimit ?? null, effectiveBase, hostHasHotPr(prs, now)),
+          dueFromMs: now,
+          baseIntervalMs: hostIntervalMs(prev?.rateLimit ?? null, effectiveBase, hostHasHotPr(prs, now)),
           fetchedAt: prev?.fetchedAt ?? fetchedNow,
           notif: prev?.notif ?? initialNotif(),
           notifNextProbeAt: prev?.notifNextProbeAt ?? now + DEFAULT_POLL_INTERVAL_MS,
@@ -634,19 +732,10 @@ export class Poller {
     }
     this.resolveFirst();
 
-    return this.nextWakeMs(now);
+    return this.nextWakeMs(now, presenceFactor);
   }
 
-  /** Soonest per-host due time, clamped to [MIN, MAX]; base if no hosts. */
-  private nextWakeMs(now: number): number {
-    if (this.hostSlots.size === 0) {
-      return Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, this.intervalMs));
-    }
-    let soonest = MAX_INTERVAL_MS;
-    for (const slot of this.hostSlots.values()) {
-      const wait = Math.max(0, slot.nextDueAt - now);
-      if (wait < soonest) soonest = wait;
-    }
-    return Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, soonest));
+  private nextWakeMs(now: number, presenceFactor = 1): number {
+    return computeNextWakeMs(this.hostSlots.values(), now, presenceFactor, this.intervalMs);
   }
 }

@@ -3,7 +3,8 @@ import path from "node:path";
 import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
-import { isPollingPaused } from "../shared/idle-gate";
+import { planPolling } from "../shared/idle-gate";
+import type { PollPlan } from "../shared/idle-gate";
 import { setIgnored } from "../shared/ignored";
 import {
   createReleaseGuard,
@@ -67,21 +68,21 @@ const windowGate = createWindowReadyGate();
 let prevNotifyPrs: PullRequest[] | null = null;
 
 /**
- * The idle gate handed to the poller: true when a fetch would just waste the
- * rate-limit budget. The suspend / genuinely-away / no-window branches and the
- * notifications-aware "hidden window" carve-out all live in the pure
- * `isPollingPaused` (unit-tested); this only samples the live Electron state and
- * feeds it in. `wake()` (focus/resume) forces a fetch back regardless.
+ * The idle gate handed to the poller: how hard this tick should hit the network.
+ * The suspend / no-window branches, the notifications-aware "hidden window"
+ * carve-out and the input-idle freshness ramp all live in the pure
+ * `planPolling` (unit-tested); this only samples the live Electron state and
+ * feeds it in. `wake()` (focus/resume) forces a full-cadence fetch regardless.
  *
- * A hidden/minimized window no longer pauses polling when a notification could
+ * A hidden/minimized window does not park polling when a notification could
  * actually reach the user — otherwise the notifier can never observe a
  * transition while the window is out of sight, which is exactly when the user
  * relies on it. "Could actually reach" comes from `hasDeliverableNotifications`,
  * not the bare `notifications.enabled` toggle: `enabled` with every event type
  * or both delivery channels off can never fire a toast, and keeping the poll
  * loop alive for that state would spend budget for nothing. Budget is otherwise
- * bounded by per-host spacing, the cold-host floor, the no-change backoff and
- * the cheap REST detector.
+ * bounded by per-host spacing, the cold-host floor, the no-change backoff, the
+ * presence ramp and the cheap REST detector.
  *
  * Takes the `settings` the poller already loaded this tick instead of reading
  * `settings.json` again: `Poller.tick()` loads and validates it at the top of
@@ -89,14 +90,14 @@ let prevNotifyPrs: PullRequest[] | null = null;
  * read here would be duplicate synchronous I/O on the main thread and its error
  * branch would be unreachable. Both native-touching inputs
  * (`getSystemIdleTime`, `Notification.isSupported`) are passed as thunks for the
- * same reason — the free branches inside `isPollingPaused` decide without paying
+ * same reason — the parking branches inside `planPolling` decide without paying
  * for either.
  */
-function isDashboardPaused(settings: Settings): boolean {
+function planDashboardPoll(settings: Settings): PollPlan {
   const win = mainWindow;
   const hasWindow = Boolean(win && !win.isDestroyed());
 
-  return isPollingPaused({
+  return planPolling({
     systemSuspended,
     hasWindow,
     // Verified against Electron's win32 semantics (minimize + hide-to-taskbar).
@@ -413,7 +414,7 @@ function createWindow(): void {
   // handler routes to `focusMainWindow`) brings the dashboard back. Background
   // behavior while hidden is deliberately conditional: the idle gate keeps the
   // poller running only while a notification could actually be delivered
-  // (`isPollingPaused`'s hidden-window carve-out) — with notifications off
+  // (`planPolling`'s hidden-window carve-out) — with notifications off
   // there is nothing a fetch could surface, so polling parks until the window
   // is shown again and the show-wake refresh catches it up. The three-way
   // close decision — hide / let a real quit through / no tray, so close as
@@ -729,7 +730,7 @@ function startApp(): void {
       if (process.env.PRD_DEBUG) console.error("[config-error]", message);
       sendToRenderer("config-error", message);
     },
-    isPaused: isDashboardPaused,
+    planPoll: planDashboardPoll,
     // PRD_MOCK: canned PRs instead of gh/network — see mock.ts.
     ...(isMockMode() ? mockPollerOverrides(app.getPath("userData")) : {}),
   });

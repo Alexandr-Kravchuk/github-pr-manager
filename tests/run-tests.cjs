@@ -1430,6 +1430,26 @@ test("hostIntervalMs: hot expensive host keeps the tight 5-min floor", () =>
 test("hostIntervalMs: hotness never stretches a cheap host below base", () =>
   assert.strictEqual(poller.hostIntervalMs(rl(1), 60_000, false), 60_000));
 
+// The presence stretch lives in isHostDue, NOT in the stored interval — so that
+// a factor which no longer applies can't keep a host from being fetched.
+const slot = (baseIntervalMs, dueFromMs = 0) => ({ baseIntervalMs, dueFromMs });
+test("isHostDue: an unstretched host is due once its own interval elapsed", () => {
+  assert.strictEqual(poller.isHostDue(slot(300_000), 299_999, 1), false);
+  assert.strictEqual(poller.isHostDue(slot(300_000), 300_000, 1), true);
+});
+test("isHostDue: the presence factor holds an idle host back", () => {
+  assert.strictEqual(poller.isHostDue(slot(300_000), 300_000, 4), false);
+  assert.strictEqual(poller.isHostDue(slot(300_000), 1_200_000, 4), true);
+});
+test("isHostDue: a factor dropping back to 1 makes a stretched host due at once", () =>
+  // The user is back: the hour-long stretch computed while they were away must
+  // not outlive the idleness that justified it.
+  assert.strictEqual(poller.isHostDue(slot(300_000), 400_000, 1), true));
+test("isHostDue: the stretched wait is capped at the 1-hour maximum", () =>
+  // 5-min floor x16 would be 80 min; the cap is what makes an unattended
+  // machine settle at one hydrate per hour rather than drifting past it.
+  assert.strictEqual(poller.isHostDue(slot(300_000), 3_600_000, 16), true));
+
 // --- poller: isHotPr / hostHasHotPr ------------------------------------------
 const NOW = Date.parse("2026-07-07T12:00:00Z");
 const basePr = { ciState: "success", unresolvedThreads: 0, updatedAt: "2026-07-07T00:00:00Z" };
@@ -4829,7 +4849,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const o = { ...GATE, ...over };
     let idleReads = 0;
     let actionableReads = 0;
-    const paused = idleGate.isPollingPaused({
+    const plan = idleGate.planPolling({
       systemSuspended: o.systemSuspended,
       hasWindow: o.hasWindow,
       windowHidden: o.windowHidden,
@@ -4842,69 +4862,108 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         return o.systemIdleSeconds;
       },
     });
-    return { paused, idleReads, actionableReads };
+    return { plan, idleReads, actionableReads };
   };
-  const gate = (over) => gateWithReads(over).paused;
+  // `parked` keeps the old boolean shape for the branch assertions; `factor`
+  // exposes the ramp the running branch now carries.
+  const gate = (over) => gateWithReads(over).plan.mode === "park";
+  const factor = (over) => gateWithReads(over).plan.presenceFactor;
 
-  test("isPollingPaused: visible, active, no notifications -> runs", () =>
+  test("planPolling: visible, active, no notifications -> runs", () =>
     assert.strictEqual(gate({}), false));
-  test("isPollingPaused: suspended always pauses (even with notifications on)", () => {
+  test("planPolling: suspended always pauses (even with notifications on)", () => {
     assert.strictEqual(gate({ systemSuspended: true }), true);
     assert.strictEqual(gate({ systemSuspended: true, notificationsActionable: true }), true);
   });
-  test("isPollingPaused: no window yet (startup/activate) -> runs", () =>
+  test("planPolling: no window yet (startup/activate) -> runs", () =>
     // hasWindow false wins even if a stale windowHidden slips through.
     assert.strictEqual(gate({ hasWindow: false, windowHidden: true }), false));
-  test("isPollingPaused: hidden window WITHOUT notifications -> pauses (budget saving)", () =>
+  test("planPolling: hidden window WITHOUT notifications -> pauses (budget saving)", () =>
     assert.strictEqual(gate({ windowHidden: true, notificationsActionable: false }), true));
-  test("isPollingPaused: hidden window WITH notifications -> runs (the fix)", () =>
+  test("planPolling: hidden window WITH notifications -> runs (the fix)", () =>
     assert.strictEqual(gate({ windowHidden: true, notificationsActionable: true }), false));
-  test("isPollingPaused: away user pauses regardless of notifications", () => {
-    const away = idleGate.IDLE_PAUSE_SECONDS + 1;
-    assert.strictEqual(gate({ systemIdleSeconds: away }), true);
-    assert.strictEqual(gate({ systemIdleSeconds: away, notificationsActionable: true }), true);
+  // The regression this replaces: input-idle used to PARK the tick outright at
+  // 5 minutes, so reading the dashboard hands-free looked exactly like leaving
+  // the building and the window sat on arbitrarily stale data. An idle machine
+  // must now keep running — only more slowly.
+  test("planPolling: an idle user stretches the cadence but never parks", () => {
+    const away = idleGate.PRESENCE_FULL_SECONDS + idleGate.PRESENCE_STEP_SECONDS * 8;
+    assert.strictEqual(gate({ systemIdleSeconds: away }), false);
+    assert.strictEqual(gate({ systemIdleSeconds: away, notificationsActionable: true }), false);
     assert.strictEqual(
       gate({ windowHidden: true, systemIdleSeconds: away, notificationsActionable: true }),
-      true,
+      false,
     );
+    // ...and it is genuinely stretched, not merely still running.
+    assert.strictEqual(factor({ systemIdleSeconds: away }), idleGate.PRESENCE_MAX_FACTOR);
   });
-  test("isPollingPaused: idle exactly at the threshold is not yet away -> runs", () =>
-    assert.strictEqual(gate({ systemIdleSeconds: idleGate.IDLE_PAUSE_SECONDS }), false));
-  test("isPollingPaused: null idle (platform can't report) treated as active", () =>
-    assert.strictEqual(gate({ systemIdleSeconds: null }), false));
+  test("planPolling: idle within the grace window keeps full cadence", () => {
+    assert.strictEqual(factor({ systemIdleSeconds: 0 }), 1);
+    assert.strictEqual(factor({ systemIdleSeconds: idleGate.PRESENCE_FULL_SECONDS }), 1);
+  });
+  test("planPolling: null idle (platform can't report) treated as fully present", () => {
+    assert.strictEqual(gate({ systemIdleSeconds: null }), false);
+    assert.strictEqual(factor({ systemIdleSeconds: null }), 1);
+  });
+  test("planPolling: no window yet runs at full cadence", () =>
+    assert.strictEqual(factor({ hasWindow: false }), 1));
 
   // The costly inputs stay unread whenever a free branch already decided — the
   // ordering regression this guards against is invisible to result-only asserts.
-  test("isPollingPaused: suspended decides without reading either costly input", () => {
+  test("planPolling: suspended decides without reading either costly input", () => {
     const r = gateWithReads({ systemSuspended: true });
     assert.strictEqual(r.idleReads, 0);
     assert.strictEqual(r.actionableReads, 0);
   });
-  test("isPollingPaused: no window decides without reading either costly input", () => {
+  test("planPolling: no window decides without reading either costly input", () => {
     const r = gateWithReads({ hasWindow: false });
     assert.strictEqual(r.idleReads, 0);
     assert.strictEqual(r.actionableReads, 0);
   });
-  test("isPollingPaused: hidden + nothing to notify decides without reading idle time", () =>
+  test("planPolling: hidden + nothing to notify decides without reading idle time", () =>
     assert.strictEqual(
       gateWithReads({ windowHidden: true, notificationsActionable: false }).idleReads,
       0,
     ));
-  test("isPollingPaused: a visible window never asks whether notifications fire", () =>
+  test("planPolling: a visible window never asks whether notifications fire", () =>
     // Only the hidden branch needs it; asking anyway would be a wasted native call.
     assert.strictEqual(gateWithReads({}).actionableReads, 0));
-  test("isPollingPaused: idle time is read once when the free branches don't decide", () => {
+  test("planPolling: idle time is read once when the free branches don't decide", () => {
     assert.strictEqual(gateWithReads({}).idleReads, 1);
     assert.strictEqual(
       gateWithReads({ windowHidden: true, notificationsActionable: true }).idleReads,
       1,
     );
   });
-  test("isPollingPaused: the hidden branch reads actionability exactly once", () =>
+  test("planPolling: the hidden branch reads actionability exactly once", () =>
     assert.strictEqual(
       gateWithReads({ windowHidden: true, notificationsActionable: true }).actionableReads,
       1,
     ));
+
+  // --- computePresenceFactor: the input-idle freshness ramp -------------------
+  test("computePresenceFactor: full cadence through the grace window", () => {
+    assert.strictEqual(idleGate.computePresenceFactor(0), 1);
+    assert.strictEqual(idleGate.computePresenceFactor(idleGate.PRESENCE_FULL_SECONDS - 1), 1);
+    // The boundary itself still counts as present — the ramp starts after it.
+    assert.strictEqual(idleGate.computePresenceFactor(idleGate.PRESENCE_FULL_SECONDS), 1);
+  });
+  test("computePresenceFactor: doubles once per step past the grace window", () => {
+    const full = idleGate.PRESENCE_FULL_SECONDS;
+    const step = idleGate.PRESENCE_STEP_SECONDS;
+    assert.strictEqual(idleGate.computePresenceFactor(full + 1), 2);
+    assert.strictEqual(idleGate.computePresenceFactor(full + step - 1), 2);
+    assert.strictEqual(idleGate.computePresenceFactor(full + step), 4);
+    assert.strictEqual(idleGate.computePresenceFactor(full + step * 2), 8);
+  });
+  test("computePresenceFactor: capped, so an overnight machine still polls", () => {
+    const far = idleGate.PRESENCE_FULL_SECONDS + idleGate.PRESENCE_STEP_SECONDS * 100;
+    assert.strictEqual(idleGate.computePresenceFactor(far), idleGate.PRESENCE_MAX_FACTOR);
+    assert.strictEqual(idleGate.computePresenceFactor(86_400), idleGate.PRESENCE_MAX_FACTOR);
+  });
+  test("computePresenceFactor: unreportable idle time assumes presence", () =>
+    // Failure direction must be freshness, never a silently stale dashboard.
+    assert.strictEqual(idleGate.computePresenceFactor(null), 1));
 
   // --- hasDeliverableNotifications: the gate's "could a toast fire?" signal ----
   // Guards the dead configurations the master `enabled` toggle alone can't see:
@@ -5015,19 +5074,18 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   });
 
   // --- poller threads its already-loaded settings into the idle gate -----------
-  // The isPaused widening from `() => boolean` to `(settings) => boolean` is
-  // backward-compatible, so nothing else would fail if tick() passed undefined or
-  // a stale object — and the gate would then read notification prefs off garbage.
+  // Nothing else would fail if tick() passed undefined or a stale object to the
+  // gate — and the gate would then read notification prefs off garbage.
   // Note: refresh() forces past the gate entirely, so this drives a plain tick.
   //
   // Beyond the argument threading, this also pins the *behavioural* contract: a
-  // gate that returns true must actually suppress the tick's side effects. The
-  // argument assertions alone would survive a condition inversion on the gate
-  // check in tick() (`!force && !skipIdleGate && isPaused?.(settings)`), which
-  // would consult the gate with the right settings yet poll anyway — so we assert
-  // no snapshot is emitted. refresh() is the only other path past the gate and it
-  // forces past it, so this plain tick is the sole test of the gate-active path.
-  await atest("Poller.tick: gate returning true parks the tick with the loaded settings", async () => {
+  // gate answering `park` must actually suppress the tick's side effects. The
+  // argument assertions alone would survive a condition inversion on the mode
+  // check in tick(), which would consult the gate with the right settings yet
+  // poll anyway — so we assert no snapshot is emitted. refresh() is the only
+  // other path past the gate and it forces past it, so this plain tick is the
+  // sole test of the parked path.
+  await atest("Poller.tick: a park plan suppresses the tick with the loaded settings", async () => {
     const loaded = {
       pollIntervalSeconds: 60,
       launchAtLogin: false,
@@ -5047,22 +5105,76 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       appVersion: "test",
       onSnapshot: (s) => snapshots.push(s),
       onConfigError: () => {},
-      // Returning true parks the tick before any network work.
-      isPaused: (s) => {
+      // `park` skips all network work before any is attempted.
+      planPoll: (s) => {
         calls++;
         seen = s;
-        return true;
+        return { mode: "park" };
       },
     });
     p.start();
     await p.awaitFirstTick();
     p.stop();
     assert.strictEqual(calls, 1, "the gate should be consulted exactly once per tick");
-    assert.strictEqual(seen, loaded, "isPaused must receive the very object loadSettings returned");
+    assert.strictEqual(seen, loaded, "planPoll must receive the very object loadSettings returned");
     assert.strictEqual(seen.notifications.enabled, true);
-    assert.strictEqual(snapshots.length, 0, "a paused tick must not emit a snapshot — the gate must suppress, not just be consulted");
+    assert.strictEqual(snapshots.length, 0, "a parked tick must not emit a snapshot — the gate must suppress, not just be consulted");
   });
 
+
+  // Returning to a stretched dashboard must be noticed promptly. Two halves,
+  // both regressions found after the first cut of this feature:
+  //
+  //  1. The stretch must be applied when a due-time is EVALUATED, never baked
+  //     into the stored one — otherwise an hour-long stretch computed while the
+  //     machine was idle outlives the idleness that justified it (isHostDue
+  //     tests above).
+  //  2. The LOOP must keep waking while stretched. Returning to an already-
+  //     focused window fires no `focus` event, so no `wake()` — the tick timer
+  //     is the only thing that can notice, and a timer asleep for the full
+  //     stretched hour cannot.
+  test("computeNextWakeMs: a stretched schedule still rechecks every minute", () => {
+    // Host fetched at 0 with a 5-min floor, deeply idle: the stretched due-time
+    // is an hour out, but the loop must not sleep that long.
+    const slots = [{ dueFromMs: 0, baseIntervalMs: 300_000 }];
+    assert.strictEqual(poller.computeNextWakeMs(slots, 0, 16), 60_000);
+    // Unstretched, the full interval is honoured — no extra wake-ups when the
+    // user is present and the cadence is already tight.
+    assert.strictEqual(poller.computeNextWakeMs(slots, 0, 1), 300_000);
+  });
+  test("computeNextWakeMs: picks the soonest host and clamps to [MIN, MAX]", () => {
+    const slots = [
+      { dueFromMs: 0, baseIntervalMs: 300_000 },
+      { dueFromMs: 0, baseIntervalMs: 60_000 },
+    ];
+    assert.strictEqual(poller.computeNextWakeMs(slots, 0, 1), 60_000);
+    // An overdue host never yields a negative or sub-minimum wait.
+    assert.strictEqual(poller.computeNextWakeMs(slots, 999_999_999, 1), 10_000);
+  });
+  test("computeNextWakeMs: no hosts falls back to the configured interval", () =>
+    assert.strictEqual(poller.computeNextWakeMs([], 0, 1, 60_000), 60_000));
+
+  // A forced refresh must assemble a snapshot even with no hosts due — the
+  // recheck short-circuit is for plain timer ticks only. This is what broke
+  // when the short-circuit was first added without excluding forced ticks.
+  await atest("Poller.refresh: forces a snapshot even when no host is due", async () => {
+    const snapshots = [];
+    const p = new poller.Poller({
+      loadSettings: () => ({
+        pollIntervalSeconds: 60, launchAtLogin: false, autoUpdate: false, theme: "system", hosts: [],
+      }),
+      toHostConfigs: () => [],
+      statePath: path.join(os.tmpdir(), "prd-refresh-state-missing.json"),
+      ignoredStatePath: path.join(os.tmpdir(), "prd-refresh-ignored-missing.json"),
+      appVersion: "test",
+      onSnapshot: (s) => snapshots.push(s),
+      onConfigError: () => {},
+      planPoll: () => ({ mode: "run", presenceFactor: 16 }),
+    });
+    await p.refresh();
+    assert.strictEqual(snapshots.length, 1);
+    p.stop();
+  });
 
   // --- window geometry (shared/window-bounds.ts) ------------------------------
   // Window position used to reset on every launch (nothing was persisted); the
