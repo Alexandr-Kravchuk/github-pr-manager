@@ -951,26 +951,19 @@ export function App() {
             </FilterChip>
             <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
             {/* The one chip that REMOVES rows: PRs you approved and that aren't
-                asking for you again. Its count is what the click takes away, and
-                like the reveal chips it stays clickable at 0 — a persisted "on"
-                with nothing left to hide must still be switchable off. */}
+                asking for you again. Its count is what the click takes away. */}
             <FilterChip
               active={hideApproved}
               count={chipCounts.approved}
-              neverDisable
               onClick={() => setHideApproved((v) => !v)}
               tone="green"
             >
               ✓ Hide my approvals
             </FilterChip>
             <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
-            {/* Reveal chips stay clickable at 0 — the count is a delta, so it hits 0
-                whenever the other chip already revealed the same PRs, and their
-                state is a persisted preference you must always be able to flip. */}
             <FilterChip
               active={showDrafts}
               count={chipCounts.drafts}
-              neverDisable
               onClick={() => setShowDrafts((v) => !v)}
             >
               Drafts
@@ -978,7 +971,6 @@ export function App() {
             <FilterChip
               active={showIgnored}
               count={chipCounts.ignored}
-              neverDisable
               onClick={() => setShowIgnored((v) => !v)}
             >
               Ignored
@@ -1195,42 +1187,37 @@ const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
 /**
  * A filter chip with its facet count. `count` is the size of the chip's source
  * within the other narrowing (source chips) or the rows toggling it changes
- * (reveal and exclude chips), so a chip at 0 is dimmed — and disabled too, since
- * turning it on would contribute nothing, unless `neverDisable` marks it as a
- * chip whose state must stay togglable at 0. `cn` is a plain join with no tailwind-merge, so the hover class is only
- * emitted when it can apply — two competing `hover:bg-*` rules would be resolved
- * by stylesheet order, not by which one we meant.
+ * (reveal and exclude chips). A chip at 0 is dimmed but always stays clickable:
+ * every chip's state is a persisted preference, so it must be switchable in both
+ * directions no matter what the current list looks like. `cn` is a plain join
+ * with no tailwind-merge, so a class is only emitted when it can apply — two
+ * competing `hover:bg-*` rules would be resolved by stylesheet order, not by
+ * which one we meant.
  */
 function FilterChip({
   active,
   count,
-  neverDisable = false,
   onClick,
   children,
   tone = "sky",
 }: {
   active: boolean;
   count: number;
-  neverDisable?: boolean;
   onClick: () => void;
   children: React.ReactNode;
   tone?: ChipTone;
 }) {
   const empty = count === 0;
-  const disabled = empty && !active && !neverDisable;
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={disabled}
-      title={disabled ? "No PRs in this source under the current filters" : undefined}
       className={cn(
         "rounded-md border px-3 py-1.5 text-sm transition-colors",
         active
           ? CHIP_TONE_ACTIVE[tone]
-          : cn("border-line-strong bg-surface text-fg-muted", !disabled && "hover:bg-elevated"),
+          : "border-line-strong bg-surface text-fg-muted hover:bg-elevated",
         empty && !active && "opacity-50",
-        disabled && "cursor-not-allowed",
       )}
     >
       {children} ({count})
