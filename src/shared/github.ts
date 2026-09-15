@@ -96,40 +96,43 @@ fragment PrFields on PullRequest {
 `;
 
 /**
- * One GraphQL request per host, merged into a single HTTP call via aliases:
+ * ONE HTTP request per search, all of a host's searches issued in parallel:
  *  - authored        — PRs the current user opened (author:@me)
  *  - reviewing        — PRs the user is *personally* asked to review (review-requested:@me)
  *  - reviewed         — PRs the user has already reviewed (reviewed-by:@me).
  *                       GitHub CLEARS the review request the moment you submit a
  *                       review, so a reviewed PR drops out of `review-requested:@me`
- *                       — without this alias it vanishes from the dashboard exactly
+ *                       — without this search it vanishes from the dashboard exactly
  *                       when the author starts addressing your comments, which is
  *                       the case `returnedToMe` exists to catch.
  *  - team0..teamN     — PRs asked of a *team* the user belongs to
  *                       (team-review-requested:org/team). `review-requested:@me`
  *                       does NOT cover team requests, so these are searched
- *                       separately — one alias per team — and merged by id.
+ *                       separately — one per team — and merged by id.
+ *
+ * These used to travel as aliases inside a SINGLE request. GitHub runs aliased
+ * searches one after another and its GraphQL proxy gives the whole request about
+ * 10 seconds, so the durations ADD UP: measured on github.com at peak hours,
+ * authored 2.6s + reviewing 1.0s + reviewed 4.6s + six team searches ≈ 10.5s,
+ * and 9 of 10 polls came back `HTTP 502 Bad Gateway` from nginx — every day from
+ * roughly 15:00 Kyiv time, when GitHub's backend is busiest. Nothing in the repo
+ * had changed when this started — the sum crept over the limit on its own, and
+ * every team the user joins adds another search to it. Split
+ * across requests the wait is the SLOWEST search (~4.6s) instead of their sum,
+ * and each request is far from the timeout. The rate-limit price is unchanged —
+ * each search still costs its own ~14 points wherever it is sent — so `cost` is
+ * summed back up across the responses, or the poller would read github.com as a
+ * cheap host and poll it several times more often.
  *
  * Each search is filtered by all of the host's repositories (multiple `repo:`
- * qualifiers act as OR). An alias is not free — each one costs roughly a dozen
- * rate-limit points at `first: 25` with this fragment (measured: 5 searches → 69,
- * 6 → 83 on a two-repo host with three team memberships), so a host lands far
- * above the poller's `EXPENSIVE_COST` threshold and is spaced out accordingly.
+ * qualifiers act as OR).
  */
-function buildQuery(teamCount: number): string {
-  const teamVarDecls = Array.from({ length: teamCount }, (_, i) => `, $teamQuery${i}: String!`).join("");
-  const teamSearches = Array.from(
-    { length: teamCount },
-    (_, i) => `  team${i}: search(query: $teamQuery${i}, type: ISSUE, first: 25) { nodes { ...PrFields } }`,
-  ).join("\n");
+function buildQuery(alias: string, varName: string): string {
   return /* GraphQL */ `
-query ($authoredQuery: String!, $reviewingQuery: String!, $reviewedQuery: String!${teamVarDecls}) {
+query ($${varName}: String!) {
   rateLimit { remaining cost resetAt }
   viewer { login }
-  authored: search(query: $authoredQuery, type: ISSUE, first: 25) { nodes { ...PrFields } }
-  reviewing: search(query: $reviewingQuery, type: ISSUE, first: 25) { nodes { ...PrFields } }
-  reviewed: search(query: $reviewedQuery, type: ISSUE, first: 25) { nodes { ...PrFields } }
-${teamSearches}
+  ${alias}: search(query: $${varName}, type: ISSUE, first: 25) { nodes { ...PrFields } }
 }
 ${PR_FIELDS_FRAGMENT}`;
 }
@@ -205,15 +208,14 @@ type SearchNodes = { nodes: Array<RawPr | Record<string, never>> };
 interface RawResponse {
   data?: {
     rateLimit: { remaining: number; cost: number; resetAt: string };
-    viewer: { login: string };
-    authored: SearchNodes;
-    reviewing: SearchNodes;
-    reviewed: SearchNodes;
-    // team0, team1, … — one per team-review-requested search.
+    viewer: { login: string } | null;
+    // The one search alias this request carried: authored / reviewing /
+    // reviewed / team0..teamN.
     [alias: string]:
       | SearchNodes
       | { remaining: number; cost: number; resetAt: string }
-      | { login: string };
+      | { login: string }
+      | null;
   };
   errors?: Array<{ message: string }>;
 }
@@ -640,6 +642,60 @@ async function fetchViewerTeams(host: HostConfig): Promise<string[]> {
 }
 
 /**
+ * Sends one GraphQL search to a host and returns its `data` block.
+ *
+ * The error text deliberately does NOT carry an HTML body: a 502 from GitHub's
+ * nginx answers with a full HTML page, and pasting its first 200 characters into
+ * the message turned the dashboard's error strip into a wall of
+ * `<html><head><title>502 Bad Gateway</title>…` markup that says nothing the
+ * status line does not. JSON bodies (GitHub's own error payloads) are still
+ * included — those name the actual problem.
+ */
+async function postSearch(
+  host: HostConfig,
+  query: string,
+  variables: Record<string, string>,
+): Promise<NonNullable<RawResponse["data"]>> {
+  const res = await fetch(host.graphqlUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${host.token}`,
+      "Content-Type": "application/json",
+      "User-Agent": "github-pr-manager",
+    },
+    body: JSON.stringify({ query, variables }),
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    const detail = isJsonBody(text) ? ` — ${text.slice(0, 200)}` : "";
+    throw new Error(`HTTP ${res.status} ${res.statusText}${detail}`.trimEnd());
+  }
+
+  const json = (await res.json()) as RawResponse;
+  if (json.errors?.length) {
+    throw new Error(json.errors.map((e) => e.message).join("; "));
+  }
+  if (!json.data) {
+    throw new Error("Empty GraphQL response.");
+  }
+  return json.data;
+}
+
+/** Whether a response body is worth quoting in an error message. */
+function isJsonBody(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return false;
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Queries a single host and returns the list of PRs (author or requested
  * reviewer) along with rate-limit info. Throws on network/GraphQL failures.
  */
@@ -666,49 +722,107 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
     console.warn(`[github] team discovery failed for "${host.label}": ${(e as Error).message}`);
   }
 
-  const variables: Record<string, string> = {
-    authoredQuery: buildSearchQuery(host.repos, "author:@me"),
-    reviewingQuery: buildSearchQuery(host.repos, "review-requested:@me"),
-    // Sorted, unlike its siblings, because this is the one set that only grows:
-    // a PR stays matched by `reviewed-by:@me` for its whole open life, while the
-    // other qualifiers clear themselves (you merge your PR, the request is
-    // satisfied). Past the `first: 25` cap the default "best match" order is
-    // neither recency-ordered nor stable — measured: it returned an older PR
-    // ahead of a newer one — so the window would both hide the PRs you care
-    // about and shuffle between polls, flickering cards in and out.
-    reviewedQuery: buildSearchQuery(host.repos, "reviewed-by:@me sort:updated-desc"),
-  };
-  teamSlugs.forEach((slug, i) => {
-    variables[`teamQuery${i}`] = buildSearchQuery(host.repos, `team-review-requested:${slug}`);
-  });
-
-  const res = await fetch(host.graphqlUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${host.token}`,
-      "Content-Type": "application/json",
-      "User-Agent": "github-pr-manager",
+  // One search per request, all in flight at once. `required` marks the three
+  // core searches: if any of them fails the whole host fails, so the poller keeps
+  // its last good PR list instead of writing a truncated one over it (a short
+  // list would read as "these PRs disappeared" and fire notifications). The team
+  // searches are best-effort, like team discovery above.
+  interface SearchSpec {
+    alias: string;
+    varName: string;
+    query: string;
+    role: PrRole;
+    required: boolean;
+  }
+  const specs: SearchSpec[] = [
+    {
+      alias: "authored",
+      varName: "authoredQuery",
+      query: buildSearchQuery(host.repos, "author:@me"),
+      role: "author",
+      required: true,
     },
-    body: JSON.stringify({ query: buildQuery(teamSlugs.length), variables }),
-    cache: "no-store",
+    {
+      alias: "reviewing",
+      varName: "reviewingQuery",
+      query: buildSearchQuery(host.repos, "review-requested:@me"),
+      role: "reviewer",
+      required: true,
+    },
+    // Team-requested PRs count as a "reviewer" role, same as personal requests —
+    // except on your own PRs, where `isOwnPr` turns it back into `author`.
+    ...teamSlugs.map((slug, i) => ({
+      alias: `team${i}`,
+      varName: `teamQuery${i}`,
+      query: buildSearchQuery(host.repos, `team-review-requested:${slug}`),
+      role: "reviewer" as PrRole,
+      required: false,
+    })),
+    {
+      alias: "reviewed",
+      varName: "reviewedQuery",
+      // Sorted, unlike its siblings, because this is the one set that only grows:
+      // a PR stays matched by `reviewed-by:@me` for its whole open life, while the
+      // other qualifiers clear themselves (you merge your PR, the request is
+      // satisfied). Past the `first: 25` cap the default "best match" order is
+      // neither recency-ordered nor stable — measured: it returned an older PR
+      // ahead of a newer one — so the window would both hide the PRs you care
+      // about and shuffle between polls, flickering cards in and out.
+      query: buildSearchQuery(host.repos, "reviewed-by:@me sort:updated-desc"),
+      role: "reviewed",
+      required: true,
+    },
+  ];
+
+  const settled = await Promise.allSettled(
+    specs.map((spec) =>
+      postSearch(host, buildQuery(spec.alias, spec.varName), { [spec.varName]: spec.query }),
+    ),
+  );
+
+  const failedRequired = specs.findIndex(
+    (spec, i) => spec.required && settled[i].status === "rejected",
+  );
+  if (failedRequired >= 0) {
+    throw (settled[failedRequired] as PromiseRejectedResult).reason;
+  }
+
+  // The rate-limit price did not change by splitting the request, so neither may
+  // the number the poller sees: `cost` is the sum of every search's own cost, or
+  // `hostIntervalMs` would read this host as cheap and poll it far more often.
+  // `remaining` is the lowest reading — the budget only falls within a window,
+  // so the smallest number is the most recent one.
+  let cost = 0;
+  let remaining: number | null = null;
+  let resetAt = "";
+  let viewerLogin: string | null = null;
+  const nodesByAlias = new Map<string, Array<RawPr | Record<string, never>>>();
+
+  settled.forEach((result, i) => {
+    const spec = specs[i];
+    if (result.status === "rejected") {
+      const message =
+        result.reason instanceof Error ? result.reason.message : String(result.reason);
+      console.warn(`[github] "${spec.alias}" search failed for "${host.label}": ${message}`);
+      return;
+    }
+    const data = result.value;
+    cost += data.rateLimit?.cost ?? 0;
+    if (data.rateLimit && (remaining === null || data.rateLimit.remaining < remaining)) {
+      remaining = data.rateLimit.remaining;
+      resetAt = data.rateLimit.resetAt;
+    }
+    // `isOwnPr` needs it, and a null login silently re-opens the bug where a
+    // team request on your own PR claims a review from you — so take it from
+    // whichever response carries one.
+    const viewer = data.viewer as { login: string } | null | undefined;
+    if (viewerLogin === null && viewer?.login) viewerLogin = viewer.login;
+    const search = data[spec.alias] as SearchNodes | undefined;
+    if (search?.nodes) nodesByAlias.set(spec.alias, search.nodes);
   });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 200)}` : ""}`);
-  }
-
-  const json = (await res.json()) as RawResponse;
-  if (json.errors?.length) {
-    throw new Error(json.errors.map((e) => e.message).join("; "));
-  }
-  if (!json.data) {
-    throw new Error("Empty GraphQL response.");
-  }
 
   // Merge authored + reviewing, unioning roles.
   const byId = new Map<string, PullRequest>();
-  const viewerLogin = json.data.viewer?.login ?? null;
 
   // You cannot review your own PR, but a review requested of a TEAM you belong
   // to matches `team-review-requested:` on your OWN pull requests as well — so
@@ -735,23 +849,19 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
     }
   };
 
-  addNodes(json.data.authored.nodes, "author");
-  addNodes(json.data.reviewing.nodes, "reviewer");
-  // Team-requested PRs count as a "reviewer" role, same as personal requests —
-  // except on your own PRs, where `isOwnPr` turns it back into `author`.
-  for (let i = 0; i < teamSlugs.length; i++) {
-    const teamResult = json.data[`team${i}`] as SearchNodes | undefined;
-    if (teamResult?.nodes) addNodes(teamResult.nodes, "reviewer");
+  // Spec order is what decides the roles: "author" and the outstanding requests
+  // first, "reviewed" last so its passive role unions onto an outstanding one
+  // rather than replacing it (a PR you reviewed and were then re-requested on
+  // carries both, and "reviewer" is what claims your attention).
+  // `reviewed-by:@me` also matches your own PRs, where the role is redundant
+  // next to "author"; harmless, and dropping it would need a lookahead.
+  for (const spec of specs) {
+    const nodes = nodesByAlias.get(spec.alias);
+    if (nodes) addNodes(nodes, spec.role);
   }
-  // Already-reviewed PRs get their own passive role — added last so it unions
-  // onto an outstanding request rather than replacing it (a PR you reviewed and
-  // were then re-requested on carries both, and "reviewer" is what claims your
-  // attention). `reviewed-by:@me` also matches your own PRs, where the role is
-  // redundant next to "author"; harmless, and dropping it would need a lookahead.
-  addNodes(json.data.reviewed.nodes, "reviewed");
 
   return {
     pullRequests: [...byId.values()],
-    rateLimit: { hostLabel: host.label, ...json.data.rateLimit },
+    rateLimit: { hostLabel: host.label, remaining: remaining ?? 0, cost, resetAt },
   };
 }

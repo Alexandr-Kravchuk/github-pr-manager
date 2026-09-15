@@ -3581,15 +3581,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   const realGithubFetch = global.fetch;
   let hostSeq = 0;
 
-  // Drives fetchHost against a stubbed transport and returns both the request it
-  // sent and the PRs it produced. A fresh graphqlUrl per call: team discovery is
-  // cached per host for 10 minutes and has no test-visible reset.
+  // Drives fetchHost against a stubbed transport and returns both the requests it
+  // sent and the PRs it produced. Every search travels as its OWN HTTP request
+  // now (GitHub runs aliases inside one request serially and times the whole
+  // thing out at ~10s, which is what made github.com answer 502 all afternoon),
+  // so the stub answers per request and `sent` collects them all, keyed by the
+  // single search alias each one carries.
+  // A fresh graphqlUrl per call: team discovery is cached per host for 10
+  // minutes and has no test-visible reset.
   // `teams` is the list of team slugs the viewer belongs to (org `a`, matching
   // the configured `a/b` repo, or `fetchHost` filters them out); `team0` holds
   // the nodes the first team search returns.
   async function runFetchHost(searches) {
     const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
-    let sent = null;
+    const sent = {};
     global.fetch = async (url, init) => {
       if (url.includes("/user/teams")) {
         const teams = (searches.teams ?? []).map((slug) => ({
@@ -3598,7 +3603,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         }));
         return { ok: true, status: 200, statusText: "OK", json: async () => teams };
       }
-      sent = JSON.parse(init.body);
+      const body = JSON.parse(init.body);
+      // The alias the request asked for, e.g. `reviewed: search(query: ...`.
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      sent[alias] = body;
       return {
         ok: true,
         status: 200,
@@ -3607,10 +3615,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           data: {
             rateLimit: { remaining: 4990, cost: 4, resetAt: "2026-07-07T01:00:00Z" },
             viewer: { login: "me" },
-            authored: { nodes: searches.authored ?? [] },
-            reviewing: { nodes: searches.reviewing ?? [] },
-            reviewed: { nodes: searches.reviewed ?? [] },
-            team0: { nodes: searches.team0 ?? [] },
+            [alias]: { nodes: searches[alias] ?? [] },
           },
         }),
       };
@@ -3627,7 +3632,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   await atest("fetchHost: asks for reviewed-by:@me over the same repos, as its own alias", async () => {
     const { sent } = await runFetchHost({});
     assert.strictEqual(
-      sent.variables.reviewedQuery,
+      sent.reviewed.variables.reviewedQuery,
       "is:open is:pr repo:a/b reviewed-by:@me sort:updated-desc",
       // The only qualifier whose match set grows for the PR's whole open life,
       // so past the first: 25 cap the default order would hide the recent ones
@@ -3635,8 +3640,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       "the reviewed search must be pinned to a recency order",
     );
     assert.ok(
-      sent.query.includes("reviewed: search(query: $reviewedQuery"),
-      "the reviewed search must be its own alias in the merged query",
+      sent.reviewed.query.includes("reviewed: search(query: $reviewedQuery"),
+      "the reviewed search must travel as its own request",
     );
   });
 
@@ -3677,10 +3682,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     // Without these two the assertion below would pass vacuously — no team
     // search sent means the team branch of `addNodes` never runs at all.
     assert.strictEqual(
-      sent.variables.teamQuery0,
+      sent.team0.variables.teamQuery0,
       "is:open is:pr repo:a/b team-review-requested:a/toolkit-contributors",
     );
-    assert.ok(sent.query.includes("team0: search(query: $teamQuery0"));
+    assert.ok(sent.team0.query.includes("team0: search(query: $teamQuery0"));
     assert.strictEqual(result.pullRequests.length, 1);
     assert.deepStrictEqual(result.pullRequests[0].roles, ["author"]);
   });
@@ -3691,6 +3696,102 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       team0: [rawPr({ id: "PR_theirs_team" })],
     });
     assert.deepStrictEqual(result.pullRequests[0].roles, ["reviewer"]);
+  });
+
+  // The split into one request per search must not change what the poller reads:
+  // `hostIntervalMs` classifies a host by `cost`, so reporting one request's 4
+  // points instead of the whole tick's would make github.com look cheap and get
+  // it polled several times more often against a shared 5000/hour budget.
+  await atest("fetchHost: the reported cost is the sum of every search's own cost", async () => {
+    const { result } = await runFetchHost({ teams: ["a/t1", "a/t2"] });
+    // authored + reviewing + reviewed + two team searches, 4 points each.
+    assert.strictEqual(result.rateLimit.cost, 20);
+    assert.strictEqual(result.rateLimit.remaining, 4990);
+  });
+
+  // A failed CORE search must fail the host: the poller keeps its last good PR
+  // list on an error, while a "successful" truncated list would overwrite it and
+  // read as PRs having disappeared.
+  await atest("fetchHost: a failing core search fails the whole host", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (body.query.includes("reviewed: search")) {
+        return {
+          ok: false,
+          status: 502,
+          statusText: "Bad Gateway",
+          text: async () => "<html><head><title>502 Bad Gateway</title></head></html>",
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 4, resetAt: "" },
+            viewer: { login: "me" },
+            authored: { nodes: [] },
+            reviewing: { nodes: [] },
+          },
+        }),
+      };
+    };
+    await assert.rejects(
+      github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" }),
+      (e) => {
+        // An nginx error page carries nothing the status line doesn't, and
+        // pasting it made the dashboard's error strip a wall of HTML.
+        assert.strictEqual(e.message, "HTTP 502 Bad Gateway");
+        return true;
+      },
+    );
+  });
+
+  // A failing TEAM search is best-effort, like team discovery itself.
+  await atest("fetchHost: a failing team search leaves the rest of the host intact", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => [{ slug: "t1", organization: { login: "a" } }],
+        };
+      }
+      const body = JSON.parse(init.body);
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      if (alias === "team0") {
+        return { ok: false, status: 502, statusText: "Bad Gateway", text: async () => "" };
+      }
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 4, resetAt: "" },
+            // Only ONE response carries the viewer here, so this also pins that
+            // `isOwnPr` still has a login when other requests answer without one.
+            viewer: alias === "authored" ? { login: "me" } : null,
+            [alias]: { nodes: alias === "authored" ? [rawPr({ id: "PR_a" })] : [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({
+      label: "H",
+      graphqlUrl,
+      repos: ["a/b"],
+      token: "t",
+    });
+    assert.strictEqual(result.pullRequests.length, 1);
+    assert.deepStrictEqual(result.pullRequests[0].roles, ["author"]);
   });
 
   global.fetch = realGithubFetch;
