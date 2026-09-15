@@ -2,7 +2,8 @@
 name: prd-release
 description: >-
   Cut a new PR Dashboard (github-pr-manager) desktop release end-to-end for Alex:
-  macOS (signed + notarized DMG/ZIP) and Windows (signed NSIS installer), both
+  macOS (signed + notarized DMG/ZIP) and Windows (NSIS installer, unsigned unless
+  built on the corporate host), both
   attached to one GitHub Release with working electron-updater feeds. Triggers ONLY
   inside the Alexandr-Kravchuk/github-pr-manager repository when Alex says "реліз",
   "створи реліз", "новий реліз", "зроби реліз", "release" and wants it shipped (not
@@ -91,12 +92,28 @@ Pushing the tag is safe — nothing publishes on tag push.
 In the build tree:
 
 ```bash
-[[ -d node_modules ]] || npm ci     # release-mac.sh dies without it; fresh worktrees have none
+[[ -n "$(ls -A node_modules 2>/dev/null)" ]] || npm ci   # see below — test CONTENTS, not the directory
 git diff --stat vX.Y.Z              # MUST be empty — see the section above
 npm run typecheck && npm test
 ```
 
-Don't skip `npm ci` reasoning: a worktree under `.claude/worktrees/` has no `node_modules`.
+Don't skip `npm ci` reasoning, and test the directory's **contents**: a worktree under
+`.claude/worktrees/` can hold an EMPTY `node_modules`, so `[[ -d node_modules ]]` passes
+while nothing is installed. `npm run typecheck` and `npm test` pass in that state too —
+Node walks up and resolves the parent checkout's `node_modules` — so the gate gives no
+warning either. The build is where it surfaces, with a message that names neither the
+worktree nor the missing install:
+
+```
+⨯ Electron version "^35.0.0" is a range, not a fixed version.
+⨯ Cannot compute electron version from installed node modules
+```
+
+That is electron-builder failing to read `node_modules/electron/package.json`, i.e. the
+install is missing — not a `package.json` problem. Run `npm ci` and rebuild; don't pin the
+Electron version in response to it. `npm ci` leaves install scripts unapproved
+(`npm warn install-scripts`), which is harmless here: electron-builder downloads its own
+platform binaries.
 
 ## Step 3 — Create the GitHub Release as a DRAFT (notes first, assets after)
 
@@ -151,28 +168,35 @@ re-run with the token, or replay just the script's `upload_asset` loop over
   (`latest.yml` is Windows-only). Missing it = updater gets 404 = silently "no updates".
 - It won't bring the ZIP, and **Squirrel.Mac updates from the ZIP, not the DMG**.
 
-## Step 5 — Windows build + upload (over SSH to the Windows build host)
+## Step 5 — Windows build + upload (GitHub Actions, not the SSH host)
 
-The NSIS installer cannot be built on macOS — it runs on a Windows host that already has a
-checkout and toolchain. The host's SSH alias and network prerequisites are in Alex's
-personal notes, not in this repo; substitute it for `<win-host>` below.
+The NSIS installer cannot be built on macOS. The route actually used is the repo's
+`Release` workflow (`.github/workflows/release.yml`, `workflow_dispatch`), which runs the
+test job and then builds + uploads the Windows installer from a `windows-latest` runner:
 
 ```bash
-TOKEN=$(gh auth token)
-ssh <win-host> "powershell -ExecutionPolicy Bypass -Command \"cd C:\\apps\\prd-build; powershell -ExecutionPolicy Bypass -File .\\scripts\\release-win.ps1 -Token '$TOKEN'\""
+gh workflow run release.yml --ref vX.Y.Z      # the TAG, not main — main may move on
+gh run list --workflow=release.yml -L 1 --json databaseId,headSha,status,url
+gh run watch <runId> --exit-status
 ```
 
-PowerShell 5.1 quoting traps, each of which cost a round-trip in v1.13.0:
-- `&&` is **not** a statement separator — use `;`.
-- The script is at `.\scripts\release-win.ps1`, not the repo root.
-- `-Token` is **mandatory**; there is no `-Version` parameter (version comes from
-  `package.json`, tag defaults to `v$version`). Optional: `-RepoDir` (default
-  `C:\apps\prd-build`), `-Tag`.
-- Invoke via `-File`, not `.\script.ps1` (execution policy).
-- No `head`/`grep` on the remote — use `Select-Object -First N` / `Select-String`.
+Pass `--ref vX.Y.Z` and then **check the run's `headSha` equals the tag** — the workflow
+otherwise checks out the default branch, which is the same class of wrong-commit build the
+`git diff --stat` gate exists to prevent on macOS.
 
-It signs with `signtool` on the host and uploads the `.exe`, `.exe.blockmap` and
-`latest.yml`. If it's up to date with origin/main it needs nothing from your local tree.
+Two consequences of this route, both of which belong in the report to Alex:
+
+- The `.exe` is **not Authenticode-signed**. Signing lives in `scripts/release-win.ps1`,
+  which runs `signtool` on the corporate Windows host (`ts1`) and is a separate, heavier
+  route: it needs VPN, does its own `git checkout main; git reset --hard origin/main`
+  (so it builds origin/main's TIP, correct only while the tag IS the tip), and carries
+  PowerShell 5.1 quoting traps — `&&` is not a separator (use `;`), invoke via `-File`,
+  `-Token` is mandatory, no `head`/`grep` on the remote. Use it only when Alex asks for a
+  signed installer; otherwise Windows users get a SmartScreen warning on install.
+- The workflow publishes with `electron-builder --publish always`, which resolves the
+  draft release **by tag on its own**. Creating the draft in Step 3 first is what keeps
+  mac and Windows on one release — verify afterwards that exactly ONE draft exists
+  (see Step 6) before publishing anything.
 
 ## Step 6 — Verify, and verify the right things
 
@@ -204,12 +228,26 @@ the result you want — so chaining it with `&&` silently swallows whatever chec
 Expected asset set: `latest-mac.yml`, `latest.yml`,
 `PR-Dashboard-X.Y.Z-universal.dmg` (+ `.blockmap`),
 `PR-Dashboard-X.Y.Z-universal-mac.zip` (+ `.blockmap`),
-`PR-Dashboard-Setup-X.Y.Z.exe` (+ `.blockmap`).
+`PR-Dashboard-Setup-X.Y.Z.exe` (+ `.blockmap`). The Actions route produces these same
+dash-names — but it is a different code path from `release-win.ps1`, so diff the name
+inside `latest.yml` against the uploaded asset rather than assuming.
 
 Note on `animate-pulse`: it legitimately appears in the built **CSS** as an unused rule,
 because Tailwind's content scanner picks the string out of the *comments* in `App.tsx` /
 `styles.css` that document the ban. Dead CSS renders no frames. What matters is **0**
 occurrences in the built JS/HTML — that's what proves no element applies it.
+
+```bash
+# 5. exactly ONE draft for this tag — two means the Windows publisher made its own,
+#    and publishing the wrong ID burns the version permanently (immutable releases)
+gh api repos/Alexandr-Kravchuk/github-pr-manager/releases \
+  --jq '.[] | select(.draft) | "\(.id) \(.tag_name) assets=\(.assets|length)"'
+```
+
+Before publishing, a draft's assets are not public, so `curl` on the feeds 404s — read
+them through the API instead (`gh api -H "Accept: application/octet-stream"
+repos/<owner>/<repo>/releases/assets/<assetId>`) and re-run the `curl` checks after
+publishing.
 
 Then publish — **by ID**, not by tag (`gh release edit` is ambiguous if a duplicate draft
 ever appeared):
