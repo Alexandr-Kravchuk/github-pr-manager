@@ -3752,6 +3752,48 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     );
   });
 
+  // Each request carries its own `viewer { login }`, and `isOwnPr` needs one: a
+  // null login makes a team request on your OWN PR claim a review from you —
+  // violet card, "Reviewer" pill, a "Needs attention" count you can never clear.
+  // The PR arrives ONLY through the team search here, and ONLY the `reviewing`
+  // response carries the viewer, so the assertion fails unless the login is
+  // picked up across responses: without it the role would be "reviewer".
+  await atest("fetchHost: the viewer login is taken from whichever response has one", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    const mine = rawPr({ id: "PR_mine_team", author: { login: "me", avatarUrl: "" } });
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => [{ slug: "t1", organization: { login: "a" } }],
+        };
+      }
+      const alias = /\n  (\w+): search\(/.exec(JSON.parse(init.body).query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 4, resetAt: "" },
+            viewer: alias === "reviewing" ? { login: "me" } : null,
+            [alias]: { nodes: alias === "team0" ? [mine] : [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({
+      label: "H",
+      graphqlUrl,
+      repos: ["a/b"],
+      token: "t",
+    });
+    assert.strictEqual(result.pullRequests.length, 1);
+    assert.deepStrictEqual(result.pullRequests[0].roles, ["author"]);
+  });
+
   // A failing TEAM search is best-effort, like team discovery itself.
   await atest("fetchHost: a failing team search leaves the rest of the host intact", async () => {
     const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
@@ -3776,9 +3818,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         json: async () => ({
           data: {
             rateLimit: { remaining: 4990, cost: 4, resetAt: "" },
-            // Only ONE response carries the viewer here, so this also pins that
-            // `isOwnPr` still has a login when other requests answer without one.
-            viewer: alias === "authored" ? { login: "me" } : null,
+            viewer: { login: "me" },
             [alias]: { nodes: alias === "authored" ? [rawPr({ id: "PR_a" })] : [] },
           },
         }),
