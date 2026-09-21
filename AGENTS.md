@@ -52,20 +52,70 @@ Three layers:
   `issue-key.ts` (the Jira issue-link builder used by `PrCard.tsx`),
   `hotkeys.ts` (the F5 refresh
   decision and the forced-refresh cooldown shared with CmdOrCtrl+R and the
-  header button) and `pr-group.ts` (which Jira key a PR clusters under and what
+  header button), `pr-group.ts` (which Jira key a PR clusters under and what
   the heading above that cluster says — `"KEY · Summary"`, or the bare key when
   Jira resolved none; it lives here rather than as closures in `App.tsx` so the
-  rendered heading is unit-tested without a DOM). Keep any such
+  rendered heading is unit-tested without a DOM), `view-mode.ts` (the three
+  display variants behind the header's Finder-style switch — `roomy` cards,
+  `cozy` table, `compact` tiles — with the guard that validates the persisted
+  choice and the two predicates App.tsx gates grouping and the sort dropdown on)
+  and `pr-table.ts` (the Cozy table's ten columns and its ordering: a comparator
+  per column, always ascending in terms of what the cell SHOWS, plus what a
+  header click does). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
-  `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js` and `pr-group.js`
+  `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
+  `pr-table.js` and `view-mode.js`
   stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
   It talks to main **exclusively** through `window.api` (the preload bridge):
   no direct network, no Node access (`contextIsolation` on, `nodeIntegration`
-  off).
+  off). The list renders in one of three display variants, chosen by the
+  Finder-style `ViewSwitch` in the header row next to Refresh and persisted with
+  the other view preferences in `localStorage`: `roomy` (`PrCard`, the original
+  full cards and the default), `cozy` (`PrTable`) and `compact` (`PrTile`).
+  Roomy and Compact are the same grid at two densities — one `PrList` renders
+  both, so their column counts are the only difference and can't drift. Cozy is
+  the odd one out and deliberately so: it is one FLAT table sorted by any
+  column, because a table per group would sort inside its group only and could
+  not answer "the oldest PR of all of them"; while it is on, `App.tsx` skips the
+  grouping pass and both the Group-by and Sort dropdowns are disabled rather
+  than hidden, so it is visible which control took over. Its rows sort through
+  `shared/pr-table.ts`, where each column also declares a `minWidthRem`;
+  `TABLE_MIN_WIDTH_REM` sums them and goes on the table as a `min-width`,
+  because a fixed-layout table ignores a `min-width` set on the cells — that one
+  number is what keeps a narrow window from squeezing the title column down to
+  one letter. The Pull-request column is the only resizable one (a grip on its
+  header edge, drag or arrow keys, double-click to reset, width persisted in rem
+  with the other view prefs): until it is dragged it carries no width and
+  absorbs the window's slack, and once dragged a trailing auto-width filler
+  column takes the slack instead — a declared width on every column would
+  otherwise have the browser spread the leftovers proportionally and silently
+  widen the column just set to an exact size. The table scrolls inside a box
+  whose height is *measured* down to the bottom of the window (`useScrollerHeight`)
+  rather than a `calc(100vh - Xrem)`: the filter row above it wraps to a second
+  line on exactly the narrow windows where the horizontal scrollbar matters. The
+  box is what makes that scrollbar visible at all — a scrollbar sits at its own
+  element's bottom edge, so while the page did the scrolling it lived below the
+  fold and a table clipped on the right looked complete. Two traps that measuring
+  walked into: the floor on that height must stay small (a floor taller than the
+  space actually left pushes the box's bottom, scrollbar included, back below the
+  window), and it re-measures in a `useLayoutEffect` after every commit rather
+  than through a `ResizeObserver` on the page — the page's height includes the
+  box, so the observer saw its own effect, Chromium dropped notifications, and
+  the box kept a stale height across a window resize. `.table-scroll` in
+  `styles.css` styles the bar for the same reason: macOS's overlay scrollbars
+  fade out seconds after the last scroll.
+  In Compact, the tile's one glyph row is where the signals the card spells out
+  in pills live (role letter, review tally, back-to-you / stacked / new-comments
+  / conflict markers, thread count, CI) — each with its own `title`, since a
+  glyph row is only readable once you can ask what a glyph means. The tile title
+  is clamped with `line-clamp-2` and must NOT also
+  carry `block` — the clamp works by `display: -webkit-box`, so a `block` next
+  to it wins on stylesheet order and the titles run to any number of lines,
+  which is what made the tiles in a row different heights.
 
 ## Build / run
 

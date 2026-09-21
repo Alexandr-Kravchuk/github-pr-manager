@@ -2,7 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Buddy, type BuddyMood } from "./components/Buddy";
 import { PrCard } from "./components/PrCard";
+import { PrTable } from "./components/PrTable";
+import { PrTile } from "./components/PrTile";
 import { SettingsScreen } from "./components/Settings";
+import { ViewSwitch } from "./components/ViewSwitch";
 import { cn, relativeTime } from "./format";
 import { playNotifySound } from "./notify-sound";
 import { shouldAllowForcedRefresh, shouldRefreshOnKey } from "../../shared/hotkeys";
@@ -23,6 +26,22 @@ import {
   type RoleFilter,
 } from "../../shared/pr-filter";
 import { groupKeyOf, groupLabel, type IssueGroupMode } from "../../shared/pr-group";
+import {
+  DEFAULT_TABLE_SORT,
+  clampPrColumnWidth,
+  isTableSort,
+  nextTableSort,
+  sortForTable,
+  type TableColumnKey,
+  type TableSort,
+} from "../../shared/pr-table";
+import {
+  DEFAULT_VIEW_MODE,
+  isViewMode,
+  supportsGrouping,
+  usesListSort,
+  type ViewMode,
+} from "../../shared/view-mode";
 import type {
   DashboardResponse,
   JiraStatus,
@@ -111,7 +130,23 @@ interface Group {
 interface ViewPrefs {
   role: RoleFilter;
   host: string;
+  /** Which display variant the list is rendered in (the Finder-style switch). */
+  viewMode: ViewMode;
   sortBy: SortKey;
+  /**
+   * The Cozy table's column sort. Kept separate from `sortBy` rather than
+   * folded into it: the two answer different questions (four curated orderings
+   * vs. any column, either way), and merging them would mean switching to Cozy
+   * silently rewrote the Roomy sort you had chosen.
+   */
+  tableSort: TableSort;
+  /**
+   * The Cozy table's Pull-request column width in rem, or null for the elastic
+   * default (the column takes whatever the window has left over). Persisted
+   * because a dragged column width that resets on every launch is worse than
+   * not being draggable at all.
+   */
+  tablePrWidthRem: number | null;
   groupBy: GroupMode;
   attentionOnly: boolean;
   failingOnly: boolean;
@@ -128,7 +163,10 @@ const PREFS_KEY = "prd:view-prefs:v1";
 const DEFAULT_PREFS: ViewPrefs = {
   role: "all",
   host: "all",
+  viewMode: DEFAULT_VIEW_MODE,
   sortBy: "action",
+  tableSort: DEFAULT_TABLE_SORT,
+  tablePrWidthRem: null,
   groupBy: "repo",
   attentionOnly: false,
   failingOnly: false,
@@ -151,6 +189,16 @@ function loadPrefs(): ViewPrefs {
     return {
       role: oneOf(p.role, ROLE_FILTERS, "all"),
       host: typeof p.host === "string" ? p.host : "all",
+      // Both guards live in `shared` (and are unit-tested there): a stored mode
+      // or column that no longer exists must fall back, not render an empty
+      // list with no way back to a working view.
+      viewMode: isViewMode(p.viewMode) ? p.viewMode : DEFAULT_VIEW_MODE,
+      tableSort: isTableSort(p.tableSort) ? p.tableSort : DEFAULT_TABLE_SORT,
+      // `clampPrColumnWidth` answers null for anything that isn't a real width,
+      // which is the elastic default — so a width saved on a 4K display can't
+      // come back as a column wider than a laptop screen, and a corrupt value
+      // can't come back as a zero-width column.
+      tablePrWidthRem: clampPrColumnWidth(p.tablePrWidthRem),
       sortBy: oneOf(p.sortBy, ["action", "waiting", "active", "newest"] as const, "action"),
       groupBy: oneOf(p.groupBy, ["none", "repo", "issue", "parent"] as const, "repo"),
       attentionOnly: Boolean(p.attentionOnly),
@@ -213,6 +261,14 @@ export function App() {
   const [hideApproved, setHideApproved] = useState(boot.hideApproved);
   const [sortBy, setSortBy] = useState<SortKey>(boot.sortBy);
   const [groupBy, setGroupBy] = useState<GroupMode>(boot.groupBy);
+  // Display variant + the Cozy table's column sort. Not filters: they change
+  // how the same rows are drawn, so `clearFilters` leaves them alone.
+  const [viewMode, setViewMode] = useState<ViewMode>(boot.viewMode);
+  const [tableSort, setTableSort] = useState<TableSort>(boot.tableSort);
+  const [tablePrWidthRem, setTablePrWidthRem] = useState<number | null>(boot.tablePrWidthRem);
+  const onTableSort = useCallback((key: TableColumnKey) => {
+    setTableSort((current) => nextTableSort(current, key));
+  }, []);
   const [showDrafts, setShowDrafts] = useState(boot.showDrafts);
   const [showIgnored, setShowIgnored] = useState(boot.showIgnored);
   // Collapsed repo groups, keyed by `${hostLabel}/${repo}`. In-memory, like
@@ -340,7 +396,10 @@ export function App() {
     savePrefs({
       role,
       host,
+      viewMode,
       sortBy,
+      tableSort,
+      tablePrWidthRem,
       groupBy,
       attentionOnly,
       failingOnly,
@@ -354,7 +413,10 @@ export function App() {
   }, [
     role,
     host,
+    viewMode,
     sortBy,
+    tableSort,
+    tablePrWidthRem,
     groupBy,
     attentionOnly,
     failingOnly,
@@ -583,7 +645,20 @@ export function App() {
     return arr;
   }, [filtered, sortBy, trackComments]);
 
+  // The Cozy table's rows: the same filtered set, ordered by the active column
+  // instead of by `sortBy`. Computed from `filtered` rather than from `sorted`
+  // so the list sort can't leak in as a hidden second ordering.
+  const tableRows = useMemo(
+    () =>
+      viewMode === "cozy" ? sortForTable(filtered, tableSort, { trackComments }) : ([] as PullRequest[]),
+    [viewMode, filtered, tableSort, trackComments],
+  );
+
   const groups = useMemo<Group[] | null>(() => {
+    // Cozy is one flat table: a table per group would sort within each group
+    // only, so the question a sortable column exists for ("the oldest PR of all
+    // of them") could not be asked.
+    if (!supportsGrouping(viewMode)) return null;
     if (groupBy === "none") return null;
     if (groupBy === "repo") {
       const map = new Map<string, Group>();
@@ -636,7 +711,7 @@ export function App() {
       clusters.push({ key: OTHER_GROUP_KEY, label: "Other", hostLabel: null, prs: other });
     }
     return clusters;
-  }, [sorted, groupBy]);
+  }, [sorted, groupBy, viewMode]);
 
   const allCollapsed =
     groups !== null && groups.length > 0 && groups.every((g) => collapsed.has(g.key));
@@ -740,6 +815,11 @@ export function App() {
               </p>
             </div>
           </div>
+          {/* The display-variant switch sits in the header's middle gap — the
+              empty space `justify-between` leaves between the title block and
+              the Refresh / Settings buttons. It is a view control, not a filter,
+              so it belongs up here with Refresh rather than in the Filters row. */}
+          <ViewSwitch value={viewMode} onChange={setViewMode} />
           <div className="flex items-center gap-2 text-xs text-fg-muted">
             {data?.rateLimits?.map((rl) => (
               <span
@@ -888,12 +968,21 @@ export function App() {
               })}
             </div>
 
+            {/* Both view controls are disabled in Cozy rather than hidden: the
+                table owns the ordering (its column headers) and is flat, and a
+                control that vanished would read as a bug, where a disabled one
+                with a title says which thing took it over. */}
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as SortKey)}
-              title="Sort order"
+              disabled={!usesListSort(viewMode)}
+              title={
+                usesListSort(viewMode)
+                  ? "Sort order"
+                  : "In Cozy the column headers set the sort order"
+              }
               aria-label="Sort order"
-              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
+              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
             >
               {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
                 <option key={k} value={k}>
@@ -905,9 +994,12 @@ export function App() {
             <select
               value={groupBy}
               onChange={(e) => setGroupBy(e.target.value as GroupMode)}
-              title="Grouping"
+              disabled={!supportsGrouping(viewMode)}
+              title={
+                supportsGrouping(viewMode) ? "Grouping" : "Cozy is one flat table — no grouping"
+              }
               aria-label="Grouping"
-              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
+              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
             >
               <option value="none">No grouping</option>
               <option value="repo">Group by repo</option>
@@ -1063,7 +1155,22 @@ export function App() {
         <div className="p-8 text-center text-sm text-fg-subtle">Loading…</div>
       )}
 
-      {groups ? (
+      {viewMode === "cozy" ? (
+        tableRows.length > 0 && (
+          <PrTable
+            prs={tableRows}
+            sort={tableSort}
+            onSort={onTableSort}
+            prWidthRem={tablePrWidthRem}
+            onPrWidthChange={setTablePrWidthRem}
+            jiraBaseUrl={jiraStatus?.baseUrl ?? null}
+            trackComments={trackComments}
+            onOpen={openPr}
+            onMarkSeen={(p) => postSeen([p])}
+            onToggleIgnore={toggleIgnore}
+          />
+        )
+      ) : groups ? (
         <div>
           {groups.map((g) => {
             const isCollapsed = collapsed.has(g.key);
@@ -1098,39 +1205,32 @@ export function App() {
                   )}
                 </button>
                 {!isCollapsed && (
-                  <div className="mt-3 grid gap-2.5 pl-2 md:grid-cols-2 2xl:grid-cols-3 3xl:grid-cols-4 4xl:grid-cols-5">
-                    {g.prs.map((pr) => (
-                      <PrCard
-                        key={pr.id}
-                        pr={pr}
-                        hideRepo={groupBy === "repo"}
-                        jiraBaseUrl={jiraStatus?.baseUrl ?? null}
-                        trackComments={trackComments}
-                        onOpen={openPr}
-                        onMarkSeen={(p) => postSeen([p])}
-                        onToggleIgnore={toggleIgnore}
-                      />
-                    ))}
-                  </div>
+                  <PrList
+                    prs={g.prs}
+                    mode={viewMode}
+                    className="mt-3 pl-2"
+                    hideRepo={groupBy === "repo"}
+                    jiraBaseUrl={jiraStatus?.baseUrl ?? null}
+                    trackComments={trackComments}
+                    onOpen={openPr}
+                    onMarkSeen={(p) => postSeen([p])}
+                    onToggleIgnore={toggleIgnore}
+                  />
                 )}
               </section>
             );
           })}
         </div>
       ) : (
-        <div className="grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3 3xl:grid-cols-4 4xl:grid-cols-5">
-          {sorted.map((pr) => (
-            <PrCard
-              key={pr.id}
-              pr={pr}
-              jiraBaseUrl={jiraStatus?.baseUrl ?? null}
-              trackComments={trackComments}
-              onOpen={openPr}
-              onMarkSeen={(p) => postSeen([p])}
-              onToggleIgnore={toggleIgnore}
-            />
-          ))}
-        </div>
+        <PrList
+          prs={sorted}
+          mode={viewMode}
+          jiraBaseUrl={jiraStatus?.baseUrl ?? null}
+          trackComments={trackComments}
+          onOpen={openPr}
+          onMarkSeen={(p) => postSeen([p])}
+          onToggleIgnore={toggleIgnore}
+        />
       )}
 
       <div className="pointer-events-none fixed bottom-2 right-3 z-10 flex items-center gap-2 text-[11px]">
@@ -1159,6 +1259,83 @@ export function App() {
           <span className="text-fg-faint">v{data.version}</span>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * A grid of PRs in the current card size — Roomy's full cards or Compact's
+ * tiles. One component rather than the branch written twice, because the flat
+ * list and every group render the same thing and a copy would let them drift
+ * (the grouped grid already carried its own column counts before this).
+ *
+ * The column counts are the whole difference between the two modes: Roomy fits
+ * two cards on a laptop, Compact five — which is what "see many PRs on a small
+ * screen" means in practice. `mode` is the full `ViewMode` and Cozy simply never
+ * reaches here (it renders `PrTable`), so a new mode fails at the switch below
+ * rather than silently falling back to cards.
+ */
+function PrList({
+  prs,
+  mode,
+  className,
+  hideRepo = false,
+  jiraBaseUrl,
+  trackComments,
+  onOpen,
+  onMarkSeen,
+  onToggleIgnore,
+}: {
+  prs: PullRequest[];
+  mode: ViewMode;
+  className?: string;
+  hideRepo?: boolean;
+  jiraBaseUrl: string | null;
+  trackComments: boolean;
+  onOpen: (pr: PullRequest) => void;
+  onMarkSeen: (pr: PullRequest) => void;
+  onToggleIgnore: (pr: PullRequest) => void;
+}) {
+  if (mode === "compact") {
+    return (
+      <div
+        className={cn(
+          "grid gap-1.5 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 3xl:grid-cols-8 4xl:grid-cols-10",
+          className,
+        )}
+      >
+        {prs.map((pr) => (
+          <PrTile
+            key={pr.id}
+            pr={pr}
+            hideRepo={hideRepo}
+            trackComments={trackComments}
+            onOpen={onOpen}
+            onToggleIgnore={onToggleIgnore}
+          />
+        ))}
+      </div>
+    );
+  }
+  return (
+    <div
+      className={cn(
+        "grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3 3xl:grid-cols-4 4xl:grid-cols-5",
+        className,
+      )}
+    >
+      {prs.map((pr) => (
+        <PrCard
+          key={pr.id}
+          pr={pr}
+          hideRepo={hideRepo}
+          jiraBaseUrl={jiraBaseUrl}
+          trackComments={trackComments}
+          onOpen={onOpen}
+          onMarkSeen={onMarkSeen}
+          onToggleIgnore={onToggleIgnore}
+        />
+      ))}
     </div>
   );
 }

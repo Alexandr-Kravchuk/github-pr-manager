@@ -24,6 +24,31 @@ and any PR you don't care about can be **ignored** and tucked behind an
 "Ignored" filter. Light / dark / system **theme** follows the OS or can be
 pinned in Settings.
 
+The header carries a **display switch** (the three icons next to Refresh) with
+three variants of the same list:
+
+- **Roomy** — the full cards, everything on screen without a hover. The default.
+- **Cozy** — one flat table, sortable by **any** column (signal, PR, author,
+  role, review, CI, unresolved threads, age, last update). Click a header to
+  sort, click it again to reverse; grouping and the sort dropdown hand over to
+  the columns while this variant is on. The **Pull request** column is
+  resizable — drag the grip on its right edge (arrow keys work too,
+  double-click resets it) — and every column has a minimum width, so a window
+  too narrow for all ten scrolls sideways instead of squeezing them, with the
+  scrollbar kept on screen and the header row pinned while the rows scroll.
+- **Compact** — the same cards shrunk to small tiles, five or six per row on a
+  laptop screen. The title is clamped to two lines; under it one row of small
+  marks carries the rest: the author, your role (**A** author, **R** your review
+  is requested, **✓** you already reviewed), where the review stands
+  (**✗** changes requested, **○** nobody has looked, or the approvals tally
+  `2/2`), then **↩** back in your court, **↳** stacked on another branch,
+  **✦** new comments, **⚠** merge conflict, **💬 N** unresolved threads, and the
+  CI state on the right. Every mark has a tooltip, and hovering the tile itself
+  gives the full detail.
+
+The choice is remembered between launches, as are the filters and the column
+sort.
+
 It is **per-user and single-identity**: tokens are read from the
 [`gh` CLI](https://cli.github.com/) you're already signed into — there is no
 OAuth flow and **nothing is stored** by the app. Settings (hosts, repos, refresh

@@ -86,7 +86,15 @@ test("pickAppId: falls back on malformed JSON", () =>
 // builtin — a regression would break the Vite renderer build. Assert the
 // compiled output is clean so the AGENTS.md carve-out is enforced, not just
 // documented.
-for (const mod of ["notify.js", "pr-filter.js", "issue-key.js", "hotkeys.js", "pr-group.js"]) {
+for (const mod of [
+  "notify.js",
+  "pr-filter.js",
+  "issue-key.js",
+  "hotkeys.js",
+  "pr-group.js",
+  "pr-table.js",
+  "view-mode.js",
+]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
       path.join(__dirname, `../dist/main/shared/${mod}`),
@@ -1971,6 +1979,299 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     ));
   test("groupLabel: an empty cluster is just the key (no crash, no separator)", () =>
     assert.strictEqual(prGroup.groupLabel("ENG-93374", [], "issue"), "ENG-93374"));
+}
+
+// --- view-mode: the display-variant switch -----------------------------------
+// The mode is a persisted localStorage value, so the guard that reads it back is
+// the only thing between a stale/garbled preference and a dashboard rendered in
+// a mode that no longer exists. The two predicates are here because App.tsx uses
+// each of them twice (skip the grouping pass / disable the control), and a
+// hand-spelled `=== "cozy"` at four sites is what drifts.
+{
+  const viewMode = require(path.join(__dirname, "../dist/main/shared/view-mode.js"));
+
+  test("isViewMode: accepts the three shipped modes", () => {
+    for (const mode of ["roomy", "cozy", "compact"]) {
+      assert.strictEqual(viewMode.isViewMode(mode), true, mode);
+    }
+  });
+  test("isViewMode: rejects anything a stale preference could hold", () => {
+    for (const bad of ["Roomy", "table", "", null, undefined, 3, {}, ["cozy"]]) {
+      assert.strictEqual(viewMode.isViewMode(bad), false, JSON.stringify(bad));
+    }
+  });
+  test("view-mode: roomy is the default and leads the switch", () => {
+    assert.strictEqual(viewMode.DEFAULT_VIEW_MODE, "roomy");
+    assert.strictEqual(viewMode.VIEW_MODES[0], "roomy");
+  });
+  test("supportsGrouping / usesListSort: cozy is the only mode that opts out", () => {
+    // Cozy's table is flat and sorts by column, so BOTH header controls hand
+    // over to it. Roomy and Compact are the same list at two sizes and keep them.
+    assert.deepStrictEqual(
+      viewMode.VIEW_MODES.map((m) => [viewMode.supportsGrouping(m), viewMode.usesListSort(m)]),
+      [
+        [true, true],
+        [false, false],
+        [true, true],
+      ],
+    );
+  });
+  test("VIEW_MODE_TITLES: every mode has one (the switch is icon-only)", () => {
+    // The icons are the whole control, so a missing title would leave a segment
+    // with no name anywhere — including for a screen reader.
+    for (const mode of viewMode.VIEW_MODES) {
+      assert.ok(viewMode.VIEW_MODE_TITLES[mode], `${mode} has no title`);
+    }
+  });
+}
+
+// --- pr-table: the Cozy table's columns and ordering -------------------------
+// A sortable column is a promise about ordering, which is exactly what a
+// DOM-less runner can hold: each comparator must order by what its cell SHOWS
+// (worst CI first, smallest age = newest), and the tie-break must not follow the
+// flipped direction into "least recently updated".
+{
+  const prTable = require(path.join(__dirname, "../dist/main/shared/pr-table.js"));
+  const CTX = { trackComments: true };
+  const tpr = (o = {}) => ({
+    id: "n1",
+    repo: "clio",
+    number: 10,
+    title: "Retry transient network errors",
+    author: { login: "ann", avatarUrl: "" },
+    createdAt: "2026-09-01T00:00:00Z",
+    updatedAt: "2026-09-10T00:00:00Z",
+    roles: ["author"],
+    reviewers: [],
+    reviewDecision: null,
+    checks: [{ name: "build", kind: "check", state: "success", url: null }],
+    failingChecks: [],
+    pendingChecks: [],
+    ciState: "success",
+    hasUnaddressedChangeRequest: false,
+    hasUnaddressedComments: false,
+    hasConflicts: false,
+    hasNoReviews: false,
+    hasHumanApproval: false,
+    hasNewActivity: false,
+    awaitingReview: false,
+    returnedToMe: false,
+    myReReviewDue: false,
+    unresolvedThreads: 0,
+    totalComments: 0,
+    isDraft: false,
+    isIgnored: false,
+    ...o,
+  });
+  const rev = (login, reviewState) => ({ login, avatarUrl: "", reviewState });
+
+  test("TABLE_COLUMNS: ten unique columns, Actions the only unsortable one", () => {
+    const keys = prTable.TABLE_COLUMNS.map((c) => c.key);
+    assert.strictEqual(keys.length, 10);
+    assert.strictEqual(new Set(keys).size, keys.length, "duplicate column key");
+    assert.deepStrictEqual(
+      prTable.TABLE_COLUMNS.filter((c) => !c.sortable).map((c) => c.key),
+      ["actions"],
+    );
+  });
+
+  test("TABLE_MIN_WIDTH_REM: every column declares a minimum and the table's floor is their sum", () => {
+    // The floor has to be enforced on the table, not on the cells — a
+    // fixed-layout table ignores a cell `min-width` — so a column added without
+    // a minimum would silently shrink the others instead of widening the table.
+    for (const col of prTable.TABLE_COLUMNS) {
+      assert.ok(col.minWidthRem > 0, `${col.key} declares no minimum width`);
+    }
+    assert.strictEqual(
+      prTable.TABLE_MIN_WIDTH_REM,
+      prTable.TABLE_COLUMNS.reduce((sum, c) => sum + c.minWidthRem, 0),
+    );
+  });
+
+  test("clampPrColumnWidth: a dragged width is held inside the column's bounds", () => {
+    assert.strictEqual(prTable.clampPrColumnWidth(40), 40);
+    assert.strictEqual(prTable.clampPrColumnWidth(2), prTable.PR_COLUMN_MIN_REM);
+    assert.strictEqual(prTable.clampPrColumnWidth(5000), prTable.PR_COLUMN_MAX_REM);
+    assert.ok(prTable.PR_COLUMN_MIN_REM > 0 && prTable.PR_COLUMN_MAX_REM > prTable.PR_COLUMN_MIN_REM);
+  });
+  test("clampPrColumnWidth: anything that isn't a width answers null — the elastic default", () => {
+    // Null is the un-dragged state, so a corrupt persisted value (or a NaN from
+    // measuring a column that isn't on screen) restores the default layout
+    // instead of collapsing the column to nothing.
+    for (const bad of [NaN, Infinity, null, undefined, "32", {}]) {
+      assert.strictEqual(prTable.clampPrColumnWidth(bad), null, String(bad));
+    }
+  });
+
+  test("tableMinWidthRem: un-dragged is the plain sum; dragged swaps in that width", () => {
+    assert.strictEqual(prTable.tableMinWidthRem(null), prTable.TABLE_MIN_WIDTH_REM);
+    const others = prTable.TABLE_MIN_WIDTH_REM - prTable.PR_COLUMN_MIN_REM;
+    assert.strictEqual(prTable.tableMinWidthRem(50), others + 50);
+    // A width outside the bounds must not widen the table past them either —
+    // the floor is what keeps the other nine columns from being squeezed.
+    assert.strictEqual(prTable.tableMinWidthRem(1), others + prTable.PR_COLUMN_MIN_REM);
+    assert.strictEqual(
+      prTable.tableMinWidthRem(5000),
+      others + prTable.PR_COLUMN_MAX_REM,
+    );
+  });
+
+  test("isTableSort: accepts a stored sortable column with a direction", () =>
+    assert.strictEqual(prTable.isTableSort({ key: "age", dir: "desc" }), true));
+  test("isTableSort: rejects an unknown column, the unsortable one, and a bad shape", () => {
+    // The stored value drives `sortForTable`, so a column that no longer exists
+    // must fall back to the default instead of ordering the table by nothing.
+    for (const bad of [
+      { key: "reviewers", dir: "asc" },
+      { key: "actions", dir: "asc" },
+      { key: "age", dir: "up" },
+      { key: "age" },
+      "age",
+      null,
+    ]) {
+      assert.strictEqual(prTable.isTableSort(bad), false, JSON.stringify(bad));
+    }
+  });
+
+  test("nextTableSort: a new column takes ITS own default direction", () => {
+    // Not the previous column's: "most comments first" inherited by Age would
+    // mean the first click on Age showed the newest PRs, which is not what the
+    // header's arrow would then be claiming.
+    assert.deepStrictEqual(prTable.nextTableSort({ key: "pr", dir: "asc" }, "comments"), {
+      key: "comments",
+      dir: "desc",
+    });
+    assert.deepStrictEqual(prTable.nextTableSort({ key: "comments", dir: "desc" }, "pr"), {
+      key: "pr",
+      dir: "asc",
+    });
+  });
+  test("nextTableSort: clicking the active column flips it", () => {
+    assert.deepStrictEqual(prTable.nextTableSort({ key: "age", dir: "desc" }, "age"), {
+      key: "age",
+      dir: "asc",
+    });
+    assert.deepStrictEqual(prTable.nextTableSort({ key: "age", dir: "asc" }, "age"), {
+      key: "age",
+      dir: "desc",
+    });
+  });
+  test("nextTableSort: the Actions header is a no-op, not an error", () => {
+    const current = { key: "signal", dir: "asc" };
+    assert.strictEqual(prTable.nextTableSort(current, "actions"), current);
+  });
+
+  test("compareForColumn(age): ascending is the smallest age — the newest PR", () => {
+    const newer = tpr({ createdAt: "2026-09-19T00:00:00Z" });
+    const older = tpr({ createdAt: "2026-08-01T00:00:00Z" });
+    assert.ok(prTable.compareForColumn(newer, older, "age", CTX) < 0);
+    // …so the column's first click, which is `desc`, is "oldest first".
+    assert.strictEqual(prTable.TABLE_COLUMNS.find((c) => c.key === "age").defaultDir, "desc");
+  });
+  test("compareForColumn(updated): ascending is the oldest activity", () =>
+    assert.ok(
+      prTable.compareForColumn(
+        tpr({ updatedAt: "2026-09-01T00:00:00Z" }),
+        tpr({ updatedAt: "2026-09-20T00:00:00Z" }),
+        "updated",
+        CTX,
+      ) < 0,
+    ));
+  test("compareForColumn(pr): repository first, then number", () => {
+    assert.ok(prTable.compareForColumn(tpr({ repo: "aaa" }), tpr({ repo: "zzz" }), "pr", CTX) < 0);
+    assert.ok(
+      prTable.compareForColumn(tpr({ number: 7 }), tpr({ number: 700 }), "pr", CTX) < 0,
+      "same repo orders by number, not by the number's text",
+    );
+  });
+  test("compareForColumn(author): a PR with no author sorts last, not first", () =>
+    assert.ok(prTable.compareForColumn(tpr(), tpr({ author: null }), "author", CTX) < 0));
+
+  test("ciRank: failing, then running, then green — and 'no checks' last of all", () => {
+    const rank = (o) => prTable.ciRank(tpr(o));
+    const failing = rank({ ciState: "failure" });
+    const pending = rank({ ciState: "pending" });
+    const green = rank({ ciState: "success" });
+    const none = rank({ checks: [] });
+    assert.ok(failing < pending && pending < green, "worst CI must sort first");
+    // The absence of CI is not good news: mixing it in with success would bury
+    // the PRs that are actually green.
+    assert.ok(green < none, "'no checks' must not outrank a passing build");
+  });
+
+  test("reviewRank: a standing change request first, a full set of approvals last", () => {
+    const changes = prTable.reviewRank(tpr({ reviewDecision: "CHANGES_REQUESTED" }));
+    const unaddressed = prTable.reviewRank(tpr({ hasUnaddressedChangeRequest: true }));
+    const untouched = prTable.reviewRank(tpr({ hasNoReviews: true }));
+    const partial = prTable.reviewRank(
+      tpr({ hasHumanApproval: true, reviewers: [rev("ann", "approved"), rev("bob", "pending")] }),
+    );
+    const done = prTable.reviewRank(
+      tpr({ hasHumanApproval: true, reviewers: [rev("ann", "approved")] }),
+    );
+    assert.strictEqual(changes, unaddressed, "either form of change request ranks the same");
+    assert.ok(changes < untouched && untouched < partial && partial < done);
+  });
+
+  test("approvalTally: counts approvals out of the reviewers on the PR", () =>
+    assert.deepStrictEqual(
+      prTable.approvalTally(tpr({ reviewers: [rev("ann", "approved"), rev("bob", "pending")] })),
+      { approved: 1, total: 2 },
+    ));
+  test("approvalTally: null when nobody is requested (the cell prints a dash)", () =>
+    assert.strictEqual(prTable.approvalTally(tpr()), null));
+
+  test("primaryRole: author outranks an owed review, which outranks a done one", () => {
+    assert.strictEqual(prTable.primaryRole(tpr({ roles: ["reviewed", "author"] })), "author");
+    assert.strictEqual(prTable.primaryRole(tpr({ roles: ["reviewed", "reviewer"] })), "reviewer");
+    assert.strictEqual(prTable.primaryRole(tpr({ roles: ["reviewed"] })), "reviewed");
+    assert.strictEqual(prTable.primaryRole(tpr({ roles: [] })), null);
+  });
+
+  test("compareForColumn(signal): the same severity the card accents use", () => {
+    const blocked = tpr({ failingChecks: [{ name: "ci", kind: "check", state: "failure", url: null }] });
+    const mine = tpr({ roles: ["reviewer"] });
+    assert.ok(prTable.compareForColumn(blocked, mine, "signal", CTX) < 0);
+    assert.ok(prTable.compareForColumn(mine, tpr(), "signal", CTX) < 0);
+  });
+
+  test("compareForColumn(comments): unresolved threads first, total comments break the tie", () => {
+    assert.ok(
+      prTable.compareForColumn(tpr({ unresolvedThreads: 1 }), tpr({ unresolvedThreads: 4 }), "comments", CTX) < 0,
+    );
+    assert.ok(
+      prTable.compareForColumn(tpr({ totalComments: 1 }), tpr({ totalComments: 9 }), "comments", CTX) < 0,
+    );
+  });
+
+  test("sortForTable: the tie-break is most-recently-updated and does NOT flip with the direction", () => {
+    // Both rows are green with checks, so the CI column can't separate them.
+    // Reversing the column must not reverse the fallback into "stalest first" —
+    // that would reshuffle rows the user did not ask to reorder.
+    const old = tpr({ id: "a", updatedAt: "2026-09-01T00:00:00Z" });
+    const fresh = tpr({ id: "b", updatedAt: "2026-09-20T00:00:00Z" });
+    const asc = prTable.sortForTable([old, fresh], { key: "ci", dir: "asc" }, CTX);
+    const desc = prTable.sortForTable([old, fresh], { key: "ci", dir: "desc" }, CTX);
+    assert.deepStrictEqual(asc.map((p) => p.id), ["b", "a"]);
+    assert.deepStrictEqual(desc.map((p) => p.id), ["b", "a"]);
+  });
+  test("sortForTable: direction applies to the chosen column", () => {
+    const failing = tpr({ id: "f", ciState: "failure", failingChecks: [{ name: "ci", kind: "check", state: "failure", url: null }] });
+    const green = tpr({ id: "g" });
+    assert.deepStrictEqual(
+      prTable.sortForTable([green, failing], { key: "ci", dir: "asc" }, CTX).map((p) => p.id),
+      ["f", "g"],
+    );
+    assert.deepStrictEqual(
+      prTable.sortForTable([green, failing], { key: "ci", dir: "desc" }, CTX).map((p) => p.id),
+      ["g", "f"],
+    );
+  });
+  test("sortForTable: leaves the input array alone", () => {
+    const input = [tpr({ id: "a" }), tpr({ id: "b", updatedAt: "2026-09-20T00:00:00Z" })];
+    prTable.sortForTable(input, { key: "updated", dir: "desc" }, CTX);
+    assert.deepStrictEqual(input.map((p) => p.id), ["a", "b"]);
+  });
 }
 
 // --- ignored: persistent ignore store ----------------------------------------
