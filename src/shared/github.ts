@@ -40,6 +40,18 @@ import type {
  * CHANGES_REQUESTED])`, which needs the login as a query variable and therefore
  * a cached per-host lookup, on the pattern of the team-slug cache.
  *
+ * `reviewThreads(last: 100)` is the other load-bearing page. GitHub lists
+ * threads oldest first, so a `first:` page drops the NEWEST threads — the ones
+ * most likely still open. With `first: 50` a PR with 53 threads whose last two
+ * were unresolved read as 0 unresolved and painted green. `last:` keeps the
+ * newest, and past 100 threads the ones that did not fit are counted as
+ * unresolved and unaddressed (`hiddenThreads` in `mapPr`), so an oversized PR
+ * fails closed — red — instead of reading clean. The price: each thread also
+ * pulls `comments(last: 1)`, so GitHub bills about 1 point per 100 threads per
+ * PR, and 100 threads × 25 PRs takes a search from ~14 to ~27 points. Node count
+ * stays far below the 500 000 limit (≈ 25 × 100 × 1 thread comments + 25 × 30
+ * check contexts).
+ *
  * Deliberately out here rather than as a `#` comment inside the template: every
  * byte in there is sent to GitHub on each poll, and prose inside a template
  * literal is exactly how a stray backtick broke this build once.
@@ -68,7 +80,9 @@ fragment PrFields on PullRequest {
     nodes { author { __typename login avatarUrl } state submittedAt }
   }
   comments { totalCount }
-  reviewThreads(first: 50) {
+  # last, not first — see the note above this fragment before changing it.
+  reviewThreads(last: 100) {
+    totalCount
     nodes {
       isResolved
       comments(last: 1) { totalCount nodes { author { login } createdAt } }
@@ -184,6 +198,7 @@ interface RawPr {
   };
   comments: { totalCount: number };
   reviewThreads: {
+    totalCount: number;
     nodes: Array<{
       isResolved: boolean;
       comments: {
@@ -353,7 +368,12 @@ export function mapPr(
   viewerLogin: string | null,
 ): PullRequest {
   const threads = pr.reviewThreads.nodes;
-  const unresolvedThreads = threads.filter((t) => !t.isResolved).length;
+  // Threads past the `last: 100` page (the oldest ones) were never fetched, so
+  // their state is unknown. They count as unresolved and unaddressed: a PR too
+  // big to read in full must not read as clean. `?? threads.length` keeps a
+  // response without totalCount (older fixtures) at zero hidden threads.
+  const hiddenThreads = Math.max(0, (pr.reviewThreads.totalCount ?? threads.length) - threads.length);
+  const unresolvedThreads = threads.filter((t) => !t.isResolved).length + hiddenThreads;
   const reviewCommentCount = threads.reduce((sum, t) => sum + t.comments.totalCount, 0);
   const totalComments = pr.comments.totalCount + reviewCommentCount;
 
@@ -367,7 +387,7 @@ export function mapPr(
     if (t.isResolved) return false;
     const lastCommentLogin = t.comments.nodes[t.comments.nodes.length - 1]?.author?.login ?? null;
     return lastCommentLogin !== authorLogin;
-  }).length;
+  }).length + hiddenThreads;
   const hasUnaddressedComments = unaddressedThreads > 0;
 
   const checks = extractChecks(pr);

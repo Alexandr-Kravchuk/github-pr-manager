@@ -2854,6 +2854,44 @@ test("activeFilterCount: every narrowing control at once", () =>
     3 + prFilter.SOURCE_CHIPS.length,
   ));
 
+// --- github: mapPr past the review-thread page -------------------------------
+// GitHub lists review threads oldest first. The query reads `last: 100` so the
+// newest — usually the still-open — threads are the ones fetched, and any
+// threads past that page count as unresolved so an oversized PR fails closed.
+// Real case: usercustom-ai-skills#31, 53 threads, the 2 open ones among 51–53,
+// read as 0 unresolved and painted green under `first: 50`.
+{
+  const tThread = (isResolved, login = "copilot") => ({
+    isResolved,
+    comments: { totalCount: 1, nodes: [{ author: { login }, createdAt: "2026-07-07T10:00:00Z" }] },
+  });
+  const mapped = (reviewThreads) => github.mapPr(rawPr({ reviewThreads }), "GH", ["author"], null);
+  const sigOpts = { trackComments: true };
+
+  test("mapPr: 53 threads, the newest 2 open, fetched in full → 2 unresolved, card blocked", () => {
+    const nodes = [...Array.from({ length: 51 }, () => tThread(true)), tThread(false), tThread(false)];
+    const pr = mapped({ totalCount: 53, nodes });
+    assert.strictEqual(pr.unresolvedThreads, 2);
+    assert.strictEqual(pr.unaddressedThreads, 2);
+    assert.strictEqual(prFilter.prSignal(pr, sigOpts), "blocked");
+  });
+
+  test("mapPr: threads past the fetched page count as unresolved (fail closed)", () => {
+    // 130 threads, only the newest 100 fetched and all of those resolved.
+    const pr = mapped({ totalCount: 130, nodes: Array.from({ length: 100 }, () => tThread(true)) });
+    assert.strictEqual(pr.unresolvedThreads, 30);
+    assert.strictEqual(pr.unaddressedThreads, 30);
+    assert.strictEqual(pr.hasUnaddressedComments, true);
+    assert.strictEqual(prFilter.prSignal(pr, sigOpts), "blocked");
+  });
+
+  test("mapPr: every thread fetched and resolved → nothing to resolve", () => {
+    const pr = mapped({ totalCount: 53, nodes: Array.from({ length: 53 }, () => tThread(true)) });
+    assert.strictEqual(pr.unresolvedThreads, 0);
+    assert.strictEqual(pr.unaddressedThreads, 0);
+  });
+}
+
 // --- pr-filter: prSignal under trackComments --------------------------------
 // The card-colour promises the README and the `trackComments` docblock make.
 // `prSignal` reads `hasNewActivity`, `hasUnaddressedComments` and
@@ -3929,6 +3967,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
     return { sent, result };
   }
+
+  await atest("fetchHost: reads the NEWEST review threads, with their total count", async () => {
+    const { sent } = await runFetchHost({});
+    // `first:` would drop the newest threads on a long PR — the open ones.
+    assert.match(sent.authored.query, /reviewThreads\(last: 100\) \{\s+totalCount/);
+    assert.ok(!/reviewThreads\(first:/.test(sent.authored.query));
+  });
 
   await atest("fetchHost: asks for reviewed-by:@me over the same repos, as its own alias", async () => {
     const { sent } = await runFetchHost({});
