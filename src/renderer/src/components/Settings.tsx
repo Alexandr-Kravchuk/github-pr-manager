@@ -397,7 +397,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           <span>
             <span className="block text-sm text-fg-secondary">Launch at login</span>
             <span className="block text-xs text-fg-faint">
-              Start PR Dashboard automatically when you sign in.
+              Start PR Dashboard automatically when you sign in — in the tray, when
+              closing to the tray is on.
             </span>
           </span>
         </label>

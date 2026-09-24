@@ -22,6 +22,7 @@ const issueKey = require(path.join(__dirname, "../dist/main/shared/issue-key.js"
 const prFilter = require(path.join(__dirname, "../dist/main/shared/pr-filter.js"));
 const singleInstance = require(path.join(__dirname, "../dist/main/main/single-instance.js"));
 const windowBounds = require(path.join(__dirname, "../dist/main/shared/window-bounds.js"));
+const loginLaunch = require(path.join(__dirname, "../dist/main/main/login-launch.js"));
 
 let passed = 0;
 let failed = 0;
@@ -5894,6 +5895,40 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       closeHandler[0].indexOf("flush()") < closeHandler[0].indexOf("trayController.handleClose"),
       "the flush must run before handleClose, which may hide the window",
     );
+  });
+
+  // --- launch at login, starting in the tray -----------------------------------
+
+  test("loginItemSettingsFor: Windows passes the hidden-launch marker as an argument", () => {
+    assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(true, "win32"), {
+      openAtLogin: true,
+      args: [loginLaunch.HIDDEN_LAUNCH_ARG],
+    });
+    // Disabling must name the same args, or Windows reports/keeps a different entry.
+    assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(false, "win32").args, [loginLaunch.HIDDEN_LAUNCH_ARG]);
+  });
+
+  test("loginItemSettingsFor: macOS asks for a hidden open, no arguments", () => {
+    assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(true, "darwin"), { openAtLogin: true, openAsHidden: true });
+  });
+
+  test("wasLaunchedAtLogin: the argv marker or macOS wasOpenedAtLogin, nothing else", () => {
+    assert.strictEqual(loginLaunch.wasLaunchedAtLogin(["app.exe", "--hidden"], undefined), true);
+    assert.strictEqual(loginLaunch.wasLaunchedAtLogin(["app"], true), true);
+    assert.strictEqual(loginLaunch.wasLaunchedAtLogin(["app.exe"], undefined), false);
+    assert.strictEqual(loginLaunch.wasLaunchedAtLogin(["app"], false), false);
+  });
+
+  test("main.js wiring: a login launch starts hidden, and shows the window if no tray icon appeared", () => {
+    const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+    assert.match(src, /loginItemSettingsFor\)\(enabled, process\.platform\)/, "the login item must carry the marker");
+    assert.match(src, /startInTray = launchedAtLogin && prefs\.closeToTray/, "only close-to-tray may start hidden");
+    assert.match(src, /createWindow\(\{ show: !startInTray \}\)/, "the first window must honor the tray start");
+    const applyIdx = src.indexOf("applyPreferences(prefs);");
+    const fallback = /if \(startInTray && !trayController\.hidesToTray\(\)\)\s*focusMainWindow\(\);/.exec(src);
+    assert.ok(fallback, "a missing tray icon must bring the window back");
+    assert.ok(applyIdx !== -1 && applyIdx < fallback.index, "the fallback must run after the tray is created");
+    assert.match(src, /mainWindow\.once\("show", restoreSavedState\)/, "maximize must wait for the first show");
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);
