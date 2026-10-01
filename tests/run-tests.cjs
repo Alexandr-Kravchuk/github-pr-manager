@@ -3224,6 +3224,41 @@ test("activeFilterCount: every narrowing control at once", () =>
           });
         }
 
+        test(`contract: ${detectorName} queue selectors match dashboard signals across roles/blockers/reveal exclusions`, () => {
+          const sandbox = { require, module: { exports: {} }, process, console, __dirname: path.dirname(file), actual: prFilter.prSignal };
+          require("node:vm").runInNewContext(source + "\nprSignal = actual; module.exports.setTracking = value => { trackComments = value; };", sandbox);
+          const selector = detectorName === "red-prs.cjs" ? "isRed" : detectorName === "green-prs.cjs" ? "isGreen" : "isPurple";
+          const target = selector === "isRed" ? "blocked" : selector === "isGreen" ? "approved" : "myReview";
+          for (const trackComments of [true, false]) {
+            sandbox.module.exports.setTracking(trackComments);
+            for (const roles of [["author"], ["author", "reviewed"], ["reviewer"], ["reviewed"]]) {
+              for (let bits = 0; bits < 128; bits++) {
+                const pr = sigPr({ roles, isDraft: !!(bits & 1), isIgnored: !!(bits & 2), isBehindBase: !!(bits & 4), hasUnaddressedReviewFeedback: !!(bits & 8), unresolvedThreads: bits & 16 ? 1 : 0, hasHumanApproval: !!(bits & 32), returnedToMe: roles.includes("author") ? false : !!(bits & 64), awaitingReview: false });
+                const eligible = !pr.isDraft && !pr.isIgnored && (target !== "approved" || roles.includes("author"));
+                assert.strictEqual(!pr.isIgnored && sandbox.module.exports[selector](pr), eligible && prFilter.prSignal(pr, { trackComments }) === target);
+                assert.strictEqual(sandbox.module.exports.localPrSignal(pr, { trackComments }), prFilter.prSignal(pr, { trackComments }));
+              }
+            }
+          }
+        });
+
+        test(`contract: ${detectorName} shares dashboard settings validation/defaults`, () => {
+          const tempDir = fsSync.mkdtempSync(path.join(os2.tmpdir(), "pr-detector-config-"));
+          try {
+            const configFile = path.join(tempDir, "settings.json");
+            const sandbox = { require, module: { exports: {} }, process: { ...process, env: { ...process.env, PR_DASHBOARD_CONFIG: configFile } }, console, __dirname: path.dirname(file) };
+            const vmSource = source + "\nloadDeps(); loadConfig(); module.exports.auditConfig = { config, trackComments };";
+            for (const rawFlag of [undefined, true, false, "invalid"]) {
+              const raw = { hosts: [{ label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"] }] };
+              if (rawFlag !== undefined) raw.trackComments = rawFlag;
+              fsSync.writeFileSync(configFile, JSON.stringify(raw));
+              const fresh = { ...sandbox, module: { exports: {} } };
+              require("node:vm").runInNewContext(vmSource, fresh);
+              assert.strictEqual(fresh.module.exports.auditConfig.trackComments, cfg.validateSettings(raw).trackComments);
+            }
+          } finally { fsSync.rmSync(tempDir, { recursive: true, force: true }); }
+        });
+
         let mod;
         try {
           mod = require(file);
