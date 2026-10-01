@@ -120,8 +120,10 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     awaitingReview: false,
     hasUnaddressedChangeRequest: false,
     hasUnaddressedComments: false,
+    hasUnaddressedReviewFeedback: false,
     hasHumanApproval: false,
     hasConflicts: false,
+    isBehindBase: false,
     canBeMerged: false,
     // Overwritten by applyActivity:
     hasNewActivity: false,

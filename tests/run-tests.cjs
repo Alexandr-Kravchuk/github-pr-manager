@@ -1545,6 +1545,72 @@ const rawPr = (overrides = {}) => ({
   commits: { nodes: [{ commit: { pushedDate: "2026-07-07T00:00:00Z", committedDate: "2026-07-07T00:00:00Z", statusCheckRollup: null } }] },
   ...overrides,
 });
+// Approval bodies have no resolvable-thread state: only reviewer clearance is
+// authoritative. Conservative unknown prose must never enter the merge queue.
+for (const body of ["", "LGTM!", "Looks good to me.", "Approved ✅", "Thanks!", "👍"]) {
+  test(`approval body: plain acknowledgement ${JSON.stringify(body)}`, () =>
+    assert.strictEqual(github.approvalBodyNeedsAttention(body), false));
+}
+for (const body of ["LGTM, but please add a regression test", "Fix x", "Consider avoiding shared mutable state", "Looks good. Could you handle null inputs?", "The implementation is carefully structured and I appreciate the extensive validation already included."]) {
+  test(`approval body: feedback or unknown intent ${JSON.stringify(body)}`, () =>
+    assert.strictEqual(github.approvalBodyNeedsAttention(body), true));
+}
+test("mapPr: approved review body blocks own PR even without inline comments, push/re-request cannot clear it", () => {
+  const feedback = { ...approvedReview, body: "LGTM, but please add null validation" };
+  for (const trackComments of [true, false]) {
+    for (const reviewRequests of [{ totalCount: 0, nodes: [] }, { totalCount: 1, nodes: [{ requestedReviewer: { login: "rev" } }] }]) {
+      const pr = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [feedback] }, reviewRequests }), "GH", ["author"], "auth");
+      assert.strictEqual(pr.hasHumanApproval, true);
+      assert.strictEqual(pr.hasUnaddressedReviewFeedback, true);
+      assert.strictEqual(pr.canBeMerged, false);
+      assert.strictEqual(prFilter.prSignal(pr, { trackComments }), "blocked");
+    }
+    const anotherApproval = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [feedback, { ...approvedReview, author: { __typename: "User", login: "other" }, body: "LGTM" }] } }), "GH", ["author"], "auth");
+    assert.strictEqual(anotherApproval.hasUnaddressedReviewFeedback, true);
+    assert.strictEqual(prFilter.prSignal(anotherApproval, { trackComments }), "blocked");
+    const clean = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [{ ...approvedReview, body: "LGTM" }] } }), "GH", ["author"], "auth");
+    assert.strictEqual(clean.hasUnaddressedReviewFeedback, false);
+    assert.strictEqual(prFilter.prSignal(clean, { trackComments }), "approved");
+  }
+});
+test("mapPr: bot approval and author's own review do not create human-feedback blocker", () => {
+  for (const author of [{ __typename: "Bot", login: "bot" }, { __typename: "User", login: "auth" }]) {
+    const pr = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [{ ...approvedReview, author, body: "Please fix this" }] } }), "GH", ["author"], "auth");
+    assert.strictEqual(pr.hasUnaddressedReviewFeedback, false);
+  }
+});
+test("approval feedback: only fresh author EYES on the exact review clears it", () => {
+  const feedback = { ...approvedReview, body: "Please add validation", updatedAt: "2026-10-01T10:00:00Z" };
+  const eyes = (login, createdAt = "2026-10-01T10:01:00Z", content = "EYES") => ({ content, createdAt, user: login == null ? null : { login } });
+  for (const [label, reactions, blocked] of [
+    ["absent", [], true], ["other person", [eyes("other")], true],
+    ["reviewer", [eyes("rev")], true], ["deleted actor", [eyes(null)], true],
+    ["wrong emoji", [eyes("auth", undefined, "THUMBS_UP")], true],
+    ["old ack before edit", [eyes("auth", "2026-10-01T09:00:00Z")], true],
+    ["invalid time", [eyes("auth", "invalid")], true],
+    ["author", [eyes("AUTH")], false],
+  ]) {
+    const review = { ...feedback, reactions: { nodes: reactions } };
+    const pr = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [review] } }), "GH", ["author"], "auth");
+    assert.strictEqual(pr.hasUnaddressedReviewFeedback, blocked, label);
+    assert.strictEqual(pr.canBeMerged, !blocked, label);
+    for (const trackComments of [true, false]) assert.strictEqual(prFilter.prSignal(pr, { trackComments }), blocked ? "blocked" : "approved", label);
+  }
+  const acknowledged = { ...feedback, reactions: { nodes: [eyes("auth")] } };
+  for (const extra of [
+    { ...feedback, author: { __typename: "User", login: "other-reviewer" } },
+    { ...feedback, updatedAt: "2026-10-01T10:02:00Z" }, // replacement review has no inherited reaction
+  ]) {
+    const pr = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [acknowledged, extra] } }), "GH", ["author"], "auth");
+    assert.strictEqual(pr.hasUnaddressedReviewFeedback, true);
+  }
+  const behind = github.mapPr(rawPr({ mergeStateStatus: "BEHIND", latestOpinionatedReviews: { nodes: [acknowledged] } }), "GH", ["author"], "auth");
+  assert.strictEqual(behind.hasUnaddressedReviewFeedback, false);
+  assert.strictEqual(behind.canBeMerged, false);
+  assert.strictEqual(prFilter.prSignal(behind, { trackComments: false }), "blocked");
+  const noAuthor = github.mapPr(rawPr({ author: null, latestOpinionatedReviews: { nodes: [acknowledged] } }), "GH", ["author"], "auth");
+  assert.strictEqual(noAuthor.hasUnaddressedReviewFeedback, true);
+});
 const canMerge = (overrides) => github.mapPr(rawPr(overrides), "GH", ["authored"], null).canBeMerged;
 const failingRollup = {
   nodes: [{ commit: { statusCheckRollup: { state: "FAILURE", contexts: {
@@ -1626,6 +1692,25 @@ test("mapPr.hasConflicts: MERGEABLE is false", () =>
   assert.strictEqual(conflicting({ mergeable: "MERGEABLE" }), false));
 test("mapPr.hasConflicts: transient UNKNOWN stays false", () =>
   assert.strictEqual(conflicting({ mergeable: "UNKNOWN" }), false));
+
+test("mapPr.isBehindBase: only BEHIND requests a base update", () => {
+  for (const mergeStateStatus of ["BEHIND", "CLEAN", "UNKNOWN", "BLOCKED", "DIRTY", undefined]) {
+    const pr = github.mapPr(rawPr({ mergeStateStatus }), "GH", ["authored"], null);
+    assert.strictEqual(pr.isBehindBase, mergeStateStatus === "BEHIND");
+    assert.strictEqual(pr.hasConflicts, false);
+    if (mergeStateStatus === "BEHIND") assert.strictEqual(pr.canBeMerged, false);
+  }
+});
+test("mapPr: approved conflict-free PR moves from red to green after base update", () => {
+  for (const trackComments of [true, false]) {
+    const before = github.mapPr(rawPr({ mergeStateStatus: "BEHIND" }), "GH", ["author"], null);
+    const after = github.mapPr(rawPr({ mergeStateStatus: "CLEAN" }), "GH", ["author"], null);
+    assert.strictEqual(before.hasHumanApproval, true);
+    assert.strictEqual(prFilter.prSignal(before, { trackComments }), "blocked");
+    assert.strictEqual(prFilter.prSignal(after, { trackComments }), "approved");
+    assert.strictEqual(after.canBeMerged, true);
+  }
+});
 
 // --- github: mapPr defaults isIgnored to false (set later by ignored.ts) -----
 test("mapPr.isIgnored: defaults to false", () =>
@@ -3051,6 +3136,9 @@ test("activeFilterCount: every narrowing control at once", () =>
         ["idle", sigPr()],
         ["blocked: failing CI", sigPr({ failingChecks: [{ name: "build", kind: "check", state: "failure", url: null }] })],
         ["blocked: unaddressed change request", sigPr({ hasUnaddressedChangeRequest: true })],
+        ["blocked: approval-body feedback", sigPr({ hasUnaddressedReviewFeedback: true, hasHumanApproval: true, awaitingReview: false })],
+        ["blocked: approved behind base", sigPr({ isBehindBase: true, awaitingReview: false, hasHumanApproval: true })],
+        ["not author: behind base", sigPr({ isBehindBase: true, roles: ["reviewed"], awaitingReview: false, hasHumanApproval: true })],
         ["blocked: merge conflict", sigPr({ hasConflicts: true })],
         [
           "blocked: unresolved thread on your own PR",
@@ -3106,6 +3194,35 @@ test("activeFilterCount: every narrowing control at once", () =>
               `requiring it for this contract check would run that call as a side effect`,
           ));
         if (!guarded) continue;
+
+        if (detectorName === "red-prs.cjs" || detectorName === "green-prs.cjs") {
+          test(`contract: ${detectorName} selects behind PRs only for RED, then GREEN after update`, () => {
+            // Evaluate the guarded CLI with only its pure fallback/config wired.
+            // main() never runs: no settings reads, GitHub calls or live PR mutations.
+            const sandbox = { require, module: { exports: {} }, process, console, __dirname: path.dirname(file) };
+            require("node:vm").runInNewContext(source + "\nprSignal = localPrSignal; trackComments = false;", sandbox);
+            const detector = sandbox.module.exports;
+            const before = sigPr({ isBehindBase: true, isDraft: false, awaitingReview: false, hasHumanApproval: true });
+            const after = { ...before, isBehindBase: false };
+            const feedback = { ...after, hasUnaddressedReviewFeedback: true };
+            if (detectorName === "red-prs.cjs") {
+              assert.strictEqual(detector.isRed(feedback), true);
+              assert.strictEqual(detector.redReason(feedback), "approval-body-feedback");
+            } else {
+              assert.strictEqual(detector.isGreen(feedback), false);
+            }
+            if (detectorName === "red-prs.cjs") {
+              assert.strictEqual(detector.isRed(before), true);
+              assert.strictEqual(detector.redReason(before), "behind-base");
+              assert.strictEqual(detector.isRed(after), false);
+              assert.strictEqual(detector.isRed({ ...before, isDraft: true }), false);
+            } else {
+              assert.strictEqual(detector.isGreen(before), false);
+              assert.strictEqual(detector.isGreen(after), true);
+              assert.strictEqual(detector.isGreen({ ...after, isDraft: true }), false);
+            }
+          });
+        }
 
         let mod;
         try {
@@ -3319,6 +3436,22 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     awaitingReview: false,
     ...o,
   });
+
+  for (const trackComments of [true, false]) {
+    await atest(`applyActivity: base-update attention clears after refresh (tracking=${trackComments})`, () =>
+      withTempStore(async (file) => {
+        const before = reviewPr({ roles: ["author"], isBehindBase: true });
+        await state.applyActivity([before], file, { trackComments });
+        assert.strictEqual(before.needsAttention, true);
+        assert.strictEqual(prFilter.hiddenAttentionCount([before]), 1);
+        const after = reviewPr({ roles: ["author"], isBehindBase: false });
+        await state.applyActivity([after], file, { trackComments });
+        assert.strictEqual(after.needsAttention, false);
+        const reviewed = reviewPr({ roles: ["reviewed"], isBehindBase: true });
+        await state.applyActivity([reviewed], file, { trackComments });
+        assert.strictEqual(reviewed.needsAttention, false);
+      }));
+  }
 
   await atest("applyActivity.returnedToMe: false on the first-seen baseline", () =>
     withTempStore(async (file) => {
@@ -3790,6 +3923,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(more.needsAttention, false);
       }),
   );
+
+  for (const trackComments of [true, false]) {
+    await atest(`applyActivity: approval-body feedback persists until reviewer clears it (tracking=${trackComments})`, () =>
+      withTempStore(async (file) => {
+        const pr = reviewPr({ roles: ["author"], hasUnaddressedReviewFeedback: true });
+        await state.applyActivity([pr], file, { trackComments });
+        assert.strictEqual(pr.needsAttention, true);
+        await state.markSeen([{ id: pr.id, comments: pr.totalComments, updatedAt: pr.updatedAt, lastCommitPushedAt: pr.lastCommitPushedAt }], file, { trackComments });
+        await state.applyActivity([pr], file, { trackComments });
+        assert.strictEqual(pr.needsAttention, true);
+        const after = reviewPr({ roles: ["author"], hasUnaddressedReviewFeedback: false });
+        await state.applyActivity([after], file, { trackComments });
+        assert.strictEqual(after.needsAttention, false);
+      }));
+  }
 
   await atest("applyActivity(trackComments=true): a comment awaiting your reply still claims attention", () =>
     withTempStore(async (file) => {
@@ -5002,6 +5150,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       poller.hashSnapshot(hsnap()),
       poller.hashSnapshot(hsnap({ hasUnaddressedComments: true })),
     ));
+  test("hashSnapshot: approval-body feedback alone triggers a snapshot", () =>
+    assert.notStrictEqual(poller.hashSnapshot(hsnap()), poller.hashSnapshot(hsnap({ hasUnaddressedReviewFeedback: true }))));
   // The comment count is the unread channel's raw input and renders nowhere, so
   // with the setting off a change in it alone must not drive a push. Narrow on
   // purpose: a real new comment also bumps `updatedAt`, which stays hashed

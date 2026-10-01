@@ -349,6 +349,21 @@ export function PrCard({
           </span>
         )}
 
+        {pr.roles.includes("author") && pr.hasUnaddressedReviewFeedback && (
+          <span title="Approval includes feedback: process it, then acknowledge this review with 👀 as PR author" className={cn(pill, "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300")}>
+            💬 Review feedback
+          </span>
+        )}
+
+        {pr.roles.includes("author") && pr.isBehindBase && (
+          <span
+            title="GitHub requires this branch to be updated with the base branch before merging"
+            className={cn(pill, "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300")}
+          >
+            ⚠ Update base
+          </span>
+        )}
+
         {review && <span className={cn(pill, review.cls)}>{review.text}</span>}
 
         {pr.returnedToMe && (

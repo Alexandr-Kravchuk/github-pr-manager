@@ -381,6 +381,11 @@ export interface PullRequest {
    * the case the change-request/CI signals miss. Author-only on the card.
    */
   hasUnaddressedComments: boolean;
+  /** Human approval body beyond a plain acknowledgement. Conservative intent
+   * check; cleared by author EYES on that review after its last edit, or the
+   * reviewer's later clean approval. Never cleared by a push,
+   * author reply, marking seen, re-request or disabling comment tracking. */
+  hasUnaddressedReviewFeedback: boolean;
   /**
    * At least one non-bot reviewer's latest review is an approval. This is what
    * marks a PR "good to go" — a single human approve is enough, independent of
@@ -398,6 +403,8 @@ export interface PullRequest {
    * signal on the card: only the author can resolve their own conflict.
    */
   hasConflicts: boolean;
+  /** Required base update: strictly GitHub mergeStateStatus === BEHIND. */
+  isBehindBase: boolean;
 
   /**
    * Roll-up flag: the PR is ready to merge. Composite of GitHub's mergeable

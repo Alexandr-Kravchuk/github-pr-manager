@@ -451,8 +451,11 @@ export function prSignal(pr: PullRequest, { trackComments }: { trackComments: bo
     isAuthor &&
     (pr.failingChecks.length > 0 ||
       pr.hasUnaddressedChangeRequest ||
+      // Approval body feedback requires reviewer clearance, regardless of tracking.
+      pr.hasUnaddressedReviewFeedback ||
       (trackComments && pr.hasUnaddressedComments) ||
       pr.hasConflicts ||
+      pr.isBehindBase ||
       pr.unresolvedThreads > 0)
   ) {
     return "blocked";

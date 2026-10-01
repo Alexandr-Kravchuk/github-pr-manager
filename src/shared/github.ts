@@ -68,6 +68,7 @@ fragment PrFields on PullRequest {
   baseRefName
   headRefName
   mergeable
+  mergeStateStatus
   author { login avatarUrl }
   repository { nameWithOwner defaultBranchRef { name } }
   reviewDecision
@@ -77,7 +78,10 @@ fragment PrFields on PullRequest {
   }
   # 15 is load-bearing — see the note above this fragment before changing it.
   latestOpinionatedReviews(first: 15) {
-    nodes { author { __typename login avatarUrl } state submittedAt }
+    nodes {
+      author { __typename login avatarUrl } state submittedAt body updatedAt
+      reactions(first: 100, content: EYES) { nodes { content createdAt user { login } } }
+    }
   }
   comments { totalCount }
   # last, not first — see the note above this fragment before changing it.
@@ -181,6 +185,7 @@ interface RawPr {
   // GitHub's mergeability enum: "MERGEABLE" | "CONFLICTING" | "UNKNOWN".
   // Computed asynchronously — "UNKNOWN" right after a push, settles on a re-poll.
   mergeable: string;
+  mergeStateStatus: string;
   author: { login: string; avatarUrl: string } | null;
   repository: { nameWithOwner: string; defaultBranchRef: { name: string } | null };
   reviewDecision: ReviewDecision;
@@ -194,6 +199,9 @@ interface RawPr {
       author: { __typename: string; login: string; avatarUrl: string } | null;
       state: string;
       submittedAt: string | null;
+      body?: string;
+      updatedAt?: string;
+      reactions?: { nodes: Array<{ content: string; createdAt: string; user: { login: string } | null }> };
     }>;
   };
   comments: { totalCount: number };
@@ -360,6 +368,17 @@ function parseIssueKey(title: string, headRefName: string): string | null {
   return fromBranch ? fromBranch[1] : null;
 }
 
+/** Only plain approvals are safe to interpret automatically. Unknown prose is
+ * kept for human review: text length and a keyword list cannot prove intent.
+ * Author EYES acknowledgement on that specific review also clears feedback.
+ * It must postdate the body's last edit; another user's reaction never counts.
+ * Pushes, author replies and re-requests alone do not clear feedback.
+ */
+export function approvalBodyNeedsAttention(body: string | undefined): boolean {
+  const text = (body ?? "").trim().toLowerCase().replace(/[.!✅👍]+$/u, "").trim();
+  return text !== "" && !/^(?:lgtm|looks good(?: to me)?|approved|approve|thanks|thank you|good job|nice work|ship it|✅|👍)$/.test(text);
+}
+
 /** Maps a raw PR into the domain model (without activity fields — those are added by state.ts). */
 export function mapPr(
   pr: RawPr,
@@ -389,6 +408,15 @@ export function mapPr(
     return lastCommentLogin !== authorLogin;
   }).length + hiddenThreads;
   const hasUnaddressedComments = unaddressedThreads > 0;
+  const hasUnaddressedReviewFeedback = pr.latestOpinionatedReviews.nodes.some(
+    (r) => r.state === "APPROVED" && r.author?.__typename === "User" &&
+      r.author.login !== authorLogin && approvalBodyNeedsAttention(r.body) &&
+      !r.reactions?.nodes.some((reaction) =>
+        authorLogin != null && reaction.content === "EYES" &&
+        reaction.user?.login.toLowerCase() === authorLogin.toLowerCase() &&
+        // Invalid/missing dates fail closed; edited feedback requires a new acknowledgement.
+        Date.parse(reaction.createdAt) >= Date.parse(r.updatedAt ?? "")),
+  );
 
   const checks = extractChecks(pr);
   const failingChecks = checks.filter((c) => c.state === "failure");
@@ -524,8 +552,11 @@ export function mapPr(
   const canBeMerged =
     !pr.isDraft &&
     pr.mergeable === "MERGEABLE" &&
+    pr.mergeStateStatus !== "BEHIND" &&
     hasHumanApproval &&
     !hasUnaddressedChangeRequest &&
+    !hasUnaddressedReviewFeedback &&
+    unresolvedThreads === 0 &&
     pr.reviewDecision !== "CHANGES_REQUESTED" &&
     failingChecks.length === 0 &&
     pendingChecks.length === 0;
@@ -569,8 +600,10 @@ export function mapPr(
     awaitingReview,
     hasUnaddressedChangeRequest,
     hasUnaddressedComments,
+    hasUnaddressedReviewFeedback,
     hasHumanApproval,
     hasConflicts,
+    isBehindBase: pr.mergeStateStatus === "BEHIND",
     canBeMerged,
     // Resolved later by the poller's Jira enricher (null without Jira):
     issueSummary: null,

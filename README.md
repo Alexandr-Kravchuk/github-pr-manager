@@ -8,6 +8,15 @@ reviewed — and highlights what needs attention:
 - ✗ **failing CI** — individual named checks (unit tests, Sonar, etc.) are shown by name;
 - ✦ **new comments** — comments added since the last time you viewed the PR
   (switchable off in Settings — see [Track new comments](#track-new-comments));
+- 💬 **approval-body feedback** — your own PR stays red when a human approval
+  contains more than a plain acknowledgement, even with comment tracking off.
+  Unknown prose is conservatively held for acknowledgement. Process it, then
+  add 👀 (EYES) to that specific review as the PR author, after its last edit.
+  Another user's reaction does not count. A later plain approval from that same
+  reviewer also clears it; pushes, author replies, marking seen and re-requesting
+  review alone do not. This uses the latest opinionated review
+  per reviewer (up to the existing 15-reviewer query cap), not semantic analysis
+  or proof that a code change implements feedback.
 - 💬 **unresolved comments** — how many threads still need to be resolved;
 - review state (approved / changes requested / review required), drafts, author, last update.
 
@@ -271,9 +280,12 @@ keeping a second unread state here. With it off:
 - your own PR that is awaiting review and picks up a comment keeps the grey
   **waiting** accent instead of turning amber — nothing is being asked of you
   until a reviewer actually blocks it;
+- approval-body feedback and required base updates (`mergeStateStatus: BEHIND`)
+  on your own PR remain red. Process feedback and acknowledge the specific review
+  with 👀 as the PR author; this does not clear any other blocker.
 - 💬 **unresolved comments** and a comment awaiting your reply also stop
   colouring the card and counting towards "needs attention" — the setting mutes
-  every comment-shaped signal that drives the accent and the "Need attention"
+  the ordinary comment signals that drive the accent and the "Need attention"
   filter, not just the unread one. The 💬 thread-count badge itself still
   renders (it's a count, not an attention flag), and they still send a
   notification (that channel is separate). The one exception is an **open

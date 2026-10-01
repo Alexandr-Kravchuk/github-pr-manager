@@ -180,6 +180,8 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
     // (notify.ts) — hash it too, so a tick whose only delta is a new
     // unanswered comment still pushes a snapshot and fires the notification.
     p.hasUnaddressedComments,
+    p.hasUnaddressedReviewFeedback,
+    p.isBehindBase,
     // Also read by the notifier (notify.ts) — it detects the reviewer-added
     // transition (`isReviewer && !wasReviewer` -> review_requested) from roles.
     // Being added as an additional reviewer to an already-tracked PR may not
