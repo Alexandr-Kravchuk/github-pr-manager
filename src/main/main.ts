@@ -34,6 +34,7 @@ import {
   validateSeenItems,
   validateThemePreference,
 } from "./ipc-validation";
+import { loginItemSettingsFor, wasLaunchedAtLogin } from "./login-launch";
 import { createMenuActions, installAppMenu } from "./menu";
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
@@ -312,9 +313,13 @@ function handleNotifications(prs: PullRequest[]): void {
  *  the item would point at the dev Electron binary. Not supported on Linux. */
 function applyLaunchAtLogin(enabled: boolean): void {
   if (!app.isPackaged || process.platform === "linux") return;
-  app.setLoginItemSettings({ openAtLogin: enabled });
+  const options = loginItemSettingsFor(enabled, process.platform);
+  app.setLoginItemSettings(options);
   if (process.env.PRD_DEBUG) {
-    console.log("[main] launchAtLogin", enabled, "-> openAtLogin", app.getLoginItemSettings().openAtLogin);
+    // Windows matches the entry by its full command line, so the query needs the
+    // same args or it reports a registered item as absent.
+    const { openAtLogin } = app.getLoginItemSettings({ args: options.args });
+    console.log("[main] launchAtLogin", enabled, "-> openAtLogin", openAtLogin);
   }
 }
 
@@ -386,7 +391,7 @@ function resolveWindowsAppId(): string {
   }
 }
 
-function createWindow(): void {
+function createWindow({ show = true }: { show?: boolean } = {}): void {
   // Size and position are restored from the last run. Without this the window
   // jumps back to the centered default on every launch — most visibly right
   // after an update, which is simply the restart the user notices.
@@ -399,6 +404,7 @@ function createWindow(): void {
     backgroundColor: themeBackground(),
     autoHideMenuBar: true,
     icon: resolveAppIcon(),
+    show,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -419,8 +425,14 @@ function createWindow(): void {
   // is shown again and the show-wake refresh catches it up. The three-way
   // close decision — hide / let a real quit through / no tray, so close as
   // usual — lives in `trayController.handleClose` and is unit-tested there.
-  if (savedWindowState?.isFullScreen) mainWindow.setFullScreen(true);
-  else if (savedWindowState?.isMaximized) mainWindow.maximize();
+  // `maximize()` also shows a hidden window, so a tray start defers the saved
+  // maximized/full-screen state to the first time the window is shown.
+  const restoreSavedState = (): void => {
+    if (savedWindowState?.isFullScreen) mainWindow?.setFullScreen(true);
+    else if (savedWindowState?.isMaximized) mainWindow?.maximize();
+  };
+  if (show) restoreSavedState();
+  else mainWindow.once("show", restoreSavedState);
 
   // Geometry is written on a debounce while the window is dragged/resized, and
   // flushed on close — close-to-tray makes hidden-but-alive the normal idle
@@ -766,7 +778,14 @@ function startApp(): void {
     }
   });
 
-  createWindow();
+  // Started by the OS login item with close-to-tray on: come up in the tray
+  // rather than putting a window in front of the user on every sign-in.
+  const launchedAtLogin = wasLaunchedAtLogin(
+    process.argv,
+    process.platform === "darwin" ? app.getLoginItemSettings().wasOpenedAtLogin : undefined,
+  );
+  const startInTray = launchedAtLogin && prefs.closeToTray;
+  createWindow({ show: !startInTray });
 
   // The application menu owns the keyboard shortcuts (Settings on CmdOrCtrl+,
   // Refresh on CmdOrCtrl+R). Both actions belong to the renderer — it owns the
@@ -787,6 +806,10 @@ function startApp(): void {
   // Apply the remaining prefs (launch-at-login + auto-update; theme re-applied
   // harmlessly). Runs after the updater is initialized.
   applyPreferences(prefs);
+
+  // The tray icon only exists once applyPreferences has run. If it failed to
+  // appear, a hidden window would be unreachable, so show it after all.
+  if (startInTray && !trayController.hidesToTray()) focusMainWindow();
 
   app.on("activate", () => {
     // A window may exist but be hidden in the tray — reactivating (dock click,
