@@ -40,7 +40,7 @@
  */
 
 import { ConfigError } from "../shared/config";
-import { fetchHost } from "../shared/github";
+import { fetchHost, RateLimitedError } from "../shared/github";
 import type { PollPlan } from "../shared/idle-gate";
 import { JIRA_ERROR_DETAIL_SEP } from "../shared/jira";
 import { applyIgnored } from "../shared/ignored";
@@ -123,6 +123,20 @@ const EXPENSIVE_FLOOR_MS = 300_000; // 5 min
 const EXPENSIVE_COLD_FACTOR = 4; // 20 min
 /** A PR updated within this window counts as "hot" (worth a tight cadence). */
 const RECENT_ACTIVITY_MS = 30 * 60 * 1000;
+/**
+ * Share of a host's hourly budget this app leaves untouched for the other `gh`
+ * clients on the same account (scheduled routines and the sessions they start,
+ * another machine running this app). Those spend in bursts this app cannot
+ * predict or prevent; what it can do is not be the one that takes the last
+ * points, so the tools doing real work keep running.
+ */
+const BUDGET_RESERVE_RATIO = 0.1;
+/**
+ * Slack after a budget's reset time before the next attempt: `resetAt` has
+ * one-second resolution and the two clocks are not in step, so fetching at the
+ * exact second can still land in the old window and be refused again.
+ */
+const RESET_MARGIN_MS = 5_000;
 /** Stretch the base interval only after this many consecutive unchanged ticks. */
 const IDLE_BACKOFF_AFTER = 2;
 /** Cap on the no-change backoff multiplier. */
@@ -265,14 +279,50 @@ export function hostIntervalMs(rl: RateLimitInfo | null, baseMs: number, hot = t
     ? EXPENSIVE_FLOOR_MS
     : Math.min(MAX_INTERVAL_MS, EXPENSIVE_FLOOR_MS * EXPENSIVE_COLD_FACTOR);
   const floor = rl.cost >= EXPENSIVE_COST ? expensiveFloor : baseMs;
-  const secondsUntilReset = Math.max(0, (new Date(rl.resetAt).getTime() - Date.now()) / 1000);
-  const safeTicks = Math.floor(rl.remaining / rl.cost);
+  const msUntilReset = Math.max(0, new Date(rl.resetAt).getTime() - Date.now());
+  const safeTicks = Math.floor(usableBudget(rl) / rl.cost);
   if (safeTicks <= 0) {
-    // Budget spent: wait out the reset (at least a minute), but no less than floor.
-    return Math.min(MAX_INTERVAL_MS, Math.max(floor, Math.max(60_000, secondsUntilReset * 1000)));
+    // Budget spent, or down to the reserve: the next fetch worth making is the
+    // first one after the reset, so wait exactly that long (at least a minute).
+    // The floor deliberately does not apply — it spaces fetches within a
+    // window, and a fresh window has the whole budget.
+    return Math.min(MAX_INTERVAL_MS, Math.max(60_000, msUntilReset + RESET_MARGIN_MS));
   }
-  const safeMs = (secondsUntilReset / safeTicks) * 1000;
+  const safeMs = msUntilReset / safeTicks;
   return Math.min(MAX_INTERVAL_MS, Math.max(floor, safeMs));
+}
+
+/** Points this app may still spend before the reset: what is left minus the reserve. */
+function usableBudget(rl: RateLimitInfo): number {
+  const reserve = rl.limit ? Math.ceil(rl.limit * BUDGET_RESERVE_RATIO) : 0;
+  return rl.remaining - reserve;
+}
+
+/**
+ * Whether a reading says the next fetch would be refused: fewer points left
+ * than one tick costs, and the window has not reset yet. Gates the detector's
+ * forced hydrate, which otherwise bypasses the host's spacing — human activity
+ * is worth spending the reserve on, but not a request that cannot succeed.
+ */
+export function isBudgetSpent(rl: RateLimitInfo | null, now: number): boolean {
+  if (!rl || !rl.resetAt) return false;
+  if (Date.parse(rl.resetAt) <= now) return false;
+  return rl.remaining < Math.max(1, rl.cost);
+}
+
+/**
+ * The notice for a host this app has stopped polling to leave the reserve to
+ * other tools — fetched fine, but the next fetch waits for the reset. Null
+ * while the host still has budget to spend.
+ */
+export function reserveNotice(rl: RateLimitInfo | null): HostError | null {
+  if (!rl || !rl.limit || rl.cost <= 0 || !rl.resetAt) return null;
+  if (usableBudget(rl) >= rl.cost) return null;
+  return {
+    hostLabel: rl.hostLabel,
+    message: `${rl.remaining} of ${rl.limit} GraphQL points left this hour — pausing so other tools on this account keep the rest.`,
+    rateLimitedUntil: rl.resetAt,
+  };
 }
 
 /**
@@ -575,7 +625,9 @@ export class Poller {
           slot.notif = { lastModified: p.value.lastModified, watermark: p.value.watermark };
           slot.notifNextProbeAt = now + p.value.pollIntervalMs;
           if (p.value.status === "unavailable") slot.notifDisabled = true;
-          if (p.value.changed) forced.add(probeHosts[i].graphqlUrl);
+          if (p.value.changed && !isBudgetSpent(slot.rateLimit, now)) {
+            forced.add(probeHosts[i].graphqlUrl);
+          }
           if (process.env.PRD_DEBUG) {
             console.log(
               `[notif] ${probeHosts[i].label}: ${
@@ -632,7 +684,7 @@ export class Poller {
         this.hostSlots.set(host.graphqlUrl, {
           prs,
           rateLimit,
-          error: null,
+          error: reserveNotice(rateLimit),
           dueFromMs: now,
           baseIntervalMs: hostIntervalMs(rateLimit, effectiveBase, hostHasHotPr(prs, now)),
           fetchedAt: fetchedNow,
@@ -648,12 +700,30 @@ export class Poller {
         const message =
           result.reason instanceof Error ? result.reason.message : String(result.reason);
         const prs = prev?.prs ?? [];
+        // A spent budget is a reading, not just an error: it says how long to
+        // wait. Recording it as `remaining: 0` until `resetAt` is what makes
+        // `hostIntervalMs` hold the host until the reset and the detector stop
+        // forcing it — the previous reading named a window that has already
+        // reset, so the host was retried on its floor all hour long. It also
+        // gives an app that started inside a spent window its budget chip.
+        const limited = result.reason instanceof RateLimitedError ? result.reason : null;
+        const rateLimit: RateLimitInfo | null = limited?.resetAt
+          ? {
+              hostLabel: host.label,
+              remaining: 0,
+              cost: Math.max(1, prev?.rateLimit?.cost ?? 0),
+              resetAt: limited.resetAt,
+              limit: prev?.rateLimit?.limit,
+            }
+          : (prev?.rateLimit ?? null);
         this.hostSlots.set(host.graphqlUrl, {
           prs,
-          rateLimit: prev?.rateLimit ?? null,
-          error: { hostLabel: host.label, message },
+          rateLimit,
+          error: limited
+            ? { hostLabel: host.label, message, rateLimitedUntil: limited.resetAt }
+            : { hostLabel: host.label, message },
           dueFromMs: now,
-          baseIntervalMs: hostIntervalMs(prev?.rateLimit ?? null, effectiveBase, hostHasHotPr(prs, now)),
+          baseIntervalMs: hostIntervalMs(rateLimit, effectiveBase, hostHasHotPr(prs, now)),
           fetchedAt: prev?.fetchedAt ?? fetchedNow,
           notif: prev?.notif ?? initialNotif(),
           notifNextProbeAt: prev?.notifNextProbeAt ?? now + DEFAULT_POLL_INTERVAL_MS,

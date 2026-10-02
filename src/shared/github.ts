@@ -148,7 +148,7 @@ fragment PrFields on PullRequest {
 function buildQuery(alias: string, varName: string): string {
   return /* GraphQL */ `
 query ($${varName}: String!) {
-  rateLimit { remaining cost resetAt }
+  rateLimit { limit remaining cost resetAt }
   viewer { login }
   ${alias}: search(query: $${varName}, type: ISSUE, first: 25) { nodes { ...PrFields } }
 }
@@ -230,17 +230,17 @@ type SearchNodes = { nodes: Array<RawPr | Record<string, never>> };
 
 interface RawResponse {
   data?: {
-    rateLimit: { remaining: number; cost: number; resetAt: string };
+    rateLimit: { limit?: number; remaining: number; cost: number; resetAt: string };
     viewer: { login: string } | null;
     // The one search alias this request carried: authored / reviewing /
     // reviewed / team0..teamN.
     [alias: string]:
       | SearchNodes
-      | { remaining: number; cost: number; resetAt: string }
+      | { limit?: number; remaining: number; cost: number; resetAt: string }
       | { login: string }
       | null;
   };
-  errors?: Array<{ message: string }>;
+  errors?: Array<{ message: string; type?: string }>;
 }
 
 /** Result of a query against a single host. */
@@ -695,6 +695,46 @@ async function fetchViewerTeams(host: HostConfig): Promise<string[]> {
 }
 
 /**
+ * The host refused the request because the account's GraphQL budget is spent.
+ * Not a failure of the host: every `gh` client on the same account (scheduled
+ * routines, the sessions they start, another machine running this app) draws
+ * from one 5000-point hourly budget, so it can run out without this app having
+ * spent much of it. `resetAt` is when the budget refills — ISO, or "" when the
+ * response named no time — so the poller can wait exactly that long instead of
+ * retrying on its floor and keeping the error up for the rest of the hour.
+ *
+ * GitHub answers a spent budget with a 200 whose `errors[].type` is
+ * `RATE_LIMITED` (message "API rate limit already exceeded for user ID …"), and
+ * a secondary limit with 403/429 plus `retry-after`; both land here.
+ */
+export class RateLimitedError extends Error {
+  constructor(
+    message: string,
+    readonly resetAt: string,
+  ) {
+    super(message);
+    this.name = "RateLimitedError";
+  }
+}
+
+/**
+ * When the budget refills, from the response headers: `retry-after` (seconds,
+ * secondary limits) wins over `x-ratelimit-reset` (epoch seconds, the primary
+ * hourly window); "" when neither is present or parseable.
+ */
+function rateLimitResetAt(header: (name: string) => string | null): string {
+  const retryAfter = Number(header("retry-after"));
+  if (header("retry-after") !== null && Number.isFinite(retryAfter) && retryAfter >= 0) {
+    return new Date(Date.now() + retryAfter * 1000).toISOString();
+  }
+  const reset = Number(header("x-ratelimit-reset"));
+  if (header("x-ratelimit-reset") !== null && Number.isFinite(reset) && reset > 0) {
+    return new Date(reset * 1000).toISOString();
+  }
+  return "";
+}
+
+/**
  * Sends one GraphQL search to a host and returns its `data` block.
  *
  * The error text deliberately does NOT carry an HTML body: a 502 from GitHub's
@@ -723,12 +763,24 @@ async function postSearch(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     const detail = isJsonBody(text) ? ` — ${text.slice(0, 200)}` : "";
-    throw new Error(`HTTP ${res.status} ${res.statusText}${detail}`.trimEnd());
+    const message = `HTTP ${res.status} ${res.statusText}${detail}`.trimEnd();
+    const header = (name: string) => res.headers?.get?.(name) ?? null;
+    if (
+      (res.status === 403 || res.status === 429) &&
+      (header("x-ratelimit-remaining") === "0" || header("retry-after") !== null)
+    ) {
+      throw new RateLimitedError(message, rateLimitResetAt(header));
+    }
+    throw new Error(message);
   }
 
   const json = (await res.json()) as RawResponse;
   if (json.errors?.length) {
-    throw new Error(json.errors.map((e) => e.message).join("; "));
+    const message = json.errors.map((e) => e.message).join("; ");
+    if (json.errors.some((e) => e.type === "RATE_LIMITED")) {
+      throw new RateLimitedError(message, rateLimitResetAt((name) => res.headers?.get?.(name) ?? null));
+    }
+    throw new Error(message);
   }
   if (!json.data) {
     throw new Error("Empty GraphQL response.");
@@ -848,6 +900,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
   let cost = 0;
   let remaining: number | null = null;
   let resetAt = "";
+  let limit: number | undefined;
   let viewerLogin: string | null = null;
   const nodesByAlias = new Map<string, Array<RawPr | Record<string, never>>>();
 
@@ -861,6 +914,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
     }
     const data = result.value;
     cost += data.rateLimit?.cost ?? 0;
+    if (typeof data.rateLimit?.limit === "number") limit = data.rateLimit.limit;
     if (data.rateLimit && (remaining === null || data.rateLimit.remaining < remaining)) {
       remaining = data.rateLimit.remaining;
       resetAt = data.rateLimit.resetAt;
@@ -915,6 +969,6 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
 
   return {
     pullRequests: [...byId.values()],
-    rateLimit: { hostLabel: host.label, remaining: remaining ?? 0, cost, resetAt },
+    rateLimit: { hostLabel: host.label, remaining: remaining ?? 0, cost, resetAt, limit },
   };
 }

@@ -1429,6 +1429,91 @@ test("hostIntervalMs: exhausted budget waits at least the minute floor", () =>
     60_000,
   ));
 
+// --- poller: budget reserve and spent budget --------------------------------
+// The GraphQL budget is per account, shared with every gh client (scheduled
+// routines, the sessions they start, the app on another machine). The app may
+// not take the last 10% of it, and once it stops — reserve or a spent budget —
+// the next fetch worth making is the first one after the reset.
+const within = (actual, expected, slackMs = 2_000) =>
+  assert.ok(Math.abs(actual - expected) <= slackMs, `expected ~${expected}, got ${actual}`);
+test("hostIntervalMs: down to the reserve, an expensive host waits for the reset", () =>
+  within(
+    poller.hostIntervalMs(
+      { hostLabel: "GH", remaining: 400, cost: 35, limit: 5000, resetAt: future(1800) },
+      60_000,
+    ),
+    1_805_000,
+  ));
+test("hostIntervalMs: down to the reserve, a cheap host waits for the reset too", () =>
+  within(
+    poller.hostIntervalMs(
+      { hostLabel: "GHE", remaining: 148, cost: 1, limit: 5000, resetAt: future(600) },
+      60_000,
+    ),
+    605_000,
+  ));
+test("hostIntervalMs: above the reserve the floor still applies", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs(
+      { hostLabel: "GH", remaining: 5000, cost: 35, limit: 5000, resetAt: future(3600) },
+      60_000,
+    ),
+    300_000,
+  ));
+test("hostIntervalMs: the reserve is spread over, not spent — safe ticks count usable points only", () =>
+  // 1000 left, 500 reserved, 50 a tick -> 10 ticks over 3600 s -> 360 s apart.
+  within(
+    poller.hostIntervalMs(
+      { hostLabel: "GH", remaining: 1000, cost: 50, limit: 5000, resetAt: future(3600) },
+      60_000,
+    ),
+    360_000,
+  ));
+test("hostIntervalMs: a spent budget resuming in 2 min waits 2 min, not the 5-min floor", () =>
+  within(
+    poller.hostIntervalMs({ hostLabel: "GH", remaining: 0, cost: 35, resetAt: future(120) }, 60_000),
+    125_000,
+  ));
+test("isBudgetSpent: fewer points than a tick, before the reset", () => {
+  const now = Date.now();
+  assert.strictEqual(
+    poller.isBudgetSpent({ hostLabel: "GH", remaining: 20, cost: 35, resetAt: future(60) }, now),
+    true,
+  );
+  assert.strictEqual(
+    poller.isBudgetSpent({ hostLabel: "GH", remaining: 400, cost: 35, resetAt: future(60) }, now),
+    false,
+    "the reserve is not 'spent' — human activity may still use it",
+  );
+  assert.strictEqual(
+    poller.isBudgetSpent({ hostLabel: "GH", remaining: 0, cost: 35, resetAt: future(-5) }, now),
+    false,
+    "a window that has reset is not spent",
+  );
+  assert.strictEqual(poller.isBudgetSpent(null, now), false);
+});
+test("reserveNotice: only once the usable budget cannot pay for a tick", () => {
+  assert.strictEqual(
+    poller.reserveNotice({ hostLabel: "GH", remaining: 5000, cost: 35, limit: 5000, resetAt: future(60) }),
+    null,
+  );
+  assert.strictEqual(
+    poller.reserveNotice({ hostLabel: "GH", remaining: 400, cost: 35, resetAt: future(60) }),
+    null,
+    "no limit in the reading -> no reserve, so nothing to report",
+  );
+  const n = poller.reserveNotice({
+    hostLabel: "GHE",
+    remaining: 148,
+    cost: 1,
+    limit: 5000,
+    resetAt: "2026-10-02T13:00:00Z",
+  });
+  assert.strictEqual(n.hostLabel, "GHE");
+  assert.strictEqual(n.rateLimitedUntil, "2026-10-02T13:00:00Z");
+  assert.match(n.message, /148 of 5000/);
+});
+
 // --- poller: hotness floor ---------------------------------------------------
 const rl = (cost) => ({ hostLabel: "GH", remaining: 5000, cost, resetAt: future(3600) });
 test("hostIntervalMs: cold expensive host stretches the floor 4x", () =>
@@ -4281,6 +4366,110 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     );
   });
 
+  // A spent budget must reach the poller as a RateLimitedError carrying the
+  // reset time, from both shapes GitHub uses: a 200 whose errors[].type is
+  // RATE_LIMITED (primary hourly budget) and a 403/429 with retry-after
+  // (secondary limit). Anything else stays a plain error.
+  const stubSearchResponse = (response) => {
+    global.fetch = async (url) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      return response();
+    };
+    return github.fetchHost({
+      label: "H",
+      graphqlUrl: `https://api.stub${++hostSeq}.test/graphql`,
+      repos: ["a/b"],
+      token: "t",
+    });
+  };
+  const headersOf = (h) => ({ get: (name) => h[name.toLowerCase()] ?? null });
+
+  await atest("fetchHost: a RATE_LIMITED GraphQL error carries the x-ratelimit-reset time", async () => {
+    await assert.rejects(
+      stubSearchResponse(() => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: headersOf({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1790948255" }),
+        json: async () => ({
+          errors: [
+            { type: "RATE_LIMITED", message: "API rate limit already exceeded for user ID 12455901." },
+          ],
+        }),
+      })),
+      (e) => {
+        assert.ok(e instanceof github.RateLimitedError, `got ${e && e.name}`);
+        assert.strictEqual(e.message, "API rate limit already exceeded for user ID 12455901.");
+        assert.strictEqual(e.resetAt, new Date(1790948255 * 1000).toISOString());
+        return true;
+      },
+    );
+  });
+
+  await atest("fetchHost: a 403 with retry-after is a RateLimitedError resuming after it", async () => {
+    const before = Date.now();
+    await assert.rejects(
+      stubSearchResponse(() => ({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        headers: headersOf({ "retry-after": "60" }),
+        text: async () => '{"message":"You have exceeded a secondary rate limit."}',
+      })),
+      (e) => {
+        assert.ok(e instanceof github.RateLimitedError, `got ${e && e.name}`);
+        within(Date.parse(e.resetAt), before + 60_000);
+        return true;
+      },
+    );
+  });
+
+  await atest("fetchHost: a 403 without rate-limit headers stays a plain error", async () => {
+    await assert.rejects(
+      stubSearchResponse(() => ({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        headers: headersOf({}),
+        text: async () => '{"message":"Resource not accessible"}',
+      })),
+      (e) => {
+        assert.ok(!(e instanceof github.RateLimitedError));
+        return true;
+      },
+    );
+  });
+
+  await atest("fetchHost: the hourly limit is passed on with the reading", async () => {
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const alias = /\n  (\w+): search\(/.exec(JSON.parse(init.body).query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { limit: 5000, remaining: 4990, cost: 4, resetAt: "2026-07-07T01:00:00Z" },
+            viewer: { login: "me" },
+            [alias]: { nodes: [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({
+      label: "H",
+      graphqlUrl: `https://api.stub${++hostSeq}.test/graphql`,
+      repos: ["a/b"],
+      token: "t",
+    });
+    assert.strictEqual(result.rateLimit.limit, 5000);
+  });
+
   // Each request carries its own `viewer { login }`, and `isOwnPr` needs one: a
   // null login makes a team request on your OWN PR claim a review from you —
   // violet card, "Reviewer" pill, a "Needs attention" count you can never clear.
@@ -5048,6 +5237,45 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       "snapshot.fetchedAt is the oldest host's stamp — it is not a per-push id",
     );
 
+    p.stop();
+  });
+
+  // --- poller: a spent budget is a wait until the reset ---------------------
+  // Before: the slot kept the previous reading, whose window had already reset,
+  // so the host was retried on its floor all hour and the banner stayed red.
+  await atest("Poller.tick: a spent budget holds the host until the reset and says when", async () => {
+    const snapshots = [];
+    let calls = 0;
+    const resetAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    const p = new poller.Poller({
+      loadSettings: () => cfg.defaultSettings(),
+      toHostConfigs: () => [
+        { label: "GitHub", graphqlUrl: "https://limited.test/graphql", token: "t", repos: ["o/r"] },
+      ],
+      statePath: path.join(os.tmpdir(), "prd-poller-state-missing.json"),
+      ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),
+      appVersion: "test",
+      onSnapshot: (s) => snapshots.push(s),
+      onConfigError: () => {},
+      probeNotificationsFn: async () => {
+        throw new Error("probe must not run in this test");
+      },
+      fetchHostFn: async () => {
+        calls++;
+        throw new github.RateLimitedError("API rate limit already exceeded for user ID 1.", resetAt);
+      },
+    });
+    p.start();
+    await p.awaitFirstTick();
+    assert.strictEqual(calls, 1);
+    const snap = snapshots[0];
+    assert.strictEqual(snap.errors[0].rateLimitedUntil, resetAt);
+    assert.strictEqual(snap.rateLimits[0].remaining, 0, "the chip shows the spent budget");
+    assert.strictEqual(snap.rateLimits[0].resetAt, resetAt);
+
+    // Window focus / resume respects spacing — it must not retry before the reset.
+    await p.wake();
+    assert.strictEqual(calls, 1, "wake() must not retry a spent host before its reset");
     p.stop();
   });
 

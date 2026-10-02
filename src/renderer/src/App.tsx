@@ -884,14 +884,29 @@ export function App() {
       )}
 
       {/* Per-host errors */}
-      {data?.errors?.map((e) => (
-        <div
-          key={e.hostLabel}
-          className="mb-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/30 dark:text-red-200"
-        >
-          <span className="font-semibold">{e.hostLabel}:</span> {e.message}
-        </div>
-      ))}
+      {/* A spent GraphQL budget is a wait, not a failure: the account's budget is
+          shared with every gh client, the PRs below are the last good fetch, and
+          the poller fetches again right after the reset — so amber, with the time. */}
+      {data?.errors?.map((e) =>
+        e.rateLimitedUntil !== undefined ? (
+          <div
+            key={e.hostLabel}
+            className="mb-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-600/40 dark:bg-amber-950/30 dark:text-amber-200"
+          >
+            <span className="font-semibold">{e.hostLabel}:</span> {e.message}{" "}
+            {e.rateLimitedUntil
+              ? `Next update at ${new Date(e.rateLimitedUntil).toLocaleTimeString()}, showing the last fetched data.`
+              : "Showing the last fetched data."}
+          </div>
+        ) : (
+          <div
+            key={e.hostLabel}
+            className="mb-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/30 dark:text-red-200"
+          >
+            <span className="font-semibold">{e.hostLabel}:</span> {e.message}
+          </div>
+        ),
+      )}
 
       {/* Jira parent-enrichment health — explain a failed/empty pass rather than
           leaving "Group by parent task" silently empty. */}

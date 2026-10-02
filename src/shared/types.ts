@@ -442,6 +442,12 @@ export interface PullRequest {
 export interface HostError {
   hostLabel: string;
   message: string;
+  /**
+   * Set when the host refused for a spent GraphQL budget rather than failed:
+   * when the budget refills (ISO), or "" when the response named no time. The
+   * renderer shows it as a wait with cached data, not as a failure.
+   */
+  rateLimitedUntil?: string;
 }
 
 /** GraphQL rate-limit info at request time. */
@@ -450,6 +456,8 @@ export interface RateLimitInfo {
   remaining: number;
   cost: number;
   resetAt: string;
+  /** The hourly budget (5000 on github.com); absent on readings that did not report it. */
+  limit?: number;
   /** When this host's data was last actually fetched from the network (set by the poller). */
   fetchedAt?: string;
 }
