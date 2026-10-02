@@ -1474,6 +1474,11 @@ test("hostIntervalMs: a spent budget resuming in 2 min waits 2 min, not the 5-mi
     poller.hostIntervalMs({ hostLabel: "GH", remaining: 0, cost: 35, resetAt: future(120) }, 60_000),
     125_000,
   ));
+test("hostIntervalMs: a spent reading whose window already reset falls back to the floor", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs({ hostLabel: "GH", remaining: 0, cost: 35, resetAt: future(-30) }, 60_000),
+    300_000,
+  ));
 test("isBudgetSpent: fewer points than a tick, before the reset", () => {
   const now = Date.now();
   assert.strictEqual(

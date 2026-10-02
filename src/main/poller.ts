@@ -29,6 +29,12 @@
  *  - **Hotness floor** — an expensive host with no hot PRs (nothing red,
  *    pending, unresolved or recently touched) gets its floor stretched; a quiet
  *    dashboard costs far less than an active one.
+ *  - **Budget reserve and reset wait** — the budget is per account, so other
+ *    `gh` clients (scheduled routines, the app on another machine) can spend it
+ *    in bursts. The app stops polling a host once only `BUDGET_RESERVE_RATIO`
+ *    of it is left, and a spent budget (`RateLimitedError`) holds the host until
+ *    exactly its reset — no retries before it, one fetch right after — while the
+ *    banner shows when data resumes instead of a failure.
  *  - **Notifications detector** — a cheap REST `/notifications` probe on the
  *    separate `core` budget gates the expensive GraphQL hydrate: human activity
  *    on a tracked PR forces an immediate fetch, so the dashboard stays reactive
@@ -279,6 +285,9 @@ export function hostIntervalMs(rl: RateLimitInfo | null, baseMs: number, hot = t
     ? EXPENSIVE_FLOOR_MS
     : Math.min(MAX_INTERVAL_MS, EXPENSIVE_FLOOR_MS * EXPENSIVE_COLD_FACTOR);
   const floor = rl.cost >= EXPENSIVE_COST ? expensiveFloor : baseMs;
+  // A reading from a window that has since reset says nothing about the budget
+  // now (e.g. the fetch after the reset failed on the network): the floor.
+  if (Date.parse(rl.resetAt) <= Date.now()) return Math.min(MAX_INTERVAL_MS, floor);
   const msUntilReset = Math.max(0, new Date(rl.resetAt).getTime() - Date.now());
   const safeTicks = Math.floor(usableBudget(rl) / rl.cost);
   if (safeTicks <= 0) {
