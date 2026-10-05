@@ -1413,6 +1413,18 @@ test("hostIntervalMs: cheap host (cost 1) stays at base", () =>
     poller.hostIntervalMs({ hostLabel: "GHE", remaining: 5000, cost: 1, resetAt: future(3600) }, 60_000),
     60_000,
   ));
+// A GHE host costs ~7 a tick since the searches went ids-only plus one read by
+// id (it cost 1–3 before); that must not push it onto github.com's floor.
+test("hostIntervalMs: a GHE-sized tick (cost 7) stays at base", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs({ hostLabel: "GHE", remaining: 5000, cost: 7, resetAt: future(3600) }, 60_000),
+    60_000,
+  ));
+test("hostIntervalMs: a github.com-sized tick (cost 20) gets the 5-min floor", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs({ hostLabel: "GH", remaining: 5000, cost: 20, resetAt: future(3600) }, 60_000),
+    300_000,
+  ));
 test("hostIntervalMs: expensive host (cost 35) gets the 5-min floor", () =>
   assert.strictEqual(
     poller.hostIntervalMs({ hostLabel: "GH", remaining: 5000, cost: 35, resetAt: future(3600) }, 60_000),
@@ -4193,6 +4205,23 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   const realGithubFetch = global.fetch;
   let hostSeq = 0;
 
+  // The second step of a tick: every PR the searches found is read in full by
+  // id. Answers it from `pool` (every raw PR the stub's searches return), so a
+  // stub only has to describe its searches. Null for an id the pool lacks, as
+  // GitHub answers a PR that went away between the search and the read.
+  const isHydrate = (body) => body.query.includes("hydrated: nodes(ids: $ids)");
+  const hydrateResponse = (body, pool, cost = 4) => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        rateLimit: { remaining: 4990, cost, resetAt: "2026-07-07T01:00:00Z" },
+        hydrated: body.variables.ids.map((id) => pool.find((pr) => pr.id === id) ?? null),
+      },
+    }),
+  });
+
   // Drives fetchHost against a stubbed transport and returns both the requests it
   // sent and the PRs it produced. Every search travels as its OWN HTTP request
   // now (GitHub runs aliases inside one request serially and times the whole
@@ -4216,6 +4245,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         return { ok: true, status: 200, statusText: "OK", json: async () => teams };
       }
       const body = JSON.parse(init.body);
+      if (isHydrate(body)) {
+        sent.hydrate = body;
+        const pool = Object.entries(searches).flatMap(([k, v]) => (k === "teams" ? [] : v));
+        return hydrateResponse(body, pool);
+      }
       // The alias the request asked for, e.g. `reviewed: search(query: ...`.
       const alias = /\n  (\w+): search\(/.exec(body.query)[1];
       sent[alias] = body;
@@ -4242,10 +4276,165 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   }
 
   await atest("fetchHost: reads the NEWEST review threads, with their total count", async () => {
-    const { sent } = await runFetchHost({});
+    const { sent } = await runFetchHost({ authored: [rawPr({ id: "PR_a" })] });
     // `first:` would drop the newest threads on a long PR — the open ones.
-    assert.match(sent.authored.query, /reviewThreads\(last: 100\) \{\s+totalCount/);
-    assert.ok(!/reviewThreads\(first:/.test(sent.authored.query));
+    assert.match(sent.hydrate.query, /reviewThreads\(last: 100\) \{\s+totalCount/);
+    assert.ok(!/reviewThreads\(first:/.test(sent.hydrate.query));
+  });
+
+  // The full selection is what GitHub bills for: 30 points per search carrying
+  // it on github.com whatever it matched, against 1 for a search of ids. Nine
+  // searches made a tick cost 270 points; the searches must stay ids-only and
+  // the PRs they share must be read once.
+  await atest("fetchHost: searches carry ids only, and each distinct PR is read once", async () => {
+    const shared = rawPr({ id: "PR_shared" });
+    const { sent, result } = await runFetchHost({
+      teams: ["a/t1"],
+      authored: [shared, rawPr({ id: "PR_a" })],
+      reviewed: [shared],
+      team0: [shared],
+    });
+    for (const alias of ["authored", "reviewing", "reviewed", "team0"]) {
+      assert.ok(!sent[alias].query.includes("reviewThreads"), `${alias} must not carry the full selection`);
+      assert.ok(!sent[alias].query.includes("PrFields"), `${alias} must not carry the fragment`);
+    }
+    assert.deepStrictEqual(sent.hydrate.variables.ids, ["PR_shared", "PR_a"]);
+    assert.strictEqual(result.pullRequests.length, 2);
+  });
+
+  await atest("fetchHost: no PRs found means no hydrate request", async () => {
+    const { sent } = await runFetchHost({});
+    assert.strictEqual(sent.hydrate, undefined);
+  });
+
+  await atest("fetchHost: more PRs than one hydrate page go out as several reads", async () => {
+    const many = Array.from({ length: 30 }, (_, i) => rawPr({ id: `PR_${i}` }));
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    const reads = [];
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) {
+        reads.push(body.variables.ids.length);
+        return hydrateResponse(body, many);
+      }
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 1, resetAt: "" },
+            viewer: { login: "me" },
+            [alias]: { nodes: alias === "authored" ? many.slice(0, 25) : alias === "reviewed" ? many.slice(5) : [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" });
+    assert.deepStrictEqual(reads.sort((a, b) => b - a), [25, 5]);
+    assert.strictEqual(result.pullRequests.length, 30);
+    // 3 searches at 1 point + 2 reads at 4.
+    assert.strictEqual(result.rateLimit.cost, 11);
+  });
+
+  // What github.com answers for an id it cannot resolve: a null node plus a
+  // NOT_FOUND error beside the data for the rest.
+  await atest("fetchHost: a NOT_FOUND beside the hydrated data does not fail the host", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({
+            data: { rateLimit: { remaining: 4990, cost: 2, resetAt: "" }, hydrated: [rawPr({ id: "PR_kept" }), null] },
+            errors: [{ type: "NOT_FOUND", path: ["hydrated", 1], message: "Could not resolve to a node with the global id of 'PR_gone'" }],
+          }),
+        };
+      }
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 1, resetAt: "" },
+            viewer: { login: "me" },
+            [alias]: { nodes: alias === "authored" ? [{ id: "PR_kept" }, { id: "PR_gone" }] : [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" });
+    assert.deepStrictEqual(result.pullRequests.map((p) => p.id), ["PR_kept"]);
+  });
+
+  await atest("fetchHost: a PR gone between the search and the read is dropped", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) return hydrateResponse(body, [rawPr({ id: "PR_kept" })]);
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 1, resetAt: "" },
+            viewer: { login: "me" },
+            [alias]: { nodes: alias === "authored" ? [{ id: "PR_kept" }, { id: "PR_gone" }] : [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" });
+    assert.deepStrictEqual(result.pullRequests.map((p) => p.id), ["PR_kept"]);
+  });
+
+  // The searches only say which PRs exist; a "successful" host without their
+  // data would blank every card, so a failed read fails the host.
+  await atest("fetchHost: a failing hydrate fails the whole host", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) {
+        return { ok: false, status: 502, statusText: "Bad Gateway", text: async () => "" };
+      }
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 1, resetAt: "" },
+            viewer: { login: "me" },
+            [alias]: { nodes: alias === "authored" ? [{ id: "PR_a" }] : [] },
+          },
+        }),
+      };
+    };
+    await assert.rejects(
+      github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" }),
+      /HTTP 502 Bad Gateway/,
+    );
   });
 
   await atest("fetchHost: asks for reviewed-by:@me over the same repos, as its own alias", async () => {
@@ -4413,6 +4602,34 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     );
   });
 
+  // What github.com actually sends for a spent budget (seen 2026-10-05, and in
+  // other clients' fixtures): `RATE_LIMIT`, not `RATE_LIMITED`. Matching only
+  // the latter left 1.18.3 on a red failure strip, retrying all hour.
+  await atest("fetchHost: github.com's RATE_LIMIT / graphql_rate_limit error is a RateLimitedError", async () => {
+    await assert.rejects(
+      stubSearchResponse(() => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: headersOf({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1790948255" }),
+        json: async () => ({
+          errors: [
+            {
+              type: "RATE_LIMIT",
+              code: "graphql_rate_limit",
+              message: "API rate limit already exceeded for user ID 12455901.",
+            },
+          ],
+        }),
+      })),
+      (e) => {
+        assert.ok(e instanceof github.RateLimitedError, `got ${e && e.name}`);
+        assert.strictEqual(e.resetAt, new Date(1790948255 * 1000).toISOString());
+        return true;
+      },
+    );
+  });
+
   await atest("fetchHost: a 403 with retry-after is a RateLimitedError resuming after it", async () => {
     const before = Date.now();
     await assert.rejects(
@@ -4493,7 +4710,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           json: async () => [{ slug: "t1", organization: { login: "a" } }],
         };
       }
-      const alias = /\n  (\w+): search\(/.exec(JSON.parse(init.body).query)[1];
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) return hydrateResponse(body, [mine]);
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
       return {
         ok: true,
         status: 200,
@@ -4530,6 +4749,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         };
       }
       const body = JSON.parse(init.body);
+      if (isHydrate(body)) return hydrateResponse(body, [rawPr({ id: "PR_a" })]);
       const alias = /\n  (\w+): search\(/.exec(body.query)[1];
       if (alias === "team0") {
         return { ok: false, status: 502, statusText: "Bad Gateway", text: async () => "" };

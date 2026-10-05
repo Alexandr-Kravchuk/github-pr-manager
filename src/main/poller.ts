@@ -7,8 +7,9 @@
  *
  * Three budget-saving behaviours keep a shared `gh` token from being exhausted
  * (the per-user GraphQL budget is spent by every client on the token, not just
- * this app — and a github.com tick costs many tens of points, observed ~35–100
- * depending on repo/PR volume, vs only a few on a GHE host):
+ * this app — and a github.com tick costs ~20 points for ten-odd PRs (it cost
+ * 270 while every search carried the full PR selection, see `fetchHost`), vs
+ * only a few on a GHE host):
  *
  *  - **Idle gating** — the injected `planPoll()` either parks a tick (machine
  *    asleep, or a hidden / minimized window with no notification able to reach
@@ -112,12 +113,14 @@ const MAX_INTERVAL_MS = 3_600_000;
 /** Cheap "are we back yet?" cadence while the idle gate is closed (no network). */
 const PARKED_INTERVAL_MS = 20_000;
 /**
- * A host whose GraphQL cost per tick is at least this is "expensive" (github.com
- * runs tens of points — observed ~35–100; a GHE host only a few) and gets a
+ * A host whose GraphQL cost per tick is at least this is "expensive" and gets a
  * higher minimum interval, so a shared per-user token survives other clients
- * spending the same budget.
+ * spending the same budget. Measured 2026-10-05 with ids-only searches plus one
+ * read by id: github.com 20 points for 9 PRs (nine searches at 1 point, then
+ * ~1.2 per PR), a GHE host 7 for 14 PRs — so 10 keeps GHE on the base cadence
+ * it had while it cost 1–3, and github.com on the expensive floor.
  */
-const EXPENSIVE_COST = 5;
+const EXPENSIVE_COST = 10;
 /** Minimum spacing for an expensive host (github.com) with hot PRs. */
 const EXPENSIVE_FLOOR_MS = 300_000; // 5 min
 /**

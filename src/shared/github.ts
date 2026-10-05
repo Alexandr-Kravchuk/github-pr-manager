@@ -48,9 +48,10 @@ import type {
  * unresolved and unaddressed (`hiddenThreads` in `mapPr`), so an oversized PR
  * fails closed — red — instead of reading clean. The price: each thread also
  * pulls `comments(last: 1)`, so GitHub bills about 1 point per 100 threads per
- * PR, and 100 threads × 25 PRs takes a search from ~14 to ~27 points. Node count
- * stays far below the 500 000 limit (≈ 25 × 100 × 1 thread comments + 25 × 30
- * check contexts).
+ * PR — measured, a 25-PR read by id costs 30 points. That is why this fragment
+ * travels only in the hydrate (`buildHydrateQuery`), once per distinct PR, and
+ * never inside a search. Node count stays far below the 500 000 limit
+ * (≈ 25 × 100 × 1 thread comments + 25 × 30 check contexts per read).
  *
  * Deliberately out here rather than as a `#` comment inside the template: every
  * byte in there is sent to GitHub on each poll, and prose inside a template
@@ -137,10 +138,19 @@ fragment PrFields on PullRequest {
  * had changed when this started — the sum crept over the limit on its own, and
  * every team the user joins adds another search to it. Split
  * across requests the wait is the SLOWEST search (~4.6s) instead of their sum,
- * and each request is far from the timeout. The rate-limit price is unchanged —
- * each search still costs its own ~14 points wherever it is sent — so `cost` is
- * summed back up across the responses, or the poller would read github.com as a
- * cheap host and poll it several times more often.
+ * and each request is far from the timeout.
+ *
+ * The searches carry only `id` and the author's login, and every PR they found
+ * is then read ONCE, by id, through `nodes(ids:)` — `buildHydrateQuery`. The
+ * full selection is what GitHub bills for (`reviewThreads(last: 100)` with its
+ * comments above all): measured on github.com, a search carrying it costs 30
+ * points whatever it matched, a search of ids costs 1, and `nodes(ids:)` costs
+ * about 1.2 points per PR (6 for 5, 19 for 16, 30 for 25). With nine searches —
+ * three personal, six teams — that took a tick from 270 points to ~9 + 1.2 per
+ * distinct PR, and the searches overlap heavily (your own PRs match `author`,
+ * `reviewed-by` and the team searches alike), so a PR they share is no longer
+ * paid for once per search. `cost` is still summed across every response, or
+ * the poller would read github.com as a cheap host and poll it far more often.
  *
  * Each search is filtered by all of the host's repositories (multiple `repo:`
  * qualifiers act as OR).
@@ -150,7 +160,23 @@ function buildQuery(alias: string, varName: string): string {
 query ($${varName}: String!) {
   rateLimit { limit remaining cost resetAt }
   viewer { login }
-  ${alias}: search(query: $${varName}, type: ISSUE, first: 25) { nodes { ...PrFields } }
+  ${alias}: search(query: $${varName}, type: ISSUE, first: 25) { nodes { ... on PullRequest { id author { login } } } }
+}`;
+}
+
+/**
+ * PRs read by id per hydrate request. 25 is the page the full selection used to
+ * travel with inside a search, so one request stays as far from GitHub's ~10 s
+ * proxy timeout and its 500 000-node limit as a search ever was; more PRs than
+ * that go out as parallel requests, for the same reason the searches are split.
+ */
+const HYDRATE_CHUNK = 25;
+
+function buildHydrateQuery(): string {
+  return /* GraphQL */ `
+query ($ids: [ID!]!) {
+  rateLimit { limit remaining cost resetAt }
+  hydrated: nodes(ids: $ids) { ...PrFields }
 }
 ${PR_FIELDS_FRAGMENT}`;
 }
@@ -226,21 +252,28 @@ interface RawPr {
   };
 }
 
-type SearchNodes = { nodes: Array<RawPr | Record<string, never>> };
+/** What a search returns per PR: just enough to merge roles and spot your own PRs. */
+interface RawSearchPr {
+  id: string;
+  author: { login: string } | null;
+}
+type SearchNodes = { nodes: Array<RawSearchPr | Record<string, never>> };
+type HydratedNodes = Array<RawPr | Record<string, never> | null>;
 
 interface RawResponse {
   data?: {
     rateLimit: { limit?: number; remaining: number; cost: number; resetAt: string };
     viewer: { login: string } | null;
-    // The one search alias this request carried: authored / reviewing /
-    // reviewed / team0..teamN.
+    // The one search alias this request carried (authored / reviewing /
+    // reviewed / team0..teamN), or `hydrated` on a read by id.
     [alias: string]:
       | SearchNodes
+      | HydratedNodes
       | { limit?: number; remaining: number; cost: number; resetAt: string }
       | { login: string }
       | null;
   };
-  errors?: Array<{ message: string; type?: string }>;
+  errors?: Array<{ message: string; type?: string; code?: string }>;
 }
 
 /** Result of a query against a single host. */
@@ -619,8 +652,12 @@ export function mapPr(
   };
 }
 
-function isRawPr(node: RawPr | Record<string, never>): node is RawPr {
-  return typeof (node as RawPr).id === "string";
+function isRawPr(node: RawPr | Record<string, never> | null): node is RawPr {
+  return typeof (node as RawPr | null)?.id === "string";
+}
+
+function isSearchPr(node: RawSearchPr | Record<string, never>): node is RawSearchPr {
+  return typeof (node as RawSearchPr).id === "string";
 }
 
 function buildSearchQuery(repos: string[], qualifier: string): string {
@@ -703,9 +740,13 @@ async function fetchViewerTeams(host: HostConfig): Promise<string[]> {
  * response named no time — so the poller can wait exactly that long instead of
  * retrying on its floor and keeping the error up for the rest of the hour.
  *
- * GitHub answers a spent budget with a 200 whose `errors[].type` is
- * `RATE_LIMITED` (message "API rate limit already exceeded for user ID …"), and
- * a secondary limit with 403/429 plus `retry-after`; both land here.
+ * GitHub answers a spent budget with a 200 whose error is
+ * `{ type: "RATE_LIMIT", code: "graphql_rate_limit" }` (message "API rate limit
+ * already exceeded for user ID …") — `isRateLimitError` also takes the
+ * `RATE_LIMITED` spelling the docs use — and a secondary limit with 403/429 plus
+ * `retry-after`; all of them land here. Matching only `RATE_LIMITED` is what
+ * left 1.18.3 showing the red failure strip and retrying all hour: that is not
+ * the type github.com actually sends.
  */
 export class RateLimitedError extends Error {
   constructor(
@@ -735,7 +776,8 @@ function rateLimitResetAt(header: (name: string) => string | null): string {
 }
 
 /**
- * Sends one GraphQL search to a host and returns its `data` block.
+ * Sends one GraphQL request (a search or a hydrate) to a host and returns its
+ * `data` block.
  *
  * The error text deliberately does NOT carry an HTML body: a 502 from GitHub's
  * nginx answers with a full HTML page, and pasting its first 200 characters into
@@ -747,7 +789,8 @@ function rateLimitResetAt(header: (name: string) => string | null): string {
 async function postSearch(
   host: HostConfig,
   query: string,
-  variables: Record<string, string>,
+  variables: Record<string, string | string[]>,
+  { allowNotFound = false } = {},
 ): Promise<NonNullable<RawResponse["data"]>> {
   const res = await fetch(host.graphqlUrl, {
     method: "POST",
@@ -775,9 +818,15 @@ async function postSearch(
   }
 
   const json = (await res.json()) as RawResponse;
+  // A read by id answers a PR that went away since the search with a null node
+  // AND a NOT_FOUND error next to the data for the rest; that is not a failed
+  // request, and failing it would fail the whole host for one deleted PR.
+  if (allowNotFound && json.data && json.errors?.every((e) => e.type === "NOT_FOUND")) {
+    return json.data;
+  }
   if (json.errors?.length) {
     const message = json.errors.map((e) => e.message).join("; ");
-    if (json.errors.some((e) => e.type === "RATE_LIMITED")) {
+    if (json.errors.some(isRateLimitError)) {
       throw new RateLimitedError(message, rateLimitResetAt((name) => res.headers?.get?.(name) ?? null));
     }
     throw new Error(message);
@@ -786,6 +835,11 @@ async function postSearch(
     throw new Error("Empty GraphQL response.");
   }
   return json.data;
+}
+
+/** Whether a GraphQL error is a spent budget — see `RateLimitedError` for the shapes. */
+function isRateLimitError(e: { type?: string; code?: string }): boolean {
+  return e.type === "RATE_LIMIT" || e.type === "RATE_LIMITED" || e.code === "graphql_rate_limit";
 }
 
 /** Whether a response body is worth quoting in an error message. */
@@ -892,17 +946,24 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
     throw (settled[failedRequired] as PromiseRejectedResult).reason;
   }
 
-  // The rate-limit price did not change by splitting the request, so neither may
-  // the number the poller sees: `cost` is the sum of every search's own cost, or
-  // `hostIntervalMs` would read this host as cheap and poll it far more often.
-  // `remaining` is the lowest reading — the budget only falls within a window,
-  // so the smallest number is the most recent one.
+  // `cost` is the sum of every request's own cost — the searches and the
+  // hydrate alike — or `hostIntervalMs` would read this host as cheap and poll
+  // it far more often. `remaining` is the lowest reading — the budget only falls
+  // within a window, so the smallest number is the most recent one.
   let cost = 0;
   let remaining: number | null = null;
   let resetAt = "";
   let limit: number | undefined;
   let viewerLogin: string | null = null;
-  const nodesByAlias = new Map<string, Array<RawPr | Record<string, never>>>();
+  const nodesByAlias = new Map<string, Array<RawSearchPr | Record<string, never>>>();
+  const readBudget = (data: NonNullable<RawResponse["data"]>) => {
+    cost += data.rateLimit?.cost ?? 0;
+    if (typeof data.rateLimit?.limit === "number") limit = data.rateLimit.limit;
+    if (data.rateLimit && (remaining === null || data.rateLimit.remaining < remaining)) {
+      remaining = data.rateLimit.remaining;
+      resetAt = data.rateLimit.resetAt;
+    }
+  };
 
   settled.forEach((result, i) => {
     const spec = specs[i];
@@ -913,12 +974,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
       return;
     }
     const data = result.value;
-    cost += data.rateLimit?.cost ?? 0;
-    if (typeof data.rateLimit?.limit === "number") limit = data.rateLimit.limit;
-    if (data.rateLimit && (remaining === null || data.rateLimit.remaining < remaining)) {
-      remaining = data.rateLimit.remaining;
-      resetAt = data.rateLimit.resetAt;
-    }
+    readBudget(data);
     // `isOwnPr` needs it, and a null login silently re-opens the bug where a
     // team request on your own PR claims a review from you — so take it from
     // whichever response carries one.
@@ -927,6 +983,29 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
     const search = data[spec.alias] as SearchNodes | undefined;
     if (search?.nodes) nodesByAlias.set(spec.alias, search.nodes);
   });
+
+  // Every distinct PR the searches found, read in full once. Unlike a failed
+  // team search, a failed hydrate fails the host: the searches only say which
+  // PRs exist, and writing them out without their data would blank every card.
+  const ids = [
+    ...new Set(
+      specs.flatMap((spec) => (nodesByAlias.get(spec.alias) ?? []).filter(isSearchPr).map((n) => n.id)),
+    ),
+  ];
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += HYDRATE_CHUNK) chunks.push(ids.slice(i, i + HYDRATE_CHUNK));
+  const hydrated = await Promise.all(
+    chunks.map((chunk) => postSearch(host, buildHydrateQuery(), { ids: chunk }, { allowNotFound: true })),
+  );
+  const fullById = new Map<string, RawPr>();
+  for (const data of hydrated) {
+    readBudget(data);
+    // A null entry is a PR that went away (or out of reach) between the search
+    // and the read; dropping it is what the next search would do anyway.
+    for (const node of (data.hydrated as HydratedNodes | undefined) ?? []) {
+      if (isRawPr(node)) fullById.set(node.id, node);
+    }
+  }
 
   // Merge authored + reviewing, unioning roles.
   const byId = new Map<string, PullRequest>();
@@ -940,18 +1019,20 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
   // than on an already-collected `author` role: the authored search is capped at
   // `first: 25`, so your own PR can arrive from a team search with no entry yet,
   // and it must still land as `author` (dropping it would lose the card).
-  const isOwnPr = (node: RawPr) =>
+  const isOwnPr = (node: RawSearchPr) =>
     viewerLogin != null && node.author?.login.toLowerCase() === viewerLogin.toLowerCase();
 
-  const addNodes = (nodes: Array<RawPr | Record<string, never>>, role: PrRole) => {
+  const addNodes = (nodes: Array<RawSearchPr | Record<string, never>>, role: PrRole) => {
     for (const node of nodes) {
-      if (!isRawPr(node)) continue;
+      if (!isSearchPr(node)) continue;
+      const full = fullById.get(node.id);
+      if (!full) continue;
       const effectiveRole: PrRole = role === "reviewer" && isOwnPr(node) ? "author" : role;
       const existing = byId.get(node.id);
       if (existing) {
         if (!existing.roles.includes(effectiveRole)) existing.roles.push(effectiveRole);
       } else {
-        byId.set(node.id, mapPr(node, host.label, [effectiveRole], viewerLogin));
+        byId.set(node.id, mapPr(full, host.label, [effectiveRole], viewerLogin));
       }
     }
   };
