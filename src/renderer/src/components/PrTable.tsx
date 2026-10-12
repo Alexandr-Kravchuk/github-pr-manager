@@ -8,6 +8,7 @@ import {
   approvalTally,
   clampPrColumnWidth,
   primaryRole,
+  repoShortName,
   reviewRank,
   tableMinWidthRem,
   type TableColumnKey,
@@ -404,16 +405,15 @@ function Row({
 
       <td className={cn("py-1.5", COLUMN_CLASS.pr)}>
         <div className="flex min-w-0 items-center gap-1.5">
-          {/* The repo prefix is what truncates, not the title: a name like
-              `Creatio-Platform/creatio-ai-app-development-toolkit` is 50
-              characters of context, while the title is the cell's actual
-              content. The number never truncates — it is the PR's identity —
-              and the full `host · repo` is on hover. */}
+          {/* The repo prefix shows without its owner and is what truncates,
+              not the title: the title is the cell's actual content. The number
+              never truncates — it is the PR's identity — and the full
+              `host · owner/repo` is on hover. */}
           <span
             className="flex min-w-0 shrink items-center gap-1 text-xs text-fg-subtle"
             title={`${pr.hostLabel} · ${pr.repo}`}
           >
-            <span className="max-w-[11rem] truncate">{pr.repo}</span>
+            <span className="max-w-[11rem] truncate">{repoShortName(pr.repo)}</span>
             <span className="shrink-0 text-fg-faint">#{pr.number}</span>
           </span>
           {pr.isDraft && (

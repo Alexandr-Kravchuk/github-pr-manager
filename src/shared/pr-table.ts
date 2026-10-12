@@ -345,6 +345,16 @@ export function ageDays(iso: string, now: number): number {
 }
 
 /**
+ * The repo name without its owner — `Advance-Technologies-Foundation/clio`
+ * shows as `clio`. The owner is the long, repeated part, and it is what pushed
+ * the name into an ellipsis; the full `owner/repo` stays on hover.
+ */
+export function repoShortName(repo: string): string {
+  const slash = repo.lastIndexOf("/");
+  return slash >= 0 ? repo.slice(slash + 1) : repo;
+}
+
+/**
  * Compares two PRs by one column, ALWAYS ascending in terms of what the cell
  * shows. Direction is applied by `sortForTable`, so a comparator never has to
  * know which way the header arrow points.
@@ -364,7 +374,13 @@ export function compareForColumn(
       // Repo first, then number: the title is the one thing in this cell nobody
       // looks up alphabetically, while "all of clio's PRs together, oldest
       // number first" is how the column actually gets used.
-      return a.repo.localeCompare(b.repo) || a.number - b.number;
+      // By the short name the cell shows; the full name only breaks a tie
+      // between two owners' repos of the same name.
+      return (
+        repoShortName(a.repo).localeCompare(repoShortName(b.repo)) ||
+        a.repo.localeCompare(b.repo) ||
+        a.number - b.number
+      );
     case "author":
       // A PR whose author GitHub no longer resolves (deleted account) sorts
       // last either way rather than ahead of every real login.

@@ -2290,6 +2290,17 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     }
   });
 
+  test("repoShortName: drops the owner, keeps a bare name as is", () => {
+    assert.strictEqual(prTable.repoShortName("Advance-Technologies-Foundation/clio"), "clio");
+    assert.strictEqual(prTable.repoShortName("engineering/creatio-ui"), "creatio-ui");
+    assert.strictEqual(prTable.repoShortName("clio"), "clio");
+  });
+  test("compareForColumn pr: sorts by the short name the cell shows", () => {
+    const a = { repo: "zeta-org/alpha", number: 1 };
+    const b = { repo: "acme/beta", number: 1 };
+    assert.ok(prTable.compareForColumn(a, b, "pr", { trackComments: false }) < 0);
+  });
+
   test("tableMinWidthRem: un-dragged is the plain sum; dragged swaps in that width", () => {
     assert.strictEqual(prTable.tableMinWidthRem(null), prTable.TABLE_MIN_WIDTH_REM);
     const others = prTable.TABLE_MIN_WIDTH_REM - prTable.PR_COLUMN_MIN_REM;

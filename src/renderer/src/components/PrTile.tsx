@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 
 import { prSignal, type PrSignal } from "../../../shared/pr-filter";
-import { ageDays, approvalTally, primaryRole, reviewRank } from "../../../shared/pr-table";
+import { ageDays, approvalTally, primaryRole, repoShortName, reviewRank } from "../../../shared/pr-table";
 import type { PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 
@@ -118,7 +118,7 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
           <span className="text-fg-faint">#{pr.number}</span>
         ) : (
           <span className="flex min-w-0 items-center gap-1">
-            <span className="truncate">{pr.repo}</span>
+            <span className="truncate">{repoShortName(pr.repo)}</span>
             <span className="shrink-0 text-fg-faint">#{pr.number}</span>
           </span>
         )}

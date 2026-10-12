@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
 import { isPassiveReviewed, prSignal, type PrSignal } from "../../../shared/pr-filter";
+import { repoShortName } from "../../../shared/pr-table";
 import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { CheckBadge } from "./CheckBadge";
@@ -213,7 +214,7 @@ export function PrCard({
               {/* The number is the PR's identity — it must survive a long repo
                   name, so only the repo part truncates and #number stays put. */}
               <span className="flex min-w-0 items-center gap-1" title={`${pr.repo} #${pr.number}`}>
-                <span className="truncate">{pr.repo}</span>
+                <span className="truncate">{repoShortName(pr.repo)}</span>
                 <span className="shrink-0 text-fg-faint">#{pr.number}</span>
               </span>
             </>
