@@ -179,6 +179,13 @@ Three layers:
   move/resize and **flushed on `close` before `trayController.handleClose`**:
   close-to-tray may hide the window, and a hidden window's bounds are not
   reliable.
+- Launch at login starts the app **in the tray** when close-to-tray is on
+  (`main/login-launch.ts`): the Windows Run-key entry carries `--hidden`
+  (macOS relies on `wasOpenedAtLogin`, best-effort — login items there take no
+  arguments). The first window is then created with `show: false`, and it is
+  shown anyway if the tray icon failed to appear, since a hidden window with no
+  icon is unreachable. The saved maximized/full-screen state waits for the
+  first `show`, because `maximize()` would itself show the hidden window.
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes
   `electron .` self-quit after the renderer loads (a non-interactive boot check).
 - **No always-running animation in the renderer.** An `infinite` CSS animation —
