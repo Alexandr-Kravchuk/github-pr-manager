@@ -14,6 +14,7 @@ import {
 } from "../shared/notify";
 import { markSeen } from "../shared/state";
 import type {
+  ClaudeLaunchResult,
   ConfigResult,
   DashboardResult,
   GhStatus,
@@ -23,6 +24,7 @@ import type {
   Settings,
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
+import { launchClaude } from "./claude-launch";
 import { ensureCliPath } from "./cli-path";
 import { clearJiraCaches } from "../shared/jira";
 import { buildJiraEnricher, getJiraStatus, setJiraToken } from "./jira-store";
@@ -31,6 +33,7 @@ import {
   validateExternalUrl,
   validateIgnoredArgs,
   validateJiraToken,
+  validatePrId,
   validateSeenItems,
   validateThemePreference,
 } from "./ipc-validation";
@@ -575,6 +578,24 @@ function registerIpc(): void {
 
   ipcMain.handle("app:openExternal", async (_event, url: unknown) => {
     await shell.openExternal(validateExternalUrl(url));
+  });
+
+  // The renderer sends only the PR id: the PR's state, its repository and the
+  // prompt are all read here, so nothing from the renderer reaches the shell.
+  ipcMain.handle("claude:launch", async (_event, raw: unknown): Promise<ClaudeLaunchResult> => {
+    const id = validatePrId(raw);
+    const pr = poller?.getSnapshot()?.pullRequests.find((p) => p.id === id);
+    if (!pr) return { ok: false, error: "This PR is no longer on the dashboard." };
+    let settings: Settings;
+    try {
+      settings = loadSettings();
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+    return launchClaude(pr, settings.claude, {
+      trackComments: settings.trackComments,
+      openUrl: (url) => shell.openExternal(url),
+    });
   });
 
   ipcMain.handle("settings:get", async (): Promise<Settings> => loadSettings());

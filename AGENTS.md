@@ -58,14 +58,23 @@ Three layers:
   rendered heading is unit-tested without a DOM), `view-mode.ts` (the three
   display variants behind the header's Finder-style switch — `roomy` cards,
   `cozy` table, `compact` tiles — with the guard that validates the persisted
-  choice and the two predicates App.tsx gates grouping and the sort dropdown on)
-  and `pr-table.ts` (the Cozy table's ten columns and its ordering: a comparator
+  choice and the two predicates App.tsx gates grouping and the sort dropdown on),
+  `pr-table.ts` (the Cozy table's ten columns and its ordering: a comparator
   per column, always ascending in terms of what the cell SHOWS, plus what a
-  header click does). Keep any such
+  header click does) and `claude-launch.ts` (the opt-in "start Claude on this
+  PR" button: which prompt a PR's state picks — blocked → drive, review due →
+  review, own mergeable → close, else the bare link — plus the shell quoting;
+  the renderer imports it for the tooltip, while finding the checkout by git
+  remote and opening the terminal live in `main/claude-launch.ts`, and the
+  renderer sends only the PR id so nothing it supplies reaches the shell) and
+  `settings-search.ts` (the Settings screen's tabs, which section sits on which,
+  and the keywords its search box matches — every word of the query must hit a
+  section's title or keywords; a setting whose label is missing there cannot be
+  found, so extend its keywords when adding one). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
-  `pr-table.js` and `view-mode.js`
+  `pr-table.js`, `view-mode.js`, `claude-launch.js` and `settings-search.js`
   stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
@@ -119,7 +128,10 @@ Three layers:
 
 ## Build / run
 
-- `npm run dev` — Vite dev server (HMR) + Electron pointed at it.
+- `npm run dev` — Vite dev server (HMR) + Electron pointed at it. The main
+  process compiles in `tsc --watch` and Electron restarts after each clean
+  build: it reads `dist/main` only at startup, so a one-off compile kept a dev
+  app on stale main code while the renderer hot-reloaded and looked current.
 - `npm run build` — `tsc` (main) + `vite` (renderer) → `dist/`.
 - `npm run typecheck` and `npm test` — the gate before any push.
 - `npm run package` / `npm run package:dir` — electron-builder (dmg / nsis).

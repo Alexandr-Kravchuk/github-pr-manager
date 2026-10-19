@@ -4,6 +4,7 @@ import { prSignal, type PrSignal } from "../../../shared/pr-filter";
 import { ageDays, approvalTally, primaryRole, repoShortName, reviewRank } from "../../../shared/pr-table";
 import type { PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
+import { ClaudeButton } from "./ClaudeButton";
 
 /**
  * The Compact tile: the same information architecture as `PrCard` shrunk to
@@ -231,6 +232,10 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
           )}
         </span>
       </div>
+
+      {/* Line 4 — only while the Claude integration is on, so every tile in the
+          grid gets it and the rows stay one height. */}
+      <ClaudeButton pr={pr} trackComments={trackComments} compact className="mt-1.5 w-full justify-center" />
 
       {/* Hover-only actions, in the corner so they cost no layout width. */}
       <div className="absolute right-1 top-1 hidden items-center gap-0.5 rounded bg-surface/90 px-0.5 group-hover:flex">

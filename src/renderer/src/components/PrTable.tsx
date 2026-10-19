@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
 import { prSignal, type PrSignal } from "../../../shared/pr-filter";
@@ -10,12 +10,15 @@ import {
   primaryRole,
   repoShortName,
   reviewRank,
+  actionsColumnRem,
   tableMinWidthRem,
   type TableColumnKey,
   type TableSort,
 } from "../../../shared/pr-table";
 import type { PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
+import { ClaudeButton } from "./ClaudeButton";
+import { ClaudeEnabledContext } from "./claude-context";
 
 /**
  * The Cozy variant: one flat, sortable table instead of cards.
@@ -228,6 +231,8 @@ export function PrTable({
     [prWidthRem, onPrWidthChange],
   );
 
+  const claudeEnabled = useContext(ClaudeEnabledContext);
+
   return (
     // Three things hold the layout together. `table-fixed` + the `<colgroup>`
     // pin each column at its declared width, so a long title truncates instead
@@ -246,7 +251,9 @@ export function PrTable({
     >
       <table
         className="w-full table-fixed border-collapse text-sm"
-        style={{ minWidth: `${tableMinWidthRem(prWidthRem)}rem` }}
+        style={{
+          minWidth: `${tableMinWidthRem(prWidthRem) - actionsColumnRem(false) + actionsColumnRem(claudeEnabled)}rem`,
+        }}
       >
         <colgroup>
           {TABLE_COLUMNS.map((col) => (
@@ -262,7 +269,9 @@ export function PrTable({
                   ? prWidthRem === null
                     ? undefined
                     : { width: `${prWidthRem}rem` }
-                  : { width: `${col.minWidthRem}rem` }
+                  : col.key === "actions"
+                    ? { width: `${actionsColumnRem(claudeEnabled)}rem` }
+                    : { width: `${col.minWidthRem}rem` }
               }
             />
           ))}
@@ -542,6 +551,7 @@ function Row({
           >
             <RowIcon kind={copied ? "check" : "copy"} />
           </button>
+          <ClaudeButton pr={pr} trackComments={trackComments} compact className="mr-1" />
           <button
             type="button"
             onClick={() => onToggleIgnore(pr)}

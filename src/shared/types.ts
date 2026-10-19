@@ -112,6 +112,33 @@ export interface NotificationSettings {
   events: NotificationEventToggles;
 }
 
+/**
+ * "Start a Claude session on this PR" — opt-in. A click opens a terminal in the
+ * PR's local checkout and runs `claude` with a prompt picked from the PR's state
+ * (see `shared/claude-launch.ts`).
+ */
+export type ClaudeTerminal = "auto" | "iterm" | "terminal" | "desktop";
+
+export interface ClaudeSettings {
+  enabled: boolean;
+  /** Folder whose subfolders are searched for a checkout by git remote; "" = ~/Projects. */
+  projectsRoot: string;
+  /** Explicit checkout per "owner/name" — wins over the search. */
+  repoPaths: Record<string, string>;
+  /** Prompt template per launch kind; `{url}` is the PR URL. */
+  prompts: Record<"drive" | "review" | "close" | "open", string>;
+  /**
+   * Where the session opens. `auto` takes iTerm2 when it is installed, else
+   * Terminal (macOS; a `cmd` window on Windows). The system's "default
+   * terminal" is not consulted: macOS has no such setting a launcher can ask.
+   * `desktop` opens the Code tab of Claude Desktop through its
+   * `claude://code/new` link instead — on every platform, but the prompt is
+   * only prefilled (Enter sends it) and Desktop asks to confirm the folder on
+   * every launch. `iterm` / `terminal` fall back to `auto` off macOS.
+   */
+  terminal: ClaudeTerminal;
+}
+
 /** Persisted application settings (userData/settings.json) — no tokens. */
 export interface Settings {
   /** Auto-refresh interval in seconds. */
@@ -168,6 +195,8 @@ export interface Settings {
   hosts: SettingsHost[];
   /** Optional Jira connection for parent-task grouping (token stored separately). */
   jira?: JiraSettings;
+  /** Claude session launcher (off by default). */
+  claude: ClaudeSettings;
 }
 
 /** Jira setup state for the UI, from the main process. */
@@ -214,6 +243,8 @@ export interface PublicConfig {
    * comment-driven chip, badge and header stat, and it is not a secret.
    */
   trackComments: boolean;
+  /** Mirror of `Settings.claude.enabled` — whether cards show the Claude button. */
+  claudeEnabled: boolean;
 }
 
 /** State of an individual reviewer on a PR. */
@@ -499,6 +530,11 @@ export type ConfigResult =
  *  but could not take effect (today: close-to-tray with no usable tray). */
 export type SaveSettingsResult = { ok: true; warning?: string } | { ok: false; error: string };
 
+/** Result of `launchClaude`: what was started and where, or why not. */
+export type ClaudeLaunchResult =
+  | { ok: true; kind: "drive" | "review" | "close" | "open"; dir: string }
+  | { ok: false; error: string };
+
 /** `gh` CLI availability + per-host authentication, for the settings UI. */
 export interface GhStatus {
   /** Whether the `gh` CLI is installed and on PATH. */
@@ -541,6 +577,11 @@ export interface PrManagerApi {
   setJiraToken(token: string): Promise<{ ok: boolean; error?: string }>;
   /** The running app version. */
   getAppVersion(): Promise<string>;
+  /**
+   * Open a terminal in the PR's local checkout and start `claude` with the
+   * prompt for the PR's state. Refused while the integration is off.
+   */
+  launchClaude(prId: string): Promise<ClaudeLaunchResult>;
   /** Copy text (e.g. a PR URL) to the system clipboard. */
   copyText(text: string): Promise<void>;
   /** Returns release info if a new version was installed since last ack, or null. */

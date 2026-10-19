@@ -13,6 +13,7 @@ import type {
   PullRequest,
   Settings,
 } from "../../shared/types";
+import { DEFAULT_CLAUDE_SETTINGS } from "../../shared/claude-launch";
 
 function pr(overrides: Partial<PullRequest>): PullRequest {
   return {
@@ -319,6 +320,7 @@ const settings: Settings = {
     events: { yourTurn: true, ciFailed: true, goodNews: true },
   },
   hosts: [{ label: "GitHub", graphqlUrl: "https://api.github.com/graphql", repos: ["acme/widgets"] }],
+  claude: { ...DEFAULT_CLAUDE_SETTINGS, enabled: true },
 };
 
 const api: PrManagerApi = {
@@ -330,6 +332,7 @@ const api: PrManagerApi = {
       pollIntervalSeconds: 60,
       hosts: [{ label: "GitHub", repos: ["acme/widgets"] }],
       trackComments: true,
+      claudeEnabled: true,
     },
   }),
   markSeen: async () => {},
@@ -350,6 +353,7 @@ const api: PrManagerApi = {
   }),
   setJiraToken: async () => ({ ok: true }),
   getAppVersion: async () => "dev",
+  launchClaude: async () => ({ ok: false, error: "Not available in mock mode." }),
   copyText: async () => {},
   getWhatsNew: async () => null,
   dismissWhatsNew: async () => {},

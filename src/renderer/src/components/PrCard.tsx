@@ -6,6 +6,7 @@ import { repoShortName } from "../../../shared/pr-table";
 import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { CheckBadge } from "./CheckBadge";
+import { ClaudeButton } from "./ClaudeButton";
 
 interface Props {
   pr: PullRequest;
@@ -265,9 +266,10 @@ export function PrCard({
             {pr.isIgnored ? <EyeIcon /> : <EyeOffIcon />}
           </button>
         </div>
-        <span className="shrink-0" title={new Date(pr.updatedAt).toLocaleString()}>
-          {relativeTime(pr.updatedAt)}
-        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <span title={new Date(pr.updatedAt).toLocaleString()}>{relativeTime(pr.updatedAt)}</span>
+          <ClaudeButton pr={pr} trackComments={trackComments} />
+        </div>
       </div>
 
       {/* Title — clicking opens the PR and marks it as seen */}

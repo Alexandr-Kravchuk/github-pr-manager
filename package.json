@@ -86,7 +86,10 @@
           ]
         }
       ],
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "PR Dashboard opens Terminal to start a Claude session in a pull request's folder."
+      }
     },
     "nsis": {
       "oneClick": false,

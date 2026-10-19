@@ -26,6 +26,8 @@ import {
   type RoleFilter,
 } from "../../shared/pr-filter";
 import { groupKeyOf, groupLabel, type IssueGroupMode } from "../../shared/pr-group";
+import { ClaudeEnabledContext } from "./components/claude-context";
+import { Snowflakes } from "./components/Snowflakes";
 import {
   DEFAULT_TABLE_SORT,
   clampPrColumnWidth,
@@ -795,7 +797,8 @@ export function App() {
     <div className="px-4 py-6">
       {/* Header */}
       <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-line bg-canvas/85 px-4 pb-3 pt-1 backdrop-blur">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="relative flex flex-wrap items-center justify-between gap-3">
+          <Snowflakes />
           <div className="flex items-center gap-3">
             <Buddy mood={buddyMood} />
             <div>
@@ -864,6 +867,228 @@ export function App() {
             </button>
           </div>
         </div>
+        {/* Toolbar: view controls (row 1) and filters (row 2). Inside the sticky
+            header so the filters stay on screen while the list scrolls. */}
+        {!configError && (
+          <div className="mt-3 space-y-2 border-t border-line pt-3">
+            {/* Row 1 — search + how the list is viewed (sort / group / scope). */}
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search by title, repo, author…"
+                className="min-w-[14rem] flex-1 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none"
+              />
+
+              {/* Role is one exclusive choice, so it is a segmented switch rather
+                  than chips: four buttons in one bordered group read as "pick one"
+                  where separate chips would read as "combine these". It was a
+                  <select> until the two clicks and the hidden labels made the one
+                  filter you flip most often the slowest one to reach. */}
+              <div
+                role="group"
+                aria-label="Role filter"
+                className="inline-flex overflow-hidden rounded-md border border-line-strong"
+              >
+                {ROLE_FILTERS.map((key, i) => {
+                  const active = role === key;
+                  const count = roleCounts[key];
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      // Clicking the active segment goes back to `all`, so the
+                      // switch is never a choice you can't undo from itself.
+                      onClick={() => setRole(active && key !== "all" ? "all" : key)}
+                      title={ROLE_FILTER_TITLES[key]}
+                      aria-label={ROLE_FILTER_TITLES[key]}
+                      aria-pressed={active}
+                      className={cn(
+                        "px-3 py-1.5 text-sm transition-colors",
+                        i > 0 && "border-l border-line",
+                        // A separate constant, not CHIP_TONE_ACTIVE.sky: that one
+                        // carries its own border and `cn` is a plain join, so the
+                        // group's border would end up fighting the segment's.
+                        // Stronger than a chip's `/15` fill and bolder: a chip
+                        // carries its own border to mark itself active, a segment
+                        // sits inside the group's border and has only the fill.
+                        active
+                          ? "bg-sky-500/30 font-medium text-sky-800 dark:text-sky-100"
+                          : "bg-surface text-fg-muted hover:bg-elevated",
+                        count === 0 && !active && "opacity-50",
+                      )}
+                    >
+                      {ROLE_FILTER_LABELS[key]}{" "}
+                      <span className={active ? "text-sky-800/70 dark:text-sky-100/70" : "text-fg-faint"}>
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Both view controls are disabled in Cozy rather than hidden: the
+                  table owns the ordering (its column headers) and is flat, and a
+                  control that vanished would read as a bug, where a disabled one
+                  with a title says which thing took it over. */}
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as SortKey)}
+                disabled={!usesListSort(viewMode)}
+                title={
+                  usesListSort(viewMode)
+                    ? "Sort order"
+                    : "In Cozy the column headers set the sort order"
+                }
+                aria-label="Sort order"
+                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
+              >
+                {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
+                  <option key={k} value={k}>
+                    Sort: {SORT_LABELS[k]}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={groupBy}
+                onChange={(e) => setGroupBy(e.target.value as GroupMode)}
+                disabled={!supportsGrouping(viewMode)}
+                title={
+                  supportsGrouping(viewMode) ? "Grouping" : "Cozy is one flat table — no grouping"
+                }
+                aria-label="Grouping"
+                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
+              >
+                <option value="none">No grouping</option>
+                <option value="repo">Group by repo</option>
+                <option value="issue">Group by issue</option>
+                {jiraStatus?.configured && <option value="parent">Group by parent task</option>}
+              </select>
+
+              {config && config.hosts.length > 1 && (
+                <select
+                  value={host}
+                  onChange={(e) => setHost(e.target.value)}
+                  className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
+                >
+                  <option value="all">All hosts</option>
+                  {config.hosts.map((h) => (
+                    <option key={h.label} value={h.label}>
+                      {h.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {groups && groups.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCollapsed(allCollapsed ? new Set() : new Set(groups.map((g) => g.key)))
+                  }
+                  title={allCollapsed ? "Expand all groups" : "Collapse all groups"}
+                  aria-label={allCollapsed ? "Expand all groups" : "Collapse all groups"}
+                  className="inline-flex items-center rounded-md border border-line-strong bg-surface px-2.5 py-2 text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
+                >
+                  <FoldIcon expand={allCollapsed} />
+                </button>
+              )}
+            </div>
+
+            {/* Row 2 — the source chips, then what applies on top of them. */}
+            <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
+              <span className="mr-0.5 text-xs font-medium uppercase tracking-wide text-fg-muted">
+                Filters
+              </span>
+              {/* Three groups, separated by a hairline: the five OR-ed source chips,
+                  then the one chip that removes rows, then the two reveal chips.
+                  Every chip always renders, so the row never reflows under the
+                  cursor and a persisted reveal can't hide as an invisible active
+                  filter. */}
+              <FilterChip
+                active={attentionOnly}
+                count={chipCounts.attention}
+                onClick={() => setAttentionOnly((v) => !v)}
+                tone="amber"
+              >
+                ⚠ Needs attention
+              </FilterChip>
+              <FilterChip
+                active={failingOnly}
+                count={chipCounts.failing}
+                onClick={() => setFailingOnly((v) => !v)}
+                tone="red"
+              >
+                ✗ Failing CI
+              </FilterChip>
+              {/* The one chip that can be absent: with `trackComments` off there is
+                  no comment channel to filter on, so the chip is removed rather
+                  than left at a permanent 0. */}
+              {trackComments && (
+                <FilterChip
+                  active={newOnly}
+                  count={chipCounts.fresh}
+                  onClick={() => setNewOnly((v) => !v)}
+                  tone="violet"
+                >
+                  ✦ New comments
+                </FilterChip>
+              )}
+              <FilterChip
+                active={mergeableOnly}
+                count={chipCounts.mergeable}
+                onClick={() => setMergeableOnly((v) => !v)}
+                tone="green"
+              >
+                ✔ Ready to merge
+              </FilterChip>
+              <FilterChip
+                active={noReviewsOnly}
+                count={chipCounts.noReviews}
+                onClick={() => setNoReviewsOnly((v) => !v)}
+              >
+                ◷ No reviews yet
+              </FilterChip>
+              <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
+              {/* The one chip that REMOVES rows: PRs you approved and that aren't
+                  asking for you again. Its count is what the click takes away. */}
+              <FilterChip
+                active={hideApproved}
+                count={chipCounts.approved}
+                onClick={() => setHideApproved((v) => !v)}
+                tone="green"
+              >
+                ✓ Hide my approvals
+              </FilterChip>
+              <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
+              <FilterChip
+                active={showDrafts}
+                count={chipCounts.drafts}
+                onClick={() => setShowDrafts((v) => !v)}
+              >
+                Drafts
+              </FilterChip>
+              <FilterChip
+                active={showIgnored}
+                count={chipCounts.ignored}
+                onClick={() => setShowIgnored((v) => !v)}
+              >
+                Ignored
+              </FilterChip>
+              {activeFilters > 0 && (
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="ml-auto rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
+                >
+                  ✕ Clear filters ({activeFilters})
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </header>
 
       {/* Config error */}
@@ -923,227 +1148,6 @@ export function App() {
         </div>
       )}
 
-      {/* Toolbar: view controls (row 1) and filters (row 2), visually separated. */}
-      {!configError && (
-        <div className="mb-4 space-y-2">
-          {/* Row 1 — search + how the list is viewed (sort / group / scope). */}
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by title, repo, author…"
-              className="min-w-[14rem] flex-1 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none"
-            />
-
-            {/* Role is one exclusive choice, so it is a segmented switch rather
-                than chips: four buttons in one bordered group read as "pick one"
-                where separate chips would read as "combine these". It was a
-                <select> until the two clicks and the hidden labels made the one
-                filter you flip most often the slowest one to reach. */}
-            <div
-              role="group"
-              aria-label="Role filter"
-              className="inline-flex overflow-hidden rounded-md border border-line-strong"
-            >
-              {ROLE_FILTERS.map((key, i) => {
-                const active = role === key;
-                const count = roleCounts[key];
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    // Clicking the active segment goes back to `all`, so the
-                    // switch is never a choice you can't undo from itself.
-                    onClick={() => setRole(active && key !== "all" ? "all" : key)}
-                    title={ROLE_FILTER_TITLES[key]}
-                    aria-label={ROLE_FILTER_TITLES[key]}
-                    aria-pressed={active}
-                    className={cn(
-                      "px-3 py-1.5 text-sm transition-colors",
-                      i > 0 && "border-l border-line",
-                      // A separate constant, not CHIP_TONE_ACTIVE.sky: that one
-                      // carries its own border and `cn` is a plain join, so the
-                      // group's border would end up fighting the segment's.
-                      // Stronger than a chip's `/15` fill and bolder: a chip
-                      // carries its own border to mark itself active, a segment
-                      // sits inside the group's border and has only the fill.
-                      active
-                        ? "bg-sky-500/30 font-medium text-sky-800 dark:text-sky-100"
-                        : "bg-surface text-fg-muted hover:bg-elevated",
-                      count === 0 && !active && "opacity-50",
-                    )}
-                  >
-                    {ROLE_FILTER_LABELS[key]}{" "}
-                    <span className={active ? "text-sky-800/70 dark:text-sky-100/70" : "text-fg-faint"}>
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Both view controls are disabled in Cozy rather than hidden: the
-                table owns the ordering (its column headers) and is flat, and a
-                control that vanished would read as a bug, where a disabled one
-                with a title says which thing took it over. */}
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as SortKey)}
-              disabled={!usesListSort(viewMode)}
-              title={
-                usesListSort(viewMode)
-                  ? "Sort order"
-                  : "In Cozy the column headers set the sort order"
-              }
-              aria-label="Sort order"
-              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
-            >
-              {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
-                <option key={k} value={k}>
-                  Sort: {SORT_LABELS[k]}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={groupBy}
-              onChange={(e) => setGroupBy(e.target.value as GroupMode)}
-              disabled={!supportsGrouping(viewMode)}
-              title={
-                supportsGrouping(viewMode) ? "Grouping" : "Cozy is one flat table — no grouping"
-              }
-              aria-label="Grouping"
-              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
-            >
-              <option value="none">No grouping</option>
-              <option value="repo">Group by repo</option>
-              <option value="issue">Group by issue</option>
-              {jiraStatus?.configured && <option value="parent">Group by parent task</option>}
-            </select>
-
-            {config && config.hosts.length > 1 && (
-              <select
-                value={host}
-                onChange={(e) => setHost(e.target.value)}
-                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
-              >
-                <option value="all">All hosts</option>
-                {config.hosts.map((h) => (
-                  <option key={h.label} value={h.label}>
-                    {h.label}
-                  </option>
-                ))}
-              </select>
-            )}
-
-            {groups && groups.length > 0 && (
-              <button
-                type="button"
-                onClick={() =>
-                  setCollapsed(allCollapsed ? new Set() : new Set(groups.map((g) => g.key)))
-                }
-                title={allCollapsed ? "Expand all groups" : "Collapse all groups"}
-                aria-label={allCollapsed ? "Expand all groups" : "Collapse all groups"}
-                className="inline-flex items-center rounded-md border border-line-strong bg-surface px-2.5 py-2 text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
-              >
-                <FoldIcon expand={allCollapsed} />
-              </button>
-            )}
-          </div>
-
-          {/* Row 2 — the source chips, then what applies on top of them. */}
-          <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
-            <span className="mr-0.5 text-xs font-medium uppercase tracking-wide text-fg-muted">
-              Filters
-            </span>
-            {/* Three groups, separated by a hairline: the five OR-ed source chips,
-                then the one chip that removes rows, then the two reveal chips.
-                Every chip always renders, so the row never reflows under the
-                cursor and a persisted reveal can't hide as an invisible active
-                filter. */}
-            <FilterChip
-              active={attentionOnly}
-              count={chipCounts.attention}
-              onClick={() => setAttentionOnly((v) => !v)}
-              tone="amber"
-            >
-              ⚠ Needs attention
-            </FilterChip>
-            <FilterChip
-              active={failingOnly}
-              count={chipCounts.failing}
-              onClick={() => setFailingOnly((v) => !v)}
-              tone="red"
-            >
-              ✗ Failing CI
-            </FilterChip>
-            {/* The one chip that can be absent: with `trackComments` off there is
-                no comment channel to filter on, so the chip is removed rather
-                than left at a permanent 0. */}
-            {trackComments && (
-              <FilterChip
-                active={newOnly}
-                count={chipCounts.fresh}
-                onClick={() => setNewOnly((v) => !v)}
-                tone="violet"
-              >
-                ✦ New comments
-              </FilterChip>
-            )}
-            <FilterChip
-              active={mergeableOnly}
-              count={chipCounts.mergeable}
-              onClick={() => setMergeableOnly((v) => !v)}
-              tone="green"
-            >
-              ✔ Ready to merge
-            </FilterChip>
-            <FilterChip
-              active={noReviewsOnly}
-              count={chipCounts.noReviews}
-              onClick={() => setNoReviewsOnly((v) => !v)}
-            >
-              ◷ No reviews yet
-            </FilterChip>
-            <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
-            {/* The one chip that REMOVES rows: PRs you approved and that aren't
-                asking for you again. Its count is what the click takes away. */}
-            <FilterChip
-              active={hideApproved}
-              count={chipCounts.approved}
-              onClick={() => setHideApproved((v) => !v)}
-              tone="green"
-            >
-              ✓ Hide my approvals
-            </FilterChip>
-            <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
-            <FilterChip
-              active={showDrafts}
-              count={chipCounts.drafts}
-              onClick={() => setShowDrafts((v) => !v)}
-            >
-              Drafts
-            </FilterChip>
-            <FilterChip
-              active={showIgnored}
-              count={chipCounts.ignored}
-              onClick={() => setShowIgnored((v) => !v)}
-            >
-              Ignored
-            </FilterChip>
-            {activeFilters > 0 && (
-              <button
-                type="button"
-                onClick={clearFilters}
-                className="ml-auto rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
-              >
-                ✕ Clear filters ({activeFilters})
-              </button>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* No hosts configured yet — guide to Settings. */}
       {!configError && noHosts && (
@@ -1170,6 +1174,7 @@ export function App() {
         <div className="p-8 text-center text-sm text-fg-subtle">Loading…</div>
       )}
 
+      <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
       {viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable
@@ -1247,6 +1252,7 @@ export function App() {
           onToggleIgnore={toggleIgnore}
         />
       )}
+      </ClaudeEnabledContext.Provider>
 
       <div className="pointer-events-none fixed bottom-2 right-3 z-10 flex items-center gap-2 text-[11px]">
         {whatsNew && (

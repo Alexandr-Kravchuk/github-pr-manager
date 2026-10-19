@@ -94,6 +94,8 @@ for (const mod of [
   "pr-group.js",
   "pr-table.js",
   "view-mode.js",
+  "claude-launch.js",
+  "settings-search.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -1389,18 +1391,25 @@ test("toPublicConfig: strips graphqlUrl, keeps label + repos", () => {
     pollIntervalSeconds: 60,
     trackComments: true,
     hosts: [{ label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"] }],
+    claude: cfg.validateClaude(undefined),
   });
   assert.deepStrictEqual(pub, {
     pollIntervalSeconds: 60,
     hosts: [{ label: "GH", repos: ["a/b"] }],
     trackComments: true,
+    claudeEnabled: false,
   });
 });
 test("toPublicConfig: trackComments is propagated, not assumed", () => {
   // The renderer's whole half of the feature reads this mirror, so asserting only
   // the `true` case would pass for a hardcoded `true` while the chip, the header
   // stat and the filter reset never turned off for anyone.
-  const pub = cfg.toPublicConfig({ pollIntervalSeconds: 60, trackComments: false, hosts: [] });
+  const pub = cfg.toPublicConfig({
+    pollIntervalSeconds: 60,
+    trackComments: false,
+    hosts: [],
+    claude: cfg.validateClaude(undefined),
+  });
   assert.strictEqual(pub.trackComments, false);
 });
 
@@ -6544,6 +6553,158 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       "the flush must run before handleClose, which may hide the window",
     );
   });
+
+  // --- Claude session launcher -----------------------------------------------
+  {
+    const cl = require(path.join(__dirname, "../dist/main/shared/claude-launch.js"));
+    const launcher = require(path.join(__dirname, "../dist/main/main/claude-launch.js"));
+    const quiet = {
+      roles: ["author"], failingChecks: [], pendingChecks: [], hasUnaddressedChangeRequest: false,
+      hasUnaddressedReviewFeedback: false, hasUnaddressedComments: false, hasConflicts: false,
+      isBehindBase: false, unresolvedThreads: 0, returnedToMe: false, myReReviewDue: false,
+      awaitingReview: false, hasNewActivity: false, hasHumanApproval: false, reviewDecision: null,
+      ciState: "success", canBeMerged: false, url: "https://github.com/acme/widgets/pull/7", repo: "acme/widgets",
+    };
+    const pick = (patch) => cl.pickClaudeLaunch({ ...quiet, ...patch }, { trackComments: true });
+
+    test("claude launch: own blocked PR → drive, review due → review, own mergeable → close, else open", () => {
+      assert.strictEqual(pick({ failingChecks: [{ name: "ci" }] }), "drive");
+      assert.strictEqual(pick({ hasConflicts: true }), "drive");
+      assert.strictEqual(pick({ unresolvedThreads: 1 }), "drive");
+      assert.strictEqual(pick({ roles: ["reviewer"] }), "review");
+      assert.strictEqual(pick({ roles: ["reviewed"], myReReviewDue: true }), "review");
+      assert.strictEqual(pick({ canBeMerged: true, hasHumanApproval: true }), "close");
+      assert.strictEqual(pick({ roles: ["reviewed"], canBeMerged: true }), "open", "someone else's PR is not ours to close");
+      assert.strictEqual(pick({}), "open");
+    });
+
+    test("claude button: every launch kind has button text; the table widens only while it shows", () => {
+      for (const k of ["drive", "review", "close", "open"]) assert.ok(cl.CLAUDE_BUTTON_TEXT[k], k);
+      const tbl = require(path.join(__dirname, "../dist/main/shared/pr-table.js"));
+      assert.strictEqual(tbl.actionsColumnRem(false), 5);
+      assert.strictEqual(tbl.actionsColumnRem(true), 5 + tbl.CLAUDE_ACTIONS_EXTRA_REM);
+    });
+
+    test("claude launch: prompt template fills {url}, an empty one falls back to the default", () => {
+      assert.strictEqual(cl.renderClaudePrompt({ drive: "fix {url} now" }, "drive", quiet), `fix ${quiet.url} now`);
+      assert.strictEqual(cl.renderClaudePrompt({ review: "  " }, "review", quiet), `/creatio-code-review ${quiet.url}`);
+    });
+
+    test("claude launch: shell and AppleScript quoting survive quotes and backslashes", () => {
+      const cmd = cl.posixLaunchCommand("/a b/it's", "x");
+      assert.ok(cmd.endsWith(`; cd '/a b/it'\\''s' && claude 'x'`), cmd);
+      assert.ok(cmd.startsWith("unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION "), "session markers are dropped before claude starts");
+      assert.strictEqual(cl.appleScriptString(`say "hi" \\ there`), `"say \\"hi\\" \\\\ there"`);
+    });
+
+    test("claude launch: the launcher env drops a parent session's markers and keeps the rest", () => {
+      const env = cl.launcherEnv({
+        PATH: "/bin",
+        HOME: "/h",
+        CLAUDECODE: "1",
+        CLAUDE_CODE_CHILD_SESSION: "1",
+        CLAUDE_CODE_SESSION_ID: "s",
+        CLAUDE_AGENT_SDK_VERSION: "1",
+        CLAUDE_PID: "9",
+      });
+      assert.deepStrictEqual(env, { PATH: "/bin", HOME: "/h" });
+    });
+
+    test("claude launch: iTerm2 and Terminal scripts carry the command, quoted once", () => {
+      const it = cl.terminalScript("iterm", `cd '/x' && claude 'a "b"'`).join("\n");
+      assert.match(it, /tell application id "com\.googlecode\.iterm2"/);
+      assert.match(it, /create window with default profile/);
+      assert.match(it, /set wasRunning to running\nactivate/, "running is read before activate starts the app");
+      assert.match(it, /else if wasRunning then\nset w to current window\ntell w to create tab with default profile/, "a running iTerm2 gets a tab, not a window");
+      assert.ok(it.includes(`write text "cd '/x' && claude 'a \\"b\\"'"`), it);
+      const term = cl.terminalScript("terminal", "x").join("\n");
+      assert.match(term, /tell application "Terminal"[\s\S]*do script "x"/);
+      assert.strictEqual(cfg.validateClaude({}).terminal, "auto");
+      assert.strictEqual(cfg.validateClaude({ terminal: "iterm" }).terminal, "iterm");
+      assert.strictEqual(cfg.validateClaude({ terminal: "xterm" }).terminal, "auto");
+      assert.strictEqual(cfg.validateClaude({ terminal: "desktop" }).terminal, "desktop");
+      assert.strictEqual(
+        cl.claudeDesktopUrl("/Users/me/my repo", "/drive-pr-green https://x/pull/1?a=b&c"),
+        "claude://code/new?q=%2Fdrive-pr-green%20https%3A%2F%2Fx%2Fpull%2F1%3Fa%3Db%26c&folder=%2FUsers%2Fme%2Fmy%20repo",
+      );
+    });
+
+    test("settings search: every section is on a real tab, every tab has a section", () => {
+      const ss = require(path.join(__dirname, "../dist/main/shared/settings-search.js"));
+      const tabs = new Set(ss.SETTINGS_TABS.map((t) => t.id));
+      for (const sec of ss.SETTINGS_SECTIONS) assert.ok(tabs.has(sec.tab), sec.id);
+      for (const t of tabs) assert.ok(ss.sectionsOfTab(t).length > 0, t);
+      assert.strictEqual(ss.toSettingsTab("hosts"), "hosts");
+      assert.strictEqual(ss.toSettingsTab("nope"), "general");
+      assert.strictEqual(ss.toSettingsTab(null), "general");
+    });
+
+    test("settings search: all words must match, case-insensitive; blank finds nothing", () => {
+      const ss = require(path.join(__dirname, "../dist/main/shared/settings-search.js"));
+      const ids = (q) => ss.searchSettings(q).map((s) => s.id);
+      assert.deepStrictEqual(ids("   "), []);
+      assert.deepStrictEqual(ids("iTerm"), ["claude"]);
+      assert.deepStrictEqual(ids("close tray"), ["behavior"], "the Claude 'close' prompt has no 'tray'");
+      assert.deepStrictEqual(ids("token"), ["gh", "jira"]);
+      assert.deepStrictEqual(ids("DARK"), ["appearance"]);
+      assert.deepStrictEqual(ids("xyzzy"), []);
+    });
+
+    test("claude launch: remotes normalize across https, scp and ssh:// forms", () => {
+      for (const u of [
+        "https://github.com/Acme/Widgets.git",
+        "git@github.com:acme/widgets.git",
+        "ssh://git@github.com/acme/widgets",
+        "https://token@github.com/acme/widgets/",
+      ]) {
+        assert.strictEqual(cl.normalizeRemote(u), "github.com/acme/widgets", u);
+      }
+      assert.strictEqual(cl.prRemoteKey(quiet), "github.com/acme/widgets");
+    });
+
+    test("claude settings: off by default, garbage falls back, empty repo paths dropped", () => {
+      assert.strictEqual(cfg.defaultSettings().claude.enabled, false);
+      assert.strictEqual(cfg.validateSettings({ hosts: [] }).claude.enabled, false);
+      const c = cfg.validateClaude({ enabled: true, repoPaths: { "acme/widgets": " ~/w ", bad: "x", "a/b": "" }, prompts: { drive: "" } });
+      assert.deepStrictEqual(c.repoPaths, { "acme/widgets": "~/w" });
+      assert.strictEqual(c.prompts.drive, "/drive-pr-green {url}");
+      assert.strictEqual(cfg.toPublicConfig(cfg.validateSettings({ claude: c })).claudeEnabled, true);
+    });
+
+    test("claude launch: checkout found by remote on the PR's host, explicit path wins", () => {
+      const fsSync = require("node:fs");
+      const root = fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-claude-"));
+      const mk = (name, url) => {
+        fsSync.mkdirSync(path.join(root, name, ".git"), { recursive: true });
+        fsSync.writeFileSync(
+          path.join(root, name, ".git", "config"),
+          `[core]\n\tbare = false\n[remote "origin"]\n\turl = ${url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`,
+        );
+      };
+      mk("other-host", "git@ghe.example.com:acme/widgets.git");
+      mk("my-widgets", "https://github.com/acme/widgets.git");
+      try {
+        assert.strictEqual(launcher.findCheckout(quiet, { projectsRoot: root, repoPaths: {} }), path.join(root, "my-widgets"));
+        assert.strictEqual(
+          launcher.findCheckout(quiet, { projectsRoot: root, repoPaths: { "acme/widgets": path.join(root, "other-host") } }),
+          path.join(root, "other-host"),
+        );
+        assert.strictEqual(
+          launcher.findCheckout(quiet, { projectsRoot: root, repoPaths: { "acme/widgets": path.join(root, "missing") } }),
+          null,
+          "a stale explicit path must not fall through to a guess",
+        );
+        assert.strictEqual(launcher.findCheckout({ ...quiet, repo: "acme/none" }, { projectsRoot: root, repoPaths: {} }), null);
+      } finally {
+        fsSync.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("main.js wiring: claude:launch looks the PR up by id in the poller snapshot", () => {
+      const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /"claude:launch"[\s\S]{0,300}validatePrId[\s\S]{0,200}getSnapshot\(\)/);
+    });
+  }
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

@@ -89,3 +89,11 @@ export function validateClipboardText(value: unknown): string {
   }
   return value;
 }
+
+/** Validates the PR id the renderer asks to start a Claude session on. */
+export function validatePrId(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 200) {
+    throw new Error("launchClaude: expected a PR id.");
+  }
+  return value;
+}

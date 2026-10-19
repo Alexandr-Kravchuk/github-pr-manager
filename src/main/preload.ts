@@ -18,6 +18,7 @@ const api: PrManagerApi = {
   getAppVersion: () => ipcRenderer.invoke("app:getVersion"),
   getWhatsNew: () => ipcRenderer.invoke("app:getWhatsNew"),
   dismissWhatsNew: () => ipcRenderer.invoke("app:dismissWhatsNew"),
+  launchClaude: (prId) => ipcRenderer.invoke("claude:launch", prId),
   copyText: (text) => ipcRenderer.invoke("app:copyText", text),
   onSnapshot: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DashboardResponse) =>

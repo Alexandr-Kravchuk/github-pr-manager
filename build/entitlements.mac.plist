@@ -8,5 +8,9 @@
   <true/>
   <key>com.apple.security.cs.disable-library-validation</key>
   <true/>
+  <!-- "Start Claude" opens Terminal through osascript (Apple events); the
+       hardened runtime blocks those without this entitlement. -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
 </dict>
 </plist>

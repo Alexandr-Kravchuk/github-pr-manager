@@ -172,11 +172,12 @@ export const TABLE_COLUMNS: readonly TableColumn[] = [
   {
     key: "actions",
     label: "",
-    title: "Copy link, ignore, mark as seen",
+    title: "Copy link, start Claude, ignore, mark as seen",
     align: "right",
     sortable: false,
     defaultDir: "asc",
     // Three icon buttons at their widest (mark-as-seen only appears sometimes).
+    // The labelled Claude button adds CLAUDE_ACTIONS_EXTRA_REM while it is on.
     minWidthRem: 5,
   },
 ];
@@ -224,6 +225,14 @@ export function clampPrColumnWidth(rem: unknown): number | null {
  * leaves it at its own minimum — the un-dragged, elastic state — which is
  * exactly {@link TABLE_MIN_WIDTH_REM}.
  */
+/** Width the labelled Claude button (the spark + "Drive to green", the widest) adds to the actions column. */
+export const CLAUDE_ACTIONS_EXTRA_REM = 8;
+
+/** The actions column's width — wider only while the Claude button is shown. */
+export function actionsColumnRem(claudeEnabled: boolean): number {
+  return COLUMN_BY_KEY.actions.minWidthRem + (claudeEnabled ? CLAUDE_ACTIONS_EXTRA_REM : 0);
+}
+
 export function tableMinWidthRem(prWidthRem: number | null): number {
   if (prWidthRem === null) return TABLE_MIN_WIDTH_REM;
   return TABLE_MIN_WIDTH_REM - PR_COLUMN_MIN_REM + (clampPrColumnWidth(prWidthRem) ?? PR_COLUMN_MIN_REM);
