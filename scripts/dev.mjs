@@ -110,15 +110,52 @@ try {
   shutdown(1);
 }
 
-// Compile the main process before launching Electron (it runs the compiled
-// dist/main output, not the .ts source).
-const tscMain = run("npx", ["tsc", "-p", "tsconfig.main.json"]);
-tscMain.on("exit", (code) => {
-  if (code !== 0) {
-    shutdown(code ?? 1);
+// Compile the main process in watch mode and (re)launch Electron after every
+// successful build. Electron runs the compiled dist/main output and only reads
+// it at startup, so a one-off compile left a running dev app on the main code
+// it started with: a change to main.ts / claude-launch.ts looked applied (the
+// renderer hot-reloaded) while the process kept running the old code — and
+// settings saved through it silently dropped the keys the old validation did
+// not know.
+let electron = null;
+// Electron children killed on purpose for a restart; their exit must not end the session.
+const replaced = new WeakSet();
+
+function launchElectron() {
+  console.log(`[dev] Vite ready at ${DEV_URL}, launching Electron…`);
+  const child = run("npx", ["electron", "."], { ELECTRON_RENDERER_URL: DEV_URL });
+  child.on("exit", (electronCode) => {
+    if (replaced.has(child)) return;
+    shutdown(electronCode ?? 0);
+  });
+  electron = child;
+}
+
+function restartElectron() {
+  if (!electron) {
+    launchElectron();
     return;
   }
-  console.log(`[dev] Vite ready at ${DEV_URL}, launching Electron…`);
-  const electron = run("npx", ["electron", "."], { ELECTRON_RENDERER_URL: DEV_URL });
-  electron.on("exit", (electronCode) => shutdown(electronCode ?? 0));
+  console.log("[dev] main process rebuilt — restarting Electron…");
+  const old = electron;
+  replaced.add(old);
+  old.once("exit", launchElectron);
+  killChild(old);
+}
+
+const tscMain = spawn("npx", ["tsc", "-p", "tsconfig.main.json", "--watch", "--preserveWatchOutput"], {
+  stdio: ["ignore", "pipe", "inherit"],
+  shell: process.platform === "win32",
+  env: process.env,
 });
+children.push(tscMain);
+tscMain.stdout.setEncoding("utf8");
+tscMain.stdout.on("data", (chunk) => {
+  process.stdout.write(chunk);
+  // tsc --watch ends every pass with "Found N error(s). Watching for file changes."
+  const m = /Found (\d+) errors?\. Watching for file changes/.exec(chunk);
+  if (!m) return;
+  if (m[1] === "0") restartElectron();
+  else if (!electron) console.error("[dev] main process has type errors — fix them to launch Electron.");
+});
+tscMain.on("exit", (code) => shutdown(code ?? 1));
