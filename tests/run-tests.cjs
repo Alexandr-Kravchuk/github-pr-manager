@@ -3378,6 +3378,7 @@ test("activeFilterCount: every narrowing control at once", () =>
         ["blocked: approved behind base", sigPr({ isBehindBase: true, awaitingReview: false, hasHumanApproval: true })],
         ["not author: behind base", sigPr({ isBehindBase: true, roles: ["reviewed"], awaitingReview: false, hasHumanApproval: true })],
         ["blocked: merge conflict", sigPr({ hasConflicts: true })],
+        ["attention: approved but waits for a lower PR of its stack", sigPr({ hasHumanApproval: true, awaitingReview: false, blockedByStack: true })],
         [
           "blocked: unresolved thread on your own PR",
           sigPr({ awaitingReview: false, unresolvedThreads: 2 }),
