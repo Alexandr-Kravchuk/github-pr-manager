@@ -30,7 +30,8 @@ import { ClaudeEnabledContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
   DEFAULT_TABLE_SORT,
-  clampPrColumnWidth,
+  parseColumnWidths,
+  type ColumnWidths,
   isTableSort,
   nextTableSort,
   sortForTable,
@@ -143,12 +144,12 @@ interface ViewPrefs {
    */
   tableSort: TableSort;
   /**
-   * The Cozy table's Pull-request column width in rem, or null for the elastic
-   * default (the column takes whatever the window has left over). Persisted
-   * because a dragged column width that resets on every launch is worse than
-   * not being draggable at all.
+   * The Cozy table's dragged column widths in rem; a column missing from the map
+   * has its default (the Pull-request column's default is elastic — it takes
+   * whatever the window has left over). Persisted because a dragged column
+   * width that resets on every launch is worse than not being draggable at all.
    */
-  tablePrWidthRem: number | null;
+  tableColumnWidths: ColumnWidths;
   groupBy: GroupMode;
   attentionOnly: boolean;
   failingOnly: boolean;
@@ -168,7 +169,7 @@ const DEFAULT_PREFS: ViewPrefs = {
   viewMode: DEFAULT_VIEW_MODE,
   sortBy: "action",
   tableSort: DEFAULT_TABLE_SORT,
-  tablePrWidthRem: null,
+  tableColumnWidths: {},
   groupBy: "repo",
   attentionOnly: false,
   failingOnly: false,
@@ -196,11 +197,12 @@ function loadPrefs(): ViewPrefs {
       // list with no way back to a working view.
       viewMode: isViewMode(p.viewMode) ? p.viewMode : DEFAULT_VIEW_MODE,
       tableSort: isTableSort(p.tableSort) ? p.tableSort : DEFAULT_TABLE_SORT,
-      // `clampPrColumnWidth` answers null for anything that isn't a real width,
-      // which is the elastic default — so a width saved on a 4K display can't
-      // come back as a column wider than a laptop screen, and a corrupt value
-      // can't come back as a zero-width column.
-      tablePrWidthRem: clampPrColumnWidth(p.tablePrWidthRem),
+      // `parseColumnWidths` clamps every width and drops anything that isn't
+      // one — so a width saved on a 4K display can't come back as a column
+      // wider than a laptop screen, and a corrupt value can't come back as a
+      // zero-width column. `tablePrWidthRem` is the pre-2.1 key, when only the
+      // Pull-request column could be dragged; its width carries over.
+      tableColumnWidths: parseColumnWidths(p.tableColumnWidths ?? { pr: p.tablePrWidthRem }),
       sortBy: oneOf(p.sortBy, ["action", "waiting", "active", "newest"] as const, "action"),
       groupBy: oneOf(p.groupBy, ["none", "repo", "issue", "parent"] as const, "repo"),
       attentionOnly: Boolean(p.attentionOnly),
@@ -267,7 +269,7 @@ export function App() {
   // how the same rows are drawn, so `clearFilters` leaves them alone.
   const [viewMode, setViewMode] = useState<ViewMode>(boot.viewMode);
   const [tableSort, setTableSort] = useState<TableSort>(boot.tableSort);
-  const [tablePrWidthRem, setTablePrWidthRem] = useState<number | null>(boot.tablePrWidthRem);
+  const [tableColumnWidths, setTableColumnWidths] = useState<ColumnWidths>(boot.tableColumnWidths);
   const onTableSort = useCallback((key: TableColumnKey) => {
     setTableSort((current) => nextTableSort(current, key));
   }, []);
@@ -401,7 +403,7 @@ export function App() {
       viewMode,
       sortBy,
       tableSort,
-      tablePrWidthRem,
+      tableColumnWidths,
       groupBy,
       attentionOnly,
       failingOnly,
@@ -418,7 +420,7 @@ export function App() {
     viewMode,
     sortBy,
     tableSort,
-    tablePrWidthRem,
+    tableColumnWidths,
     groupBy,
     attentionOnly,
     failingOnly,
@@ -1205,8 +1207,8 @@ export function App() {
             prs={tableRows}
             sort={tableSort}
             onSort={onTableSort}
-            prWidthRem={tablePrWidthRem}
-            onPrWidthChange={setTablePrWidthRem}
+            columnWidths={tableColumnWidths}
+            onColumnWidthsChange={setTableColumnWidths}
             jiraBaseUrl={jiraStatus?.baseUrl ?? null}
             trackComments={trackComments}
             onOpen={openPr}

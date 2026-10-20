@@ -2261,13 +2261,14 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
   });
   const rev = (login, reviewState) => ({ login, avatarUrl: "", reviewState });
 
-  test("TABLE_COLUMNS: ten unique columns, Actions the only unsortable one", () => {
+  test("TABLE_COLUMNS: eleven unique columns, only Reviewers and Actions unsortable", () => {
     const keys = prTable.TABLE_COLUMNS.map((c) => c.key);
-    assert.strictEqual(keys.length, 10);
+    assert.strictEqual(keys.length, 11);
     assert.strictEqual(new Set(keys).size, keys.length, "duplicate column key");
+    assert.ok(!keys.includes("role"), "the Role column was removed");
     assert.deepStrictEqual(
       prTable.TABLE_COLUMNS.filter((c) => !c.sortable).map((c) => c.key),
-      ["actions"],
+      ["reviewers", "actions"],
     );
   });
 
@@ -2284,19 +2285,30 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     );
   });
 
-  test("clampPrColumnWidth: a dragged width is held inside the column's bounds", () => {
-    assert.strictEqual(prTable.clampPrColumnWidth(40), 40);
-    assert.strictEqual(prTable.clampPrColumnWidth(2), prTable.PR_COLUMN_MIN_REM);
-    assert.strictEqual(prTable.clampPrColumnWidth(5000), prTable.PR_COLUMN_MAX_REM);
-    assert.ok(prTable.PR_COLUMN_MIN_REM > 0 && prTable.PR_COLUMN_MAX_REM > prTable.PR_COLUMN_MIN_REM);
+  test("clampColumnWidth: a dragged width is held inside the bounds", () => {
+    assert.strictEqual(prTable.clampColumnWidth(40), 40);
+    assert.strictEqual(prTable.clampColumnWidth(0.5), prTable.COLUMN_MIN_REM);
+    assert.strictEqual(prTable.clampColumnWidth(5000), prTable.COLUMN_MAX_REM);
+    assert.ok(prTable.COLUMN_MIN_REM > 0 && prTable.COLUMN_MAX_REM > prTable.COLUMN_MIN_REM);
   });
-  test("clampPrColumnWidth: anything that isn't a width answers null — the elastic default", () => {
+  test("clampColumnWidth: anything that isn't a width answers null — the default width", () => {
     // Null is the un-dragged state, so a corrupt persisted value (or a NaN from
     // measuring a column that isn't on screen) restores the default layout
     // instead of collapsing the column to nothing.
     for (const bad of [NaN, Infinity, null, undefined, "32", {}]) {
-      assert.strictEqual(prTable.clampPrColumnWidth(bad), null, String(bad));
+      assert.strictEqual(prTable.clampColumnWidth(bad), null, String(bad));
     }
+  });
+  test("parseColumnWidths: keeps known columns, clamps, drops the rest one by one", () => {
+    assert.deepStrictEqual(
+      prTable.parseColumnWidths({ pr: 40, author: 0.1, role: 9, ci: "x", age: 5000 }),
+      { pr: 40, author: prTable.COLUMN_MIN_REM, age: prTable.COLUMN_MAX_REM },
+    );
+    for (const bad of [null, undefined, 3, "pr"]) {
+      assert.deepStrictEqual(prTable.parseColumnWidths(bad), {}, String(bad));
+    }
+    // The pre-2.1 shape migrates through the same parser: `{ pr: null }` means elastic.
+    assert.deepStrictEqual(prTable.parseColumnWidths({ pr: null }), {});
   });
 
   test("repoShortName: drops the owner, keeps a bare name as is", () => {
@@ -2304,23 +2316,26 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     assert.strictEqual(prTable.repoShortName("engineering/creatio-ui"), "creatio-ui");
     assert.strictEqual(prTable.repoShortName("clio"), "clio");
   });
-  test("compareForColumn pr: sorts by the short name the cell shows", () => {
+  test("compareForColumn repo: sorts by the short name the cell shows", () => {
     const a = { repo: "zeta-org/alpha", number: 1 };
     const b = { repo: "acme/beta", number: 1 };
-    assert.ok(prTable.compareForColumn(a, b, "pr", { trackComments: false }) < 0);
+    assert.ok(prTable.compareForColumn(a, b, "repo", { trackComments: false }) < 0);
   });
 
-  test("tableMinWidthRem: un-dragged is the plain sum; dragged swaps in that width", () => {
-    assert.strictEqual(prTable.tableMinWidthRem(null), prTable.TABLE_MIN_WIDTH_REM);
-    const others = prTable.TABLE_MIN_WIDTH_REM - prTable.PR_COLUMN_MIN_REM;
-    assert.strictEqual(prTable.tableMinWidthRem(50), others + 50);
-    // A width outside the bounds must not widen the table past them either —
-    // the floor is what keeps the other nine columns from being squeezed.
-    assert.strictEqual(prTable.tableMinWidthRem(1), others + prTable.PR_COLUMN_MIN_REM);
+  test("tableMinWidthRem: un-dragged is the plain sum; a dragged column swaps in its width", () => {
+    assert.strictEqual(prTable.tableMinWidthRem({}, false), prTable.TABLE_MIN_WIDTH_REM);
+    const prMin = prTable.TABLE_COLUMNS.find((c) => c.key === "pr").minWidthRem;
+    const authorMin = prTable.TABLE_COLUMNS.find((c) => c.key === "author").minWidthRem;
     assert.strictEqual(
-      prTable.tableMinWidthRem(5000),
-      others + prTable.PR_COLUMN_MAX_REM,
+      prTable.tableMinWidthRem({ pr: 50, author: 2 }, false),
+      prTable.TABLE_MIN_WIDTH_REM - prMin + 50 - authorMin + 2,
     );
+    // The Claude button widens an undragged Actions column, not a dragged one.
+    assert.strictEqual(
+      prTable.tableMinWidthRem({}, true),
+      prTable.TABLE_MIN_WIDTH_REM + prTable.CLAUDE_ACTIONS_EXTRA_REM,
+    );
+    assert.strictEqual(prTable.tableMinWidthRem({ actions: 6 }, true), prTable.tableMinWidthRem({ actions: 6 }, false));
   });
 
   test("isTableSort: accepts a stored sortable column with a direction", () =>
@@ -2329,6 +2344,7 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     // The stored value drives `sortForTable`, so a column that no longer exists
     // must fall back to the default instead of ordering the table by nothing.
     for (const bad of [
+      { key: "role", dir: "asc" },
       { key: "reviewers", dir: "asc" },
       { key: "actions", dir: "asc" },
       { key: "age", dir: "up" },
@@ -2384,11 +2400,16 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
         CTX,
       ) < 0,
     ));
-  test("compareForColumn(pr): repository first, then number", () => {
-    assert.ok(prTable.compareForColumn(tpr({ repo: "aaa" }), tpr({ repo: "zzz" }), "pr", CTX) < 0);
+  test("compareForColumn(repo): repository first, then number", () => {
+    assert.ok(prTable.compareForColumn(tpr({ repo: "aaa" }), tpr({ repo: "zzz" }), "repo", CTX) < 0);
     assert.ok(
-      prTable.compareForColumn(tpr({ number: 7 }), tpr({ number: 700 }), "pr", CTX) < 0,
+      prTable.compareForColumn(tpr({ number: 7 }), tpr({ number: 700 }), "repo", CTX) < 0,
       "same repo orders by number, not by the number's text",
+    );
+  });
+  test("compareForColumn(pr): by number alone, across repositories", () => {
+    assert.ok(
+      prTable.compareForColumn(tpr({ repo: "zzz", number: 7 }), tpr({ repo: "aaa", number: 700 }), "pr", CTX) < 0,
     );
   });
   test("compareForColumn(author): a PR with no author sorts last, not first", () =>

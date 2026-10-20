@@ -6,16 +6,16 @@ import {
   TABLE_COLUMNS,
   ageDays,
   approvalTally,
-  clampPrColumnWidth,
-  primaryRole,
+  clampColumnWidth,
+  defaultColumnRem,
+  type ColumnWidths,
   repoShortName,
   reviewRank,
-  actionsColumnRem,
   tableMinWidthRem,
   type TableColumnKey,
   type TableSort,
 } from "../../../shared/pr-table";
-import type { PullRequest } from "../../../shared/types";
+import type { PullRequest, ReviewerState } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { ClaudeButton } from "./ClaudeButton";
 import { ClaudeEnabledContext } from "./claude-context";
@@ -37,13 +37,13 @@ interface Props {
   sort: TableSort;
   onSort: (key: TableColumnKey) => void;
   /**
-   * The Pull-request column's width in rem, or null while it has never been
-   * dragged — which is the elastic default, where the column absorbs whatever
-   * width the window has left over.
+   * Dragged column widths in rem. A column missing from the map has its
+   * default width; for the Pull-request column that default is elastic — it
+   * absorbs whatever width the window has left over.
    */
-  prWidthRem: number | null;
-  /** Called with a new width, or null to go back to elastic (double-click). */
-  onPrWidthChange: (rem: number | null) => void;
+  columnWidths: ColumnWidths;
+  /** Called with the whole new map; a column reset by double-click is dropped from it. */
+  onColumnWidthsChange: (widths: ColumnWidths) => void;
   onOpen: (pr: PullRequest) => void;
   onMarkSeen: (pr: PullRequest) => void;
   onToggleIgnore: (pr: PullRequest) => void;
@@ -70,31 +70,36 @@ const SIGNAL_TITLE: Record<PrSignal, string> = {
   idle: "Nothing pending",
 };
 
-const ROLE_LABEL = { author: "Author", reviewer: "To review", reviewed: "Reviewed" } as const;
+/** The ring around a reviewer's avatar — their state at a glance. */
+const REVIEWER_RING: Record<ReviewerState, string> = {
+  approved: "ring-emerald-500",
+  changes_requested: "ring-red-500",
+  pending: "ring-line-strong",
+};
 
-const ROLE_CLASS = {
-  author: "text-sky-700 dark:text-sky-300",
-  reviewer: "text-violet-700 dark:text-violet-300",
-  reviewed: "text-fg-muted",
-} as const;
+/** Avatars shown before the rest collapse into "+N". */
+const MAX_REVIEWER_AVATARS = 5;
 
 /**
- * Per-column padding and alignment. Widths are NOT here — they come from each
- * column's `minWidthRem` in `shared/pr-table.ts` via the `<colgroup>` below, so
- * the numbers that define the layout and the number that stops the table
- * shrinking (`TABLE_MIN_WIDTH_REM`) can't disagree.
+ * Per-column padding and alignment. Widths are NOT here — they come from the
+ * dragged widths or each column's default in `shared/pr-table.ts` via the
+ * `<colgroup>` below, so the numbers that define the layout and the number that
+ * stops the table shrinking (`tableMinWidthRem`) can't disagree.
+ * `overflow-hidden` everywhere: a column dragged narrower than its content must
+ * clip it, not paint over its neighbour.
  */
 const COLUMN_CLASS: Record<TableColumnKey, string> = {
-  signal: "px-1 text-center",
-  pr: "px-2",
-  author: "px-2",
-  role: "px-2",
-  review: "px-2",
-  ci: "px-2",
-  comments: "px-2 text-right",
-  age: "px-2 text-right",
-  updated: "px-2 text-right",
-  actions: "px-2 text-right",
+  signal: "overflow-hidden px-1 text-center",
+  repo: "overflow-hidden px-2",
+  pr: "overflow-hidden px-2",
+  author: "overflow-hidden px-2 text-center",
+  reviewers: "overflow-hidden px-2",
+  review: "overflow-hidden px-2",
+  ci: "overflow-hidden px-2",
+  comments: "overflow-hidden px-2 text-right",
+  age: "overflow-hidden px-2 text-right",
+  updated: "overflow-hidden px-2 text-right",
+  actions: "overflow-hidden px-2 text-right",
 };
 
 /** One rem in CSS pixels, so a pointer delta can be stored as rem. */
@@ -166,36 +171,49 @@ export function PrTable({
   prs,
   sort,
   onSort,
-  prWidthRem,
-  onPrWidthChange,
+  columnWidths,
+  onColumnWidthsChange,
   onOpen,
   onMarkSeen,
   onToggleIgnore,
   trackComments,
   jiraBaseUrl = null,
 }: Props) {
-  // The header cell is measured at drag start rather than derived from
-  // `prWidthRem`: until the first drag the column is elastic, so its only width
-  // is the one it happens to have on screen, and starting anywhere else would
-  // make the column jump under the cursor on the first pixel of movement.
-  const prHeadRef = useRef<HTMLTableCellElement | null>(null);
-  const dragRef = useRef<{ startX: number; startRem: number; rem: number } | null>(null);
+  const dragRef = useRef<{ key: TableColumnKey; startX: number; startRem: number; rem: number } | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const scrollerHeight = useScrollerHeight(scrollerRef);
 
-  const beginResize = useCallback((event: React.PointerEvent<HTMLElement>) => {
+  const setWidth = useCallback(
+    (key: TableColumnKey, rem: number | null) => {
+      const next = { ...columnWidths };
+      if (rem === null) delete next[key];
+      else next[key] = rem;
+      onColumnWidthsChange(next);
+    },
+    [columnWidths, onColumnWidthsChange],
+  );
+
+  // The grip's own header cell is measured at drag start rather than read from
+  // `columnWidths`: an undragged column — the elastic PR one above all — has
+  // only the width it happens to have on screen, and starting anywhere else
+  // would make the column jump under the cursor on the first pixel of movement.
+  const headerRem = (grip: HTMLElement): number =>
+    (grip.parentElement?.offsetWidth ?? 0) / remToPx();
+
+  const beginResize = useCallback((key: TableColumnKey, event: React.PointerEvent<HTMLElement>) => {
     // Without this the browser starts a text selection instead, and the drag
     // paints the whole header blue. It also suppresses the focus a pointerdown
     // would normally give the grip, hence the explicit `focus()` — otherwise the
     // arrow keys below do nothing right after a drag, which is exactly when
     // someone reaches for them to nudge the edge a couple of rem.
     event.preventDefault();
+    event.stopPropagation();
     event.currentTarget.focus();
-    const rem = remToPx();
     dragRef.current = {
+      key,
       startX: event.clientX,
-      startRem: (prHeadRef.current?.offsetWidth ?? 0) / rem,
-      rem,
+      startRem: headerRem(event.currentTarget),
+      rem: remToPx(),
     };
     // Pointer capture keeps the moves coming after the cursor leaves the 5px
     // grip — which it does immediately, since the column follows the cursor.
@@ -206,9 +224,9 @@ export function PrTable({
     (event: React.PointerEvent<HTMLElement>) => {
       const drag = dragRef.current;
       if (!drag) return;
-      onPrWidthChange(clampPrColumnWidth(drag.startRem + (event.clientX - drag.startX) / drag.rem));
+      setWidth(drag.key, clampColumnWidth(drag.startRem + (event.clientX - drag.startX) / drag.rem));
     },
-    [onPrWidthChange],
+    [setWidth],
   );
 
   const endResize = useCallback((event: React.PointerEvent<HTMLElement>) => {
@@ -221,24 +239,26 @@ export function PrTable({
   // Arrow keys move the edge too: the grip is a 5px target, and a resize that
   // only exists for a mouse is a resize half the users can't reach.
   const keyResize = useCallback(
-    (event: React.KeyboardEvent<HTMLElement>) => {
-      const step = event.key === "ArrowLeft" ? -2 : event.key === "ArrowRight" ? 2 : 0;
+    (key: TableColumnKey, event: React.KeyboardEvent<HTMLElement>) => {
+      const step = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
       if (step === 0) return;
       event.preventDefault();
-      const current = prWidthRem ?? (prHeadRef.current?.offsetWidth ?? 0) / remToPx();
-      onPrWidthChange(clampPrColumnWidth(current + step));
+      const current = columnWidths[key] ?? headerRem(event.currentTarget);
+      setWidth(key, clampColumnWidth(current + step));
     },
-    [prWidthRem, onPrWidthChange],
+    [columnWidths, setWidth],
   );
 
   const claudeEnabled = useContext(ClaudeEnabledContext);
+  // A dragged PR column has an exact width, so the window's slack needs the
+  // trailing filler column instead.
+  const prFixed = columnWidths.pr !== undefined;
 
   return (
     // Three things hold the layout together. `table-fixed` + the `<colgroup>`
     // pin each column at its declared width, so a long title truncates instead
     // of pushing the numeric columns aside; the table's `min-width` — the sum of
-    // those declared minimums, with the dragged Pull-request width in place of
-    // its own — is what keeps them from being squeezed on a narrow window, since
+    // those widths, dragged or default — is what keeps them from being squeezed on a narrow window, since
     // a fixed-layout table ignores a `min-width` set on the cells; and
     // `.table-scroll` (a styled, non-overlay scrollbar — macOS's own fades out
     // seconds after the last scroll) scrolls the table inside a box bounded by
@@ -252,7 +272,7 @@ export function PrTable({
       <table
         className="w-full table-fixed border-collapse text-sm"
         style={{
-          minWidth: `${tableMinWidthRem(prWidthRem) - actionsColumnRem(false) + actionsColumnRem(claudeEnabled)}rem`,
+          minWidth: `${tableMinWidthRem(columnWidths, claudeEnabled)}rem`,
         }}
       >
         <colgroup>
@@ -261,17 +281,13 @@ export function PrTable({
               key={col.key}
               // Until it is dragged, the PR column carries no width at all: it
               // then absorbs the slack on a wide window, where a declared width
-              // would instead be spread proportionally over all ten columns and
+              // would instead be spread proportionally over all the columns and
               // grow the numeric ones nobody needs wider. Once dragged it gets
               // its exact width and the filler column below takes the slack.
               style={
-                col.key === "pr"
-                  ? prWidthRem === null
-                    ? undefined
-                    : { width: `${prWidthRem}rem` }
-                  : col.key === "actions"
-                    ? { width: `${actionsColumnRem(claudeEnabled)}rem` }
-                    : { width: `${col.minWidthRem}rem` }
+                col.key === "pr" && columnWidths.pr === undefined
+                  ? undefined
+                  : { width: `${columnWidths[col.key] ?? defaultColumnRem(col.key, claudeEnabled)}rem` }
               }
             />
           ))}
@@ -279,7 +295,7 @@ export function PrTable({
               land somewhere; an auto-width filler takes all of it, where
               otherwise the browser would hand each column a proportional share
               and quietly widen the one just dragged to an exact size. */}
-          {prWidthRem !== null && <col />}
+          {prFixed && <col />}
         </colgroup>
         {/* Sticky inside the scroll box: the rows move under the headers, so the
             column you sorted by — and its arrow — stay in sight. It needs its
@@ -292,7 +308,6 @@ export function PrTable({
               return (
                 <th
                   key={col.key}
-                  ref={col.key === "pr" ? prHeadRef : undefined}
                   scope="col"
                   aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : undefined}
                   className={cn("relative py-1.5 font-medium", COLUMN_CLASS[col.key])}
@@ -309,36 +324,39 @@ export function PrTable({
                     >
                       <span className="truncate">{col.label}</span>
                       {/* The arrow is drawn only on the active column: a per-header
-                          placeholder arrow reads as "sorted by this" on all ten. */}
+                          placeholder arrow reads as "sorted by this" on every column. */}
                       {active && (
                         <span aria-hidden className="text-[10px] leading-none">
                           {sort.dir === "asc" ? "▲" : "▼"}
                         </span>
                       )}
                     </button>
+                  ) : col.label ? (
+                    <span className="block truncate" title={col.title}>
+                      {col.label}
+                    </span>
                   ) : (
                     <span className="sr-only">{col.title}</span>
                   )}
-                  {col.key === "pr" && (
-                    <span
-                      role="separator"
-                      aria-orientation="vertical"
-                      aria-label="Resize the Pull request column (double-click to reset)"
-                      tabIndex={0}
-                      title="Drag to resize · double-click to reset"
-                      onPointerDown={beginResize}
-                      onPointerMove={continueResize}
-                      onPointerUp={endResize}
-                      onPointerCancel={endResize}
-                      onDoubleClick={() => onPrWidthChange(null)}
-                      onKeyDown={keyResize}
-                      className="absolute -right-0.5 top-0 z-[1] h-full w-1.5 cursor-col-resize touch-none rounded bg-transparent transition-colors hover:bg-sky-500/50 focus-visible:bg-sky-500/50 focus-visible:outline-none"
-                    />
-                  )}
+                  {/* Every column has a grip on its right edge. */}
+                  <span
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label={`Resize the ${col.label || col.key} column (double-click to reset)`}
+                    tabIndex={0}
+                    title="Drag to resize · double-click to reset"
+                    onPointerDown={(e) => beginResize(col.key, e)}
+                    onPointerMove={continueResize}
+                    onPointerUp={endResize}
+                    onPointerCancel={endResize}
+                    onDoubleClick={() => setWidth(col.key, null)}
+                    onKeyDown={(e) => keyResize(col.key, e)}
+                    className="absolute right-0 top-0 z-[1] h-full w-1.5 cursor-col-resize touch-none rounded bg-transparent transition-colors hover:bg-sky-500/50 focus-visible:bg-sky-500/50 focus-visible:outline-none"
+                  />
                 </th>
               );
             })}
-            {prWidthRem !== null && <th aria-hidden />}
+            {prFixed && <th aria-hidden />}
           </tr>
         </thead>
         <tbody>
@@ -346,7 +364,7 @@ export function PrTable({
             <Row
               key={pr.id}
               pr={pr}
-              filler={prWidthRem !== null}
+              filler={prFixed}
               onOpen={onOpen}
               onMarkSeen={onMarkSeen}
               onToggleIgnore={onToggleIgnore}
@@ -390,7 +408,6 @@ function Row({
   }, [pr.url]);
 
   const signal = prSignal(pr, { trackComments });
-  const role = primaryRole(pr);
   const jiraUrl = jiraBrowseUrl(jiraBaseUrl, pr.issueKey);
   // Same rule as the card: the key is dropped from the title only when the
   // badge next to it actually carries it.
@@ -412,19 +429,26 @@ function Row({
         />
       </td>
 
+      <td className={cn("py-1.5", COLUMN_CLASS.repo)}>
+        <span className="block truncate text-xs text-fg-subtle" title={`${pr.hostLabel} · ${pr.repo}`}>
+          {repoShortName(pr.repo)}
+        </span>
+      </td>
+
       <td className={cn("py-1.5", COLUMN_CLASS.pr)}>
         <div className="flex min-w-0 items-center gap-1.5">
-          {/* The repo prefix shows without its owner and is what truncates,
-              not the title: the title is the cell's actual content. The number
-              never truncates — it is the PR's identity — and the full
-              `host · owner/repo` is on hover. */}
-          <span
-            className="flex min-w-0 shrink items-center gap-1 text-xs text-fg-subtle"
-            title={`${pr.hostLabel} · ${pr.repo}`}
-          >
-            <span className="max-w-[11rem] truncate">{repoShortName(pr.repo)}</span>
-            <span className="shrink-0 text-sm font-semibold tabular-nums text-fg-secondary">#{pr.number}</span>
+          {/* Fixed widths for the number and the Jira key so every title starts
+              at the same x — a 3-digit number next to a 4-digit one otherwise
+              shifts the title by a character. The number never truncates: it
+              is the PR's identity. */}
+          <span className="w-[3.25rem] shrink-0 text-sm font-semibold tabular-nums text-fg-secondary">
+            #{pr.number}
           </span>
+          {pr.returnedToMe && (
+            <span title="New changes since you last looked" className="shrink-0 text-violet-600 dark:text-violet-300">
+              ↩
+            </span>
+          )}
           {pr.isDraft && (
             <span className="shrink-0 rounded bg-elevated px-1 text-[10px] text-fg-muted">Draft</span>
           )}
@@ -444,7 +468,7 @@ function Row({
               type="button"
               onClick={() => window.api.openExternal(jiraUrl).catch(() => {})}
               title={`Open ${pr.issueKey} in Jira`}
-              className="shrink-0 rounded border border-indigo-500/40 bg-indigo-500/15 px-1 text-[10px] font-medium text-indigo-700 hover:bg-indigo-500/25 dark:text-indigo-300"
+              className="w-[5.25rem] shrink-0 rounded border border-indigo-500/40 bg-indigo-500/15 px-1 text-center text-[10px] font-medium text-indigo-700 hover:bg-indigo-500/25 dark:text-indigo-300"
             >
               {pr.issueKey}
             </button>
@@ -462,32 +486,22 @@ function Row({
 
       <td className={cn("py-1.5", COLUMN_CLASS.author)}>
         {pr.author ? (
-          <span className="flex min-w-0 items-center gap-1.5 text-xs text-fg-muted">
-            <img
-              src={pr.author.avatarUrl}
-              alt=""
-              width={16}
-              height={16}
-              className="shrink-0 rounded-full"
-            />
-            <span className="truncate">{pr.author.login}</span>
-          </span>
+          // Avatar only — the login is on hover, like the Reviewers column.
+          <img
+            src={pr.author.avatarUrl}
+            alt={pr.author.login}
+            title={pr.author.login}
+            width={18}
+            height={18}
+            className="rounded-full"
+          />
         ) : (
           <span className="text-xs text-fg-faint">—</span>
         )}
       </td>
 
-      <td className={cn("py-1.5 text-xs", COLUMN_CLASS.role)}>
-        {role ? (
-          <span className={ROLE_CLASS[role]}>{ROLE_LABEL[role]}</span>
-        ) : (
-          <span className="text-fg-faint">—</span>
-        )}
-        {pr.returnedToMe && (
-          <span title="New changes since you last looked" className="ml-1 text-violet-600 dark:text-violet-300">
-            ↩
-          </span>
-        )}
+      <td className={cn("py-1.5", COLUMN_CLASS.reviewers)}>
+        <ReviewersCell pr={pr} />
       </td>
 
       <td className={cn("py-1.5 text-xs", COLUMN_CLASS.review)}>
@@ -569,6 +583,35 @@ function Row({
 
       {filler && <td aria-hidden />}
     </tr>
+  );
+}
+
+/**
+ * Requested reviewers as overlapping avatars, each ringed in its state's color;
+ * past {@link MAX_REVIEWER_AVATARS} the rest collapse into "+N". Logins and
+ * states are on hover, since a face alone doesn't say who or what.
+ */
+function ReviewersCell({ pr }: { pr: PullRequest }) {
+  if (pr.reviewers.length === 0) return <span className="text-xs text-fg-faint">—</span>;
+  const shown = pr.reviewers.slice(0, MAX_REVIEWER_AVATARS);
+  const rest = pr.reviewers.length - shown.length;
+  return (
+    <span
+      className="flex items-center -space-x-1"
+      title={pr.reviewers.map((r) => `${r.login}: ${r.reviewState.replace("_", " ")}`).join("\n")}
+    >
+      {shown.map((r) => (
+        <img
+          key={r.login}
+          src={r.avatarUrl}
+          alt={r.login}
+          width={18}
+          height={18}
+          className={cn("shrink-0 rounded-full ring-2", REVIEWER_RING[r.reviewState])}
+        />
+      ))}
+      {rest > 0 && <span className="pl-2 text-xs text-fg-muted">+{rest}</span>}
+    </span>
   );
 }
 

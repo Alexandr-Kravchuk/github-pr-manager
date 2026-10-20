@@ -59,7 +59,7 @@ Three layers:
   display variants behind the header's Finder-style switch — `roomy` cards,
   `cozy` table, `compact` tiles — with the guard that validates the persisted
   choice and the two predicates App.tsx gates grouping and the sort dropdown on),
-  `pr-table.ts` (the Cozy table's ten columns and its ordering: a comparator
+  `pr-table.ts` (the Cozy table's eleven columns and its ordering: a comparator
   per column, always ascending in terms of what the cell SHOWS, plus what a
   header click does) and `claude-launch.ts` (the opt-in "start Claude on this
   PR" button: which prompt a PR's state picks — blocked → drive, review due →
@@ -96,10 +96,12 @@ Three layers:
   `TABLE_MIN_WIDTH_REM` sums them and goes on the table as a `min-width`,
   because a fixed-layout table ignores a `min-width` set on the cells — that one
   number is what keeps a narrow window from squeezing the title column down to
-  one letter. The Pull-request column is the only resizable one (a grip on its
-  header edge, drag or arrow keys, double-click to reset, width persisted in rem
-  with the other view prefs): until it is dragged it carries no width and
-  absorbs the window's slack, and once dragged a trailing auto-width filler
+  one letter. Every column is resizable (a grip on its header edge, drag or
+  arrow keys, double-click to reset; the dragged widths persist in rem as one
+  `tableColumnWidths` map with the other view prefs, and cells clip with
+  `overflow-hidden` so a narrowed column can't paint over its neighbour). The
+  Pull-request column is the elastic one: until it is dragged it carries no
+  width and absorbs the window's slack, and once dragged a trailing auto-width filler
   column takes the slack instead — a declared width on every column would
   otherwise have the browser spread the leftovers proportionally and silently
   widen the column just set to an exact size. The table scrolls inside a box
