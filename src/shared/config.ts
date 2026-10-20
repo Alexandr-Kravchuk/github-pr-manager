@@ -221,7 +221,13 @@ export function validateClaude(raw: unknown): ClaudeSettings {
     enabled: typeof obj.enabled === "boolean" ? obj.enabled : d.enabled,
     projectsRoot: str(obj.projectsRoot),
     repoPaths,
-    prompts: { drive: prompt("drive"), review: prompt("review"), close: prompt("close"), open: prompt("open") },
+    prompts: {
+      drive: prompt("drive"),
+      review: prompt("review"),
+      close: prompt("close"),
+      explain: prompt("explain"),
+      open: prompt("open"),
+    },
     terminal:
       obj.terminal === "iterm" || obj.terminal === "terminal" || obj.terminal === "desktop"
         ? obj.terminal

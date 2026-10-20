@@ -2188,6 +2188,31 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     stack: stack && { number: stack[0], position: stack[1], size: 3, bottom: null },
     ...over,
   });
+  const hpr = (id, issueKey, parentKey = null, over = {}) => ({
+    id, issueKey, parentKey, issueSummary: `${issueKey} title`, parentSummary: parentKey && `${parentKey} title`, ...over,
+  });
+  const keysOf = (prs) => Object.fromEntries(prGroup.parentGroupKeys(prs));
+  test("parentGroupKeys: PRs on a task with no parent group under the task itself", () => {
+    // ENG-83724 "Code designer": a Task with no parent, five PRs — they were all in "Other".
+    assert.deepStrictEqual(keysOf([hpr("a", "ENG-1"), hpr("b", "ENG-1")]), { a: "ENG-1", b: "ENG-1" });
+  });
+  test("parentGroupKeys: a task's own PR joins its subtasks' PRs, under the top key", () => {
+    const prs = [hpr("sub1", "S-1", "T-1"), hpr("sub2", "S-2", "T-1"), hpr("task", "T-1", "E-1")];
+    assert.deepStrictEqual(keysOf(prs), { sub1: "E-1", sub2: "E-1", task: "E-1" });
+    assert.strictEqual(prGroup.groupLabel("E-1", prs, "parent"), "E-1 · E-1 title");
+  });
+  test("parentGroupKeys: without the task's PR, subtasks still group under their task", () => {
+    const prs = [hpr("sub1", "S-1", "T-1"), hpr("sub2", "S-2", "T-1"), hpr("other", "S-9", "T-9")];
+    assert.deepStrictEqual(keysOf(prs), { sub1: "T-1", sub2: "T-1", other: "T-9" });
+    assert.strictEqual(prGroup.groupLabel("T-1", prs.slice(0, 2), "parent"), "T-1 · T-1 title");
+  });
+  test("parentGroupKeys: a PR with no issue key has no group", () => {
+    assert.deepStrictEqual(keysOf([hpr("x", null), hpr("y", "ENG-2")]), { x: null, y: "ENG-2" });
+  });
+  test("groupLabel(parent): the key's summary comes from the PR whose own issue it is", () => {
+    assert.strictEqual(prGroup.groupLabel("ENG-1", [hpr("a", "ENG-1")], "parent"), "ENG-1 · ENG-1 title");
+    assert.strictEqual(prGroup.groupLabel("ENG-1", [hpr("a", "ENG-1", null, { issueSummary: null })], "parent"), "ENG-1");
+  });
   test("orderStacks: a stack's PRs gather, bottom first, where the first of them was", () => {
     const list = [spr(1), spr(13, [7, 3]), spr(2), spr(11, [7, 1]), spr(3), spr(12, [7, 2])];
     assert.deepStrictEqual(prGroup.orderStacks(list).map((p) => p.number), [1, 11, 12, 13, 2, 3]);
@@ -6748,7 +6773,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
 
     test("claude button: every launch kind has button text; the table widens only while it shows", () => {
-      for (const k of ["drive", "review", "close", "open"]) assert.ok(cl.CLAUDE_BUTTON_TEXT[k], k);
+      for (const k of ["drive", "review", "close", "explain", "open"]) assert.ok(cl.CLAUDE_BUTTON_TEXT[k], k);
       const tbl = require(path.join(__dirname, "../dist/main/shared/pr-table.js"));
       assert.strictEqual(tbl.actionsColumnRem(false), 5);
       assert.strictEqual(tbl.actionsColumnRem(true), 5 + tbl.CLAUDE_ACTIONS_EXTRA_REM);
@@ -6837,6 +6862,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const c = cfg.validateClaude({ enabled: true, repoPaths: { "acme/widgets": " ~/w ", bad: "x", "a/b": "" }, prompts: { drive: "" } });
       assert.deepStrictEqual(c.repoPaths, { "acme/widgets": "~/w" });
       assert.strictEqual(c.prompts.drive, "/drive-pr-green {url}");
+      assert.strictEqual(c.prompts.explain, cl.DEFAULT_CLAUDE_PROMPTS.explain);
       assert.strictEqual(cfg.toPublicConfig(cfg.validateSettings({ claude: c })).claudeEnabled, true);
     });
 
@@ -6869,9 +6895,58 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    test("claude menu: only the fixed actions cross from the renderer", () => {
+      const v = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+      assert.strictEqual(v.validateClaudeKind(undefined), undefined);
+      for (const k of cl.CLAUDE_LAUNCH_KINDS) assert.strictEqual(v.validateClaudeKind(k), k);
+      for (const bad of ["", "merge", "close; rm -rf ~", 1, null, {}]) {
+        assert.throws(() => v.validateClaudeKind(bad), /unknown action/);
+      }
+    });
+
+    test("claude menu: Close PR only on your own PRs; Explain on every PR, never picked from the state", () => {
+      assert.deepStrictEqual(cl.claudeKindsFor({ roles: ["author"] }), ["drive", "review", "close", "explain", "open"]);
+      for (const roles of [["reviewer"], ["reviewed"], []]) {
+        assert.deepStrictEqual(cl.claudeKindsFor({ roles }), ["drive", "review", "explain", "open"], roles.join());
+      }
+      for (const patch of [{}, { failingChecks: [{ name: "ci" }] }, { roles: ["reviewer"] }, { canBeMerged: true, hasHumanApproval: true }]) {
+        assert.notStrictEqual(pick(patch), "explain");
+      }
+    });
+
+    // The point of the menu: a PR whose state suggests "Drive to green" can be
+    // closed on purpose. The picked kind replaces the state's pick, and its
+    // prompt still comes from Settings.
+    await atest("claude menu: a picked action overrides the one the PR's state suggests", async () => {
+      const dir = require("node:fs").mkdtempSync(path.join(require("node:os").tmpdir(), "prd-claude-"));
+      try {
+        const blocked = { ...quiet, roles: ["author"], failingChecks: [{ name: "ci", kind: "check", state: "failure", url: null }] };
+        assert.strictEqual(cl.pickClaudeLaunch(blocked, { trackComments: true }), "drive");
+        const settings = { enabled: true, projectsRoot: "", repoPaths: { [blocked.repo]: dir }, prompts: {}, terminal: "desktop" };
+        const opened = [];
+        const openUrl = async (url) => { opened.push(decodeURIComponent(url)); };
+        const picked = await launcher.launchClaude(blocked, settings, { trackComments: true, openUrl, kind: "close" });
+        assert.strictEqual(picked.ok && picked.kind, "close");
+        assert.match(opened[0], /\/drive-pr-close /);
+        const auto = await launcher.launchClaude(blocked, settings, { trackComments: true, openUrl });
+        assert.strictEqual(auto.ok && auto.kind, "drive");
+        assert.match(opened[1], /\/drive-pr-green /);
+        const explained = await launcher.launchClaude(blocked, settings, { trackComments: true, openUrl, kind: "explain" });
+        assert.strictEqual(explained.ok && explained.kind, "explain");
+        assert.match(opened[2], /\/usercustom-dev:pr-first-look https:\/\/github\.com\/acme\/widgets\/pull\/7 .*do not send a letter/);
+        const notMine = { ...blocked, roles: ["reviewer"] };
+        const refused = await launcher.launchClaude(notMine, settings, { trackComments: true, openUrl, kind: "close" });
+        assert.strictEqual(refused.ok, false);
+        assert.match(refused.error, /author/);
+        assert.strictEqual(opened.length, 3, "a refused close must not open anything");
+      } finally {
+        require("node:fs").rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     test("main.js wiring: claude:launch looks the PR up by id in the poller snapshot", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
-      assert.match(src, /"claude:launch"[\s\S]{0,300}validatePrId[\s\S]{0,200}getSnapshot\(\)/);
+      assert.match(src, /"claude:launch"[\s\S]{0,300}validatePrId[\s\S]{0,200}validateClaudeKind[\s\S]{0,200}getSnapshot\(\)/);
     });
   }
 

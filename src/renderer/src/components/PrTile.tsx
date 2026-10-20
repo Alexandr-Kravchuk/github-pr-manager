@@ -233,11 +233,10 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
             </span>
           )}
         </span>
+        {/* Icon only: a labelled button took a line of its own and made every
+            tile taller. Its colour still says which action a click starts. */}
+        <ClaudeButton pr={pr} trackComments={trackComments} iconOnly className="ml-1" />
       </div>
-
-      {/* Line 4 — only while the Claude integration is on, so every tile in the
-          grid gets it and the rows stay one height. */}
-      <ClaudeButton pr={pr} trackComments={trackComments} compact className="mt-1.5 w-full justify-center" />
 
       {/* Hover-only actions, in the corner so they cost no layout width. */}
       <div className="absolute right-1 top-1 hidden items-center gap-0.5 rounded bg-surface/90 px-0.5 group-hover:flex">

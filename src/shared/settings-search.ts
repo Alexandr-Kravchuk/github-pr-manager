@@ -113,6 +113,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       "drive",
       "review",
       "close",
+      "explain",
     ],
   },
 ];

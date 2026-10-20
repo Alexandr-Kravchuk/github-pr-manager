@@ -1,3 +1,4 @@
+import { CLAUDE_LAUNCH_KINDS, type ClaudeLaunchKind } from "../shared/claude-launch";
 import type { SeenInput, ThemePreference } from "../shared/types";
 
 // Validators for values that cross the IPC boundary from the renderer. The
@@ -88,6 +89,19 @@ export function validateClipboardText(value: unknown): string {
     throw new Error("copyText: text too long.");
   }
   return value;
+}
+
+/**
+ * Validates the action the renderer picked from the Claude button's menu:
+ * undefined (the button itself — main picks from the PR's state) or one of the
+ * fixed kinds. Only the kind crosses over; its prompt comes from Settings.
+ */
+export function validateClaudeKind(value: unknown): ClaudeLaunchKind | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "string" && (CLAUDE_LAUNCH_KINDS as readonly string[]).includes(value)) {
+    return value as ClaudeLaunchKind;
+  }
+  throw new Error("launchClaude: unknown action.");
 }
 
 /** Validates the PR id the renderer asks to start a Claude session on. */

@@ -14,14 +14,29 @@ import type { ClaudeSettings, PullRequest } from "./types";
  *  - `review` — your review is due (requested, returned to you, re-review);
  *  - `close` — your PR is ready to merge (`canBeMerged`);
  *  - `open` — anything else: the session gets only the link.
+ * `explain` is never picked from the state — it is only in the button's menu:
+ * a plain-language explanation of the PR, shown in the session, no letter.
  */
-export type ClaudeLaunchKind = "drive" | "review" | "close" | "open";
+export type ClaudeLaunchKind = "drive" | "review" | "close" | "explain" | "open";
+
+/** Every kind, in the order the button's menu lists them. */
+export const CLAUDE_LAUNCH_KINDS: readonly ClaudeLaunchKind[] = ["drive", "review", "close", "explain", "open"];
+
+/**
+ * The kinds the menu offers for this PR. Closing means merging, which is the
+ * author's call, so `close` is offered on your own PRs only — main refuses it
+ * on any other PR too.
+ */
+export function claudeKindsFor(pr: Pick<PullRequest, "roles">): ClaudeLaunchKind[] {
+  return CLAUDE_LAUNCH_KINDS.filter((k) => k !== "close" || pr.roles.includes("author"));
+}
 
 /** `{url}` is replaced with the PR's URL. */
 export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudeLaunchKind, string> = {
   drive: "/drive-pr-green {url}",
   review: "/creatio-code-review {url}",
   close: "/drive-pr-close {url}",
+  explain: "/usercustom-dev:pr-first-look {url} — show the explanation here in the session; do not send a letter",
   open: "{url}",
 };
 
@@ -38,6 +53,7 @@ export const CLAUDE_LAUNCH_LABEL: Record<ClaudeLaunchKind, string> = {
   drive: "drive it to green",
   review: "review it",
   close: "close it",
+  explain: "explain what it does",
   open: "open it",
 };
 
@@ -46,6 +62,7 @@ export const CLAUDE_BUTTON_TEXT: Record<ClaudeLaunchKind, string> = {
   drive: "Drive to green",
   review: "Review",
   close: "Close PR",
+  explain: "Explain",
   open: "Open session",
 };
 

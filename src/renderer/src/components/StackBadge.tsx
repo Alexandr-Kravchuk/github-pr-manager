@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { stackTitle } from "../../../shared/pr-group";
 import type { PullRequest } from "../../../shared/types";
 import { cn } from "../format";
+import { useAnchoredMenu } from "./anchored-menu";
 
 /** GitHub's stack glyph: three layers. */
 function StackIcon() {
@@ -29,38 +29,9 @@ const MENU_WIDTH_PX = 360;
  * on the bottom PR. Clicking it opens the stack the way GitHub's own popover
  * does: top PR first, the base branch last, this PR highlighted; picking a row
  * opens that PR. Renders nothing outside a stack.
- *
- * The menu is portalled to <body> at a fixed position: the table's cells clip
- * with `overflow-hidden`, so a menu rendered in place would be cut to the cell.
  */
 export function StackBadge({ pr, className }: { pr: PullRequest; className?: string }) {
-  const [anchor, setAnchor] = useState<DOMRect | null>(null);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!anchor) return;
-    const close = () => setAnchor(null);
-    const onPointer = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (menuRef.current?.contains(target) || buttonRef.current?.contains(target)) return;
-      close();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    // A fixed menu would drift away from its badge on scroll, so it closes.
-    document.addEventListener("mousedown", onPointer);
-    document.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    return () => {
-      document.removeEventListener("mousedown", onPointer);
-      document.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
-    };
-  }, [anchor]);
+  const menu = useAnchoredMenu(MENU_WIDTH_PX);
 
   if (!pr.stack) return null;
   const { stack } = pr;
@@ -70,26 +41,22 @@ export function StackBadge({ pr, className }: { pr: PullRequest; className?: str
 
   const open = (url: string) => {
     window.api.openExternal(url).catch(() => {});
-    setAnchor(null);
+    menu.close();
   };
-
-  // Keep the menu inside the window: right-align it to the badge when it would
-  // run off the right edge.
-  const left = anchor ? Math.max(8, Math.min(anchor.left, window.innerWidth - MENU_WIDTH_PX - 8)) : 0;
 
   return (
     <>
       <button
-        ref={buttonRef}
+        ref={menu.buttonRef}
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          setAnchor((prev) => (prev ? null : (buttonRef.current?.getBoundingClientRect() ?? null)));
+          menu.toggle();
         }}
         title={title}
         aria-label={title}
         aria-haspopup="menu"
-        aria-expanded={anchor !== null}
+        aria-expanded={menu.open}
         className={cn(
           "inline-flex shrink-0 items-center gap-0.5 rounded px-0.5 text-xs font-medium tabular-nums hover:bg-elevated",
           pr.blockedByStack ? "text-amber-600 dark:text-amber-300" : "text-emerald-600 dark:text-emerald-400",
@@ -99,13 +66,13 @@ export function StackBadge({ pr, className }: { pr: PullRequest; className?: str
         <StackIcon />
         {stack.position}/{stack.size}
       </button>
-      {anchor &&
+      {menu.open &&
         createPortal(
           <div
-            ref={menuRef}
+            ref={menu.menuRef}
             role="menu"
             aria-label={`Stack #${stack.number}`}
-            style={{ position: "fixed", top: anchor.bottom + 4, left, width: MENU_WIDTH_PX }}
+            style={menu.style}
             className="z-50 overflow-hidden rounded-lg border border-line bg-surface text-sm shadow-xl"
           >
             <div className="border-b border-line px-3 py-2 font-semibold text-fg">Stack #{stack.number}</div>

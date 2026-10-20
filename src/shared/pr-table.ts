@@ -256,11 +256,11 @@ export function parseColumnWidths(value: unknown): ColumnWidths {
 
 /**
  * Width the labelled Claude button adds to the actions column: the widest one
- * ("Drive to green", ~6.6rem measured) plus its margin, so the cell fits copy,
+ * ("Drive to green" with its menu arrow, ~7.4rem measured) plus its margin, so the cell fits copy,
  * ignore, mark-as-seen and that button with nothing to spare. Any surplus shows
  * up as a gap between Updated and the right-aligned buttons — 8 left ~2rem of it.
  */
-export const CLAUDE_ACTIONS_EXTRA_REM = 6.5;
+export const CLAUDE_ACTIONS_EXTRA_REM = 7.5;
 
 /** The actions column's width — wider only while the Claude button is shown. */
 export function actionsColumnRem(claudeEnabled: boolean): number {

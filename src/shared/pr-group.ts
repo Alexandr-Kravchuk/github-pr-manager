@@ -47,8 +47,64 @@ export function groupSummaryOf(pr: PullRequest, mode: IssueGroupMode): string | 
  * heading right without depending on that.
  */
 export function groupLabel(key: string, prs: PullRequest[], mode: IssueGroupMode): string {
-  const summary = prs.map((pr) => groupSummaryOf(pr, mode)).find((s): s is string => Boolean(s));
+  // A "parent" cluster can hold PRs whose own issue IS the key (a task next to
+  // its subtasks' PRs, or a task with no parent), so the key's summary may come
+  // from either side.
+  const summary =
+    mode === "parent"
+      ? prs
+          .map((pr) => (pr.parentKey === key ? pr.parentSummary : pr.issueKey === key ? pr.issueSummary : null))
+          .find((s): s is string => Boolean(s))
+      : prs.map((pr) => groupSummaryOf(pr, mode)).find((s): s is string => Boolean(s));
   return summary ? `${key} · ${summary}` : key;
+}
+
+/**
+ * The "group by parent task" key of every PR, keyed by PR id — the top of the
+ * Jira hierarchy its issue shares with the other PRs on the board.
+ *
+ * Grouping by `parentKey` alone missed two cases, both seen on the board:
+ *  - a PR on a task with no parent (ENG-83724 "Code designer": five PRs, one
+ *    key) had no parent key at all and fell into "Other";
+ *  - a PR on a task sat apart from the PRs on that task's subtasks — the
+ *    subtasks' parent is the task, while the task's parent is its epic.
+ * So each PR links its issue to its parent, PRs that share any key end up in
+ * one cluster, and the cluster is named after its top key: the one with no
+ * parent inside the cluster. Jira gives each issue one parent, so a cluster has
+ * exactly one such key. A PR with no issue key has no group (null).
+ */
+export function parentGroupKeys(prs: PullRequest[]): Map<string, string | null> {
+  const up = new Map<string, string>(); // union-find over issue keys
+  const find = (k: string): string => {
+    let root = k;
+    while (up.get(root) !== root) root = up.get(root) as string;
+    up.set(k, root);
+    return root;
+  };
+  const add = (k: string) => {
+    if (!up.has(k)) up.set(k, k);
+  };
+  const parentOf = new Map<string, string>();
+  for (const pr of prs) {
+    if (!pr.issueKey) continue;
+    add(pr.issueKey);
+    if (pr.parentKey) {
+      add(pr.parentKey);
+      parentOf.set(pr.issueKey, pr.parentKey);
+      const a = find(pr.issueKey);
+      const b = find(pr.parentKey);
+      if (a !== b) up.set(a, b);
+    }
+  }
+  // The top key of each cluster: the one whose parent is not in it.
+  const top = new Map<string, string>();
+  for (const k of up.keys()) {
+    const p = parentOf.get(k);
+    if (!p || find(p) !== find(k)) top.set(find(k), k);
+  }
+  const out = new Map<string, string | null>();
+  for (const pr of prs) out.set(pr.id, pr.issueKey ? (top.get(find(pr.issueKey)) ?? null) : null);
+  return out;
 }
 
 /** Which stack a PR is in — stack numbers are per repository. Null outside one. */

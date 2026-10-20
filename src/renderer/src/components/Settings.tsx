@@ -726,6 +726,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                 ["drive", "Your PR is blocked (CI, conflict, threads, changes requested)"],
                 ["review", "Your review is due"],
                 ["close", "Your PR is ready to merge"],
+                ["explain", "Explain (from the button's menu only)"],
                 ["open", "Anything else"],
               ] as const
             ).map(([kind, title]) => (

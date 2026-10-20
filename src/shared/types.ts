@@ -126,7 +126,7 @@ export interface ClaudeSettings {
   /** Explicit checkout per "owner/name" — wins over the search. */
   repoPaths: Record<string, string>;
   /** Prompt template per launch kind; `{url}` is the PR URL. */
-  prompts: Record<"drive" | "review" | "close" | "open", string>;
+  prompts: Record<"drive" | "review" | "close" | "explain" | "open", string>;
   /**
    * Where the session opens. `auto` takes iTerm2 when it is installed, else
    * Terminal (macOS; a `cmd` window on Windows). The system's "default
@@ -577,7 +577,7 @@ export type SaveSettingsResult = { ok: true; warning?: string } | { ok: false; e
 
 /** Result of `launchClaude`: what was started and where, or why not. */
 export type ClaudeLaunchResult =
-  | { ok: true; kind: "drive" | "review" | "close" | "open"; dir: string }
+  | { ok: true; kind: "drive" | "review" | "close" | "explain" | "open"; dir: string }
   | { ok: false; error: string };
 
 /** `gh` CLI availability + per-host authentication, for the settings UI. */
@@ -624,9 +624,10 @@ export interface PrManagerApi {
   getAppVersion(): Promise<string>;
   /**
    * Open a terminal in the PR's local checkout and start `claude` with the
-   * prompt for the PR's state. Refused while the integration is off.
+   * prompt for the PR's state — or for `kind`, when the user picked an action
+   * from the button's menu. Refused while the integration is off.
    */
-  launchClaude(prId: string): Promise<ClaudeLaunchResult>;
+  launchClaude(prId: string, kind?: "drive" | "review" | "close" | "explain" | "open"): Promise<ClaudeLaunchResult>;
   /** Copy text (e.g. a PR URL) to the system clipboard. */
   copyText(text: string): Promise<void>;
   /** Returns release info if a new version was installed since last ack, or null. */

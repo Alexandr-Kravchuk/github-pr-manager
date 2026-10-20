@@ -55,7 +55,9 @@ Three layers:
   header button), `pr-group.ts` (which Jira key a PR clusters under and what
   the heading above that cluster says — `"KEY · Summary"`, or the bare key when
   Jira resolved none; it lives here rather than as closures in `App.tsx` so the
-  rendered heading is unit-tested without a DOM — plus `orderStacks`, which
+  rendered heading is unit-tested without a DOM; "by parent task" clusters by
+  the Jira hierarchy through `parentGroupKeys` — a task's PR, its subtasks' PRs
+  and a parentless task's PRs land together under the cluster's top key — plus `orderStacks`, which
   keeps the PRs of one native GitHub stack together bottom-first in the
   Roomy/Compact list; GitHub merges a stack bottom-up only yet reports the PRs
   above the bottom as `CLEAN`, so `canBeMerged` in `github.ts` is gated on

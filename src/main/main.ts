@@ -33,6 +33,7 @@ import {
   validateExternalUrl,
   validateIgnoredArgs,
   validateJiraToken,
+  validateClaudeKind,
   validatePrId,
   validateSeenItems,
   validateThemePreference,
@@ -582,8 +583,9 @@ function registerIpc(): void {
 
   // The renderer sends only the PR id: the PR's state, its repository and the
   // prompt are all read here, so nothing from the renderer reaches the shell.
-  ipcMain.handle("claude:launch", async (_event, raw: unknown): Promise<ClaudeLaunchResult> => {
+  ipcMain.handle("claude:launch", async (_event, raw: unknown, rawKind?: unknown): Promise<ClaudeLaunchResult> => {
     const id = validatePrId(raw);
+    const kind = validateClaudeKind(rawKind);
     const pr = poller?.getSnapshot()?.pullRequests.find((p) => p.id === id);
     if (!pr) return { ok: false, error: "This PR is no longer on the dashboard." };
     let settings: Settings;
@@ -595,6 +597,7 @@ function registerIpc(): void {
     return launchClaude(pr, settings.claude, {
       trackComments: settings.trackComments,
       openUrl: (url) => shell.openExternal(url),
+      kind,
     });
   });
 

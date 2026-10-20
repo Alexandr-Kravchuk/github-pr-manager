@@ -8,7 +8,9 @@ import {
   claudeDesktopUrl,
   launcherEnv,
   normalizeRemote,
+  claudeKindsFor,
   pickClaudeLaunch,
+  type ClaudeLaunchKind,
   posixLaunchCommand,
   prRemoteKey,
   renderClaudePrompt,
@@ -141,9 +143,17 @@ async function openTerminal(
 export async function launchClaude(
   pr: PullRequest,
   settings: ClaudeSettings,
-  opts: { trackComments: boolean; openUrl: (url: string) => Promise<void> },
+  opts: {
+    trackComments: boolean;
+    openUrl: (url: string) => Promise<void>;
+    /** Picked from the button's menu; without it the PR's state picks. */
+    kind?: ClaudeLaunchKind;
+  },
 ): Promise<ClaudeLaunchResult> {
   if (!settings.enabled) return { ok: false, error: "Claude integration is off — turn it on in Settings." };
+  if (opts.kind && !claudeKindsFor(pr).includes(opts.kind)) {
+    return { ok: false, error: "Only the PR's author can close it." };
+  }
   const dir = findCheckout(pr, settings);
   if (!dir) {
     const where = settings.repoPaths[pr.repo]
@@ -151,7 +161,7 @@ export async function launchClaude(
       : `no checkout of it was found in ${settings.projectsRoot || "~/Projects"}`;
     return { ok: false, error: `${pr.repo}: ${where}. Set its folder in Settings → Claude.` };
   }
-  const kind = pickClaudeLaunch(pr, opts);
+  const kind = opts.kind ?? pickClaudeLaunch(pr, opts);
   const prompt = renderClaudePrompt(settings.prompts, kind, pr);
   if (settings.terminal === "desktop") {
     try {

@@ -25,7 +25,7 @@ import {
   type FilterState,
   type RoleFilter,
 } from "../../shared/pr-filter";
-import { groupKeyOf, groupLabel, orderStacks, type IssueGroupMode } from "../../shared/pr-group";
+import { groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
 import { ClaudeEnabledContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
@@ -685,12 +685,15 @@ export function App() {
     // forest of one-card groups.
     //
     //  - "issue"  groups by the PR's own issue key (ENG-93374).
-    //  - "parent" groups by the parent task resolved from Jira (ENG-93367), so
-    //    the subtasks of one task sit together.
+    //  - "parent" groups by the Jira hierarchy (`parentGroupKeys`): the PRs of
+    //    a task's subtasks, of the task itself and of its epic sit together,
+    //    under the top key among them; a task with no parent still groups its
+    //    own PRs.
     // Which key and what the heading above it says are `shared/pr-group.ts` —
     // pure, and unit-tested there rather than eyeballed through the DOM.
     const mode: IssueGroupMode = groupBy === "parent" ? "parent" : "issue";
-    const keyOf = (p: PullRequest) => groupKeyOf(p, mode);
+    const parentKeys = mode === "parent" ? parentGroupKeys(sorted) : null;
+    const keyOf = (p: PullRequest) => (parentKeys ? (parentKeys.get(p.id) ?? null) : groupKeyOf(p, mode));
 
     const byKey = new Map<string, PullRequest[]>();
     for (const pr of sorted) {
