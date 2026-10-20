@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
 import { prSignal, type PrSignal } from "../../../shared/pr-filter";
@@ -101,6 +101,14 @@ const COLUMN_CLASS: Record<TableColumnKey, string> = {
   updated: "overflow-hidden px-2 text-right",
   actions: "overflow-hidden px-2 text-right",
 };
+
+/**
+ * The Actions column is pinned to the right edge of the scroll box: copy,
+ * ignore and Claude stay reachable however far the table is scrolled sideways.
+ * `sticky` needs an opaque background (set per cell) or the scrolled cells show
+ * through, and the left shadow marks where the pinned part begins.
+ */
+const ACTIONS_STICKY = "sticky right-0 z-[1] shadow-[-6px_0_6px_-6px_rgba(0,0,0,0.35)]";
 
 /** One rem in CSS pixels, so a pointer delta can be stored as rem. */
 function remToPx(): number {
@@ -277,8 +285,14 @@ export function PrTable({
       >
         <colgroup>
           {TABLE_COLUMNS.map((col) => (
+            <Fragment key={col.key}>
+            {/* With every column fixed, the leftover width of a wide window has
+                to land somewhere; an auto-width filler takes all of it, where
+                otherwise the browser would hand each column a proportional share
+                and quietly widen the one just dragged to an exact size. It sits
+                BEFORE Actions so the buttons stay at the right edge. */}
+            {col.key === "actions" && prFixed && <col />}
             <col
-              key={col.key}
               // Until it is dragged, the PR column carries no width at all: it
               // then absorbs the slack on a wide window, where a declared width
               // would instead be spread proportionally over all the columns and
@@ -290,12 +304,8 @@ export function PrTable({
                   : { width: `${columnWidths[col.key] ?? defaultColumnRem(col.key, claudeEnabled)}rem` }
               }
             />
+            </Fragment>
           ))}
-          {/* With every column fixed, the leftover width of a wide window has to
-              land somewhere; an auto-width filler takes all of it, where
-              otherwise the browser would hand each column a proportional share
-              and quietly widen the one just dragged to an exact size. */}
-          {prFixed && <col />}
         </colgroup>
         {/* Sticky inside the scroll box: the rows move under the headers, so the
             column you sorted by — and its arrow — stay in sight. It needs its
@@ -306,11 +316,16 @@ export function PrTable({
             {TABLE_COLUMNS.map((col) => {
               const active = col.sortable && sort.key === col.key;
               return (
+                <Fragment key={col.key}>
+                {col.key === "actions" && prFixed && <th aria-hidden />}
                 <th
-                  key={col.key}
                   scope="col"
                   aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : undefined}
-                  className={cn("relative py-1.5 font-medium", COLUMN_CLASS[col.key])}
+                  className={cn(
+                    "relative py-1.5 font-medium",
+                    COLUMN_CLASS[col.key],
+                    col.key === "actions" && cn(ACTIONS_STICKY, "bg-canvas"),
+                  )}
                 >
                   {col.sortable ? (
                     <button
@@ -319,10 +334,19 @@ export function PrTable({
                       title={`${col.title} — click to sort`}
                       className={cn(
                         "inline-flex max-w-full items-center gap-1 rounded hover:text-fg-secondary",
+                        // A label-less header (the signal dot) fills its cell:
+                        // otherwise the button is zero-wide whenever its arrow
+                        // isn't drawn, and the column can't be sorted at all.
+                        !col.label && "w-full justify-center",
                         active && "text-fg-secondary",
                       )}
                     >
-                      <span className="truncate">{col.label}</span>
+                      {col.label ? (
+                        <span className="truncate">{col.label}</span>
+                      ) : (
+                        // Stands in for the label while another column is sorted.
+                        !active && <span aria-hidden className="inline-block h-2 w-2 rounded-full border border-current" />
+                      )}
                       {/* The arrow is drawn only on the active column: a per-header
                           placeholder arrow reads as "sorted by this" on every column. */}
                       {active && (
@@ -332,11 +356,24 @@ export function PrTable({
                       )}
                     </button>
                   ) : col.label ? (
-                    <span className="block truncate" title={col.title}>
+                    <span className="block truncate normal-case" title={col.title}>
                       {col.label}
                     </span>
                   ) : (
                     <span className="sr-only">{col.title}</span>
+                  )}
+                  {/* The one place that undoes every drag at once; per column,
+                      double-clicking its grip does the same. Shown only while
+                      something was dragged, so it never sits there doing nothing. */}
+                  {col.key === "actions" && Object.keys(columnWidths).length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => onColumnWidthsChange({})}
+                      title="Reset all column widths"
+                      className="rounded px-1.5 py-0.5 normal-case tracking-normal text-fg-muted hover:bg-elevated hover:text-fg"
+                    >
+                      ↺ Reset widths
+                    </button>
                   )}
                   {/* Every column has a grip on its right edge. */}
                   <span
@@ -354,9 +391,9 @@ export function PrTable({
                     className="absolute right-0 top-0 z-[1] h-full w-1.5 cursor-col-resize touch-none rounded bg-transparent transition-colors hover:bg-sky-500/50 focus-visible:bg-sky-500/50 focus-visible:outline-none"
                   />
                 </th>
+                </Fragment>
               );
             })}
-            {prFixed && <th aria-hidden />}
           </tr>
         </thead>
         <tbody>
@@ -418,7 +455,10 @@ function Row({
   return (
     <tr
       className={cn(
-        "border-b border-line align-middle hover:bg-elevated/50",
+        // Opaque hover colour (elevated at 50% over the canvas, mixed rather
+        // than alpha) so the sticky Actions cell can repeat it exactly without
+        // the scrolled cells showing through.
+        "group border-b border-line align-middle hover:bg-[color-mix(in_srgb,var(--elevated)_50%,var(--canvas))]",
         pr.isIgnored && "opacity-60 hover:opacity-100",
       )}
     >
@@ -540,8 +580,10 @@ function Row({
         <span title={new Date(pr.updatedAt).toLocaleString()}>{relativeTime(pr.updatedAt)}</span>
       </td>
 
-      <td className={cn("py-1.5", COLUMN_CLASS.actions)}>
-        <span className="inline-flex items-center gap-0.5">
+      {filler && <td aria-hidden />}
+
+      <td className={cn("py-1.5", COLUMN_CLASS.actions, ACTIONS_STICKY, "bg-canvas group-hover:bg-[color-mix(in_srgb,var(--elevated)_50%,var(--canvas))]")}>
+        <span className="inline-flex items-center justify-end gap-0.5">
           {pr.hasNewActivity && (
             <button
               type="button"
@@ -565,7 +607,6 @@ function Row({
           >
             <RowIcon kind={copied ? "check" : "copy"} />
           </button>
-          <ClaudeButton pr={pr} trackComments={trackComments} compact className="mr-1" />
           <button
             type="button"
             onClick={() => onToggleIgnore(pr)}
@@ -578,10 +619,10 @@ function Row({
           >
             <RowIcon kind={pr.isIgnored ? "eye" : "eye-off"} />
           </button>
+          {/* Last, so it sits on the row's right edge where the eye lands. */}
+          <ClaudeButton pr={pr} trackComments={trackComments} compact className="ml-1" />
         </span>
       </td>
-
-      {filler && <td aria-hidden />}
     </tr>
   );
 }

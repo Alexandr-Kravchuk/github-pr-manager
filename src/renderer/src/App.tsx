@@ -797,9 +797,12 @@ export function App() {
   }
 
   return (
-    <div className="px-4 py-6">
+    <div className="px-4 pb-6">
       {/* Header */}
-      <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-line bg-canvas/85 px-4 pb-3 pt-1 backdrop-blur">
+      {/* No padding above the header in the page: the top gap lives INSIDE the
+          sticky header, so it already sits at top 0 and doesn't shift up by
+          that gap on the first pixels of scrolling before it sticks. */}
+      <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-line bg-canvas/85 px-4 pb-3 pt-2 backdrop-blur">
         <div className="relative flex flex-wrap items-center justify-between gap-3">
           <Snowflakes />
           <div className="flex items-center gap-3">
@@ -830,7 +833,7 @@ export function App() {
             {data?.rateLimits?.map((rl) => (
               <span
                 key={rl.hostLabel}
-                title={`Resets: ${rl.resetAt ? new Date(rl.resetAt).toLocaleTimeString() : "—"}`}
+                title={`GitHub GraphQL budget left this hour: ${rl.remaining}${rl.limit ? ` of ${rl.limit}` : ""} points. Each refresh spends a few. Resets at ${rl.resetAt ? new Date(rl.resetAt).toLocaleTimeString() : "—"}.`}
                 className="flex items-center gap-1.5 rounded bg-elevated px-2 py-1"
               >
                 {rl.hostLabel}: {rl.remaining}
@@ -855,16 +858,32 @@ export function App() {
               type="button"
               onClick={refresh}
               disabled={loading}
-              className="rounded-md border border-line-strong px-3 py-1 font-medium text-fg-secondary hover:bg-elevated disabled:opacity-50"
+              aria-busy={loading}
+              title={loading ? "Refreshing…" : "Refresh now"}
+              // The same glass as the filter chips: the old bare outline on the
+              // canvas read as a disabled button.
+              className={cn(
+                "inline-flex items-center gap-1 rounded-md border px-3 py-1 font-medium",
+                GLASS_BASE,
+                GLASS_IDLE,
+                "text-fg-secondary disabled:opacity-70",
+              )}
             >
-              {loading ? "Refreshing…" : "↻ Refresh"}
+              {/* The icon spins while the poll runs instead of the label
+                  changing, so the button keeps its width. `.refresh-spin` is a
+                  FINITE animation (see styles.css) and the class goes away when
+                  the poll ends. */}
+              <span aria-hidden className={cn("inline-block leading-none", loading && "refresh-spin")}>
+                ↻
+              </span>
+              Refresh
             </button>
             <button
               type="button"
               onClick={() => setView("settings")}
               title="Settings"
               aria-label="Settings"
-              className="inline-flex items-center rounded-md border border-line-strong px-2 py-1 text-fg-secondary hover:bg-elevated"
+              className={cn("inline-flex items-center rounded-md border px-2 py-1", GLASS_BASE, GLASS_IDLE, "text-fg-secondary")}
             >
               <GearIcon />
             </button>
@@ -915,9 +934,12 @@ export function App() {
               <div
                 role="group"
                 aria-label="Role filter"
-                className="inline-flex overflow-hidden rounded-md border border-line-strong"
+                // Styled like the header's ViewSwitch (a sunken track, the active
+                // segment a raised surface), so the app's two segmented switches
+                // read as one control type.
+                className="inline-flex items-center gap-0.5 rounded-lg border border-line-strong bg-elevated p-0.5"
               >
-                {ROLE_FILTERS.map((key, i) => {
+                {ROLE_FILTERS.map((key) => {
                   const active = role === key;
                   const count = roleCounts[key];
                   return (
@@ -931,22 +953,15 @@ export function App() {
                       aria-label={ROLE_FILTER_TITLES[key]}
                       aria-pressed={active}
                       className={cn(
-                        "px-3 py-1.5 text-sm transition-colors",
-                        i > 0 && "border-l border-line",
-                        // A separate constant, not CHIP_TONE_ACTIVE.sky: that one
-                        // carries its own border and `cn` is a plain join, so the
-                        // group's border would end up fighting the segment's.
-                        // Stronger than a chip's `/15` fill and bolder: a chip
-                        // carries its own border to mark itself active, a segment
-                        // sits inside the group's border and has only the fill.
+                        "rounded-md px-2.5 py-1 text-sm transition-colors",
                         active
-                          ? "bg-sky-500/30 font-medium text-sky-800 dark:text-sky-100"
-                          : "bg-surface text-fg-muted hover:bg-elevated",
+                          ? "bg-surface font-medium text-fg shadow-sm"
+                          : "text-fg-muted hover:bg-surface/60 hover:text-fg-secondary",
                         count === 0 && !active && "opacity-50",
                       )}
                     >
                       {ROLE_FILTER_LABELS[key]}{" "}
-                      <span className={active ? "text-sky-800/70 dark:text-sky-100/70" : "text-fg-faint"}>
+                      <span className={active ? "text-fg-muted" : "text-fg-faint"}>
                         {count}
                       </span>
                     </button>
@@ -1289,26 +1304,36 @@ export function App() {
               window.api.dismissWhatsNew().catch(() => {});
               setWhatsNew(null);
             }}
-            className="pointer-events-auto rounded-md border border-sky-500/50 bg-sky-500/15 px-2 py-0.5 font-medium text-sky-600 transition-colors hover:bg-sky-500/25 dark:text-sky-300"
+            // Opaque: it floats over the list, and a translucent fill let the
+            // rows underneath show through the label.
+            className="pointer-events-auto rounded-md border border-sky-500/60 bg-sky-50 px-2 py-0.5 font-medium text-sky-700 shadow-md transition-colors hover:bg-sky-100 dark:bg-sky-950 dark:text-sky-200 dark:hover:bg-sky-900"
           >
             What&apos;s new in v{whatsNew.version}
           </button>
         )}
         {updateStatus?.state === "downloading" && (
-          <span className="text-fg-faint">
+          <span className={FLOATING_PILL}>
             Downloading v{updateStatus.version}… {updateStatus.percent}%
           </span>
         )}
         {updateStatus?.state === "downloaded" && (
-          <span className="text-fg-faint">Restarting to install v{updateStatus.version}…</span>
+          <span className={FLOATING_PILL}>Restarting to install v{updateStatus.version}…</span>
         )}
-        {data?.version && (
-          <span className="text-fg-faint">v{data.version}</span>
-        )}
+        {/* The What's new button already names the version, so the bare one
+            shows only without it. */}
+        {data?.version && !whatsNew && <span className={FLOATING_PILL}>v{data.version}</span>}
       </div>
     </div>
   );
 }
+
+/**
+ * The bottom-right status labels (version, update progress): framed and opaque,
+ * since they float over the list and a bare translucent label let the rows
+ * underneath show through it.
+ */
+const FLOATING_PILL =
+  "rounded-md border border-line-strong bg-surface px-2 py-0.5 text-fg-muted shadow-md";
 
 /**
  * A grid of PRs in the current card size — Roomy's full cards or Compact's
@@ -1468,6 +1493,23 @@ const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
  * competing `hover:bg-*` rules would be resolved by stylesheet order, not by
  * which one we meant.
  */
+/**
+ * A light glass look shared by the filter chips and the header buttons: a
+ * translucent top-lit fill over a blur, an inner highlight on the top edge and
+ * a soft drop shadow. Static only — the blur is free at rest but multiplies the
+ * cost of anything animating beneath it (see AGENTS.md), so nothing styled with
+ * it may animate except a short, finite icon spin.
+ */
+const GLASS_BASE =
+  "backdrop-blur-md transition-colors shadow-[inset_0_1px_0_rgb(255_255_255/0.14),0_1px_3px_rgb(0_0_0/0.12)]";
+/**
+ * The glass fill of a button that isn't lit — a chip that is off, or Refresh /
+ * Settings. No text colour here: `cn` is a plain join, so the caller's would
+ * fight it on stylesheet order.
+ */
+const GLASS_IDLE =
+  "border-line-strong/70 bg-gradient-to-b from-surface/90 to-surface/40 hover:from-elevated/90 hover:to-elevated/50";
+
 function FilterChip({
   active,
   count,
@@ -1487,10 +1529,9 @@ function FilterChip({
       type="button"
       onClick={onClick}
       className={cn(
-        "rounded-md border px-3 py-1.5 text-sm transition-colors",
-        active
-          ? CHIP_TONE_ACTIVE[tone]
-          : "border-line-strong bg-surface text-fg-muted hover:bg-elevated",
+        "rounded-md border px-3 py-1.5 text-sm",
+        GLASS_BASE,
+        active ? CHIP_TONE_ACTIVE[tone] : cn(GLASS_IDLE, "text-fg-muted"),
         empty && !active && "opacity-50",
       )}
     >

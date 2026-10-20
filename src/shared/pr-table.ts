@@ -148,8 +148,8 @@ export const TABLE_COLUMNS: readonly TableColumn[] = [
     align: "left",
     sortable: true,
     defaultDir: "asc",
-    // A glyph and a two-digit count.
-    minWidthRem: 4.5,
+    // A glyph and a two-digit count ("✓ 24" measures ~2rem) plus padding.
+    minWidthRem: 3.25,
   },
   {
     key: "comments",
@@ -158,8 +158,9 @@ export const TABLE_COLUMNS: readonly TableColumn[] = [
     align: "right",
     sortable: true,
     defaultDir: "desc",
-    // The header word is wider than any count it holds.
-    minWidthRem: 5.5,
+    // The header word (~3.1rem) is wider than any count it holds; this fits it,
+    // the sort arrow and the padding with nothing to spare.
+    minWidthRem: 5,
   },
   {
     key: "age",
@@ -253,8 +254,13 @@ export function parseColumnWidths(value: unknown): ColumnWidths {
   return out;
 }
 
-/** Width the labelled Claude button (the spark + "Drive to green", the widest) adds to the actions column. */
-export const CLAUDE_ACTIONS_EXTRA_REM = 8;
+/**
+ * Width the labelled Claude button adds to the actions column: the widest one
+ * ("Drive to green", ~6.6rem measured) plus its margin, so the cell fits copy,
+ * ignore, mark-as-seen and that button with nothing to spare. Any surplus shows
+ * up as a gap between Updated and the right-aligned buttons — 8 left ~2rem of it.
+ */
+export const CLAUDE_ACTIONS_EXTRA_REM = 6.5;
 
 /** The actions column's width — wider only while the Claude button is shown. */
 export function actionsColumnRem(claudeEnabled: boolean): number {

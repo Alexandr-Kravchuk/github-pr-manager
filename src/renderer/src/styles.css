@@ -218,8 +218,23 @@
   background-color: var(--fg-faint);
 }
 
+/*
+ * Refresh button icon while a poll runs (App.tsx). Finite on purpose — the
+ * no-infinite-animation rule in AGENTS.md: the class is removed when the poll
+ * ends, and the iteration cap (25 x 0.7s, ~17s) stops it even if a poll hangs.
+ */
+.refresh-spin {
+  animation: refresh-spin 0.7s linear 25;
+}
+@keyframes refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .buddy :is(g, path, circle, text),
+  .refresh-spin,
   .live-beat {
     animation: none !important;
   }
