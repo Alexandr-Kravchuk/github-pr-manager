@@ -1830,13 +1830,13 @@ test("mapPr: approved conflict-free PR moves from red to green after base update
 const stackEntries = (...prs) => ({
   nodes: prs.map(([position, number, state = "OPEN"]) => ({
     position,
-    pullRequest: { number, url: `https://github.com/a/b/pull/${number}`, state },
+    pullRequest: { number, title: `PR ${number}`, url: `https://github.com/a/b/pull/${number}`, state },
   })),
 });
 const stacked = (position, entries) => rawPr({
   mergeStateStatus: "CLEAN",
   stackEntry: { position },
-  stack: { number: 7, size: entries.nodes.length, entries },
+  stack: { number: 7, size: entries.nodes.length, baseRefName: "trunk", entries },
 });
 test("mapPr.stack: outside a stack (or on a host without stacks) is null and not blocked", () => {
   for (const pr of [rawPr(), rawPr({ stack: null, stackEntry: null })]) {
@@ -1849,13 +1849,34 @@ test("mapPr.stack: outside a stack (or on a host without stacks) is null and not
 test("mapPr.stack: the bottom PR is mergeable, the one above it waits for it", () => {
   const entries = stackEntries([1, 1613], [2, 1614]);
   const bottom = github.mapPr(stacked(1, entries), "GH", ["author"], null);
-  assert.deepStrictEqual(bottom.stack, { number: 7, position: 1, size: 2, bottom: null });
+  assert.deepStrictEqual(bottom.stack, {
+    number: 7,
+    position: 1,
+    size: 2,
+    baseRefName: "trunk",
+    entries: [
+      { position: 1, number: 1613, title: "PR 1613", url: "https://github.com/a/b/pull/1613", state: "OPEN" },
+      { position: 2, number: 1614, title: "PR 1614", url: "https://github.com/a/b/pull/1614", state: "OPEN" },
+    ],
+    bottom: null,
+  });
   assert.strictEqual(bottom.blockedByStack, false);
   assert.strictEqual(bottom.canBeMerged, true);
   const top = github.mapPr(stacked(2, entries), "GH", ["author"], null);
   assert.deepStrictEqual(top.stack.bottom, { number: 1613, url: "https://github.com/a/b/pull/1613" });
   assert.strictEqual(top.blockedByStack, true);
   assert.strictEqual(top.canBeMerged, false);
+});
+test("prSignal: an approved green PR above the bottom of its stack is amber, not green", () => {
+  const entries = stackEntries([1, 1613], [2, 1614]);
+  for (const trackComments of [true, false]) {
+    assert.strictEqual(prFilter.prSignal(github.mapPr(stacked(1, entries), "GH", ["author"], null), { trackComments }), "approved");
+    assert.strictEqual(prFilter.prSignal(github.mapPr(stacked(2, entries), "GH", ["author"], null), { trackComments }), "attention");
+  }
+});
+test("mapPr.stack: entries come bottom first whatever order GitHub lists them in", () => {
+  const top = github.mapPr(stacked(2, stackEntries([2, 1614], [1, 1613])), "GH", ["author"], null);
+  assert.deepStrictEqual(top.stack.entries.map((e) => e.number), [1613, 1614]);
 });
 test("mapPr.stack: waits for the lowest OPEN PR; a merged one below no longer blocks", () => {
   const third = github.mapPr(stacked(3, stackEntries([1, 10, "MERGED"], [2, 11], [3, 12])), "GH", ["author"], null);
@@ -4601,7 +4622,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   await atest("fetchHost: the read by id asks for the PR's stack", async () => {
     const { sent } = await runFetchHost({ authored: [rawPr({ id: "PR_a" })] });
     assert.match(sent.hydrate.query, /stackEntry \{ position \}/);
-    assert.match(sent.hydrate.query, /entries\(first: 10\)/);
+    assert.match(sent.hydrate.query, /entries\(first: 10\) \{ nodes \{ position pullRequest \{ number title url state \} \} \}/);
   });
 
   await atest("fetchHost: asks for reviewed-by:@me over the same repos, as its own alias", async () => {

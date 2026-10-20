@@ -362,20 +362,6 @@ export function PrCard({
           </span>
         )}
 
-        {pr.blockedByStack && pr.stack?.bottom && (
-          <button
-            type="button"
-            onClick={() => {
-              const url = pr.stack?.bottom?.url;
-              if (url) window.api.openExternal(url).catch(() => {});
-            }}
-            title={`GitHub merges a stack bottom-up — open #${pr.stack.bottom.number}, which has to merge first`}
-            className={cn(pill, "border-amber-500/40 bg-amber-500/15 text-amber-700 hover:bg-amber-500/25 dark:text-amber-300")}
-          >
-            Waits for #{pr.stack.bottom.number}
-          </button>
-        )}
-
         {pr.roles.includes("author") && pr.isBehindBase && (
           <span
             title="GitHub requires this branch to be updated with the base branch before merging"

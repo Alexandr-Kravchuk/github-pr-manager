@@ -5,6 +5,7 @@ import type {
   HostConfig,
   PrRole,
   PrStack,
+  PrStackEntry,
   PullRequest,
   RateLimitInfo,
   ReviewDecision,
@@ -132,7 +133,8 @@ const STACK_SELECTION = `stackEntry { position }
   stack {
     number
     size
-    entries(first: 10) { nodes { position pullRequest { number url state } } }
+    baseRefName
+    entries(first: 10) { nodes { position pullRequest { number title url state } } }
   }`;
 
 function prFieldsFragment(withStacks: boolean): string {
@@ -262,7 +264,10 @@ interface RawPr {
   stack?: {
     number: number;
     size: number;
-    entries: { nodes: Array<{ position: number; pullRequest: { number: number; url: string; state: string } | null }> };
+    baseRefName: string;
+    entries: {
+      nodes: Array<{ position: number; pullRequest: { number: number; title: string; url: string; state: string } | null }>;
+    };
   } | null;
   author: { login: string; avatarUrl: string } | null;
   repository: { nameWithOwner: string; defaultBranchRef: { name: string } | null };
@@ -472,13 +477,16 @@ export function approvalBodyNeedsAttention(body: string | undefined): boolean {
 function mapStack(pr: RawPr): PrStack | null {
   if (!pr.stack || !pr.stackEntry) return null;
   const position = pr.stackEntry.position;
-  const bottom = pr.stack.entries.nodes
-    .filter((e) => e.pullRequest && e.pullRequest.state === "OPEN" && e.position < position)
-    .sort((a, b) => a.position - b.position)[0]?.pullRequest;
+  const entries: PrStackEntry[] = pr.stack.entries.nodes
+    .flatMap((e) => (e.pullRequest ? [{ position: e.position, ...e.pullRequest }] : []))
+    .sort((a, b) => a.position - b.position);
+  const bottom = entries.find((e) => e.state === "OPEN" && e.position < position);
   return {
     number: pr.stack.number,
     position,
     size: pr.stack.size,
+    baseRefName: pr.stack.baseRefName,
+    entries,
     bottom: bottom ? { number: bottom.number, url: bottom.url } : null,
   };
 }

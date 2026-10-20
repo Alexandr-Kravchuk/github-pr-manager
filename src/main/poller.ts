@@ -236,9 +236,12 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
     // until some unrelated PR field happened to change.
     p.parentSummary,
     p.issueSummary,
-    // The stack badge, the "Waits for #N" pill and the list order read these;
+    // The stack badge, its menu and the list order read these;
     // the bottom PR merging moves nothing else on the PR above it.
-    p.stack ? `${p.stack.number}:${p.stack.position}/${p.stack.size}:${p.stack.bottom?.number ?? ""}` : "",
+    p.stack
+      ? `${p.stack.number}:${p.stack.position}/${p.stack.size}:` +
+        p.stack.entries.map((e) => `${e.position}#${e.number}${e.state}${e.title}`).join(",")
+      : "",
   ]);
   return JSON.stringify({
     prs: lite,

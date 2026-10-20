@@ -84,6 +84,17 @@ const myBlockingReview: Reviewer = {
 };
 const myApproval: Reviewer = { login: "me", avatarUrl: OCTOCAT, reviewState: "approved" };
 
+/** The one native stack the `waiting` case shows: #305 at the bottom, #306 on it. */
+const MOCK_STACK = {
+  number: 9,
+  size: 2,
+  baseRefName: "main",
+  entries: [
+    { position: 1, number: 305, title: "Stack bottom: live diagnostics", url: "https://github.com/acme/widgets/pull/305", state: "OPEN" },
+    { position: 2, number: 306, title: "Stack top: completion and hover", url: "https://github.com/acme/widgets/pull/306", state: "OPEN" },
+  ],
+};
+
 function pr(overrides: Partial<PullRequest> & { id: string; number: number }): PullRequest {
   return {
     hostLabel: HOST_LABEL,
@@ -286,7 +297,7 @@ const CASES: Record<string, () => PullRequest[]> = {
       id: "mock-stack-bottom",
       number: 305,
       title: "Stack bottom: live diagnostics",
-      stack: { number: 9, position: 1, size: 2, bottom: null },
+      stack: { ...MOCK_STACK, position: 1, bottom: null },
     }),
     pr({
       id: "mock-stack-top",
@@ -294,7 +305,7 @@ const CASES: Record<string, () => PullRequest[]> = {
       title: "Stack top: completion and hover",
       baseRefName: "feature/live-diagnostics",
       baseIsDefaultBranch: false,
-      stack: { number: 9, position: 2, size: 2, bottom: { number: 305, url: "https://github.com/acme/widgets/pull/305" } },
+      stack: { ...MOCK_STACK, position: 2, bottom: { number: 305, url: "https://github.com/acme/widgets/pull/305" } },
       blockedByStack: true,
       reviewDecision: "APPROVED",
       hasHumanApproval: true,

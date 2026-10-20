@@ -435,7 +435,8 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
  *    since those are unfinished work. In practice this branch only reaches a
  *    non-author PR you're reviewing: an approved PR you authored with open
  *    threads was already caught by `blocked`.
- *  - attention (amber): new comments, open threads, CI running.
+ *  - attention (amber): new comments, open threads, CI running — and an
+ *    otherwise green PR that waits for a lower PR of its stack (`blockedByStack`).
  *
  * `trackComments` mirrors the same flag in `state.ts`'s `needsAttention`: off,
  * `hasUnaddressedComments` and `unresolvedThreads` stop feeding the accent too,
@@ -480,7 +481,9 @@ export function prSignal(pr: PullRequest, { trackComments }: { trackComments: bo
     pr.ciState !== "pending" &&
     (!trackComments || pr.unresolvedThreads === 0)
   ) {
-    return "approved";
+    // Green means "can merge now". A PR above the bottom of a native stack
+    // cannot — GitHub merges stacks bottom-up — so it waits in amber instead.
+    return pr.blockedByStack ? "attention" : "approved";
   }
   if (pr.hasNewActivity || (trackComments && pr.unresolvedThreads > 0) || pr.pendingChecks.length > 0) {
     return "attention";

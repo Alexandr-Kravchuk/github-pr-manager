@@ -59,8 +59,10 @@ Three layers:
   keeps the PRs of one native GitHub stack together bottom-first in the
   Roomy/Compact list; GitHub merges a stack bottom-up only yet reports the PRs
   above the bottom as `CLEAN`, so `canBeMerged` in `github.ts` is gated on
-  `blockedByStack`, and a host whose schema has no `stack` field is read again
-  without it and remembered for the app run), `view-mode.ts` (the three
+  `blockedByStack` and `prSignal` paints such a PR amber, not green; a host
+  whose schema has no `stack` field is read again without it and remembered for
+  the app run. The stack badge's menu is portalled to <body> because table
+  cells clip with `overflow-hidden`), `view-mode.ts` (the three
   display variants behind the header's Finder-style switch — `roomy` cards,
   `cozy` table, `compact` tiles — with the guard that validates the persisted
   choice and the two predicates App.tsx gates grouping and the sort dropdown on),

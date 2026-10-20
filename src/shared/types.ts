@@ -280,11 +280,25 @@ export interface PrStack {
   position: number;
   /** How many PRs the stack holds, open ones included whether listed here or not. */
   size: number;
+  /** The branch the stack's bottom PR targets — the row under the stack menu. */
+  baseRefName: string;
+  /** Every PR of the stack GitHub listed (first 10), bottom first. */
+  entries: PrStackEntry[];
   /**
    * The open PR at the bottom of the stack — the one this PR waits for. Null on
    * the bottom PR itself, and when the stack's first page did not reach it.
    */
   bottom: { number: number; url: string } | null;
+}
+
+/** One PR of a stack, as the stack menu lists it. */
+export interface PrStackEntry {
+  position: number;
+  number: number;
+  title: string;
+  url: string;
+  /** GitHub's PR state: "OPEN" | "MERGED" | "CLOSED". */
+  state: string;
 }
 
 export interface PullRequest {

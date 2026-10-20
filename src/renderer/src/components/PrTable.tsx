@@ -65,7 +65,7 @@ const SIGNAL_DOT: Record<PrSignal, string> = {
 const SIGNAL_TITLE: Record<PrSignal, string> = {
   blocked: "Blocked on you — failing CI, a change request, conflicts or unresolved comments",
   myReview: "Your review is what it is waiting for",
-  attention: "New activity or checks still running",
+  attention: "New activity, checks still running, or waiting for a lower PR of its stack",
   waiting: "Waiting for someone else's review",
   approved: "Approved and green",
   idle: "Nothing pending",
