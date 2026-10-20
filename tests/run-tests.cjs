@@ -1823,6 +1823,49 @@ test("mapPr: approved conflict-free PR moves from red to green after base update
   }
 });
 
+// --- github: native PR stacks -------------------------------------------------
+// GitHub merges a stack bottom-up only, yet reports the PRs above the bottom as
+// CLEAN — measured on creatio.ghe.com core#1614 (position 2 of 2). Readiness
+// must come from the stack position, not from GitHub's merge state.
+const stackEntries = (...prs) => ({
+  nodes: prs.map(([position, number, state = "OPEN"]) => ({
+    position,
+    pullRequest: { number, url: `https://github.com/a/b/pull/${number}`, state },
+  })),
+});
+const stacked = (position, entries) => rawPr({
+  mergeStateStatus: "CLEAN",
+  stackEntry: { position },
+  stack: { number: 7, size: entries.nodes.length, entries },
+});
+test("mapPr.stack: outside a stack (or on a host without stacks) is null and not blocked", () => {
+  for (const pr of [rawPr(), rawPr({ stack: null, stackEntry: null })]) {
+    const mapped = github.mapPr(pr, "GH", ["author"], null);
+    assert.strictEqual(mapped.stack, null);
+    assert.strictEqual(mapped.blockedByStack, false);
+    assert.strictEqual(mapped.canBeMerged, true);
+  }
+});
+test("mapPr.stack: the bottom PR is mergeable, the one above it waits for it", () => {
+  const entries = stackEntries([1, 1613], [2, 1614]);
+  const bottom = github.mapPr(stacked(1, entries), "GH", ["author"], null);
+  assert.deepStrictEqual(bottom.stack, { number: 7, position: 1, size: 2, bottom: null });
+  assert.strictEqual(bottom.blockedByStack, false);
+  assert.strictEqual(bottom.canBeMerged, true);
+  const top = github.mapPr(stacked(2, entries), "GH", ["author"], null);
+  assert.deepStrictEqual(top.stack.bottom, { number: 1613, url: "https://github.com/a/b/pull/1613" });
+  assert.strictEqual(top.blockedByStack, true);
+  assert.strictEqual(top.canBeMerged, false);
+});
+test("mapPr.stack: waits for the lowest OPEN PR; a merged one below no longer blocks", () => {
+  const third = github.mapPr(stacked(3, stackEntries([1, 10, "MERGED"], [2, 11], [3, 12])), "GH", ["author"], null);
+  assert.strictEqual(third.stack.bottom.number, 11);
+  const second = github.mapPr(stacked(2, stackEntries([1, 10, "MERGED"], [2, 11])), "GH", ["author"], null);
+  assert.strictEqual(second.stack.bottom, null);
+  assert.strictEqual(second.blockedByStack, false);
+  assert.strictEqual(second.canBeMerged, true);
+});
+
 // --- github: mapPr defaults isIgnored to false (set later by ignored.ts) -----
 test("mapPr.isIgnored: defaults to false", () =>
   assert.strictEqual(github.mapPr(rawPr(), "GH", ["authored"], null).isIgnored, false));
@@ -2113,6 +2156,36 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
   assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", "ENG-1/../x"), null);
   assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", "eng-1"), null);
 });
+
+// --- pr-group: a native stack reads bottom-up wherever it landed --------------
+{
+  const prGroup = require(path.join(__dirname, "../dist/main/shared/pr-group.js"));
+  const spr = (number, stack = null, over = {}) => ({
+    number,
+    hostLabel: "GH",
+    repo: "a/b",
+    stack: stack && { number: stack[0], position: stack[1], size: 3, bottom: null },
+    ...over,
+  });
+  test("orderStacks: a stack's PRs gather, bottom first, where the first of them was", () => {
+    const list = [spr(1), spr(13, [7, 3]), spr(2), spr(11, [7, 1]), spr(3), spr(12, [7, 2])];
+    assert.deepStrictEqual(prGroup.orderStacks(list).map((p) => p.number), [1, 11, 12, 13, 2, 3]);
+  });
+  test("orderStacks: the same stack number in another repo is another stack", () => {
+    const list = [spr(2, [7, 2]), spr(5, [7, 1], { repo: "a/c" }), spr(1, [7, 1])];
+    assert.deepStrictEqual(prGroup.orderStacks(list).map((p) => p.number), [1, 2, 5]);
+  });
+  test("orderStacks: a list without stacks comes back unchanged", () => {
+    const list = [spr(3), spr(1), spr(2)];
+    assert.strictEqual(prGroup.orderStacks(list), list);
+  });
+  test("stackTitle: names the PR that has to merge first", () => {
+    const top = spr(14, null, { stack: { number: 7, position: 2, size: 2, bottom: { number: 13, url: "u" } } });
+    assert.match(prGroup.stackTitle(top), /Stack #7: 2 of 2.*waits for #13/);
+    assert.match(prGroup.stackTitle(spr(13, [7, 1])), /bottom PR/);
+    assert.strictEqual(prGroup.stackTitle(spr(1)), "");
+  });
+}
 
 // --- pr-group: what a Jira-keyed group heading says --------------------------
 // The rendered heading is this PR's whole point, so it is a pure rule here rather
@@ -4477,6 +4550,58 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" }),
       /HTTP 502 Bad Gateway/,
     );
+  });
+
+  // An older GitHub Enterprise Server has no `stack` on PullRequest and fails
+  // the whole read naming the field; the host must still load, without stacks,
+  // and stop asking for them on later polls.
+  await atest("fetchHost: a host without PR stacks is read again without them, and remembered", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    const hydrates = [];
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) {
+        hydrates.push(body.query);
+        if (body.query.includes("stackEntry")) {
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            json: async () => ({ errors: [{ message: "Field 'stackEntry' doesn't exist on type 'PullRequest'" }] }),
+          };
+        }
+        return hydrateResponse(body, [rawPr({ id: "PR_a" })]);
+      }
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 1, resetAt: "" },
+            viewer: { login: "me" },
+            [alias]: { nodes: alias === "authored" ? [{ id: "PR_a", author: { login: "me" } }] : [] },
+          },
+        }),
+      };
+    };
+    const host = { label: "H", graphqlUrl, repos: ["a/b"], token: "t" };
+    const first = await github.fetchHost(host);
+    assert.strictEqual(first.pullRequests.length, 1);
+    assert.strictEqual(first.pullRequests[0].stack, null);
+    assert.deepStrictEqual(hydrates.map((q) => q.includes("stackEntry")), [true, false]);
+    await github.fetchHost(host);
+    assert.deepStrictEqual(hydrates.map((q) => q.includes("stackEntry")), [true, false, false]);
+  });
+
+  await atest("fetchHost: the read by id asks for the PR's stack", async () => {
+    const { sent } = await runFetchHost({ authored: [rawPr({ id: "PR_a" })] });
+    assert.match(sent.hydrate.query, /stackEntry \{ position \}/);
+    assert.match(sent.hydrate.query, /entries\(first: 10\)/);
   });
 
   await atest("fetchHost: asks for reviewed-by:@me over the same repos, as its own alias", async () => {

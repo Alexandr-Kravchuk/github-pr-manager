@@ -267,6 +267,26 @@ export interface CheckItem {
 }
 
 /** The pull-request model consumed by the UI. */
+/**
+ * GitHub's native PR stack (`PullRequest.stack` / `stackEntry`): an ordered
+ * chain of PRs, each based on the one below it. GitHub merges only the bottom
+ * one — every PR above it reports `mergeStateStatus: CLEAN` all the same, so
+ * readiness has to be gated on `position` here rather than on GitHub's verdict.
+ */
+export interface PrStack {
+  /** The stack's number within its repository (the "Stack #1623" GitHub shows). */
+  number: number;
+  /** 1 is the bottom — closest to the base branch, the only mergeable one. */
+  position: number;
+  /** How many PRs the stack holds, open ones included whether listed here or not. */
+  size: number;
+  /**
+   * The open PR at the bottom of the stack — the one this PR waits for. Null on
+   * the bottom PR itself, and when the stack's first page did not reach it.
+   */
+  bottom: { number: number; url: string } | null;
+}
+
 export interface PullRequest {
   /** Global node id — a stable key across refreshes. */
   id: string;
@@ -284,6 +304,16 @@ export interface PullRequest {
    * shows a green umbrella for it.
    */
   baseIsDefaultBranch: boolean;
+  /**
+   * The native GitHub stack this PR belongs to, or null when it is in none —
+   * including on a host whose GraphQL schema has no stacks yet.
+   */
+  stack: PrStack | null;
+  /**
+   * In a stack and not at its bottom: GitHub refuses to merge it until the PRs
+   * below it are merged, whatever its own reviews and checks say.
+   */
+  blockedByStack: boolean;
   author: { login: string; avatarUrl: string } | null;
   createdAt: string;
   updatedAt: string;
@@ -444,7 +474,8 @@ export interface PullRequest {
    * least one human approval, has no unaddressed change request, and CI is not
    * failing or still running. GitHub computes `mergeable` asynchronously and may
    * report UNKNOWN right after a push; while it is UNKNOWN this stays false and
-   * flips true on a later poll once GitHub settles.
+   * flips true on a later poll once GitHub settles. Never true while
+   * `blockedByStack`: GitHub reports such a PR CLEAN yet refuses to merge it.
    */
   canBeMerged: boolean;
 

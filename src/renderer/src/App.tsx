@@ -25,7 +25,7 @@ import {
   type FilterState,
   type RoleFilter,
 } from "../../shared/pr-filter";
-import { groupKeyOf, groupLabel, type IssueGroupMode } from "../../shared/pr-group";
+import { groupKeyOf, groupLabel, orderStacks, type IssueGroupMode } from "../../shared/pr-group";
 import { ClaudeEnabledContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
@@ -646,7 +646,9 @@ export function App() {
         arr.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
         break;
     }
-    return arr;
+    // A stack reads bottom-up wherever its first PR landed, so the PR GitHub
+    // will merge first is always the one on top of the run.
+    return orderStacks(arr);
   }, [filtered, sortBy, trackComments]);
 
   // The Cozy table's rows: the same filtered set, ordered by the active column

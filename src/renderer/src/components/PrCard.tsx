@@ -7,6 +7,7 @@ import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/type
 import { cn, relativeTime } from "../format";
 import { CheckBadge } from "./CheckBadge";
 import { ClaudeButton } from "./ClaudeButton";
+import { StackBadge } from "./StackBadge";
 
 interface Props {
   pr: PullRequest;
@@ -228,7 +229,10 @@ export function PrCard({
           {pr.isIgnored && (
             <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">Ignored</span>
           )}
-          {!pr.baseIsDefaultBranch && (
+          {/* A native stack says more than the base branch does — its badge
+              replaces the umbrella, which stays for hand-made stacks. */}
+          <StackBadge pr={pr} />
+          {!pr.stack && !pr.baseIsDefaultBranch && (
             <span
               title={`Based on ${pr.baseRefName}`}
               aria-label={`Based on branch ${pr.baseRefName}`}
@@ -356,6 +360,20 @@ export function PrCard({
           <span title="Approval includes feedback: process it, then acknowledge this review with 👀 as PR author" className={cn(pill, "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300")}>
             💬 Review feedback
           </span>
+        )}
+
+        {pr.blockedByStack && pr.stack?.bottom && (
+          <button
+            type="button"
+            onClick={() => {
+              const url = pr.stack?.bottom?.url;
+              if (url) window.api.openExternal(url).catch(() => {});
+            }}
+            title={`GitHub merges a stack bottom-up — open #${pr.stack.bottom.number}, which has to merge first`}
+            className={cn(pill, "border-amber-500/40 bg-amber-500/15 text-amber-700 hover:bg-amber-500/25 dark:text-amber-300")}
+          >
+            Waits for #{pr.stack.bottom.number}
+          </button>
         )}
 
         {pr.roles.includes("author") && pr.isBehindBase && (

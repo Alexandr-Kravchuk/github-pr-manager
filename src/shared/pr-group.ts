@@ -50,3 +50,50 @@ export function groupLabel(key: string, prs: PullRequest[], mode: IssueGroupMode
   const summary = prs.map((pr) => groupSummaryOf(pr, mode)).find((s): s is string => Boolean(s));
   return summary ? `${key} · ${summary}` : key;
 }
+
+/** Which stack a PR is in — stack numbers are per repository. Null outside one. */
+function stackKeyOf(pr: PullRequest): string | null {
+  return pr.stack ? `${pr.hostLabel}/${pr.repo}#${pr.stack.number}` : null;
+}
+
+/**
+ * Puts the PRs of one native GitHub stack next to each other, bottom first, at
+ * the place where the list's ordering put the first of them. Every other PR
+ * keeps its position. Applied before grouping, so it holds within each group
+ * too: a group only filters this order, it never reorders it.
+ */
+export function orderStacks(prs: PullRequest[]): PullRequest[] {
+  const byStack = new Map<string, PullRequest[]>();
+  for (const pr of prs) {
+    const key = stackKeyOf(pr);
+    if (!key) continue;
+    const list = byStack.get(key);
+    if (list) list.push(pr);
+    else byStack.set(key, [pr]);
+  }
+  if (byStack.size === 0) return prs;
+  const out: PullRequest[] = [];
+  const placed = new Set<string>();
+  for (const pr of prs) {
+    const key = stackKeyOf(pr);
+    if (!key) {
+      out.push(pr);
+      continue;
+    }
+    if (placed.has(key)) continue;
+    placed.add(key);
+    const members = byStack.get(key) ?? [];
+    out.push(...[...members].sort((a, b) => (a.stack?.position ?? 0) - (b.stack?.position ?? 0)));
+  }
+  return out;
+}
+
+/** The tooltip on a PR's stack badge. */
+export function stackTitle(pr: PullRequest): string {
+  if (!pr.stack) return "";
+  const { number, position, size, bottom } = pr.stack;
+  const where = `Stack #${number}: ${position} of ${size}, counted from the base branch`;
+  return bottom
+    ? `${where}. GitHub merges only the bottom PR — this one waits for #${bottom.number}`
+    : `${where}. This is the bottom PR — GitHub merges it first`;
+}

@@ -236,6 +236,9 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
     // until some unrelated PR field happened to change.
     p.parentSummary,
     p.issueSummary,
+    // The stack badge, the "Waits for #N" pill and the list order read these;
+    // the bottom PR merging moves nothing else on the PR above it.
+    p.stack ? `${p.stack.number}:${p.stack.position}/${p.stack.size}:${p.stack.bottom?.number ?? ""}` : "",
   ]);
   return JSON.stringify({
     prs: lite,

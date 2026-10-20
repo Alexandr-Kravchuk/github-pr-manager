@@ -18,6 +18,7 @@ import {
 import type { PullRequest, ReviewerState } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { ClaudeButton } from "./ClaudeButton";
+import { StackBadge } from "./StackBadge";
 import { ClaudeEnabledContext } from "./claude-context";
 
 /**
@@ -484,6 +485,7 @@ function Row({
           <span className="w-[3.25rem] shrink-0 text-sm font-semibold tabular-nums text-fg-secondary">
             #{pr.number}
           </span>
+          <StackBadge pr={pr} />
           {pr.returnedToMe && (
             <span title="New changes since you last looked" className="shrink-0 text-violet-600 dark:text-violet-300">
               ↩

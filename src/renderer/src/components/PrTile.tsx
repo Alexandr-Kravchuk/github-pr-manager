@@ -5,6 +5,7 @@ import { ageDays, approvalTally, primaryRole, repoShortName, reviewRank } from "
 import type { PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { ClaudeButton } from "./ClaudeButton";
+import { StackBadge } from "./StackBadge";
 
 /**
  * The Compact tile: the same information architecture as `PrCard` shrunk to
@@ -177,7 +178,8 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
             ↩
           </span>
         )}
-        {!pr.baseIsDefaultBranch && (
+        <StackBadge pr={pr} />
+        {!pr.stack && !pr.baseIsDefaultBranch && (
           <span
             title={`Stacked on ${pr.baseRefName}, not on the default branch`}
             className="shrink-0 text-emerald-600 dark:text-emerald-400"

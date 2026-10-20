@@ -55,7 +55,12 @@ Three layers:
   header button), `pr-group.ts` (which Jira key a PR clusters under and what
   the heading above that cluster says — `"KEY · Summary"`, or the bare key when
   Jira resolved none; it lives here rather than as closures in `App.tsx` so the
-  rendered heading is unit-tested without a DOM), `view-mode.ts` (the three
+  rendered heading is unit-tested without a DOM — plus `orderStacks`, which
+  keeps the PRs of one native GitHub stack together bottom-first in the
+  Roomy/Compact list; GitHub merges a stack bottom-up only yet reports the PRs
+  above the bottom as `CLEAN`, so `canBeMerged` in `github.ts` is gated on
+  `blockedByStack`, and a host whose schema has no `stack` field is read again
+  without it and remembered for the app run), `view-mode.ts` (the three
   display variants behind the header's Finder-style switch — `roomy` cards,
   `cozy` table, `compact` tiles — with the guard that validates the persisted
   choice and the two predicates App.tsx gates grouping and the sort dropdown on),

@@ -4,6 +4,7 @@ import type {
   CheckState,
   HostConfig,
   PrRole,
+  PrStack,
   PullRequest,
   RateLimitInfo,
   ReviewDecision,
@@ -57,7 +58,7 @@ import type {
  * byte in there is sent to GitHub on each poll, and prose inside a template
  * literal is exactly how a stray backtick broke this build once.
  */
-const PR_FIELDS_FRAGMENT = /* GraphQL */ `
+const PR_FIELDS_TEMPLATE = /* GraphQL */ `
 fragment PrFields on PullRequest {
   id
   number
@@ -70,6 +71,7 @@ fragment PrFields on PullRequest {
   headRefName
   mergeable
   mergeStateStatus
+  __STACK__
   author { login avatarUrl }
   repository { nameWithOwner defaultBranchRef { name } }
   reviewDecision
@@ -113,6 +115,29 @@ fragment PrFields on PullRequest {
   }
 }
 `;
+
+/**
+ * GitHub's native PR stacks. Measured on creatio.ghe.com: the selection leaves
+ * a 25-PR read at the same cost (1 point by dryRun), since stacks are short and
+ * `entries(first: 10)` is billed per page, not per node.
+ *
+ * Not every host has the fields yet — an older GitHub Enterprise Server answers
+ * `Field 'stack' doesn't exist on type 'PullRequest'` and fails the whole read.
+ * `hydrate` drops this selection for such a host and remembers it
+ * (`hostsWithoutStacks`), rather than probing every host with an extra request.
+ * Entries carry `state` because a merged PR can still be listed for a moment
+ * after GitHub merges it; the bottom is the lowest OPEN entry.
+ */
+const STACK_SELECTION = `stackEntry { position }
+  stack {
+    number
+    size
+    entries(first: 10) { nodes { position pullRequest { number url state } } }
+  }`;
+
+function prFieldsFragment(withStacks: boolean): string {
+  return PR_FIELDS_TEMPLATE.replace("__STACK__", withStacks ? STACK_SELECTION : "");
+}
 
 /**
  * ONE HTTP request per search, all of a host's searches issued in parallel:
@@ -172,13 +197,33 @@ query ($${varName}: String!) {
  */
 const HYDRATE_CHUNK = 25;
 
-function buildHydrateQuery(): string {
+function buildHydrateQuery(withStacks = true): string {
   return /* GraphQL */ `
 query ($ids: [ID!]!) {
   rateLimit { limit remaining cost resetAt }
   hydrated: nodes(ids: $ids) { ...PrFields }
 }
-${PR_FIELDS_FRAGMENT}`;
+${prFieldsFragment(withStacks)}`;
+}
+
+/** Hosts whose schema has no PR stacks — see `STACK_SELECTION`. Per app run. */
+const hostsWithoutStacks = new Set<string>();
+
+/** The error an older server answers a stack selection with. */
+function isMissingStackField(e: unknown): boolean {
+  return e instanceof Error && /Field '(stack|stackEntry)' doesn't exist on type 'PullRequest'/.test(e.message);
+}
+
+/** One read by id, without the stack selection on a host known to lack it. */
+async function hydrate(host: HostConfig, ids: string[]): Promise<NonNullable<RawResponse["data"]>> {
+  const withStacks = !hostsWithoutStacks.has(host.graphqlUrl);
+  try {
+    return await postSearch(host, buildHydrateQuery(withStacks), { ids }, { allowNotFound: true });
+  } catch (e) {
+    if (!withStacks || !isMissingStackField(e)) throw e;
+    hostsWithoutStacks.add(host.graphqlUrl);
+    return postSearch(host, buildHydrateQuery(false), { ids }, { allowNotFound: true });
+  }
 }
 
 // --- Raw GraphQL response types (narrowed to the fields we need) ---
@@ -212,6 +257,13 @@ interface RawPr {
   // Computed asynchronously — "UNKNOWN" right after a push, settles on a re-poll.
   mergeable: string;
   mergeStateStatus: string;
+  // Absent (undefined) when the host's schema has no stacks; null outside one.
+  stackEntry?: { position: number } | null;
+  stack?: {
+    number: number;
+    size: number;
+    entries: { nodes: Array<{ position: number; pullRequest: { number: number; url: string; state: string } | null }> };
+  } | null;
   author: { login: string; avatarUrl: string } | null;
   repository: { nameWithOwner: string; defaultBranchRef: { name: string } | null };
   reviewDecision: ReviewDecision;
@@ -412,6 +464,25 @@ export function approvalBodyNeedsAttention(body: string | undefined): boolean {
   return text !== "" && !/^(?:lgtm|looks good(?: to me)?|approved|approve|thanks|thank you|good job|nice work|ship it|✅|👍)$/.test(text);
 }
 
+/**
+ * The PR's place in a native GitHub stack, or null outside one. The bottom is
+ * the lowest-positioned OPEN entry other than this PR, and only when it sits
+ * below this one — the PR GitHub merges first.
+ */
+function mapStack(pr: RawPr): PrStack | null {
+  if (!pr.stack || !pr.stackEntry) return null;
+  const position = pr.stackEntry.position;
+  const bottom = pr.stack.entries.nodes
+    .filter((e) => e.pullRequest && e.pullRequest.state === "OPEN" && e.position < position)
+    .sort((a, b) => a.position - b.position)[0]?.pullRequest;
+  return {
+    number: pr.stack.number,
+    position,
+    size: pr.stack.size,
+    bottom: bottom ? { number: bottom.number, url: bottom.url } : null,
+  };
+}
+
 /** Maps a raw PR into the domain model (without activity fields — those are added by state.ts). */
 export function mapPr(
   pr: RawPr,
@@ -479,6 +550,11 @@ export function mapPr(
   // "default" so the stacked-PR marker doesn't light up on every card.
   const defaultBranch = pr.repository.defaultBranchRef?.name ?? null;
   const baseIsDefaultBranch = defaultBranch === null || pr.baseRefName === defaultBranch;
+
+  const stack = mapStack(pr);
+  // Keyed on an open PR below this one rather than on `position > 1` alone, so
+  // a stack whose lower PRs were just merged does not keep this one blocked.
+  const blockedByStack = stack?.bottom != null;
 
   // Latest commit's push time — pushedDate can be null on some commits, so fall
   // back to committedDate. Basis for detecting new pushes since a review.
@@ -586,6 +662,7 @@ export function mapPr(
     !pr.isDraft &&
     pr.mergeable === "MERGEABLE" &&
     pr.mergeStateStatus !== "BEHIND" &&
+    !blockedByStack &&
     hasHumanApproval &&
     !hasUnaddressedChangeRequest &&
     !hasUnaddressedReviewFeedback &&
@@ -609,6 +686,8 @@ export function mapPr(
     isDraft: pr.isDraft,
     baseRefName: pr.baseRefName,
     baseIsDefaultBranch,
+    stack,
+    blockedByStack,
     author: pr.author,
     createdAt: pr.createdAt,
     updatedAt: pr.updatedAt,
@@ -995,7 +1074,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
   const chunks: string[][] = [];
   for (let i = 0; i < ids.length; i += HYDRATE_CHUNK) chunks.push(ids.slice(i, i + HYDRATE_CHUNK));
   const hydrated = await Promise.all(
-    chunks.map((chunk) => postSearch(host, buildHydrateQuery(), { ids: chunk }, { allowNotFound: true })),
+    chunks.map((chunk) => hydrate(host, chunk)),
   );
   const fullById = new Map<string, RawPr>();
   for (const data of hydrated) {

@@ -93,6 +93,8 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     isDraft: false,
     baseRefName: "main",
     baseIsDefaultBranch: true,
+    stack: null,
+    blockedByStack: false,
     author: { login: "me", avatarUrl: OCTOCAT },
     createdAt: new Date(Date.now() - 2 * 864e5).toISOString(),
     updatedAt: new Date(Date.now() - 36e5).toISOString(),
@@ -277,6 +279,26 @@ const CASES: Record<string, () => PullRequest[]> = {
       // Stacked PR — based on a feature branch, not main.
       baseRefName: "feature/base-work",
       baseIsDefaultBranch: false,
+    }),
+    // A native GitHub stack: the bottom PR, and one above it that GitHub will
+    // not merge until the bottom one is in — approved and green all the same.
+    pr({
+      id: "mock-stack-bottom",
+      number: 305,
+      title: "Stack bottom: live diagnostics",
+      stack: { number: 9, position: 1, size: 2, bottom: null },
+    }),
+    pr({
+      id: "mock-stack-top",
+      number: 306,
+      title: "Stack top: completion and hover",
+      baseRefName: "feature/live-diagnostics",
+      baseIsDefaultBranch: false,
+      stack: { number: 9, position: 2, size: 2, bottom: { number: 305, url: "https://github.com/acme/widgets/pull/305" } },
+      blockedByStack: true,
+      reviewDecision: "APPROVED",
+      hasHumanApproval: true,
+      reviewers: [reviewerApproved],
     }),
   ],
   busy: () => [
