@@ -3035,9 +3035,10 @@ test("activeFilterCount: nothing set is 0, and the reveal chips stay out of it",
 });
 test("activeFilterCount: a whitespace-only search is not a filter", () =>
   assert.strictEqual(prFilter.activeFilterCount(st({ search: "   " })), 0));
+test("activeFilterCount: the role switch is a scope, not a filter Clear filters resets", () =>
+  assert.strictEqual(prFilter.activeFilterCount(st({ role: "reviewer" })), 0));
 for (const over of [
   { search: "bump" },
-  { role: "reviewer" },
   { host: "GHE" },
   ...prFilter.SOURCE_CHIPS.map((chip) => ({ [chip.flag]: true })),
 ]) {
@@ -3058,7 +3059,7 @@ test("activeFilterCount: every narrowing control at once", () =>
         noReviewsOnly: true,
       }),
     ),
-    3 + prFilter.SOURCE_CHIPS.length,
+    2 + prFilter.SOURCE_CHIPS.length,
   ));
 
 // --- github: mapPr past the review-thread page -------------------------------

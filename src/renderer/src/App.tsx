@@ -732,6 +732,8 @@ export function App() {
   // (see `activeFilterCount`). It also decides which empty-state story we tell,
   // so it lives in `shared` where both promises are unit-tested.
   const activeFilters = useMemo(() => activeFilterCount(filterState), [filterState]);
+  // Same rule `activeFilterCount` applies: whitespace alone filters nothing.
+  const searchActive = search.trim() !== "";
 
   // What an empty list means. Only rendered while nothing is on screen, which is
   // what makes the `all-hidden` copy exact: with no narrowing filter active,
@@ -760,7 +762,6 @@ export function App() {
 
   const clearFilters = useCallback(() => {
     setSearch("");
-    setRole("all");
     setHost("all");
     setAttentionOnly(false);
     setFailingOnly(false);
@@ -873,13 +874,36 @@ export function App() {
           <div className="mt-3 space-y-2 border-t border-line pt-3">
             {/* Row 1 — search + how the list is viewed (sort / group / scope). */}
             <div className="flex flex-wrap items-center gap-2">
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by title, repo, author…"
-                className="min-w-[14rem] flex-1 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none"
-              />
+              {/* A typed query hides rows as quietly as any chip, but unlike a chip
+                  it has no lit state of its own — so the box turns red while it
+                  narrows the list, and its ✕ stays put. Chromium's native cancel
+                  button shows only on hover/focus, hence our own (styles.css hides
+                  the native one). */}
+              <div className="relative min-w-[14rem] flex-1">
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search by title, repo, author…"
+                  className={cn(
+                    "w-full rounded-md border bg-surface py-1.5 pl-3 pr-8 text-sm text-fg placeholder:text-fg-faint focus:outline-none",
+                    searchActive
+                      ? "border-red-500 bg-red-500/10 ring-1 ring-red-500/60 focus:border-red-500"
+                      : "border-line-strong focus:border-sky-600",
+                  )}
+                />
+                {search !== "" && (
+                  <button
+                    type="button"
+                    onClick={() => setSearch("")}
+                    aria-label="Clear search"
+                    title="Clear search"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 rounded px-1.5 text-sm leading-6 text-fg-muted hover:bg-elevated hover:text-fg"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
 
               {/* Role is one exclusive choice, so it is a segmented switch rather
                   than chips: four buttons in one bordered group read as "pick one"

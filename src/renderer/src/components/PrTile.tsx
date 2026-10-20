@@ -108,7 +108,7 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
     <div
       title={tileTooltip(pr, Date.now())}
       className={cn(
-        "group relative rounded-md border border-line border-l-[3px] bg-surface/60 px-2 py-1.5 transition-colors hover:bg-surface",
+        "group relative rounded-md border border-line border-l-[3px] bg-surface px-2 py-1.5 shadow-sm transition-colors hover:border-line-strong",
         ACCENT[prSignal(pr, { trackComments })],
         pr.isIgnored && "opacity-60 hover:opacity-100",
       )}
@@ -116,11 +116,11 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
       {/* Line 1 — where it lives and how old it is. */}
       <div className="flex items-center gap-1 text-[11px] leading-none text-fg-subtle">
         {hideRepo ? (
-          <span className="text-fg-faint">#{pr.number}</span>
+          <span className="shrink-0 text-xs font-semibold tabular-nums text-fg-secondary">#{pr.number}</span>
         ) : (
           <span className="flex min-w-0 items-center gap-1">
             <span className="truncate">{repoShortName(pr.repo)}</span>
-            <span className="shrink-0 text-fg-faint">#{pr.number}</span>
+            <span className="shrink-0 text-xs font-semibold tabular-nums text-fg-secondary">#{pr.number}</span>
           </span>
         )}
         {pr.isDraft && <span className="shrink-0 rounded bg-elevated px-1 text-fg-muted">D</span>}

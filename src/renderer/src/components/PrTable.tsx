@@ -423,7 +423,7 @@ function Row({
             title={`${pr.hostLabel} · ${pr.repo}`}
           >
             <span className="max-w-[11rem] truncate">{repoShortName(pr.repo)}</span>
-            <span className="shrink-0 text-fg-faint">#{pr.number}</span>
+            <span className="shrink-0 text-sm font-semibold tabular-nums text-fg-secondary">#{pr.number}</span>
           </span>
           {pr.isDraft && (
             <span className="shrink-0 rounded bg-elevated px-1 text-[10px] text-fg-muted">Draft</span>

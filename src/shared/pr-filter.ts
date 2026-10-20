@@ -327,11 +327,12 @@ export function baselineStats(
  * means "show me more", the same promise clearing a source makes.
  * `Drafts`/`Ignored` are left out on purpose — they REVEAL rows, so clearing
  * them would shrink the list and break that promise.
+ * The role switch is left out too: it picks whose PRs you are looking at, a
+ * scope the user set on purpose, so `Clear filters` keeps it.
  */
 export function activeFilterCount(state: FilterState): number {
   let n = 0;
   if (state.search.trim()) n += 1;
-  if (state.role !== "all") n += 1;
   if (state.host !== "all") n += 1;
   if (state.hideApproved) n += 1;
   for (const chip of SOURCE_CHIPS) {
@@ -356,7 +357,8 @@ export type EmptyStateKind = "no-prs" | "all-hidden" | "no-match";
 
 export function emptyStateKind(state: FilterState, totalCount: number): EmptyStateKind {
   if (totalCount === 0) return "no-prs";
-  return activeFilterCount(state) === 0 ? "all-hidden" : "no-match";
+  // Role is not counted by `activeFilterCount`, but it still narrows the list.
+  return activeFilterCount(state) === 0 && state.role === "all" ? "all-hidden" : "no-match";
 }
 
 /**

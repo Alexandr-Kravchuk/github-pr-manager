@@ -197,7 +197,7 @@ export function PrCard({
   return (
     <div
       className={cn(
-        "rounded-lg border border-line border-l-4 p-4 transition-colors hover:bg-surface bg-surface/60",
+        "rounded-lg border border-line border-l-4 bg-surface p-4 shadow-sm transition-colors hover:border-line-strong",
         accentClass(pr, trackComments),
         // Revealed by the Ignored chip: on screen, but not part of the workload
         // the header counts — so it reads as set aside rather than as normal.
@@ -208,7 +208,7 @@ export function PrCard({
       <div className="mb-1 flex items-center justify-between gap-2 text-xs text-fg-subtle">
         <div className="flex min-w-0 items-center gap-2">
           {hideRepo ? (
-            <span className="text-fg-faint">#{pr.number}</span>
+            <span className="shrink-0 text-sm font-semibold tabular-nums text-fg-secondary">#{pr.number}</span>
           ) : (
             <>
               <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">{pr.hostLabel}</span>
@@ -216,7 +216,7 @@ export function PrCard({
                   name, so only the repo part truncates and #number stays put. */}
               <span className="flex min-w-0 items-center gap-1" title={`${pr.repo} #${pr.number}`}>
                 <span className="truncate">{repoShortName(pr.repo)}</span>
-                <span className="shrink-0 text-fg-faint">#{pr.number}</span>
+                <span className="shrink-0 text-sm font-semibold tabular-nums text-fg-secondary">#{pr.number}</span>
               </span>
             </>
           )}
