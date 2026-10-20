@@ -134,23 +134,48 @@ if [[ "${UPLOAD_RELEASE:-}" == "1" ]]; then
   fi
   log "Uploading macOS assets to release $TAG (id $RELID)"
 
+  # The DMG and ZIP are ~200 MB each. In v2.0.0 both came back
+  # `HTTP 408 "Upload body timed out due to inactivity"` — the upload stalled
+  # after ~10 MB and GitHub left the asset in state `starter` — while this loop
+  # printed the code and carried on, so the script reported success. Plain
+  # `--data-binary` and `-T` both stalled the same way; IPv4 + HTTP/1.1
+  # uploaded each file in ~25 s. Which of the two matters was not isolated, so
+  # both stay. Any non-201 is retried, and a file that never lands stops the
+  # release here rather than surfacing as a broken update feed after publish.
   upload_asset() {
-    local file="$1" name ct existing
+    local file="$1" name ct existing code attempt
     name="$(basename "$file" | tr ' ' '-')"   # GitHub asset names have no spaces; matches latest-mac.yml urls
     ct="application/octet-stream"; [[ "$name" == *.yml ]] && ct="text/yaml"
-    existing="$(gh api "repos/$REPO/releases/$RELID/assets" --jq ".[] | select(.name==\"$name\") | .id")"
-    [[ -n "$existing" ]] && gh api --method DELETE "repos/$REPO/releases/assets/$existing" >/dev/null 2>&1 || true
-    curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: $ct" \
-      --data-binary @"$file" \
-      "https://uploads.github.com/repos/$REPO/releases/$RELID/assets?name=$name" \
-      -o /dev/null -w "  $name: HTTP %{http_code}\n"
+    for attempt in 1 2 3; do
+      # A failed attempt leaves a `starter` asset that blocks the same name.
+      existing="$(gh api "repos/$REPO/releases/$RELID/assets" --jq ".[] | select(.name==\"$name\") | .id")"
+      [[ -n "$existing" ]] && gh api --method DELETE "repos/$REPO/releases/assets/$existing" >/dev/null 2>&1 || true
+      code="$(curl -4 --http1.1 -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: $ct" \
+        -T "$file" \
+        "https://uploads.github.com/repos/$REPO/releases/$RELID/assets?name=$name" \
+        -o /dev/null -w "%{http_code}")" || code="curl-error"
+      printf '  %s: HTTP %s (attempt %s)\n' "$name" "$code" "$attempt"
+      [[ "$code" == "201" ]] && return 0
+      sleep 5
+    done
+    die "Upload of $name failed after 3 attempts (last: HTTP $code). Re-run the upload; do not publish."
   }
 
   shopt -s nullglob
+  UPLOADED=()
   for f in dist/*.dmg dist/*.dmg.blockmap dist/*.zip dist/*.zip.blockmap dist/latest-mac.yml; do
     upload_asset "$f"
+    UPLOADED+=("$(basename "$f" | tr ' ' '-')")
   done
   shopt -u nullglob
+  [[ ${#UPLOADED[@]} -eq 5 ]] || die "Expected 5 macOS assets in dist/, uploaded ${#UPLOADED[@]}: ${UPLOADED[*]:-none}"
+
+  # A 201 is GitHub's word; the asset state is what electron-updater will see.
+  log "Checking that every macOS asset is in state 'uploaded'"
+  STATES="$(gh api "repos/$REPO/releases/$RELID/assets" --jq '.[] | "\(.name) \(.state)"')"
+  for name in "${UPLOADED[@]}"; do
+    grep -qx "$name uploaded" <<<"$STATES" || die "Asset $name is not in state 'uploaded':"$'\n'"$STATES"
+  done
 
   log "macOS assets uploaded to $TAG. After Windows is uploaded too, publish with:"
   log "  gh release edit $TAG --draft=false --latest"
