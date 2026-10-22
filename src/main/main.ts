@@ -253,19 +253,16 @@ function handleNotifications(prs: PullRequest[]): void {
       return;
     }
 
-    // Decide delivery with the pure planner (focus suppression, summary-vs-
-    // individual split, chime-once, native-off sound fallback all live there and
-    // are unit-tested); this process only executes the descriptor.
-    const win = mainWindow;
-    const focused = Boolean(win && !win.isDestroyed() && win.isFocused());
+    // Decide delivery with the pure planner (summary-vs-individual split,
+    // chime-once, native-off sound fallback all live there and are unit-tested);
+    // this process only executes the descriptor.
     const kinds = events.map((e) => e.kind).join(", ");
     const plan = planDelivery(events, settings.notifications, {
-      focused,
       nativeSupported: Notification.isSupported(),
     });
 
     if (plan.mode === "none") {
-      dbg(focused ? `suppressed ${events.length} event(s) — window focused: ${kinds}` : `no delivery channel: ${kinds}`);
+      dbg(`no delivery channel: ${kinds}`);
       return;
     }
 
