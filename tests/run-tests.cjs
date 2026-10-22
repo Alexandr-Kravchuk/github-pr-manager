@@ -6222,7 +6222,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // --- notify: planDelivery (pure delivery decision) -------------------------
   const evs = (n) =>
     Array.from({ length: n }, (_, i) => ({ prId: String(i), kind: "ci_failed", title: "t", body: "b", url: "u" }));
-  const CTX = { focused: false, nativeSupported: true };
+  const CTX = { nativeSupported: true };
   const NP = (o = {}) => ({ enabled: true, native: true, sound: false, ...o });
   const CAP = notify.MAX_INDIVIDUAL_NOTIFICATIONS;
 
@@ -6230,8 +6230,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.strictEqual(notify.planDelivery([], NP(), CTX).mode, "none"));
   test("planDelivery: disabled -> none", () =>
     assert.strictEqual(notify.planDelivery(evs(2), NP({ enabled: false }), CTX).mode, "none"));
-  test("planDelivery: focused window -> none (suppressed)", () =>
-    assert.strictEqual(notify.planDelivery(evs(1), NP(), { ...CTX, focused: true }).mode, "none"));
+  // A focused window used to swallow every toast; that hid real transitions, so
+  // the planner no longer takes focus into account at all. A stray `focused`
+  // flag from an old caller must not bring the suppression back.
+  test("planDelivery: a focused window still delivers", () =>
+    assert.strictEqual(notify.planDelivery(evs(1), NP(), { ...CTX, focused: true }).mode, "individual"));
   test("planDelivery: burst over the cap -> silent summary (no sound)", () => {
     const p = notify.planDelivery(evs(CAP + 1), NP(), CTX);
     assert.strictEqual(p.mode, "summary");
@@ -6456,9 +6459,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
             for (const nativeSupported of bools) {
               const s = { enabled, native, sound, events: ev(e) };
               const canFire = notify.hasDeliverableNotifications(s, nativeSupported);
-              // planDelivery is handed a non-empty batch and an unfocused window,
-              // so the ONLY thing left that can zero it out is channel viability.
-              const plan = notify.planDelivery(oneEvent, s, { focused: false, nativeSupported });
+              // planDelivery is handed a non-empty batch, so the ONLY thing left
+              // that can zero it out is channel viability.
+              const plan = notify.planDelivery(oneEvent, s, { nativeSupported });
               const wouldDeliver = plan.mode !== "none";
               // A settings state with no enabled event type can't produce events at
               // all, so planDelivery is never reached with one — exclude those from
