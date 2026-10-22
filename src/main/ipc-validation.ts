@@ -111,3 +111,11 @@ export function validatePrId(value: unknown): string {
   }
   return value;
 }
+
+/** Validates the Claude Code session id the renderer asks to switch to. */
+export function validateClaudeSessionId(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+    throw new Error("focusClaudeSession: expected a session id.");
+  }
+  return value;
+}

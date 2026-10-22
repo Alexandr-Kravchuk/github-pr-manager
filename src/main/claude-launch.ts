@@ -43,6 +43,11 @@ export function readRemoteUrls(dir: string): string[] {
   } catch {
     return [];
   }
+  return parseRemoteUrls(text);
+}
+
+/** The `url` of every `[remote "…"]` section in a git config file's text. */
+export function parseRemoteUrls(text: string): string[] {
   const urls: string[] = [];
   let inRemote = false;
   for (const line of text.split(/\r?\n/)) {
