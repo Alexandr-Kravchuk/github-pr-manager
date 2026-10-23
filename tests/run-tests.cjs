@@ -2865,29 +2865,72 @@ test("revealDelta: Drafts is 0 while Ready to merge is on", () =>
     0,
   ));
 
-test("isRevealChipShown: an OFF chip that would add rows renders", () =>
-  assert.strictEqual(prFilter.isRevealChipShown(st(), "drafts", 2), true));
-test("isRevealChipShown: an OFF chip that would add nothing is hidden", () => {
-  assert.strictEqual(prFilter.isRevealChipShown(st(), "drafts", 0), false);
-  assert.strictEqual(prFilter.isRevealChipShown(st(), "ignored", 0), false);
+test("isRevealChipShown: an OFF chip whose category has rows to add renders", () => {
+  assert.strictEqual(prFilter.isRevealChipShown(IGNORED_DRAFTS, st(), "drafts"), true);
+  assert.strictEqual(prFilter.isRevealChipShown(IGNORED_DRAFTS, st(), "ignored"), true);
 });
+test("isRevealChipShown: an OFF chip over an empty category is hidden", () => {
+  assert.strictEqual(prFilter.isRevealChipShown([], st(), "drafts"), false);
+  assert.strictEqual(prFilter.isRevealChipShown([], st(), "ignored"), false);
+});
+test("isRevealChipShown: an OFF chip whose rows the other filters exclude is hidden", () =>
+  assert.strictEqual(
+    prFilter.isRevealChipShown(IGNORED_DRAFTS, st({ mergeableOnly: true }), "drafts"),
+    false,
+  ));
 // The guarantee the old "every chip always renders" rule gave: a persisted
 // reveal must keep its control, or it is an active filter nobody can switch off.
-test("isRevealChipShown: an ON chip renders even when it adds nothing", () => {
-  assert.strictEqual(prFilter.isRevealChipShown(st({ showDrafts: true }), "drafts", 0), true);
-  assert.strictEqual(prFilter.isRevealChipShown(st({ showIgnored: true }), "ignored", 0), true);
+test("isRevealChipShown: an ON chip renders even over an empty category", () => {
+  assert.strictEqual(prFilter.isRevealChipShown([], st({ showDrafts: true }), "drafts"), true);
+  assert.strictEqual(prFilter.isRevealChipShown([], st({ showIgnored: true }), "ignored"), true);
 });
-test("isRevealChipShown: reads its own flag, not the sibling's", () =>
-  assert.strictEqual(prFilter.isRevealChipShown(st({ showIgnored: true }), "drafts", 0), false));
+// Every draft here is also ignored, so the sibling-aware badge drops to 0 the
+// moment the other chip turns on. Visibility must not follow it, or a click on
+// Ignored mounts / unmounts Drafts next to it and the clicked chip slides away
+// from the cursor.
+for (const [key, sibling] of [
+  ["drafts", "showIgnored"],
+  ["ignored", "showDrafts"],
+]) {
+  test(`isRevealChipShown(${key}): the sibling chip's click does not change it`, () => {
+    for (const own of [false, true]) {
+      const flag = key === "drafts" ? "showDrafts" : "showIgnored";
+      const off = prFilter.isRevealChipShown(IGNORED_DRAFTS, st({ [flag]: own, [sibling]: false }), key);
+      const on = prFilter.isRevealChipShown(IGNORED_DRAFTS, st({ [flag]: own, [sibling]: true }), key);
+      assert.strictEqual(on, off);
+      assert.strictEqual(on, true);
+    }
+  });
+}
 
-test("hideApprovalsTitle: says the count is rows hidden, singular and plural", () => {
+// Crossed cases on purpose: verb and plural must each follow their own argument.
+test("hideApprovalsTitle: the verb follows `active`, the plural follows the count", () => {
   assert.strictEqual(
     prFilter.hideApprovalsTitle(false, 1),
     "Hide 1 PR you approved that isn't asking for you again",
   );
   assert.strictEqual(
+    prFilter.hideApprovalsTitle(true, 1),
+    "Hiding 1 PR you approved that isn't asking for you again",
+  );
+  assert.strictEqual(
+    prFilter.hideApprovalsTitle(false, 3),
+    "Hide 3 PRs you approved that aren't asking for you again",
+  );
+  assert.strictEqual(
     prFilter.hideApprovalsTitle(true, 3),
     "Hiding 3 PRs you approved that aren't asking for you again",
+  );
+});
+// The badge is dropped at 0, so the title is the only place the 0 is spelled out.
+test("hideApprovalsTitle: spells out 0 in the plural", () => {
+  assert.strictEqual(
+    prFilter.hideApprovalsTitle(false, 0),
+    "Hide 0 PRs you approved that aren't asking for you again",
+  );
+  assert.strictEqual(
+    prFilter.hideApprovalsTitle(true, 0),
+    "Hiding 0 PRs you approved that aren't asking for you again",
   );
 });
 

@@ -645,8 +645,14 @@ export function App() {
     }),
     [allPrs, filterState],
   );
-  const showDraftsChip = isRevealChipShown(filterState, "drafts", chipCounts.drafts);
-  const showIgnoredChip = isRevealChipShown(filterState, "ignored", chipCounts.ignored);
+  const showDraftsChip = useMemo(
+    () => isRevealChipShown(allPrs, filterState, "drafts"),
+    [allPrs, filterState],
+  );
+  const showIgnoredChip = useMemo(
+    () => isRevealChipShown(allPrs, filterState, "ignored"),
+    [allPrs, filterState],
+  );
 
   // The role switch's four badges: how many rows each segment would leave, with
   // everything else still applied. One pass over the list, not four.
@@ -1056,10 +1062,13 @@ export function App() {
               </span>
               {/* Three groups, separated by a hairline: the five OR-ed source chips,
                   then the one chip that removes rows, then the two reveal chips.
-                  The source chips always render, so the row never reflows under
-                  the cursor. A reveal chip goes only while it is OFF and would add
-                  nothing (`isRevealChipShown`); an ON one always stays, so a
-                  persisted reveal can't hide as an invisible active filter. */}
+                  The source chips always render. A reveal chip goes only while it
+                  is OFF and its category, measured without the other reveal chip,
+                  has nothing to add (`isRevealChipShown`) — so clicking one reveal
+                  chip never adds or removes the other. An ON one always stays, so
+                  a persisted reveal can't hide as an invisible active filter; the
+                  one click that does reflow the row is switching such a chip off
+                  over an empty category, which is the chip leaving on purpose. */}
               <FilterChip
                 active={attentionOnly}
                 count={chipCounts.attention}
