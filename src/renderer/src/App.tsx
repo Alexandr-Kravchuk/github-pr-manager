@@ -26,6 +26,7 @@ import {
   type RoleFilter,
 } from "../../shared/pr-filter";
 import { groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
+import { hostHealth, type HostHealth } from "../../shared/host-status";
 import { ClaudeEnabledContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
@@ -47,9 +48,11 @@ import {
 } from "../../shared/view-mode";
 import type {
   DashboardResponse,
+  HostError,
   JiraStatus,
   PublicConfig,
   PullRequest,
+  RateLimitInfo,
   UpdateStatus,
 } from "../../shared/types";
 
@@ -815,50 +818,46 @@ export function App() {
             <div>
               <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
               <p className="text-xs text-fg-subtle">
-                {stats.total} PRs · {stats.attention} need attention · {stats.failing} failing CI
-                {trackComments && ` · ${stats.fresh} with new comments`}
+                {/* Only what the filter chips can't say. The attention / failing /
+                    new-comments totals used to sit here too, counted over every PR
+                    while the chips count within the current role — two numbers
+                    for one name, which read as a bug. The total is the standing
+                    workload, so "N of M shown" whenever the rendered SET differs.
+                    Equal counts aren't equal sets: one baseline PR filtered out
+                    and one revealed draft in its place would tie, so a rendered
+                    row outside the baseline is its own trigger. */}
+                {filtered.length !== stats.total || filtered.some((p) => !isBaselinePr(p))
+                  ? `${filtered.length} of ${stats.total} shown`
+                  : `${stats.total} PRs`}
+                {/* No chip covers "back to you", so it stays. */}
                 {stats.returned > 0 && ` · ${stats.returned} back to you`}
-                {/* The stats describe the standing workload, so say so whenever the
-                    rendered SET differs — otherwise "0 PRs" above two revealed
-                    cards reads as a bug. Equal counts aren't equal sets: one
-                    baseline PR filtered out and one revealed draft in its place
-                    would tie, so a rendered row outside the baseline is its own
-                    trigger. */}
-                {(filtered.length !== stats.total || filtered.some((p) => !isBaselinePr(p))) &&
-                  ` · ${filtered.length} shown`}
               </p>
             </div>
           </div>
-          {/* The display-variant switch sits in the header's middle gap — the
-              empty space `justify-between` leaves between the title block and
-              the Refresh / Settings buttons. It is a view control, not a filter,
-              so it belongs up here with Refresh rather than in the Filters row. */}
-          <ViewSwitch value={viewMode} onChange={setViewMode} />
           <div className="flex items-center gap-2 text-xs text-fg-muted">
-            {data?.rateLimits?.map((rl) => (
-              <span
-                key={rl.hostLabel}
-                title={`GitHub GraphQL budget left this hour: ${rl.remaining}${rl.limit ? ` of ${rl.limit}` : ""} points. Each refresh spends a few. Resets at ${rl.resetAt ? new Date(rl.resetAt).toLocaleTimeString() : "—"}.`}
-                className="flex items-center gap-1.5 rounded bg-elevated px-2 py-1"
-              >
-                {rl.hostLabel}: {rl.remaining}
-                <span className="text-fg-faint">·</span>
-                {rl.fetchedAt && <span className="text-fg-subtle">{relativeTime(rl.fetchedAt)}</span>}
-              </span>
-            ))}
-            {data && (
-              // One finite blink per incoming snapshot: `beat` remounts the node,
-              // the same monotonic-counter trick Buddy uses for its mood
-              // animations (`animationRun`). It used to carry Tailwind's
-              // `animate-pulse`, whose `infinite` keyframes kept the compositor
-              // producing frames around the clock: ~33% CPU in the GPU helper
-              // permanently, even with the window hidden.
-              <span
-                key={beat}
-                className="live-beat inline-block h-2 w-2 rounded-full bg-emerald-500"
-                title="Live — blinks when new data arrives"
+            {/* The display-variant switch sits with Refresh: it is a view control,
+                not a filter, and alone in the header's middle gap it read as
+                floating. */}
+            <ViewSwitch value={viewMode} onChange={setViewMode} />
+            {/* One pill per host, and with two or more hosts the pills ARE the
+                host filter (the "All hosts" dropdown they replaced repeated the
+                same two names one row lower). The budget number and fetch time
+                moved into the tooltip; the dot says what they meant. */}
+            {config?.hosts.map((h) => (
+              <HostPill
+                key={h.label}
+                label={h.label}
+                rateLimit={data?.rateLimits?.find((rl) => rl.hostLabel === h.label)}
+                error={data?.errors?.find((e) => e.hostLabel === h.label)}
+                beat={beat}
+                active={host === h.label}
+                onClick={
+                  config.hosts.length > 1
+                    ? () => setHost((cur) => (cur === h.label ? "all" : h.label))
+                    : undefined
+                }
               />
-            )}
+            ))}
             <button
               type="button"
               onClick={refresh}
@@ -1012,21 +1011,6 @@ export function App() {
                 <option value="issue">Group by issue</option>
                 {jiraStatus?.configured && <option value="parent">Group by parent task</option>}
               </select>
-
-              {config && config.hosts.length > 1 && (
-                <select
-                  value={host}
-                  onChange={(e) => setHost(e.target.value)}
-                  className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
-                >
-                  <option value="all">All hosts</option>
-                  {config.hosts.map((h) => (
-                    <option key={h.label} value={h.label}>
-                      {h.label}
-                    </option>
-                  ))}
-                </select>
-              )}
 
               {groups && groups.length > 0 && (
                 <button
@@ -1541,6 +1525,81 @@ function FilterChip({
       )}
     >
       {children} ({count})
+    </button>
+  );
+}
+
+const HOST_DOT: Record<HostHealth, string> = {
+  ok: "bg-emerald-500",
+  limited: "bg-amber-500",
+  error: "bg-red-500",
+  unknown: "bg-fg-faint",
+};
+
+const HOST_HEALTH_TEXT: Record<HostHealth, string> = {
+  ok: "Live",
+  limited: "Rate-limited or low on GraphQL budget",
+  error: "Last fetch failed",
+  unknown: "Not fetched yet",
+};
+
+/**
+ * A host's status pill: its label and a dot coloured by `hostHealth`. With
+ * `onClick` it is also that host's filter toggle and lights up like a chip while
+ * on; without it (a single host) it only reports status.
+ */
+function HostPill({
+  label,
+  rateLimit,
+  error,
+  beat,
+  active,
+  onClick,
+}: {
+  label: string;
+  rateLimit: RateLimitInfo | undefined;
+  error: HostError | undefined;
+  beat: number;
+  active: boolean;
+  onClick: (() => void) | undefined;
+}) {
+  const health = hostHealth(rateLimit, error);
+  const title = [
+    `${label}: ${HOST_HEALTH_TEXT[health]}`,
+    rateLimit?.fetchedAt && `Updated ${relativeTime(rateLimit.fetchedAt)}`,
+    rateLimit &&
+      `GraphQL budget left this hour: ${rateLimit.remaining}${rateLimit.limit ? ` of ${rateLimit.limit}` : ""} points, resets at ${rateLimit.resetAt ? new Date(rateLimit.resetAt).toLocaleTimeString() : "—"}`,
+    onClick && (active ? "Click to show every host" : `Click to show only ${label}`),
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const body = (
+    <>
+      {label}
+      {/* One finite blink per incoming snapshot: `beat` remounts the dot, the
+          same monotonic-counter trick Buddy uses for its mood animations. The
+          live dot this replaced once carried Tailwind's `animate-pulse`, whose
+          `infinite` keyframes kept the GPU helper at ~33% CPU permanently. */}
+      <span key={beat} aria-hidden className={cn("live-beat inline-block h-2 w-2 rounded-full", HOST_DOT[health])} />
+    </>
+  );
+  const shape = "inline-flex items-center gap-1.5 rounded-md border px-2 py-1";
+  if (!onClick) {
+    return (
+      <span title={title} className={cn(shape, "border-transparent bg-elevated")}>
+        {body}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-pressed={active}
+      className={cn(shape, GLASS_BASE, active ? CHIP_TONE_ACTIVE.sky : cn(GLASS_IDLE, "text-fg-secondary"))}
+    >
+      {body}
     </button>
   );
 }

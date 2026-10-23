@@ -254,6 +254,20 @@ body {
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
+/* Tailwind v4's preflight leaves buttons on the default arrow cursor, so
+   nothing told you a chip, a host pill or a card action was clickable. One rule
+   here rather than `cursor-pointer` on every button: a new control gets it
+   without anyone remembering to. In the base layer, so a utility still wins;
+   disabled controls keep the arrow. */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  select:not(:disabled),
+  summary {
+    cursor: pointer;
+  }
+}
+
 /* The search box draws its own always-visible ✕ (App.tsx); Chromium's native
    cancel button would show next to it on hover/focus. */
 input[type="search"]::-webkit-search-cancel-button {

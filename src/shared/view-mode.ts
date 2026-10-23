@@ -33,7 +33,7 @@ export const DEFAULT_VIEW_MODE: ViewMode = "roomy";
 
 /**
  * Tooltip / `aria-label` per segment. The switch itself is icon-only (that is
- * what makes it fit the header's middle gap), so this text is the only place
+ * what makes it fit beside Refresh in the header), so this text is the only place
  * the mode is named — it has to say what the mode does, not just repeat the
  * name.
  */

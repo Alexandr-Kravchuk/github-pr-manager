@@ -295,9 +295,6 @@ export function excludeDelta(prs: readonly FilterablePr[], state: FilterState): 
 /** Header summary: the standing "is there work for me" picture. */
 export interface BaselineStats {
   total: number;
-  attention: number;
-  failing: number;
-  fresh: number;
   returned: number;
 }
 
@@ -305,7 +302,10 @@ export interface BaselineStats {
  * The header stats, over the PRs that are neither ignored nor drafts — the same
  * base `buddyMood` reads, so the mascot and the numbers can't disagree.
  * Deliberately independent of the filters: it answers "how much work is there",
- * not "what's on screen" (the `· N shown` suffix covers the latter).
+ * not "what's on screen" (the `N of M shown` wording covers the latter). Only
+ * the two numbers no filter chip shows: the attention / failing / new-comments
+ * totals lived here too, and next to the chips' role-scoped counts for the same
+ * names they read as a bug.
  */
 export function baselineStats(
   prs: readonly (FilterablePr & Pick<PullRequest, "returnedToMe">)[],
@@ -313,9 +313,6 @@ export function baselineStats(
   const base = prs.filter(isBaselinePr);
   return {
     total: base.length,
-    attention: base.filter((pr) => pr.needsAttention).length,
-    failing: base.filter((pr) => pr.failingChecks.length > 0).length,
-    fresh: base.filter((pr) => pr.hasNewActivity).length,
     returned: base.filter((pr) => pr.returnedToMe).length,
   };
 }
