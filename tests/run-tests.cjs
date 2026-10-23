@@ -97,6 +97,7 @@ for (const mod of [
   "claude-launch.js",
   "claude-sessions.js",
   "settings-search.js",
+  "host-status.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -315,12 +316,12 @@ for (const file of ["PrCard.tsx", "PrTile.tsx"]) {
     assert.match(src, /loadSettings\(\)\.trackComments/, "and read it from settings, not hardcode it");
   });
 
-  test("App.tsx gates the New comments chip and the header count on trackComments", () => {
+  test("App.tsx gates the New comments chip on trackComments", () => {
     const src = read("src/renderer/src/App.tsx");
     // Same reasoning: assert the gate co-occurs with what it gates, not the
-    // exact JSX or the header wording.
+    // exact JSX. (The header's new-comments count it also gated is gone: the
+    // chip is the only place that number shows now.)
     assert.match(src, /trackComments &&[\s\S]{0,120}?<FilterChip/, "the chip must be conditional");
-    assert.match(src, /trackComments &&[\s\S]{0,120}?stats\.fresh/, "the header stat must be conditional");
   });
 }
 
@@ -3168,20 +3169,69 @@ test("isBaselinePr: the standing workload is neither draft nor ignored", () => {
 test("baselineStats: excludes both ignored PRs and drafts", () => {
   const stats = prFilter.baselineStats(MIXED);
   assert.strictEqual(stats.total, 3);
-  assert.strictEqual(stats.attention, 2);
-  assert.strictEqual(stats.failing, 1);
-  assert.strictEqual(stats.fresh, 1);
   // Two PRs are returnedToMe; the ignored one is not part of the workload.
   assert.strictEqual(stats.returned, 1);
 });
 test("baselineStats: all-hidden inbox reports zero, matching the header", () =>
   assert.deepStrictEqual(prFilter.baselineStats(IGNORED_DRAFTS), {
     total: 0,
-    attention: 0,
-    failing: 0,
-    fresh: 0,
     returned: 0,
   }));
+
+// --- pr-filter: headerCountLabel --------------------------------------------
+{
+  const pr = (isDraft = false, isIgnored = false) => ({ isDraft, isIgnored });
+  test("headerCountLabel: the whole baseline on screen is just the total", () =>
+    assert.strictEqual(prFilter.headerCountLabel([pr(), pr()], 2), "2 PRs"));
+  test("headerCountLabel: a filtered subset of the baseline says 'N of M shown'", () =>
+    assert.strictEqual(prFilter.headerCountLabel([pr()], 3), "1 of 3 shown"));
+  test("headerCountLabel: revealed drafts never produce 'of' — they are not part of M", () => {
+    // 10 baseline + 3 drafts with Drafts on: "13 of 10 shown" was the bug.
+    const rendered = [...Array(10)].map(() => pr()).concat([pr(true), pr(true), pr(true)]);
+    assert.strictEqual(prFilter.headerCountLabel(rendered, 10), "10 PRs · 13 shown");
+    assert.strictEqual(prFilter.headerCountLabel([pr(true), pr(false, true)], 0), "0 PRs · 2 shown");
+  });
+  test("headerCountLabel: equal counts with a revealed row swapped in still say so", () =>
+    assert.strictEqual(prFilter.headerCountLabel([pr(), pr(true)], 2), "2 PRs · 2 shown"));
+  test("headerCountLabel: an empty inbox is '0 PRs'", () =>
+    assert.strictEqual(prFilter.headerCountLabel([], 0), "0 PRs"));
+}
+
+// --- host-status: the header host pill's dot -------------------------------
+{
+  const hs = require(path.join(__dirname, "../dist/main/shared/host-status.js"));
+  const rl = (remaining, limit, resetAt = "2026-10-23T12:00:00Z") => ({ remaining, limit, resetAt });
+  test("hostHealth: plain fetch error is red even with a reading", () =>
+    assert.strictEqual(hs.hostHealth(rl(4900, 5000), { message: "boom" }), "error"));
+  test("hostHealth: a spent-budget refusal is amber, with or without a reset time", () => {
+    assert.strictEqual(hs.hostHealth(rl(0, 5000), { rateLimitedUntil: "2026-10-23T12:00:00Z" }), "limited");
+    assert.strictEqual(hs.hostHealth(undefined, { rateLimitedUntil: "" }), "limited");
+  });
+  test("hostHealth: no reading yet is unknown", () =>
+    assert.strictEqual(hs.hostHealth(undefined, undefined), "unknown"));
+  test("hostHealth: amber below 10% of the reported limit, green at it", () => {
+    assert.strictEqual(hs.hostHealth(rl(499, 5000), undefined), "limited");
+    assert.strictEqual(hs.hostHealth(rl(500, 5000), undefined), "ok");
+    assert.strictEqual(hs.hostHealth(rl(4963, 5000), undefined), "ok");
+  });
+  test("hostHealth: without a reported limit the floor is 500 points", () => {
+    assert.strictEqual(hs.hostHealth(rl(499, undefined), undefined), "limited");
+    assert.strictEqual(hs.hostHealth(rl(500, undefined), undefined), "ok");
+  });
+  test("hostHealth: a limit of 0 falls back to the 500-point floor", () => {
+    assert.strictEqual(hs.hostHealth(rl(499, 0), undefined), "limited");
+    assert.strictEqual(hs.hostHealth(rl(500, 0), undefined), "ok");
+  });
+  // A host whose responses carried no `rateLimit` (GHES with rate limiting off):
+  // fetchHost still returns remaining 0 / no limit / resetAt "". That is "no
+  // budget reported", not "0 points left" — amber there would be a false alarm.
+  test("hostHealth: a reading without budget data is green, not amber", () => {
+    assert.strictEqual(hs.hasBudgetReading(rl(0, undefined, "")), false);
+    assert.strictEqual(hs.hostHealth(rl(0, undefined, ""), undefined), "ok");
+    // The spent-budget reading the poller synthesises carries resetAt, so it stays amber.
+    assert.strictEqual(hs.hostHealth(rl(0, 5000), undefined), "limited");
+  });
+}
 
 // --- pr-filter: activeFilterCount / emptyStateKind --------------------------
 // The reveal chips must not read as active filters — counting them let

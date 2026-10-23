@@ -304,7 +304,12 @@ const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleepi
 const snapshot: DashboardResponse = {
   pullRequests: FIXTURES[mood] ?? FIXTURES.sleeping,
   errors: [],
-  rateLimits: [{ hostLabel: "GitHub", remaining: 4980, cost: 20, resetAt: new Date().toISOString(), fetchedAt: new Date().toISOString() }],
+  // Two hosts so the header's host pills act as filters; GHE's budget is low on
+  // purpose, so its dot shows the amber state.
+  rateLimits: [
+    { hostLabel: "GitHub", remaining: 4980, limit: 5000, cost: 20, resetAt: new Date().toISOString(), fetchedAt: new Date().toISOString() },
+    { hostLabel: "GHE", remaining: 320, limit: 5000, cost: 20, resetAt: new Date().toISOString(), fetchedAt: new Date().toISOString() },
+  ],
   fetchedAt: new Date().toISOString(),
   version: "dev",
 };
@@ -384,7 +389,10 @@ const api: PrManagerApi = {
     ok: true,
     config: {
       pollIntervalSeconds: 60,
-      hosts: [{ label: "GitHub", repos: ["acme/widgets"] }],
+      hosts: [
+        { label: "GitHub", repos: ["acme/widgets"] },
+        { label: "GHE", repos: ["corp/widgets"] },
+      ],
       trackComments: true,
       claudeEnabled: true,
     },

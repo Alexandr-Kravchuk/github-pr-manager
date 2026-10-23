@@ -94,16 +94,20 @@ Three layers:
   switches to it — Desktop through `claude://claude.ai/epitaxy/<hostSessionId>`,
   a CLI session through the iTerm2/Terminal tab on its tty — and launching a
   second one moves to the menu, since two sessions on one PR edit the same
-  branch) and
+  branch),
   `settings-search.ts` (the Settings screen's tabs, which section sits on which,
   and the keywords its search box matches — every word of the query must hit a
   section's title or keywords; a setting whose label is missing there cannot be
-  found, so extend its keywords when adding one). Keep any such
+  found, so extend its keywords when adding one) and `host-status.ts` (the
+  colour of a header host pill's dot — red on a failed fetch, amber on a spent
+  or low GraphQL budget, green otherwise; the pills replaced the raw budget
+  number and, with two or more hosts, the "All hosts" dropdown, since clicking a
+  pill toggles that host's filter). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
-  `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js` and
-  `settings-search.js`
+  `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
+  `settings-search.js` and `host-status.js`
   stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
