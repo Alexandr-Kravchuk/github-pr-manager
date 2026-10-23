@@ -280,6 +280,27 @@ export function revealDelta(
 }
 
 /**
+ * Whether a reveal chip renders at all. An OFF chip whose click would add no
+ * row is noise, so it goes; an ON chip always stays, or a persisted reveal
+ * would become an active filter with no control left to switch it off. The
+ * source chips are not asked: they always render, so the row in front of the
+ * reveal group never reflows.
+ */
+export function isRevealChipShown(state: FilterState, key: RevealKey, delta: number): boolean {
+  return state[REVEAL_FLAG[key]] || delta > 0;
+}
+
+/**
+ * Tooltip for `Hide my approvals`, saying what its badge counts: the rows it
+ * hides (while on) or would hide (while off). The badge itself is dropped at 0,
+ * so the title is the only place a 0 is spelled out.
+ */
+export function hideApprovalsTitle(active: boolean, hidden: number): string {
+  const rows = hidden === 1 ? "1 PR you approved that isn't" : `${hidden} PRs you approved that aren't`;
+  return `${active ? "Hiding" : "Hide"} ${rows} asking for you again`;
+}
+
+/**
  * Badge for the exclude chip: how many rows the click TAKES AWAY (or, while it
  * is on, how many turning it off would bring back). The mirror of `revealDelta`,
  * and a delta for the same reason — a PR already hidden by the sources or

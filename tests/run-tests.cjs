@@ -2865,6 +2865,32 @@ test("revealDelta: Drafts is 0 while Ready to merge is on", () =>
     0,
   ));
 
+test("isRevealChipShown: an OFF chip that would add rows renders", () =>
+  assert.strictEqual(prFilter.isRevealChipShown(st(), "drafts", 2), true));
+test("isRevealChipShown: an OFF chip that would add nothing is hidden", () => {
+  assert.strictEqual(prFilter.isRevealChipShown(st(), "drafts", 0), false);
+  assert.strictEqual(prFilter.isRevealChipShown(st(), "ignored", 0), false);
+});
+// The guarantee the old "every chip always renders" rule gave: a persisted
+// reveal must keep its control, or it is an active filter nobody can switch off.
+test("isRevealChipShown: an ON chip renders even when it adds nothing", () => {
+  assert.strictEqual(prFilter.isRevealChipShown(st({ showDrafts: true }), "drafts", 0), true);
+  assert.strictEqual(prFilter.isRevealChipShown(st({ showIgnored: true }), "ignored", 0), true);
+});
+test("isRevealChipShown: reads its own flag, not the sibling's", () =>
+  assert.strictEqual(prFilter.isRevealChipShown(st({ showIgnored: true }), "drafts", 0), false));
+
+test("hideApprovalsTitle: says the count is rows hidden, singular and plural", () => {
+  assert.strictEqual(
+    prFilter.hideApprovalsTitle(false, 1),
+    "Hide 1 PR you approved that isn't asking for you again",
+  );
+  assert.strictEqual(
+    prFilter.hideApprovalsTitle(true, 3),
+    "Hiding 3 PRs you approved that aren't asking for you again",
+  );
+});
+
 // Partial overlap on purpose: a plain draft, a plain ignored PR and one ignored
 // draft, which is what IGNORED_DRAFTS cannot express.
 const MIXED = [
