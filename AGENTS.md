@@ -76,6 +76,25 @@ Three layers:
   the renderer imports it for the tooltip, while finding the checkout by git
   remote and opening the terminal live in `main/claude-launch.ts`, and the
   renderer sends only the PR id so nothing it supplies reaches the shell),
+  `claude-sessions.ts` (which running Claude Code session works on which PR:
+  a session counts when the user sent it the PR's link — only human prompts,
+  never tool results, peer messages or task notifications, which quote PRs the
+  session was never asked about — or when its folder is a checkout of the PR's
+  repo on the PR's head branch; `main/claude-sessions.ts` reads Claude Code's
+  own live registry `~/.claude/sessions/<pid>.json` (skipping `spare` processes
+  started ahead of the next session; a `kind: "bg"` session runs in the
+  daemon's pty, so no terminal tab has its tty) plus each session's transcript
+  incrementally, on a 5 s timer gated on window visibility like the snapshot
+  pushes. Claude Desktop pauses idle sessions — stops the process, keeps the
+  session — so its own records (`claude-code-sessions/*/*/local_*.json`:
+  `isArchived`, the `prs` bound to it, `scheduledTaskId`) add those as
+  `paused` and drop archived ones; routine runs are left out because one run
+  touches every PR it drove. Those records are re-listed every 60 s and only
+  the last 14 days are read — thousands pile up. While a session holds a PR, the Claude button's main part
+  switches to it — Desktop through `claude://claude.ai/epitaxy/<hostSessionId>`,
+  a CLI session through the iTerm2/Terminal tab on its tty — and launching a
+  second one moves to the menu, since two sessions on one PR edit the same
+  branch),
   `settings-search.ts` (the Settings screen's tabs, which section sits on which,
   and the keywords its search box matches — every word of the query must hit a
   section's title or keywords; a setting whose label is missing there cannot be
@@ -87,8 +106,8 @@ Three layers:
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
-  `pr-table.js`, `view-mode.js`, `claude-launch.js`, `settings-search.js` and
-  `host-status.js`
+  `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
+  `settings-search.js` and `host-status.js`
   stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.

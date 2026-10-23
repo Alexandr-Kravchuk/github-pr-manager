@@ -27,7 +27,7 @@ import {
 } from "../../shared/pr-filter";
 import { groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
 import { hostHealth, type HostHealth } from "../../shared/host-status";
-import { ClaudeEnabledContext } from "./components/claude-context";
+import { ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
   DEFAULT_TABLE_SORT,
@@ -47,6 +47,7 @@ import {
   type ViewMode,
 } from "../../shared/view-mode";
 import type {
+  ClaudeSessionInfo,
   DashboardResponse,
   HostError,
   JiraStatus,
@@ -234,6 +235,7 @@ export function App() {
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraStatus | null>(null);
+  const [claudeSessions, setClaudeSessions] = useState<ClaudeSessionInfo[]>([]);
   const [data, setData] = useState<DashboardResponse | null>(null);
   // Monotonic count of snapshots applied — the live-dot's remount key.
   const [beat, setBeat] = useState(0);
@@ -391,6 +393,26 @@ export function App() {
       window.removeEventListener("focus", onWake);
     };
   }, [loadInitial]);
+
+  // Running Claude sessions: main pushes changes while the window is visible
+  // and pushes nothing while it is hidden, so the list is pulled again on show.
+  useEffect(() => {
+    const off = window.api.onClaudeSessions(setClaudeSessions);
+    const load = () => {
+      window.api.getClaudeSessions().then(setClaudeSessions).catch(() => {});
+    };
+    const onWake = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    load();
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => {
+      off();
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+    };
+  }, []);
 
   // Tick to refresh relative times.
   useEffect(() => {
@@ -1205,6 +1227,7 @@ export function App() {
       )}
 
       <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
+      <ClaudeSessionsContext.Provider value={claudeSessions}>
       {viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable
@@ -1282,6 +1305,7 @@ export function App() {
           onToggleIgnore={toggleIgnore}
         />
       )}
+      </ClaudeSessionsContext.Provider>
       </ClaudeEnabledContext.Provider>
 
       <div className="pointer-events-none fixed bottom-2 right-3 z-10 flex items-center gap-2 text-[11px]">

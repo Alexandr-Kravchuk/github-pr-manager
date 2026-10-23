@@ -580,6 +580,43 @@ export type ClaudeLaunchResult =
   | { ok: true; kind: "drive" | "review" | "close" | "explain" | "open"; dir: string }
   | { ok: false; error: string };
 
+/**
+ * A Claude Code session running on this machine, as its registry file
+ * (`~/.claude/sessions/<pid>.json`) and transcript describe it — the input the
+ * cards match against to show which PR has a live session. Built in
+ * `main/claude-sessions.ts`, matched in `shared/claude-sessions.ts`.
+ */
+export interface ClaudeSessionInfo {
+  /** Claude Code's session id — the transcript's file name. */
+  id: string;
+  /** The session's title (the Desktop sidebar's, or a derived one for the CLI). */
+  name: string;
+  /**
+   * `busy` — working on a turn; `waiting` — asked the user something; `idle` —
+   * the turn ended; `paused` — a Claude Desktop session whose process Desktop
+   * stopped without archiving it (opening it resumes it).
+   */
+  status: "busy" | "waiting" | "idle" | "paused";
+  /** What it waits for, when `status` is `waiting` (e.g. "input needed"). */
+  waitingFor?: string;
+  /**
+   * Where it runs, which decides what "switch to it" opens: a Claude Desktop
+   * session, a terminal tab, or a process with no window (`claude -p`, the SDK).
+   */
+  where: "desktop" | "terminal" | "background";
+  /** `host/owner/repo/pull/N` of every PR link the user sent it. */
+  prKeys: string[];
+  /** `host/owner/repo` of each git remote of its working folder. */
+  repoKeys: string[];
+  /** The branch checked out in its working folder; null when detached or not a git folder. */
+  branch: string | null;
+  /** Epoch ms of a paused session's last activity — the most recent of several goes first. */
+  lastActivityAt?: number;
+}
+
+/** Result of `focusClaudeSession`. */
+export type FocusClaudeSessionResult = { ok: true } | { ok: false; error: string };
+
 /** `gh` CLI availability + per-host authentication, for the settings UI. */
 export interface GhStatus {
   /** Whether the `gh` CLI is installed and on PATH. */
@@ -628,6 +665,16 @@ export interface PrManagerApi {
    * from the button's menu. Refused while the integration is off.
    */
   launchClaude(prId: string, kind?: "drive" | "review" | "close" | "explain" | "open"): Promise<ClaudeLaunchResult>;
+  /** The Claude Code sessions running now; empty while the integration is off. */
+  getClaudeSessions(): Promise<ClaudeSessionInfo[]>;
+  /**
+   * Bring a running session to the front: its Claude Desktop session, or the
+   * terminal tab it runs in. Only the session id crosses over; main looks it up
+   * in its own scan.
+   */
+  focusClaudeSession(sessionId: string): Promise<FocusClaudeSessionResult>;
+  /** Subscribe to changes in the running sessions. Returns an unsubscribe function. */
+  onClaudeSessions(listener: (sessions: ClaudeSessionInfo[]) => void): () => void;
   /** Copy text (e.g. a PR URL) to the system clipboard. */
   copyText(text: string): Promise<void>;
   /** Returns release info if a new version was installed since last ack, or null. */

@@ -95,6 +95,7 @@ for (const mod of [
   "pr-table.js",
   "view-mode.js",
   "claude-launch.js",
+  "claude-sessions.js",
   "settings-search.js",
   "host-status.js",
 ]) {
@@ -255,6 +256,23 @@ for (const mod of [
       "function prSignal",
     );
     reads(path.join(rendererRoot, "src/App.tsx"), "src/App.tsx", "function actionRank");
+  });
+}
+
+// --- the accent stripe survives hover ----------------------------------------
+// A card's and a tile's left border is the coloured accent (`border-l-*`). A
+// hover colour for the whole border (`hover:border-line-strong`) outranks it and
+// painted the stripe grey under the pointer (2.3.0); hover may colour the other
+// sides only (`hover:border-y-*`, `hover:border-r-*`).
+for (const file of ["PrCard.tsx", "PrTile.tsx"]) {
+  test(`${file}: hover never recolours the accent stripe`, () => {
+    const src = require("node:fs").readFileSync(
+      path.join(__dirname, `../src/renderer/src/components/${file}`),
+      "utf8",
+    );
+    const hits = src.match(/hover:border-(?:line|[a-z]+-\d)[\w-]*/g) || [];
+    assert.deepStrictEqual(hits, [], `${file} sets a whole-border hover colour: ${hits.join(", ")}`);
+    assert.match(src, /hover:border-y-line-strong hover:border-r-line-strong/);
   });
 }
 
@@ -6240,7 +6258,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // --- notify: planDelivery (pure delivery decision) -------------------------
   const evs = (n) =>
     Array.from({ length: n }, (_, i) => ({ prId: String(i), kind: "ci_failed", title: "t", body: "b", url: "u" }));
-  const CTX = { focused: false, nativeSupported: true };
+  const CTX = { nativeSupported: true };
   const NP = (o = {}) => ({ enabled: true, native: true, sound: false, ...o });
   const CAP = notify.MAX_INDIVIDUAL_NOTIFICATIONS;
 
@@ -6248,8 +6266,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.strictEqual(notify.planDelivery([], NP(), CTX).mode, "none"));
   test("planDelivery: disabled -> none", () =>
     assert.strictEqual(notify.planDelivery(evs(2), NP({ enabled: false }), CTX).mode, "none"));
-  test("planDelivery: focused window -> none (suppressed)", () =>
-    assert.strictEqual(notify.planDelivery(evs(1), NP(), { ...CTX, focused: true }).mode, "none"));
+  // A focused window used to swallow every toast; that hid real transitions, so
+  // the planner no longer takes focus into account at all. A stray `focused`
+  // flag from an old caller must not bring the suppression back.
+  test("planDelivery: a focused window still delivers", () =>
+    assert.strictEqual(notify.planDelivery(evs(1), NP(), { ...CTX, focused: true }).mode, "individual"));
   test("planDelivery: burst over the cap -> silent summary (no sound)", () => {
     const p = notify.planDelivery(evs(CAP + 1), NP(), CTX);
     assert.strictEqual(p.mode, "summary");
@@ -6474,9 +6495,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
             for (const nativeSupported of bools) {
               const s = { enabled, native, sound, events: ev(e) };
               const canFire = notify.hasDeliverableNotifications(s, nativeSupported);
-              // planDelivery is handed a non-empty batch and an unfocused window,
-              // so the ONLY thing left that can zero it out is channel viability.
-              const plan = notify.planDelivery(oneEvent, s, { focused: false, nativeSupported });
+              // planDelivery is handed a non-empty batch, so the ONLY thing left
+              // that can zero it out is channel viability.
+              const plan = notify.planDelivery(oneEvent, s, { nativeSupported });
               const wouldDeliver = plan.mode !== "none";
               // A settings state with no enabled event type can't produce events at
               // all, so planDelivery is never reached with one — exclude those from
@@ -6965,6 +6986,316 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     test("main.js wiring: claude:launch looks the PR up by id in the poller snapshot", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
       assert.match(src, /"claude:launch"[\s\S]{0,300}validatePrId[\s\S]{0,200}validateClaudeKind[\s\S]{0,200}getSnapshot\(\)/);
+    });
+  }
+
+
+  // --- Running Claude sessions -----------------------------------------------
+  {
+    const cs = require(path.join(__dirname, "../dist/main/shared/claude-sessions.js"));
+    const scanner = require(path.join(__dirname, "../dist/main/main/claude-sessions.js"));
+    const ipcv = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+    const nfs = require("node:fs");
+    const SID = "b885533b-56e7-40f9-b891-5b31e77a22a1";
+    const SID2 = "3527484f-1974-4a3b-b0ca-57b45c38321c";
+    // A prompt line as Claude Code 2.1 writes it (trimmed to the fields read).
+    const promptLine = (content, extra = {}) =>
+      JSON.stringify({ type: "user", message: { role: "user", content }, origin: { kind: "human" }, sessionId: SID, ...extra });
+
+    test("claude sessions: PR keys drop the scheme, /files, query and case", () => {
+      assert.strictEqual(cs.prUrlKey("https://creatio.ghe.com/Engineering/Core/pull/1628/files?w=1"), "creatio.ghe.com/engineering/core/pull/1628");
+      assert.strictEqual(cs.prUrlKey("https://github.com/acme/widgets/issues/3"), null);
+      assert.deepStrictEqual(
+        cs.extractPrKeys("see <https://github.com/a/b/pull/1>, https://github.com/a/b/pull/1/files and (https://x.io/c/d/pull/22)"),
+        ["github.com/a/b/pull/1", "x.io/c/d/pull/22"],
+      );
+    });
+
+    test("claude sessions: only a prompt the user sent counts, not what other turns quote", () => {
+      const slash = "<command-message>usercustom-dev:drive-pr-close</command-message>\n<command-name>/usercustom-dev:drive-pr-close</command-name>\n<command-args>https://creatio.ghe.com/engineering/core/pull/1628</command-args>";
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine(slash)), ["creatio.ghe.com/engineering/core/pull/1628"]);
+      const desktop = promptLine([
+        { type: "text", text: "<system-reminder>\nWorktree of https://github.com/a/b/pull/9\n</system-reminder>\n\n" },
+        { type: "text", text: "доведи https://github.com/a/b/pull/7" },
+      ]);
+      assert.deepStrictEqual(cs.promptPrKeys(desktop), ["github.com/a/b/pull/7"], "a system reminder is not what the user typed");
+      const toolResult = promptLine([{ type: "tool_result", tool_use_id: "t", content: "https://github.com/a/b/pull/8" }]);
+      assert.deepStrictEqual(cs.promptPrKeys(toolResult), []);
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine("https://github.com/a/b/pull/8", { origin: { kind: "peer" } })), []);
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine("https://github.com/a/b/pull/8", { origin: { kind: "task-notification" } })), []);
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine("https://github.com/a/b/pull/8", { isMeta: true })), []);
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine("https://github.com/a/b/pull/8", { isSidechain: true })), []);
+      const legacy = JSON.stringify({ type: "user", message: { role: "user", content: "https://github.com/a/b/pull/5" } });
+      assert.deepStrictEqual(cs.promptPrKeys(legacy), ["github.com/a/b/pull/5"], "a transcript older than `origin` is judged by content");
+      const blob = JSON.stringify({ type: "api-request-blob", message: { role: "user", content: "\"type\":\"user\" https://github.com/a/b/pull/4" } });
+      assert.deepStrictEqual(cs.promptPrKeys(blob), []);
+      assert.deepStrictEqual(cs.promptPrKeys('{"type":"user", "/pull/ broken'), []);
+    });
+
+    const session = (patch) => ({
+      id: SID, name: "s", status: "idle", where: "terminal", prKeys: [], repoKeys: [], branch: null, ...patch,
+    });
+    const prOf = { url: "https://github.com/acme/widgets/pull/7", repo: "acme/widgets", headRefName: "feature/x" };
+
+    test("claude sessions: matched by the PR link or by the PR's branch in its repository", () => {
+      const byLink = session({ id: "a", prKeys: ["github.com/acme/widgets/pull/7"] });
+      const byBranch = session({ id: "b", repoKeys: ["github.com/acme/widgets"], branch: "feature/x" });
+      const otherRepo = session({ id: "c", repoKeys: ["github.com/acme/other"], branch: "feature/x" });
+      const otherPr = session({ id: "d", prKeys: ["github.com/acme/widgets/pull/70"] });
+      const noBranch = session({ id: "e", repoKeys: ["github.com/acme/widgets"], branch: null });
+      const ids = cs.sessionsForPr(prOf, [byLink, byBranch, otherRepo, otherPr, noBranch]).map((x) => x.id);
+      assert.deepStrictEqual(ids.sort(), ["a", "b"]);
+    });
+
+    test("claude sessions: the one that needs the user comes first, a windowless one last", () => {
+      const k = ["github.com/acme/widgets/pull/7"];
+      const list = [
+        session({ id: "idle", name: "a", status: "idle", prKeys: k }),
+        session({ id: "bg", name: "b", status: "waiting", where: "background", prKeys: k }),
+        session({ id: "busy", name: "c", status: "busy", prKeys: k }),
+        session({ id: "wait", name: "d", status: "waiting", prKeys: k }),
+      ];
+      assert.deepStrictEqual(cs.sessionsForPr(prOf, list).map((x) => x.id), ["wait", "bg", "busy", "idle"]);
+      assert.match(cs.describeSession(session({ name: "ENG-1 · x", status: "waiting", waitingFor: "input needed" })), /waiting for you \(input needed\), in a terminal/);
+    });
+
+    test("claude sessions: the Desktop link and the terminal scripts", () => {
+      assert.strictEqual(
+        cs.claudeDesktopSessionUrl("local_04157f10-d434-496a-9d90-07a57b1c7479"),
+        "claude://claude.ai/epitaxy/local_04157f10-d434-496a-9d90-07a57b1c7479",
+      );
+      const it = cs.focusTtyScript("iterm", "/dev/ttys001").join("\n");
+      assert.match(it, /^if application id "com\.googlecode\.iterm2" is not running then return "missing"/, "a closed iTerm2 is not started");
+      assert.match(
+        it,
+        /if tty of s is "\/dev\/ttys001" then\ntell t to select\ntell s to select\ntell w to select\nactivate/,
+        "the window is raised last — raising it first reorders `windows` under `t` and `s`",
+      );
+      const term = cs.focusTtyScript("terminal", "/dev/ttys002").join("\n");
+      assert.match(term, /^if application "Terminal" is not running then return "missing"/);
+      assert.match(term, /if tty of t is "\/dev\/ttys002" then[\s\S]*set selected tab of w to t[\s\S]*set index of w to 1/);
+    });
+
+    test("claude sessions: a registry file is read defensively", () => {
+      // Copied from a real ~/.claude/sessions/<pid>.json (Claude Code 2.1.308).
+      const real = {
+        pid: 91853, sessionId: SID2, cwd: "/Users/me/Projects/github-pr-manager/.claude/worktrees/x",
+        startedAt: 1792699615158, procStart: "Thu Oct 22 20:06:53 2026", version: "2.1.308", kind: "interactive",
+        entrypoint: "claude-desktop", hostSessionId: "local_04157f10-d434-496a-9d90-07a57b1c7479", pidDomain: "darwin",
+        name: "🔍 Зворотний зв'язок PR manager для сесій", status: "busy", updatedAt: 1792699630379,
+      };
+      const e = scanner.parseRegistryEntry(real);
+      assert.deepStrictEqual(e, {
+        pid: 91853, sessionId: SID2, cwd: real.cwd, kind: "interactive", entrypoint: "claude-desktop",
+        hostSessionId: real.hostSessionId, name: real.name, status: "busy",
+      });
+      assert.strictEqual(scanner.sessionWhere(e), "desktop");
+      assert.strictEqual(scanner.sessionWhere({ kind: "interactive", entrypoint: "cli" }), "terminal");
+      // `claude` with no prompt opens the session list; its sessions run in the
+      // daemon's own pty and keep running after the terminal closes.
+      assert.strictEqual(scanner.sessionWhere({ kind: "bg", entrypoint: "cli" }), "background");
+      // Copied from a real spare (Claude Code 2.1.308): a process started ahead of the next session.
+      const spare = {
+        pid: 40972, sessionId: "975813af-6746-4cf3-afb8-3f77567b4f44", cwd: real.cwd, kind: "bg", entrypoint: "cli",
+        name: "975813af", agent: "claude", jobId: "975813af", spare: true, status: "idle",
+      };
+      assert.strictEqual(scanner.parseRegistryEntry(spare), null, "a spare is no session");
+      assert.strictEqual(scanner.parseRegistryEntry({ ...spare, spare: false }).kind, "bg");
+      assert.strictEqual(scanner.sessionWhere({ entrypoint: "sdk-cli" }), "background");
+      assert.strictEqual(scanner.sessionWhere({ entrypoint: "claude-desktop" }), "background", "no Desktop id, nothing to open");
+      const waiting = scanner.parseRegistryEntry({ ...real, status: "waiting", waitingFor: "input needed", hostSessionId: "local_x\"; rm" });
+      assert.strictEqual(waiting.waitingFor, "input needed");
+      assert.strictEqual(waiting.hostSessionId, undefined, "an id that isn't Desktop's shape never reaches a link");
+      assert.strictEqual(scanner.parseRegistryEntry({ ...real, status: "weird" }).status, "idle");
+      assert.strictEqual(scanner.parseRegistryEntry({ ...real, name: "" }).name, "x", "no title → the folder's name");
+      assert.strictEqual(scanner.parseRegistryEntry({ ...real, pid: "1" }), null);
+      assert.strictEqual(scanner.parseRegistryEntry({ ...real, sessionId: "../../etc" }), null);
+      assert.strictEqual(scanner.parseRegistryEntry(null), null);
+      assert.strictEqual(scanner.projectDirName("/Users/a.kravchuk/Projects/x/.claude/worktrees/y-1"), "-Users-a-kravchuk-Projects-x--claude-worktrees-y-1");
+    });
+
+    test("claude sessions: ipc accepts only a session id", () => {
+      assert.strictEqual(ipcv.validateClaudeSessionId(SID), SID);
+      for (const bad of [undefined, 1, "", "local_04157f10", `${SID} ; x`]) {
+        assert.throws(() => ipcv.validateClaudeSessionId(bad), /session id/);
+      }
+    });
+
+    await atest("claude sessions: scan reads the registry, the transcript and the checkout's branch", async () => {
+      const root = nfs.mkdtempSync(path.join(os.tmpdir(), "prd-sessions-"));
+      try {
+        const configDir = path.join(root, "claude");
+        // A main checkout and a linked worktree of it on the PR's branch.
+        const repo = path.join(root, "widgets");
+        nfs.mkdirSync(path.join(repo, ".git", "worktrees", "wt"), { recursive: true });
+        nfs.writeFileSync(path.join(repo, ".git", "config"), '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@github.com:Acme/Widgets.git\n');
+        nfs.writeFileSync(path.join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
+        const wt = path.join(root, "wt");
+        nfs.mkdirSync(path.join(wt, "src"), { recursive: true });
+        nfs.writeFileSync(path.join(wt, ".git"), `gitdir: ${path.join(repo, ".git", "worktrees", "wt")}\n`);
+        nfs.writeFileSync(path.join(repo, ".git", "worktrees", "wt", "HEAD"), "ref: refs/heads/feature/x\n");
+        nfs.writeFileSync(path.join(repo, ".git", "worktrees", "wt", "commondir"), "../..\n");
+        assert.deepStrictEqual(scanner.gitInfo(path.join(wt, "src")), { branch: "feature/x", remotes: ["git@github.com:Acme/Widgets.git"] });
+        assert.deepStrictEqual(scanner.gitInfo(repo).branch, "main");
+
+        nfs.mkdirSync(path.join(configDir, "sessions"), { recursive: true });
+        const reg = (pid, sid, cwd, extra) =>
+          nfs.writeFileSync(path.join(configDir, "sessions", `${pid}.json`), JSON.stringify({ pid, sessionId: sid, cwd, entrypoint: "cli", name: `s${pid}`, status: "busy", ...extra }));
+        reg(101, SID, repo, {});
+        reg(102, SID2, wt, { entrypoint: "claude-desktop", hostSessionId: "local_abc", status: "waiting", waitingFor: "input needed" });
+        reg(103, "11111111-2222-4333-8444-555555555555", repo, {}); // its process is gone
+        nfs.writeFileSync(path.join(configDir, "sessions", "104.json"), "{not json");
+        const tdir = path.join(configDir, "projects", scanner.projectDirName(repo));
+        nfs.mkdirSync(tdir, { recursive: true });
+        const transcript = path.join(tdir, `${SID}.jsonl`);
+        nfs.writeFileSync(transcript, promptLine("/drive-pr-green https://github.com/acme/widgets/pull/7") + "\n" +
+          JSON.stringify({ type: "assistant", message: { role: "assistant", content: "https://github.com/acme/widgets/pull/99" } }) + "\n");
+
+        // An empty Desktop folder: Desktop's records are covered by the next test.
+        const sc = scanner.createClaudeSessionScanner({ configDir, desktopDir: path.join(root, "desktop"), isAlive: (pid) => pid !== 103 });
+        let list = await sc.scan();
+        assert.deepStrictEqual(list.map((x) => x.id), [SID2, SID].sort(), "a dead pid and a broken file are dropped");
+        const cli = list.find((x) => x.id === SID);
+        assert.deepStrictEqual(cli.prKeys, ["github.com/acme/widgets/pull/7"], "the assistant's link is not the user's");
+        assert.deepStrictEqual(cli.repoKeys, ["github.com/acme/widgets"]);
+        assert.strictEqual(cli.branch, "main");
+        assert.strictEqual(cli.where, "terminal");
+        const desk = list.find((x) => x.id === SID2);
+        assert.deepStrictEqual(
+          { where: desk.where, status: desk.status, waitingFor: desk.waitingFor, branch: desk.branch, prKeys: desk.prKeys },
+          { where: "desktop", status: "waiting", waitingFor: "input needed", branch: "feature/x", prKeys: [] },
+          "no transcript yet, but the worktree's branch matches",
+        );
+        assert.deepStrictEqual(cs.sessionsForPr(prOf, list).map((x) => x.id).sort(), [SID, SID2].sort());
+
+        // Appended later: a half-written line counts only once it is complete.
+        const later = promptLine("а тепер https://github.com/acme/widgets/pull/8");
+        nfs.appendFileSync(transcript, later.slice(0, 40));
+        list = await sc.scan();
+        assert.deepStrictEqual(list.find((x) => x.id === SID).prKeys, ["github.com/acme/widgets/pull/7"]);
+        nfs.appendFileSync(transcript, later.slice(40) + "\n");
+        list = await sc.scan();
+        assert.deepStrictEqual(list.find((x) => x.id === SID).prKeys, ["github.com/acme/widgets/pull/7", "github.com/acme/widgets/pull/8"]);
+
+        // Switching: the Desktop session by its link; refusals say why.
+        const opened = [];
+        const openUrl = async (url) => { opened.push(url); };
+        assert.deepStrictEqual(await sc.focus(SID2, { openUrl }), { ok: true });
+        assert.deepStrictEqual(opened, ["claude://claude.ai/epitaxy/local_abc"]);
+        const linux = await sc.focus(SID, { openUrl, platform: "linux" });
+        assert.ok(!linux.ok && /macOS only/.test(linux.error), JSON.stringify(linux));
+        const gone = await sc.focus("11111111-2222-4333-8444-555555555555", { openUrl });
+        assert.ok(!gone.ok && /no longer running/.test(gone.error));
+        reg(105, "22222222-2222-4333-8444-555555555555", repo, { entrypoint: "sdk-cli" });
+        await sc.scan();
+        const bg = await sc.focus("22222222-2222-4333-8444-555555555555", { openUrl });
+        assert.ok(!bg.ok && /no window/.test(bg.error));
+        assert.strictEqual(opened.length, 1, "nothing else was opened");
+      } finally {
+        nfs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("claude sessions: a Desktop session record is read defensively", () => {
+      // Trimmed from a real claude-code-sessions/<account>/<org>/local_….json (Claude Desktop, 2026-10-22).
+      const real = {
+        sessionId: "local_4c884773-36af-4852-9c60-ca19bcd84234", cliSessionId: "283ce799-5a56-425c-a835-69b8636676cd",
+        cwd: "/Users/me/Projects/mac-setup", lastActivityAt: 1792699591065, isArchived: false, title: "✅ Drive red prs green",
+        prs: [
+          { prNumber: 3705, repo: "engineering/creatio-ui", host: "creatio.ghe.com", url: "https://creatio.ghe.com/engineering/creatio-ui/pull/3705", state: "MERGED" },
+          { prNumber: 3750, repo: "engineering/creatio-ui", host: "creatio.ghe.com", url: "https://creatio.ghe.com/engineering/creatio-ui/pull/3750", state: "OPEN" },
+        ],
+        scheduledTaskId: "drive-red-prs-green",
+      };
+      assert.deepStrictEqual(scanner.parseDesktopRecord(real), {
+        sessionId: real.sessionId, cliSessionId: real.cliSessionId, title: real.title, isArchived: false, scheduled: true,
+        prKeys: ["creatio.ghe.com/engineering/creatio-ui/pull/3705", "creatio.ghe.com/engineering/creatio-ui/pull/3750"],
+        lastActivityAt: 1792699591065,
+      });
+      const plain = scanner.parseDesktopRecord({ sessionId: "local_x", prs: [{ url: "nope" }, null, 3], cliSessionId: "../x" });
+      assert.deepStrictEqual(
+        { prKeys: plain.prKeys, cli: plain.cliSessionId, scheduled: plain.scheduled, title: plain.title },
+        { prKeys: [], cli: null, scheduled: false, title: "local_x" },
+      );
+      assert.strictEqual(scanner.parseDesktopRecord({ sessionId: "local_x\"; rm" }), null);
+      assert.strictEqual(scanner.parseDesktopRecord({ sessionId: "283ce799-5a56-425c-a835-69b8636676cd" }), null);
+    });
+
+    await atest("claude sessions: Desktop's records add paused sessions and drop archived ones", async () => {
+      const root = nfs.mkdtempSync(path.join(os.tmpdir(), "prd-desktop-"));
+      try {
+        const configDir = path.join(root, "claude");
+        const desktopDir = path.join(root, "desktop");
+        const org = path.join(desktopDir, "claude-code-sessions", "acct", "org");
+        nfs.mkdirSync(org, { recursive: true });
+        nfs.mkdirSync(path.join(configDir, "sessions"), { recursive: true });
+        let clock = Date.now();
+        const day = 24 * 3600 * 1000;
+        const pr7 = "https://github.com/acme/widgets/pull/7";
+        const record = (id, fields, mtime = clock) => {
+          const p = path.join(org, `${id}.json`);
+          nfs.writeFileSync(p, JSON.stringify({ sessionId: id, isArchived: false, ...fields }));
+          nfs.utimesSync(p, mtime / 1000, mtime / 1000);
+        };
+        // Live: a Desktop session whose process runs, with the title Desktop gave it.
+        nfs.writeFileSync(path.join(configDir, "sessions", "201.json"), JSON.stringify({
+          pid: 201, sessionId: SID2, cwd: root, entrypoint: "claude-desktop", hostSessionId: "local_live", name: "derived", status: "busy",
+        }));
+        record("local_live", { cliSessionId: SID2, title: "Live one", prs: [{ url: pr7 }] });
+        const P1 = "33333333-3333-4333-8333-333333333333";
+        const P2 = "44444444-4444-4444-8444-444444444444";
+        record("local_paused1", { cliSessionId: P1, title: "Paused older", prs: [{ url: pr7 }], lastActivityAt: 100 });
+        record("local_paused2", { cliSessionId: P2, title: "Paused newer", prs: [{ url: pr7 + "/files" }], lastActivityAt: 200 });
+        record("local_archived", { cliSessionId: "55555555-5555-4555-8555-555555555555", title: "A", prs: [{ url: pr7 }], isArchived: true });
+        record("local_routine", { cliSessionId: "66666666-6666-4666-8666-666666666666", title: "R", prs: [{ url: pr7 }], scheduledTaskId: "drive-red-prs-green" });
+        record("local_old", { cliSessionId: "77777777-7777-4777-8777-777777777777", title: "O", prs: [{ url: pr7 }] }, clock - 30 * day);
+        record("local_noprs", { cliSessionId: "88888888-8888-4888-8888-888888888888", title: "N" });
+
+        const sc = scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => true, now: () => clock });
+        let list = await sc.scan();
+        const ids = list.map((x) => x.id).sort();
+        assert.deepStrictEqual(ids, [P1, P2, SID2].sort(), "archived, routine, old and PR-less records stay out");
+        const live = list.find((x) => x.id === SID2);
+        assert.deepStrictEqual(
+          { name: live.name, status: live.status, prKeys: live.prKeys },
+          { name: "Live one", status: "busy", prKeys: ["github.com/acme/widgets/pull/7"] },
+          "a live Desktop session takes Desktop's title and the PRs bound to it",
+        );
+        assert.deepStrictEqual(
+          cs.sessionsForPr(prOf, list).map((x) => `${x.name}:${x.status}`),
+          ["Live one:busy", "Paused newer:paused", "Paused older:paused"],
+        );
+
+        const opened = [];
+        const openUrl = async (url) => { opened.push(url); };
+        assert.deepStrictEqual(await sc.focus(P2, { openUrl }), { ok: true });
+        assert.deepStrictEqual(opened, ["claude://claude.ai/epitaxy/local_paused2"], "opening a paused session resumes it in Desktop");
+
+        // Archived in Desktop: gone on the next scan, between listings too.
+        record("local_paused2", { cliSessionId: P2, title: "Paused newer", prs: [{ url: pr7 }], isArchived: true }, clock + 1000);
+        record("local_live", { cliSessionId: SID2, title: "Live one", prs: [{ url: pr7 }], isArchived: true }, clock + 1000);
+        clock += 5000;
+        list = await sc.scan();
+        assert.deepStrictEqual(list.map((x) => x.id), [P1], "an archived session leaves even while its process lingers");
+        const gone = await sc.focus(P2, { openUrl });
+        assert.ok(!gone.ok && /no longer running/.test(gone.error));
+
+        // A record written after the listing shows up once the folder is listed again.
+        record("local_new", { cliSessionId: "99999999-9999-4999-8999-999999999999", title: "New", prs: [{ url: pr7 }] }, clock);
+        assert.strictEqual((await sc.scan()).length, 1);
+        clock += 61_000;
+        assert.deepStrictEqual((await sc.scan()).map((x) => x.name).sort(), ["New", "Paused older"]);
+      } finally {
+        nfs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("main.js wiring: sessions are scanned on a timer, pushed only while visible, focused by id", () => {
+      const src = nfs.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /"claude:focusSession"[\s\S]{0,200}validateClaudeSessionId[\s\S]{0,300}claudeSessionScanner\.focus\(/);
+      assert.match(src, /"claude:sessions"[\s\S]{0,120}refreshClaudeSessions\(\)/);
+      assert.match(src, /isVisible\(\)\)\s*\{\s*sendToRenderer\("claude-sessions"/);
+      assert.match(src, /claudeSessionsOn = settings\.claude\.enabled/);
     });
   }
 

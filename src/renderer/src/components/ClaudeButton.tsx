@@ -1,7 +1,7 @@
-import { useCallback, useContext, useState } from "react";
+import { useCallback, useContext, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
-import type { PullRequest } from "../../../shared/types";
+import type { ClaudeSessionInfo, PullRequest } from "../../../shared/types";
 // Node-free, like pr-filter.ts — value-imported for the tooltip and the menu.
 // The button itself sends no kind: main picks again from its own copy of the PR.
 import {
@@ -11,17 +11,29 @@ import {
   pickClaudeLaunch,
   type ClaudeLaunchKind,
 } from "../../../shared/claude-launch";
+import { describeSession, SESSION_STATUS_TEXT, sessionsForPr } from "../../../shared/claude-sessions";
 import { cn } from "../format";
 import { useAnchoredMenu } from "./anchored-menu";
-import { ClaudeEnabledContext } from "./claude-context";
+import { ClaudeEnabledContext, ClaudeSessionsContext } from "./claude-context";
 
 const MENU_WIDTH_PX = 240;
+/** Wider once it lists sessions: their titles carry a task key and a summary. */
+const SESSIONS_MENU_WIDTH_PX = 320;
 
 /**
  * "Start a Claude session on this PR" — a split button. The main part starts
  * the action the PR's state suggests; the arrow opens a menu of every action,
  * so a PR the state calls "Drive to green" can still be closed (or reviewed)
  * on purpose. Renders nothing while the integration is off.
+ *
+ * While a Claude session is on the PR the main part belongs to it: it says
+ * what the session is doing (working / needs you / idle, or paused — a Desktop
+ * session whose process Desktop stopped without archiving it) and a click
+ * switches to it — its Claude Desktop session or its terminal tab. Starting a
+ * second one moves to the menu, because two sessions on one PR edit the same
+ * branch over each other. A session with no window (`claude -p`, the SDK) is
+ * listed in the menu but cannot take the button, since there is nothing to
+ * switch to.
  */
 export function ClaudeButton({
   pr,
@@ -39,8 +51,10 @@ export function ClaudeButton({
   className?: string;
 }) {
   const enabled = useContext(ClaudeEnabledContext);
+  const allSessions = useContext(ClaudeSessionsContext);
+  const sessions = useMemo(() => sessionsForPr(pr, allSessions), [pr, allSessions]);
   const [state, setState] = useState<"idle" | "busy" | "done">("idle");
-  const menu = useAnchoredMenu(MENU_WIDTH_PX);
+  const menu = useAnchoredMenu(sessions.length > 0 ? SESSIONS_MENU_WIDTH_PX : MENU_WIDTH_PX);
   // Without `kind` main picks from the PR's state, exactly as the button shows.
   const launch = useCallback(
     (kind?: ClaudeLaunchKind) => {
@@ -63,11 +77,26 @@ export function ClaudeButton({
     },
     [pr.id],
   );
+  const focus = useCallback((sessionId: string) => {
+    window.api
+      .focusClaudeSession(sessionId)
+      .then((res) => {
+        if (!res.ok) window.alert(res.error);
+      })
+      .catch((e: unknown) => window.alert((e as Error).message));
+  }, []);
 
   if (!enabled) return null;
   const kind = pickClaudeLaunch(pr, { trackComments });
-  const label = `Start Claude in the repo folder to ${CLAUDE_LAUNCH_LABEL[kind]}`;
-  const tone = state === "done" ? KIND_CLASS.done : KIND_CLASS[kind];
+  // `sessionsForPr` puts the one that most needs the user first.
+  const current = sessions.find((s) => s.where !== "background");
+  const shown = current ?? sessions[0];
+  const more = sessions.length > 1 ? ` ${sessions.length - 1} more in the menu.` : "";
+  const label = current
+    ? `Claude session ${describeSession(current)}. Click to switch to it.${more}`
+    : `Start Claude in the repo folder to ${CLAUDE_LAUNCH_LABEL[kind]}${shown ? `. Running: ${describeSession(shown)}.` : ""}`;
+  const tone = state === "done" ? KIND_CLASS.done : current ? SESSION_CLASS[current.status] : KIND_CLASS[kind];
+  const text = state === "done" ? "Started" : current ? SESSION_STATUS_TEXT[current.status] : CLAUDE_BUTTON_TEXT[kind];
   const segment = cn(
     "inline-flex items-center border font-medium transition-colors disabled:opacity-50",
     iconOnly ? "h-[18px]" : compact ? "py-0.5 text-[11px]" : "py-1 text-xs",
@@ -78,14 +107,21 @@ export function ClaudeButton({
     <span className={cn("inline-flex shrink-0 whitespace-nowrap", className)}>
       <button
         type="button"
-        onClick={() => launch()}
+        onClick={() => (current ? focus(current.id) : launch())}
         disabled={state === "busy"}
-        title={iconOnly ? `${CLAUDE_BUTTON_TEXT[kind]} — ${label}` : label}
+        title={iconOnly ? `${text} — ${label}` : label}
         aria-label={label}
-        className={cn(segment, "flex-1 justify-center gap-1 rounded-l-md", mainPadding)}
+        className={cn(segment, "relative flex-1 justify-center gap-1 rounded-l-md", mainPadding)}
       >
         <ClaudeMark size={compact || iconOnly ? 12 : 14} />
-        {!iconOnly && (state === "done" ? "Started" : CLAUDE_BUTTON_TEXT[kind])}
+        {shown && state !== "done" && (
+          <StatusDot
+            status={shown.status}
+            // The tile's button has no room for a dot beside the mark — it sits on its corner.
+            className={iconOnly ? "absolute -right-0.5 -top-0.5 ring-2 ring-surface" : undefined}
+          />
+        )}
+        {!iconOnly && text}
       </button>
       <button
         ref={menu.buttonRef}
@@ -108,10 +144,26 @@ export function ClaudeButton({
           <div
             ref={menu.menuRef}
             role="menu"
-            aria-label="Start Claude to"
+            aria-label={sessions.length > 0 ? "Claude sessions" : "Start Claude to"}
             style={menu.style}
             className="z-50 overflow-hidden rounded-lg border border-line bg-surface py-1 text-sm shadow-xl"
           >
+            {sessions.length > 0 && (
+              <>
+                <div className={MENU_HEADING}>Running on this PR</div>
+                {sessions.map((s) => (
+                  <SessionItem
+                    key={s.id}
+                    session={s}
+                    onSwitch={() => {
+                      menu.close();
+                      focus(s.id);
+                    }}
+                  />
+                ))}
+                <div className={cn(MENU_HEADING, "mt-1 border-t border-line pt-2")}>Start a new session</div>
+              </>
+            )}
             {claudeKindsFor(pr).map((k) => (
               <button
                 key={k}
@@ -137,6 +189,60 @@ export function ClaudeButton({
     </span>
   );
 }
+
+const MENU_HEADING = "px-3 pb-1 pt-1 text-xs font-semibold text-fg-subtle";
+
+const WHERE_TEXT: Record<ClaudeSessionInfo["where"], string> = {
+  desktop: "Claude Desktop",
+  terminal: "terminal",
+  background: "background, no window",
+};
+
+/** One running session in the menu: its title, its status and where a click takes you. */
+function SessionItem({ session, onSwitch }: { session: ClaudeSessionInfo; onSwitch: () => void }) {
+  const background = session.where === "background";
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onSwitch}
+      disabled={background}
+      title={background ? describeSession(session) : `Switch to ${describeSession(session)}`}
+      className="flex w-full items-start gap-2 px-3 py-1.5 text-left hover:bg-elevated disabled:cursor-default disabled:hover:bg-transparent"
+    >
+      <StatusDot status={session.status} className="mt-1.5" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-fg">{session.name}</span>
+        <span className="block text-xs text-fg-subtle">
+          {SESSION_STATUS_TEXT[session.status].toLowerCase()}
+          {session.waitingFor && ` (${session.waitingFor})`} · {WHERE_TEXT[session.where]}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+/** A session's status as a dot — static: an infinite animation would keep the GPU busy while hidden. */
+function StatusDot({ status, className }: { status: ClaudeSessionInfo["status"]; className?: string }) {
+  return <span className={cn("h-2 w-2 shrink-0 rounded-full", SESSION_DOT[status], className)} aria-hidden />;
+}
+
+const SESSION_DOT: Record<ClaudeSessionInfo["status"], string> = {
+  busy: "bg-orange-500",
+  waiting: "bg-fuchsia-500",
+  idle: "bg-fg-subtle",
+  // Hollow: the session is there, its process is not. A border, since the tile adds a ring of its own.
+  paused: "border border-fg-subtle bg-surface",
+};
+
+/** The button while a session holds it: orange like the mark while it works, fuchsia when it waits for you. */
+const SESSION_CLASS: Record<ClaudeSessionInfo["status"], string> = {
+  busy: "border-orange-500/50 bg-orange-500/10 text-orange-700 hover:bg-orange-500/20 dark:text-orange-300",
+  waiting:
+    "border-fuchsia-500/50 bg-fuchsia-500/10 text-fuchsia-700 hover:bg-fuchsia-500/20 dark:text-fuchsia-300",
+  idle: "border-line-strong bg-elevated/60 text-fg-secondary hover:bg-elevated",
+  paused: "border-line-strong bg-elevated/60 text-fg-secondary hover:bg-elevated",
+};
 
 /** The menu's colour key — the same colour each kind gives the button. */
 const KIND_DOT: Record<ClaudeLaunchKind, string> = {

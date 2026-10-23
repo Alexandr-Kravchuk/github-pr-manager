@@ -8,6 +8,7 @@
  * buddy into that mood (default: sleeping).
  */
 import type {
+  ClaudeSessionInfo,
   DashboardResponse,
   PrManagerApi,
   PullRequest,
@@ -330,6 +331,57 @@ const settings: Settings = {
   claude: { ...DEFAULT_CLAUDE_SETTINGS, enabled: true },
 };
 
+/** Running Claude sessions, matched to the `?buddy=review` fixtures by their head branch. */
+const CLAUDE_SESSIONS: ClaudeSessionInfo[] = [
+  {
+    id: "00000000-0000-4000-8000-000000000001",
+    name: "🚀 ENG-93373 · Deadline for the reminder job",
+    status: "busy",
+    where: "desktop",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "feature/eng-93373-deadline",
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000002",
+    name: "✋🏻 ENG-93374 · Retry the webhook delivery",
+    status: "waiting",
+    waitingFor: "input needed",
+    where: "terminal",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "feature/eng-93374-retry",
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000003",
+    name: "✅ ENG-93375 · Drive PR green",
+    status: "idle",
+    where: "terminal",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "feature/eng-93375",
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000005",
+    name: "🔀 ENG-93374 · Retry budget docs",
+    status: "paused",
+    where: "desktop",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio-knowledge"],
+    branch: "feature/eng-93374-docs",
+    lastActivityAt: Date.now() - 3 * 36e5,
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000004",
+    name: "widgets-7f",
+    status: "busy",
+    where: "background",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "feature/eng-93375",
+  },
+];
+
 const api: PrManagerApi = {
   getDashboard: async () => ({ ok: true, snapshot }),
   refresh: async () => ({ ok: true, snapshot }),
@@ -364,6 +416,9 @@ const api: PrManagerApi = {
   setJiraToken: async () => ({ ok: true }),
   getAppVersion: async () => "dev",
   launchClaude: async () => ({ ok: false, error: "Not available in mock mode." }),
+  getClaudeSessions: async () => CLAUDE_SESSIONS,
+  focusClaudeSession: async () => ({ ok: false, error: "Not available in mock mode." }),
+  onClaudeSessions: () => () => {},
   copyText: async () => {},
   getWhatsNew: async () => null,
   dismissWhatsNew: async () => {},
