@@ -258,6 +258,23 @@ for (const mod of [
   });
 }
 
+// --- the accent stripe survives hover ----------------------------------------
+// A card's and a tile's left border is the coloured accent (`border-l-*`). A
+// hover colour for the whole border (`hover:border-line-strong`) outranks it and
+// painted the stripe grey under the pointer (2.3.0); hover may colour the other
+// sides only (`hover:border-y-*`, `hover:border-r-*`).
+for (const file of ["PrCard.tsx", "PrTile.tsx"]) {
+  test(`${file}: hover never recolours the accent stripe`, () => {
+    const src = require("node:fs").readFileSync(
+      path.join(__dirname, `../src/renderer/src/components/${file}`),
+      "utf8",
+    );
+    const hits = src.match(/hover:border-(?:line|[a-z]+-\d)[\w-]*/g) || [];
+    assert.deepStrictEqual(hits, [], `${file} sets a whole-border hover colour: ${hits.join(", ")}`);
+    assert.match(src, /hover:border-y-line-strong hover:border-r-line-strong/);
+  });
+}
+
 // --- renderer wiring for the trackComments setting ---------------------------
 // The renderer half of the setting has no other gate: this repo has no renderer
 // component tests, so without these the toggle could stop being persisted, or

@@ -198,7 +198,9 @@ export function PrCard({
   return (
     <div
       className={cn(
-        "rounded-lg border border-line border-l-4 bg-surface p-4 shadow-sm transition-colors hover:border-line-strong",
+        // Hover darkens every side but the left: that one is the accent stripe,
+        // and a plain `hover:border-*` colour repaints it grey.
+        "rounded-lg border border-line border-l-4 bg-surface p-4 shadow-sm transition-colors hover:border-y-line-strong hover:border-r-line-strong",
         accentClass(pr, trackComments),
         // Revealed by the Ignored chip: on screen, but not part of the workload
         // the header counts — so it reads as set aside rather than as normal.
