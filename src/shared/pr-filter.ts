@@ -280,6 +280,41 @@ export function revealDelta(
 }
 
 /**
+ * Whether a reveal chip renders at all. An OFF chip whose category has no row
+ * to add is noise, so it goes; an ON chip always stays, or a persisted reveal
+ * would become an active filter with no control left to switch it off. The
+ * source chips are not asked: they always render, so the row in front of the
+ * reveal group never reflows.
+ *
+ * The category is measured with the SIBLING reveal chip off — unlike the
+ * badge (`revealDelta`), which is sibling-aware. Either flag alone reveals an
+ * ignored draft, so with the sibling's flag in the sum a click on Ignored
+ * could mount or unmount Drafts right next to it and slide the clicked chip
+ * out from under the cursor. Neither the sibling's click nor the chip's own
+ * click changes this number, so only an ON chip being switched off over an
+ * empty category leaves the row.
+ */
+export function isRevealChipShown(
+  prs: readonly FilterablePr[],
+  state: FilterState,
+  key: RevealKey,
+): boolean {
+  if (state[REVEAL_FLAG[key]]) return true;
+  const sibling = REVEAL_FLAG[key === "drafts" ? "ignored" : "drafts"];
+  return revealDelta(prs, { ...state, [sibling]: false }, key) > 0;
+}
+
+/**
+ * Tooltip for `Hide my approvals`, saying what its badge counts: the rows it
+ * hides (while on) or would hide (while off). The badge itself is dropped at 0,
+ * so the title is the only place a 0 is spelled out.
+ */
+export function hideApprovalsTitle(active: boolean, hidden: number): string {
+  const rows = hidden === 1 ? "1 PR you approved that isn't" : `${hidden} PRs you approved that aren't`;
+  return `${active ? "Hiding" : "Hide"} ${rows} asking for you again`;
+}
+
+/**
  * Badge for the exclude chip: how many rows the click TAKES AWAY (or, while it
  * is on, how many turning it off would bring back). The mirror of `revealDelta`,
  * and a delta for the same reason — a PR already hidden by the sources or

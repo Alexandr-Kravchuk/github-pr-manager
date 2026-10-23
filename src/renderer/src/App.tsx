@@ -17,7 +17,9 @@ import {
   filterPrs,
   headerCountLabel,
   hiddenAttentionCount,
+  hideApprovalsTitle,
   isBaselinePr,
+  isRevealChipShown,
   sourceFacetCount,
   prSignal,
   revealDelta,
@@ -643,6 +645,14 @@ export function App() {
     }),
     [allPrs, filterState],
   );
+  const showDraftsChip = useMemo(
+    () => isRevealChipShown(allPrs, filterState, "drafts"),
+    [allPrs, filterState],
+  );
+  const showIgnoredChip = useMemo(
+    () => isRevealChipShown(allPrs, filterState, "ignored"),
+    [allPrs, filterState],
+  );
 
   // The role switch's four badges: how many rows each segment would leave, with
   // everything else still applied. One pass over the list, not four.
@@ -1052,9 +1062,13 @@ export function App() {
               </span>
               {/* Three groups, separated by a hairline: the five OR-ed source chips,
                   then the one chip that removes rows, then the two reveal chips.
-                  Every chip always renders, so the row never reflows under the
-                  cursor and a persisted reveal can't hide as an invisible active
-                  filter. */}
+                  The source chips always render. A reveal chip goes only while it
+                  is OFF and its category, measured without the other reveal chip,
+                  has nothing to add (`isRevealChipShown`) — so clicking one reveal
+                  chip never adds or removes the other. An ON one always stays, so
+                  a persisted reveal can't hide as an invisible active filter; the
+                  one click that does reflow the row is switching such a chip off
+                  over an empty category, which is the chip leaving on purpose. */}
               <FilterChip
                 active={attentionOnly}
                 count={chipCounts.attention}
@@ -1101,34 +1115,44 @@ export function App() {
               </FilterChip>
               <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
               {/* The one chip that REMOVES rows: PRs you approved and that aren't
-                  asking for you again. Its count is what the click takes away. */}
+                  asking for you again. Its count is the rows it hides (or would),
+                  dropped at 0 so "(0)" doesn't read as "hides everything". */}
               <FilterChip
                 active={hideApproved}
                 count={chipCounts.approved}
+                showCount={chipCounts.approved > 0}
+                title={hideApprovalsTitle(hideApproved, chipCounts.approved)}
                 onClick={() => setHideApproved((v) => !v)}
                 tone="green"
               >
                 ✓ Hide my approvals
               </FilterChip>
-              <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
-              <FilterChip
-                active={showDrafts}
-                count={chipCounts.drafts}
-                onClick={() => setShowDrafts((v) => !v)}
-              >
-                Drafts
-              </FilterChip>
-              <FilterChip
-                active={showIgnored}
-                count={chipCounts.ignored}
-                onClick={() => setShowIgnored((v) => !v)}
-              >
-                Ignored
-              </FilterChip>
+              {(showDraftsChip || showIgnoredChip) && (
+                <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
+              )}
+              {showDraftsChip && (
+                <FilterChip
+                  active={showDrafts}
+                  count={chipCounts.drafts}
+                  onClick={() => setShowDrafts((v) => !v)}
+                >
+                  Drafts
+                </FilterChip>
+              )}
+              {showIgnoredChip && (
+                <FilterChip
+                  active={showIgnored}
+                  count={chipCounts.ignored}
+                  onClick={() => setShowIgnored((v) => !v)}
+                >
+                  Ignored
+                </FilterChip>
+              )}
               {activeFilters > 0 && (
                 <button
                   type="button"
                   onClick={clearFilters}
+                  title="Resets the filters that hide rows. Drafts and Ignored stay as they are: they add rows, so clearing them would shrink the list."
                   className="ml-auto rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
                 >
                   ✕ Clear filters ({activeFilters})
@@ -1522,12 +1546,16 @@ const GLASS_IDLE =
 function FilterChip({
   active,
   count,
+  showCount = true,
+  title,
   onClick,
   children,
   tone = "sky",
 }: {
   active: boolean;
   count: number;
+  showCount?: boolean;
+  title?: string;
   onClick: () => void;
   children: React.ReactNode;
   tone?: ChipTone;
@@ -1537,6 +1565,7 @@ function FilterChip({
     <button
       type="button"
       onClick={onClick}
+      title={title}
       className={cn(
         "rounded-md border px-3 py-1.5 text-sm",
         GLASS_BASE,
@@ -1544,7 +1573,8 @@ function FilterChip({
         empty && !active && "opacity-50",
       )}
     >
-      {children} ({count})
+      {children}
+      {showCount && ` (${count})`}
     </button>
   );
 }
