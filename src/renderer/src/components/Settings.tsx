@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import type {
+  ClaudeSettings,
   GhStatus,
   JiraStatus,
   NotificationEventToggles,
@@ -13,7 +14,20 @@ import type {
 // before settings load and as a fallback for a settings file from an older
 // version. Single source of truth shared with config.ts's main-process default.
 import { DEFAULT_NOTIFICATION_SETTINGS as DEFAULT_NOTIFICATIONS } from "../../../shared/notify";
+// Node-free (see AGENTS.md) — the defaults the Claude section starts from.
+import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "../../../shared/claude-launch";
+import {
+  SETTINGS_TABS,
+  searchSettings,
+  sectionsOfTab,
+  toSettingsTab,
+  type SettingsSectionId,
+  type SettingsTabId,
+} from "../../../shared/settings-search";
 import { cn } from "../format";
+
+/** localStorage key of the last open Settings tab. */
+const TAB_KEY = "prd:settings-tab:v1";
 
 const GITHUB_GRAPHQL = "https://api.github.com/graphql";
 
@@ -43,6 +57,29 @@ function ghHostname(graphqlUrl: string): string {
   }
 }
 
+interface RepoFolderRow {
+  repo: string;
+  path: string;
+}
+
+/** The registry rows as `repoPaths`, or the message saying which row is wrong.
+ *  Fully empty rows are dropped; a half-filled or repeated one is an error
+ *  rather than silently lost. */
+function repoFoldersToPaths(rows: RepoFolderRow[]): Record<string, string> | string {
+  const out: Record<string, string> = {};
+  for (const [i, row] of rows.entries()) {
+    const repo = row.repo.trim();
+    const dir = row.path.trim();
+    if (!repo && !dir) continue;
+    if (!repo.includes("/") || !dir) {
+      return `Repository folders, row ${i + 1}: needs a repository as owner/name and a folder.`;
+    }
+    if (repo in out) return `Repository folders: ${repo} is listed twice.`;
+    out[repo] = dir;
+  }
+  return out;
+}
+
 function parseRepos(reposText: string): string[] {
   return reposText
     .split("\n")
@@ -52,6 +89,22 @@ function parseRepos(reposText: string): string[] {
 
 export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState<SettingsTabId>(() => {
+    try {
+      return toSettingsTab(localStorage.getItem(TAB_KEY));
+    } catch {
+      return "general";
+    }
+  });
+  const [query, setQuery] = useState("");
+  const selectTab = (next: SettingsTabId) => {
+    setTab(next);
+    try {
+      localStorage.setItem(TAB_KEY, next);
+    } catch {
+      // A remembered tab is a convenience; without storage it starts on General.
+    }
+  };
   const [pollIntervalSeconds, setPollIntervalSeconds] = useState(60);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [autoUpdate, setAutoUpdate] = useState(true);
@@ -60,6 +113,10 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [theme, setTheme] = useState<ThemePreference>("system");
   const [notifications, setNotifications] = useState<NotificationSettings>(DEFAULT_NOTIFICATIONS);
   const [hosts, setHosts] = useState<DraftHost[]>([]);
+  const [claude, setClaude] = useState<ClaudeSettings>(DEFAULT_CLAUDE_SETTINGS);
+  // Rows of the repository → folder registry, kept as rows while editing so a
+  // half-typed entry isn't dropped; turned into `claude.repoPaths` on save.
+  const [repoFolders, setRepoFolders] = useState<RepoFolderRow[]>([]);
   const [gh, setGh] = useState<GhStatus | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -100,6 +157,10 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             reposText: h.repos.join("\n"),
           })),
         );
+        setClaude(s.claude ?? DEFAULT_CLAUDE_SETTINGS);
+        setRepoFolders(
+          Object.entries(s.claude?.repoPaths ?? {}).map(([repo, path]) => ({ repo, path })),
+        );
         setJiraBaseUrl(s.jira?.baseUrl ?? "");
         setJiraEmail(s.jira?.email ?? "");
         setLoaded(true);
@@ -137,11 +198,19 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const setNotifEvent = (patch: Partial<NotificationEventToggles>) =>
     setNotifications((prev) => ({ ...prev, events: { ...prev.events, ...patch } }));
 
+  const updateRepoFolder = (i: number, patch: Partial<RepoFolderRow>) =>
+    setRepoFolders((prev) => prev.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+
   const save = async () => {
     setSaving(true);
     setError(null);
     setWarning(null);
     try {
+      const folders = repoFoldersToPaths(repoFolders);
+      if (typeof folders === "string") {
+        setError(folders);
+        return;
+      }
       const baseUrl = jiraBaseUrl.trim();
       const email = jiraEmail.trim();
       const settings: Settings = {
@@ -159,6 +228,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         })),
         // Only persist Jira when both fields are present; otherwise leave it off.
         jira: baseUrl && email ? { baseUrl, email } : undefined,
+        claude: { ...claude, repoPaths: folders },
       };
       const res = await window.api.saveSettings(settings);
       if (!res.ok) {
@@ -190,53 +260,173 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const inputCls =
     "mt-1 w-full rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none";
 
-  return (
-    <div className="mx-auto max-w-3xl px-4 py-6">
-      <header className="mb-5 flex items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold text-fg">Settings</h1>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md border border-line-strong px-3 py-1.5 text-sm text-fg-secondary hover:bg-elevated"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={save}
-            disabled={saving}
-            className="rounded-md border border-sky-500/60 bg-sky-500/15 px-3 py-1.5 text-sm font-medium text-sky-700 dark:text-sky-200 hover:bg-sky-500/25 disabled:opacity-50"
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
+  const sectionContent: Record<SettingsSectionId, ReactNode> = {
+    appearance: (
+      <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
+        <div className="flex items-center justify-between gap-4">
+          <h2 className="text-sm font-semibold text-fg-secondary">Appearance</h2>
+          <ThemeToggle value={theme} onChange={changeTheme} />
         </div>
-      </header>
-
-      {error && (
-        <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/40 dark:text-red-200">
-          {error}
-        </div>
-      )}
-
-      {warning && (
-        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-600/40 dark:bg-amber-950/40 dark:text-amber-200">
-          {warning}
-        </div>
-      )}
-
-      {/* Appearance */}
-      <section className="mb-6 flex items-center justify-between gap-4">
-        <div>
-          <span className="block text-sm text-fg-secondary">Appearance</span>
-          <span className="block text-xs text-fg-faint">
-            Follow the system theme, or force light or dark.
+        <p className="mt-1 text-xs text-fg-subtle">
+          Follow the system theme, or force light or dark. Applies right away, without Save.
+        </p>
+      </section>
+    ),
+    refresh: (
+      <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
+        <div className="flex items-center justify-between gap-4">
+          <label className="text-sm font-semibold text-fg-secondary" htmlFor="poll">
+            Refresh interval
+          </label>
+          <span className="flex items-center gap-2 text-xs text-fg-subtle">
+            <input
+              id="poll"
+              type="number"
+              min={10}
+              value={pollIntervalSeconds}
+              onChange={(e) => setPollIntervalSeconds(Math.max(10, Number(e.target.value) || 10))}
+              className={cn(inputCls.replace("w-full", "w-24"), "mt-0")}
+            />
+            seconds
           </span>
         </div>
-        <ThemeToggle value={theme} onChange={changeTheme} />
+        <p className="mt-1 text-xs text-fg-subtle">
+          Minimum 10s. The app backs off automatically as a host&apos;s rate limit runs low.
+        </p>
       </section>
-
-      {/* gh CLI status / guidance */}
+    ),
+    behavior: (
+      <section className="mb-6 space-y-3 rounded-lg border border-line bg-surface/40 p-4">
+        <h2 className="text-sm font-semibold text-fg-secondary">Behavior</h2>
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={launchAtLogin}
+            onChange={(e) => setLaunchAtLogin(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-sky-500"
+          />
+          <span>
+            <span className="block text-sm text-fg-secondary">Launch at login</span>
+            <span className="block text-xs text-fg-faint">
+              Start PR Dashboard automatically when you sign in — in the tray, when
+              closing to the tray is on.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={autoUpdate}
+            onChange={(e) => setAutoUpdate(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-sky-500"
+          />
+          <span>
+            <span className="block text-sm text-fg-secondary">Automatically check for updates</span>
+            <span className="block text-xs text-fg-faint">
+              Download and install new versions in the background.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={closeToTray}
+            onChange={(e) => setCloseToTray(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-sky-500"
+          />
+          <span>
+            <span className="block text-sm text-fg-secondary">Close to tray</span>
+            <span className="block text-xs text-fg-faint">
+              Closing the window hides it instead of quitting. With notifications enabled the app
+              keeps polling in the background; quit from the tray icon&apos;s menu.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={trackComments}
+            onChange={(e) => setTrackComments(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-sky-500"
+          />
+          <span>
+            <span className="block text-sm text-fg-secondary">Track new comments</span>
+            <span className="block text-xs text-fg-faint">
+              Keeps an unread count per PR. Off drops that channel — no &ldquo;New comments&rdquo;
+              chip, badge or &ldquo;Mark as seen&rdquo; button, and no unread count in the header.
+              A comment awaiting your reply and unresolved threads also stop counting towards
+              &ldquo;Need attention&rdquo; (they still send a notification). Off, the dashboard is
+              read from GitHub rather than from what you have already looked at, so opening a PR
+              changes nothing on it, and a PR comes back to you when the author pushes after your
+              review. For reading comments in GitHub itself.
+            </span>
+          </span>
+        </label>
+      </section>
+    ),
+    notifications: (
+      <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-fg-secondary">Notifications</h2>
+          {notifications.enabled ? (
+            <span className="text-xs text-emerald-700 dark:text-emerald-400">on ✓</span>
+          ) : (
+            <span className="text-xs text-fg-faint">off</span>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-fg-subtle">
+          Get notified when a PR needs your attention while the app is running.
+        </p>
+        <div className="mt-3 space-y-3">
+          <CheckRow
+            checked={notifications.enabled}
+            onChange={(v) => setNotif({ enabled: v })}
+            title="Enable notifications"
+          />
+          <div className="ml-7 space-y-3 border-l border-line pl-4">
+            <CheckRow
+              checked={notifications.native}
+              onChange={(v) => setNotif({ native: v })}
+              disabled={!notifications.enabled}
+              title="Show desktop notifications"
+              hint="A clickable OS notification that opens the PR. Respects your Focus / Do Not Disturb settings."
+            />
+            <CheckRow
+              checked={notifications.sound}
+              onChange={(v) => setNotif({ sound: v })}
+              disabled={!notifications.enabled}
+              title="Play a sound"
+            />
+            <div className="pt-1">
+              <span className="block text-xs font-medium text-fg-muted">Notify me about</span>
+              <div className="mt-2 space-y-3">
+                <CheckRow
+                  checked={notifications.events.yourTurn}
+                  onChange={(v) => setNotifEvent({ yourTurn: v })}
+                  disabled={!notifications.enabled}
+                  title="My turn to act"
+                  hint="Review requested of me, a PR I reviewed coming back to me, or a change request / unanswered comment on my PR."
+                />
+                <CheckRow
+                  checked={notifications.events.ciFailed}
+                  onChange={(v) => setNotifEvent({ ciFailed: v })}
+                  disabled={!notifications.enabled}
+                  title="CI failed on my PR"
+                  hint="Detected on the regular poll — may lag a few minutes behind GitHub."
+                />
+                <CheckRow
+                  checked={notifications.events.goodNews}
+                  onChange={(v) => setNotifEvent({ goodNews: v })}
+                  disabled={!notifications.enabled}
+                  title="My PR was approved"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    ),
+    gh: (
       <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-fg-secondary">GitHub CLI</h2>
@@ -285,8 +475,109 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           </ul>
         )}
       </section>
+    ),
+    hosts: (
+      <section>
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-fg-secondary">Hosts</h2>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => addHost({ label: "GitHub", graphqlUrl: GITHUB_GRAPHQL, reposText: "" })}
+              className="rounded-md border border-line-strong px-2 py-0.5 text-xs text-fg-secondary hover:bg-elevated"
+            >
+              + GitHub.com
+            </button>
+            <button
+              type="button"
+              onClick={() => addHost()}
+              className="rounded-md border border-line-strong px-2 py-0.5 text-xs text-fg-secondary hover:bg-elevated"
+            >
+              + Add host
+            </button>
+          </div>
+        </div>
 
-      {/* Jira (optional) — parent-task grouping */}
+        {hosts.length === 0 && (
+          <p className="rounded-lg border border-line bg-surface/40 p-4 text-sm text-fg-subtle">
+            No hosts yet. Add GitHub.com or an Enterprise host, then list the repositories to watch.
+          </p>
+        )}
+
+        <div className="space-y-4">
+          {hosts.map((host, i) => {
+            const hostname = ghHostname(host.graphqlUrl);
+            const auth = gh?.hosts.find((h) => h.hostname === hostname);
+            return (
+              <div key={i} className="rounded-lg border border-line bg-surface/40 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="grid flex-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className={labelCls}>Label</label>
+                      <input
+                        value={host.label}
+                        onChange={(e) => updateHost(i, { label: e.target.value })}
+                        placeholder="GitHub"
+                        className={inputCls}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>GraphQL URL</label>
+                      <input
+                        value={host.graphqlUrl}
+                        onChange={(e) => updateHost(i, { graphqlUrl: e.target.value })}
+                        placeholder="https://api.github.com/graphql"
+                        className={inputCls}
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeHost(i)}
+                    title="Remove host"
+                    className="mt-5 rounded-md border border-line-strong px-2 py-1 text-xs text-fg-muted hover:bg-elevated hover:text-red-600 dark:hover:text-red-300"
+                  >
+                    Remove
+                  </button>
+                </div>
+
+                <div className="mt-3">
+                  <label className={labelCls}>Repositories (one owner/name per line)</label>
+                  <textarea
+                    value={host.reposText}
+                    onChange={(e) => updateHost(i, { reposText: e.target.value })}
+                    // Grows with the list (a line to spare for the next entry),
+                    // from 8 lines up to 24 — past that it scrolls; the corner
+                    // grip still resizes it by hand.
+                    rows={Math.min(24, Math.max(8, host.reposText.split("\n").length + 1))}
+                    placeholder={"owner/repo-1\nowner/repo-2"}
+                    className={cn(inputCls, "resize-y font-mono text-xs leading-5")}
+                  />
+                </div>
+
+                {hostname && (
+                  <p className="mt-2 text-xs">
+                    <span className="text-fg-subtle">{hostname}: </span>
+                    {auth?.authenticated ? (
+                      <span className="text-emerald-700 dark:text-emerald-400">signed in ✓</span>
+                    ) : (
+                      <span className="text-amber-700 dark:text-amber-400">
+                        not signed in (run{" "}
+                        <code className="rounded bg-elevated px-1">
+                          gh auth login --hostname {hostname}
+                        </code>
+                        )
+                      </span>
+                    )}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </section>
+    ),
+    jira: (
       <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-fg-secondary">Jira (optional)</h2>
@@ -366,243 +657,250 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           <p className="mt-1 text-xs text-fg-faint">Saved with the Save button, encrypted at rest.</p>
         </div>
       </section>
-
-      {/* Poll interval */}
-      <section className="mb-6">
-        <label className={labelCls} htmlFor="poll">
-          Refresh interval (seconds)
-        </label>
-        <input
-          id="poll"
-          type="number"
-          min={10}
-          value={pollIntervalSeconds}
-          onChange={(e) => setPollIntervalSeconds(Math.max(10, Number(e.target.value) || 10))}
-          className={cn(inputCls, "max-w-[10rem]")}
-        />
-        <p className="mt-1 text-xs text-fg-faint">
-          Minimum 10s. The app backs off automatically as a host&apos;s rate limit runs low.
+    ),
+    claude: (
+      <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
+        {/* Same frame as the Jira block: an integration with a status on the right. */}
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-fg-secondary">Claude (optional)</h2>
+          {claude.enabled ? (
+            <span className="text-xs text-emerald-700 dark:text-emerald-400">on ✓</span>
+          ) : (
+            <span className="text-xs text-fg-faint">off</span>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-fg-subtle">
+          Adds a button to each PR that starts Claude in the PR&apos;s local checkout — in a terminal
+          or in Claude Desktop — with a prompt picked from the PR&apos;s state. A terminal needs the{" "}
+          <code className="text-fg-muted">claude</code> CLI on your PATH.
         </p>
-      </section>
-
-      {/* General toggles */}
-      <section className="mb-6 space-y-3">
-        <label className="flex items-start gap-3">
-          <input
-            type="checkbox"
-            checked={launchAtLogin}
-            onChange={(e) => setLaunchAtLogin(e.target.checked)}
-            className="mt-0.5 h-4 w-4 accent-sky-500"
-          />
-          <span>
-            <span className="block text-sm text-fg-secondary">Launch at login</span>
-            <span className="block text-xs text-fg-faint">
-              Start PR Dashboard automatically when you sign in — in the tray, when
-              closing to the tray is on.
-            </span>
-          </span>
-        </label>
-        <label className="flex items-start gap-3">
-          <input
-            type="checkbox"
-            checked={autoUpdate}
-            onChange={(e) => setAutoUpdate(e.target.checked)}
-            className="mt-0.5 h-4 w-4 accent-sky-500"
-          />
-          <span>
-            <span className="block text-sm text-fg-secondary">Automatically check for updates</span>
-            <span className="block text-xs text-fg-faint">
-              Download and install new versions in the background.
-            </span>
-          </span>
-        </label>
-        <label className="flex items-start gap-3">
-          <input
-            type="checkbox"
-            checked={closeToTray}
-            onChange={(e) => setCloseToTray(e.target.checked)}
-            className="mt-0.5 h-4 w-4 accent-sky-500"
-          />
-          <span>
-            <span className="block text-sm text-fg-secondary">Close to tray</span>
-            <span className="block text-xs text-fg-faint">
-              Closing the window hides it instead of quitting. With notifications enabled the app
-              keeps polling in the background; quit from the tray icon&apos;s menu.
-            </span>
-          </span>
-        </label>
-        <label className="flex items-start gap-3">
-          <input
-            type="checkbox"
-            checked={trackComments}
-            onChange={(e) => setTrackComments(e.target.checked)}
-            className="mt-0.5 h-4 w-4 accent-sky-500"
-          />
-          <span>
-            <span className="block text-sm text-fg-secondary">Track new comments</span>
-            <span className="block text-xs text-fg-faint">
-              Keeps an unread count per PR. Off drops that channel — no &ldquo;New comments&rdquo;
-              chip, badge or &ldquo;Mark as seen&rdquo; button, and no unread count in the header.
-              A comment awaiting your reply and unresolved threads also stop counting towards
-              &ldquo;Need attention&rdquo; (they still send a notification). Off, the dashboard is
-              read from GitHub rather than from what you have already looked at, so opening a PR
-              changes nothing on it, and a PR comes back to you when the author pushes after your
-              review. For reading comments in GitHub itself.
-            </span>
-          </span>
-        </label>
-      </section>
-
-      {/* Notifications */}
-      <section className="mb-6">
-        <h2 className="mb-2 text-sm font-semibold text-fg-secondary">Notifications</h2>
-        <div className="space-y-3">
+        <div className="mt-3">
           <CheckRow
-            checked={notifications.enabled}
-            onChange={(v) => setNotif({ enabled: v })}
-            title="Enable notifications"
-            hint="Get notified when a PR needs your attention while the app is running."
+            checked={claude.enabled}
+            onChange={(enabled) => setClaude((prev) => ({ ...prev, enabled }))}
+            title="Start Claude sessions from PRs"
           />
-          <div className="ml-7 space-y-3 border-l border-line pl-4">
-            <CheckRow
-              checked={notifications.native}
-              onChange={(v) => setNotif({ native: v })}
-              disabled={!notifications.enabled}
-              title="Show desktop notifications"
-              hint="A clickable OS notification that opens the PR. Respects your Focus / Do Not Disturb settings."
-            />
-            <CheckRow
-              checked={notifications.sound}
-              onChange={(v) => setNotif({ sound: v })}
-              disabled={!notifications.enabled}
-              title="Play a sound"
-            />
-            <div className="pt-1">
-              <span className="block text-xs font-medium text-fg-muted">Notify me about</span>
-              <div className="mt-2 space-y-3">
-                <CheckRow
-                  checked={notifications.events.yourTurn}
-                  onChange={(v) => setNotifEvent({ yourTurn: v })}
-                  disabled={!notifications.enabled}
-                  title="My turn to act"
-                  hint="Review requested of me, a PR I reviewed coming back to me, or a change request / unanswered comment on my PR."
-                />
-                <CheckRow
-                  checked={notifications.events.ciFailed}
-                  onChange={(v) => setNotifEvent({ ciFailed: v })}
-                  disabled={!notifications.enabled}
-                  title="CI failed on my PR"
-                  hint="Detected on the regular poll — may lag a few minutes behind GitHub."
-                />
-                <CheckRow
-                  checked={notifications.events.goodNews}
-                  onChange={(v) => setNotifEvent({ goodNews: v })}
-                  disabled={!notifications.enabled}
-                  title="My PR was approved"
+        </div>
+        {claude.enabled && (
+          <div className="mt-3 space-y-3">
+            <div>
+              <label className={labelCls} htmlFor="claude-terminal">
+                Open in
+              </label>
+              <select
+                id="claude-terminal"
+                value={claude.terminal}
+                onChange={(e) =>
+                  setClaude((prev) => ({ ...prev, terminal: e.target.value as ClaudeSettings["terminal"] }))
+                }
+                className={cn(inputCls, "max-w-[18rem]")}
+              >
+                <option value="auto">Automatic — iTerm2 if installed</option>
+                <option value="iterm">iTerm2</option>
+                <option value="terminal">Terminal</option>
+                <option value="desktop">Claude Desktop (Code tab)</option>
+              </select>
+              {claude.terminal === "desktop" && (
+                <p className="mt-1 text-xs text-fg-faint">
+                  The prompt is only filled in — press Enter to send it — and Claude Desktop asks
+                  you to confirm the folder every time.
+                </p>
+              )}
+            </div>
+            <div>
+              <label className={labelCls} htmlFor="claude-root">
+                Projects folder
+              </label>
+              <input
+                id="claude-root"
+                value={claude.projectsRoot}
+                placeholder="~/Projects"
+                onChange={(e) => setClaude((prev) => ({ ...prev, projectsRoot: e.target.value }))}
+                className={inputCls}
+              />
+              <p className="mt-1 text-xs text-fg-faint">
+                Its subfolders are matched to a PR by their git remote. A folder set below wins.
+              </p>
+            </div>
+            {(
+              [
+                ["drive", "Your PR is blocked (CI, conflict, threads, changes requested)"],
+                ["review", "Your review is due"],
+                ["close", "Your PR is ready to merge"],
+                ["explain", "Explain (from the button's menu only)"],
+                ["open", "Anything else"],
+              ] as const
+            ).map(([kind, title]) => (
+              <div key={kind}>
+                <label className={labelCls} htmlFor={`claude-prompt-${kind}`}>
+                  {title}
+                </label>
+                <input
+                  id={`claude-prompt-${kind}`}
+                  value={claude.prompts[kind]}
+                  placeholder={DEFAULT_CLAUDE_PROMPTS[kind]}
+                  onChange={(e) =>
+                    setClaude((prev) => ({ ...prev, prompts: { ...prev.prompts, [kind]: e.target.value } }))
+                  }
+                  className={cn(inputCls, "font-mono")}
                 />
               </div>
+            ))}
+            <p className="text-xs text-fg-faint">
+              {"{url}"} is replaced with the PR link. An empty prompt goes back to the default.
+            </p>
+            <div>
+              <div className="flex items-center justify-between">
+                <span className={labelCls}>Repository folders</span>
+                <button
+                  type="button"
+                  onClick={() => setRepoFolders((prev) => [...prev, { repo: "", path: "" }])}
+                  className="rounded-md border border-line-strong px-2 py-0.5 text-xs text-fg-secondary hover:bg-elevated"
+                >
+                  + Add
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-fg-faint">
+                A repository listed here opens in its folder; any other one is searched for in the
+                projects folder.
+              </p>
+              <datalist id="claude-repo-options">
+                {[...new Set(hosts.flatMap((h) => parseRepos(h.reposText)))].map((repo) => (
+                  <option key={repo} value={repo} />
+                ))}
+              </datalist>
+              {repoFolders.length > 0 && (
+                <div className="mt-2 space-y-1.5">
+                  {repoFolders.map((row, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input
+                        value={row.repo}
+                        list="claude-repo-options"
+                        placeholder="owner/name"
+                        aria-label="Repository"
+                        onChange={(e) => updateRepoFolder(i, { repo: e.target.value })}
+                        className={cn(inputCls, "mt-0 w-56 shrink-0")}
+                      />
+                      <input
+                        value={row.path}
+                        placeholder="~/Projects/name"
+                        aria-label="Folder"
+                        onChange={(e) => updateRepoFolder(i, { path: e.target.value })}
+                        className={cn(inputCls, "mt-0")}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setRepoFolders((prev) => prev.filter((_, j) => j !== i))}
+                        title="Remove"
+                        aria-label="Remove repository folder"
+                        className="shrink-0 rounded px-1.5 text-fg-faint hover:bg-elevated hover:text-fg-secondary"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
-        </div>
-      </section>
-
-      {/* Hosts */}
-      <section>
-        <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-fg-secondary">Hosts</h2>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => addHost({ label: "GitHub", graphqlUrl: GITHUB_GRAPHQL, reposText: "" })}
-              className="rounded-md border border-line-strong px-2 py-0.5 text-xs text-fg-secondary hover:bg-elevated"
-            >
-              + GitHub.com
-            </button>
-            <button
-              type="button"
-              onClick={() => addHost()}
-              className="rounded-md border border-line-strong px-2 py-0.5 text-xs text-fg-secondary hover:bg-elevated"
-            >
-              + Add host
-            </button>
-          </div>
-        </div>
-
-        {hosts.length === 0 && (
-          <p className="rounded-lg border border-line bg-surface/40 p-4 text-sm text-fg-subtle">
-            No hosts yet. Add GitHub.com or an Enterprise host, then list the repositories to watch.
-          </p>
         )}
-
-        <div className="space-y-4">
-          {hosts.map((host, i) => {
-            const hostname = ghHostname(host.graphqlUrl);
-            const auth = gh?.hosts.find((h) => h.hostname === hostname);
-            return (
-              <div key={i} className="rounded-lg border border-line bg-surface/40 p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="grid flex-1 gap-3 sm:grid-cols-2">
-                    <div>
-                      <label className={labelCls}>Label</label>
-                      <input
-                        value={host.label}
-                        onChange={(e) => updateHost(i, { label: e.target.value })}
-                        placeholder="GitHub"
-                        className={inputCls}
-                      />
-                    </div>
-                    <div>
-                      <label className={labelCls}>GraphQL URL</label>
-                      <input
-                        value={host.graphqlUrl}
-                        onChange={(e) => updateHost(i, { graphqlUrl: e.target.value })}
-                        placeholder="https://api.github.com/graphql"
-                        className={inputCls}
-                      />
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => removeHost(i)}
-                    title="Remove host"
-                    className="mt-5 rounded-md border border-line-strong px-2 py-1 text-xs text-fg-muted hover:bg-elevated hover:text-red-600 dark:hover:text-red-300"
-                  >
-                    Remove
-                  </button>
-                </div>
-
-                <div className="mt-3">
-                  <label className={labelCls}>Repositories (one owner/name per line)</label>
-                  <textarea
-                    value={host.reposText}
-                    onChange={(e) => updateHost(i, { reposText: e.target.value })}
-                    rows={3}
-                    placeholder={"owner/repo-1\nowner/repo-2"}
-                    className={cn(inputCls, "font-mono text-xs")}
-                  />
-                </div>
-
-                {hostname && (
-                  <p className="mt-2 text-xs">
-                    <span className="text-fg-subtle">{hostname}: </span>
-                    {auth?.authenticated ? (
-                      <span className="text-emerald-700 dark:text-emerald-400">signed in ✓</span>
-                    ) : (
-                      <span className="text-amber-700 dark:text-amber-400">
-                        not signed in (run{" "}
-                        <code className="rounded bg-elevated px-1">
-                          gh auth login --hostname {hostname}
-                        </code>
-                        )
-                      </span>
-                    )}
-                  </p>
-                )}
-              </div>
-            );
-          })}
-        </div>
       </section>
+    ),
+  };
+
+  const searching = query.trim().length > 0;
+  const hits = searchSettings(query);
+  const hitTabs = new Set(hits.map((h) => h.tab));
+
+  return (
+    <div className="mx-auto max-w-3xl px-4 py-6">
+      <header className="mb-5 flex items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold text-fg">Settings</h1>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-line-strong px-3 py-1.5 text-sm text-fg-secondary hover:bg-elevated"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={save}
+            disabled={saving}
+            className="rounded-md border border-sky-500/60 bg-sky-500/15 px-3 py-1.5 text-sm font-medium text-sky-700 dark:text-sky-200 hover:bg-sky-500/25 disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </header>
+
+      {error && (
+        <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/40 dark:text-red-200">
+          {error}
+        </div>
+      )}
+
+      {warning && (
+        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-600/40 dark:bg-amber-950/40 dark:text-amber-200">
+          {warning}
+        </div>
+      )}
+
+      <div className="mb-5 flex flex-wrap items-center gap-3">
+        <div role="tablist" aria-label="Settings sections" className="flex rounded-md border border-line-strong p-0.5">
+          {SETTINGS_TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={!searching && tab === t.id}
+              onClick={() => {
+                setQuery("");
+                selectTab(t.id);
+              }}
+              className={cn(
+                "rounded px-3 py-1 text-sm transition-colors",
+                !searching && tab === t.id
+                  ? "bg-elevated font-medium text-fg"
+                  : "text-fg-muted hover:text-fg-secondary",
+                // While searching, a tab that holds a hit says so.
+                searching && hitTabs.has(t.id) && "text-sky-700 dark:text-sky-300",
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setQuery("");
+          }}
+          placeholder="Search settings"
+          aria-label="Search settings"
+          className={cn(inputCls, "mt-0 min-w-[12rem] flex-1")}
+        />
+      </div>
+
+      {searching ? (
+        hits.length === 0 ? (
+          <p className="py-8 text-center text-sm text-fg-subtle">No settings match &ldquo;{query.trim()}&rdquo;.</p>
+        ) : (
+          hits.map((s) => (
+            <div key={s.id}>
+              <div className="mb-1 text-[11px] uppercase tracking-wide text-fg-faint">
+                {SETTINGS_TABS.find((t) => t.id === s.tab)?.label} › {s.title}
+              </div>
+              {sectionContent[s.id]}
+            </div>
+          ))
+        )
+      ) : (
+        sectionsOfTab(tab).map((s) => <div key={s.id}>{sectionContent[s.id]}</div>)
+      )}
     </div>
   );
 }

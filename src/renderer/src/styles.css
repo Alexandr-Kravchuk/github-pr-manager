@@ -35,11 +35,12 @@
   --color-fg-faint: var(--fg-faint);
 }
 
-/* Light theme (default) — window bg slightly gray, cards pure white. */
+/* Light theme (default) — window bg gray, cards pure white. The canvas sits a
+   clear step below the cards: at #f7f7f8 the cards ran into the background. */
 :root {
   color-scheme: light dark;
 
-  --canvas: #f7f7f8;
+  --canvas: #ebebee;
   --surface: #ffffff;
   --elevated: #ececee;
   --line: #e4e4e7;
@@ -217,8 +218,23 @@
   background-color: var(--fg-faint);
 }
 
+/*
+ * Refresh button icon while a poll runs (App.tsx). Finite on purpose — the
+ * no-infinite-animation rule in AGENTS.md: the class is removed when the poll
+ * ends, and the iteration cap (25 x 0.7s, ~17s) stops it even if a poll hangs.
+ */
+.refresh-spin {
+  animation: refresh-spin 0.7s linear 25;
+}
+@keyframes refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .buddy :is(g, path, circle, text),
+  .refresh-spin,
   .live-beat {
     animation: none !important;
   }
@@ -236,4 +252,25 @@ body {
   color: var(--fg);
   font-family:
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Tailwind v4's preflight leaves buttons on the default arrow cursor, so
+   nothing told you a chip, a host pill or a card action was clickable. One rule
+   here rather than `cursor-pointer` on every button: a new control gets it
+   without anyone remembering to. In the base layer, so a utility still wins;
+   disabled controls keep the arrow. */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  select:not(:disabled),
+  summary {
+    cursor: pointer;
+  }
+}
+
+/* The search box draws its own always-visible ✕ (App.tsx); Chromium's native
+   cancel button would show next to it on hover/focus. */
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
 }

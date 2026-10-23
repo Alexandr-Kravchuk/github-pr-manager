@@ -112,6 +112,33 @@ export interface NotificationSettings {
   events: NotificationEventToggles;
 }
 
+/**
+ * "Start a Claude session on this PR" — opt-in. A click opens a terminal in the
+ * PR's local checkout and runs `claude` with a prompt picked from the PR's state
+ * (see `shared/claude-launch.ts`).
+ */
+export type ClaudeTerminal = "auto" | "iterm" | "terminal" | "desktop";
+
+export interface ClaudeSettings {
+  enabled: boolean;
+  /** Folder whose subfolders are searched for a checkout by git remote; "" = ~/Projects. */
+  projectsRoot: string;
+  /** Explicit checkout per "owner/name" — wins over the search. */
+  repoPaths: Record<string, string>;
+  /** Prompt template per launch kind; `{url}` is the PR URL. */
+  prompts: Record<"drive" | "review" | "close" | "explain" | "open", string>;
+  /**
+   * Where the session opens. `auto` takes iTerm2 when it is installed, else
+   * Terminal (macOS; a `cmd` window on Windows). The system's "default
+   * terminal" is not consulted: macOS has no such setting a launcher can ask.
+   * `desktop` opens the Code tab of Claude Desktop through its
+   * `claude://code/new` link instead — on every platform, but the prompt is
+   * only prefilled (Enter sends it) and Desktop asks to confirm the folder on
+   * every launch. `iterm` / `terminal` fall back to `auto` off macOS.
+   */
+  terminal: ClaudeTerminal;
+}
+
 /** Persisted application settings (userData/settings.json) — no tokens. */
 export interface Settings {
   /** Auto-refresh interval in seconds. */
@@ -168,6 +195,8 @@ export interface Settings {
   hosts: SettingsHost[];
   /** Optional Jira connection for parent-task grouping (token stored separately). */
   jira?: JiraSettings;
+  /** Claude session launcher (off by default). */
+  claude: ClaudeSettings;
 }
 
 /** Jira setup state for the UI, from the main process. */
@@ -214,6 +243,8 @@ export interface PublicConfig {
    * comment-driven chip, badge and header stat, and it is not a secret.
    */
   trackComments: boolean;
+  /** Mirror of `Settings.claude.enabled` — whether cards show the Claude button. */
+  claudeEnabled: boolean;
 }
 
 /** State of an individual reviewer on a PR. */
@@ -236,6 +267,40 @@ export interface CheckItem {
 }
 
 /** The pull-request model consumed by the UI. */
+/**
+ * GitHub's native PR stack (`PullRequest.stack` / `stackEntry`): an ordered
+ * chain of PRs, each based on the one below it. GitHub merges only the bottom
+ * one — every PR above it reports `mergeStateStatus: CLEAN` all the same, so
+ * readiness has to be gated on `position` here rather than on GitHub's verdict.
+ */
+export interface PrStack {
+  /** The stack's number within its repository (the "Stack #1623" GitHub shows). */
+  number: number;
+  /** 1 is the bottom — closest to the base branch, the only mergeable one. */
+  position: number;
+  /** How many PRs the stack holds, open ones included whether listed here or not. */
+  size: number;
+  /** The branch the stack's bottom PR targets — the row under the stack menu. */
+  baseRefName: string;
+  /** Every PR of the stack GitHub listed (first 10), bottom first. */
+  entries: PrStackEntry[];
+  /**
+   * The open PR at the bottom of the stack — the one this PR waits for. Null on
+   * the bottom PR itself, and when the stack's first page did not reach it.
+   */
+  bottom: { number: number; url: string } | null;
+}
+
+/** One PR of a stack, as the stack menu lists it. */
+export interface PrStackEntry {
+  position: number;
+  number: number;
+  title: string;
+  url: string;
+  /** GitHub's PR state: "OPEN" | "MERGED" | "CLOSED". */
+  state: string;
+}
+
 export interface PullRequest {
   /** Global node id — a stable key across refreshes. */
   id: string;
@@ -253,6 +318,16 @@ export interface PullRequest {
    * shows a green umbrella for it.
    */
   baseIsDefaultBranch: boolean;
+  /**
+   * The native GitHub stack this PR belongs to, or null when it is in none —
+   * including on a host whose GraphQL schema has no stacks yet.
+   */
+  stack: PrStack | null;
+  /**
+   * In a stack and not at its bottom: GitHub refuses to merge it until the PRs
+   * below it are merged, whatever its own reviews and checks say.
+   */
+  blockedByStack: boolean;
   author: { login: string; avatarUrl: string } | null;
   createdAt: string;
   updatedAt: string;
@@ -381,6 +456,11 @@ export interface PullRequest {
    * the case the change-request/CI signals miss. Author-only on the card.
    */
   hasUnaddressedComments: boolean;
+  /** Human approval body beyond a plain acknowledgement. Conservative intent
+   * check; cleared by author EYES on that review after its last edit, or the
+   * reviewer's later clean approval. Never cleared by a push,
+   * author reply, marking seen, re-request or disabling comment tracking. */
+  hasUnaddressedReviewFeedback: boolean;
   /**
    * At least one non-bot reviewer's latest review is an approval. This is what
    * marks a PR "good to go" — a single human approve is enough, independent of
@@ -398,6 +478,8 @@ export interface PullRequest {
    * signal on the card: only the author can resolve their own conflict.
    */
   hasConflicts: boolean;
+  /** Required base update: strictly GitHub mergeStateStatus === BEHIND. */
+  isBehindBase: boolean;
 
   /**
    * Roll-up flag: the PR is ready to merge. Composite of GitHub's mergeable
@@ -406,7 +488,8 @@ export interface PullRequest {
    * least one human approval, has no unaddressed change request, and CI is not
    * failing or still running. GitHub computes `mergeable` asynchronously and may
    * report UNKNOWN right after a push; while it is UNKNOWN this stays false and
-   * flips true on a later poll once GitHub settles.
+   * flips true on a later poll once GitHub settles. Never true while
+   * `blockedByStack`: GitHub reports such a PR CLEAN yet refuses to merge it.
    */
   canBeMerged: boolean;
 
@@ -435,6 +518,12 @@ export interface PullRequest {
 export interface HostError {
   hostLabel: string;
   message: string;
+  /**
+   * Set when the host refused for a spent GraphQL budget rather than failed:
+   * when the budget refills (ISO), or "" when the response named no time. The
+   * renderer shows it as a wait with cached data, not as a failure.
+   */
+  rateLimitedUntil?: string;
 }
 
 /** GraphQL rate-limit info at request time. */
@@ -443,6 +532,8 @@ export interface RateLimitInfo {
   remaining: number;
   cost: number;
   resetAt: string;
+  /** The hourly budget (5000 on github.com); absent on readings that did not report it. */
+  limit?: number;
   /** When this host's data was last actually fetched from the network (set by the poller). */
   fetchedAt?: string;
 }
@@ -483,6 +574,48 @@ export type ConfigResult =
 /** Result of `saveSettings`. `warning` carries a preference that was saved
  *  but could not take effect (today: close-to-tray with no usable tray). */
 export type SaveSettingsResult = { ok: true; warning?: string } | { ok: false; error: string };
+
+/** Result of `launchClaude`: what was started and where, or why not. */
+export type ClaudeLaunchResult =
+  | { ok: true; kind: "drive" | "review" | "close" | "explain" | "open"; dir: string }
+  | { ok: false; error: string };
+
+/**
+ * A Claude Code session running on this machine, as its registry file
+ * (`~/.claude/sessions/<pid>.json`) and transcript describe it — the input the
+ * cards match against to show which PR has a live session. Built in
+ * `main/claude-sessions.ts`, matched in `shared/claude-sessions.ts`.
+ */
+export interface ClaudeSessionInfo {
+  /** Claude Code's session id — the transcript's file name. */
+  id: string;
+  /** The session's title (the Desktop sidebar's, or a derived one for the CLI). */
+  name: string;
+  /**
+   * `busy` — working on a turn; `waiting` — asked the user something; `idle` —
+   * the turn ended; `paused` — a Claude Desktop session whose process Desktop
+   * stopped without archiving it (opening it resumes it).
+   */
+  status: "busy" | "waiting" | "idle" | "paused";
+  /** What it waits for, when `status` is `waiting` (e.g. "input needed"). */
+  waitingFor?: string;
+  /**
+   * Where it runs, which decides what "switch to it" opens: a Claude Desktop
+   * session, a terminal tab, or a process with no window (`claude -p`, the SDK).
+   */
+  where: "desktop" | "terminal" | "background";
+  /** `host/owner/repo/pull/N` of every PR link the user sent it. */
+  prKeys: string[];
+  /** `host/owner/repo` of each git remote of its working folder. */
+  repoKeys: string[];
+  /** The branch checked out in its working folder; null when detached or not a git folder. */
+  branch: string | null;
+  /** Epoch ms of a paused session's last activity — the most recent of several goes first. */
+  lastActivityAt?: number;
+}
+
+/** Result of `focusClaudeSession`. */
+export type FocusClaudeSessionResult = { ok: true } | { ok: false; error: string };
 
 /** `gh` CLI availability + per-host authentication, for the settings UI. */
 export interface GhStatus {
@@ -526,6 +659,22 @@ export interface PrManagerApi {
   setJiraToken(token: string): Promise<{ ok: boolean; error?: string }>;
   /** The running app version. */
   getAppVersion(): Promise<string>;
+  /**
+   * Open a terminal in the PR's local checkout and start `claude` with the
+   * prompt for the PR's state — or for `kind`, when the user picked an action
+   * from the button's menu. Refused while the integration is off.
+   */
+  launchClaude(prId: string, kind?: "drive" | "review" | "close" | "explain" | "open"): Promise<ClaudeLaunchResult>;
+  /** The Claude Code sessions running now; empty while the integration is off. */
+  getClaudeSessions(): Promise<ClaudeSessionInfo[]>;
+  /**
+   * Bring a running session to the front: its Claude Desktop session, or the
+   * terminal tab it runs in. Only the session id crosses over; main looks it up
+   * in its own scan.
+   */
+  focusClaudeSession(sessionId: string): Promise<FocusClaudeSessionResult>;
+  /** Subscribe to changes in the running sessions. Returns an unsubscribe function. */
+  onClaudeSessions(listener: (sessions: ClaudeSessionInfo[]) => void): () => void;
   /** Copy text (e.g. a PR URL) to the system clipboard. */
   copyText(text: string): Promise<void>;
   /** Returns release info if a new version was installed since last ack, or null. */

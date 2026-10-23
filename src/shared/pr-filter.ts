@@ -127,7 +127,7 @@ export const REVEAL_FLAG: Record<RevealKey, "showDrafts" | "showIgnored"> = {
 
 /**
  * The standing workload: PRs that are neither ignored nor drafts. The single
- * definition behind `baselineStats`, the header's `· N shown` reconciliation and
+ * definition behind `baselineStats`, the header's `headerCountLabel` and
  * the mascot's mood, so those three can't drift apart.
  */
 export function isBaselinePr(pr: Pick<PullRequest, "isDraft" | "isIgnored">): boolean {
@@ -280,6 +280,41 @@ export function revealDelta(
 }
 
 /**
+ * Whether a reveal chip renders at all. An OFF chip whose category has no row
+ * to add is noise, so it goes; an ON chip always stays, or a persisted reveal
+ * would become an active filter with no control left to switch it off. The
+ * source chips are not asked: they always render, so the row in front of the
+ * reveal group never reflows.
+ *
+ * The category is measured with the SIBLING reveal chip off — unlike the
+ * badge (`revealDelta`), which is sibling-aware. Either flag alone reveals an
+ * ignored draft, so with the sibling's flag in the sum a click on Ignored
+ * could mount or unmount Drafts right next to it and slide the clicked chip
+ * out from under the cursor. Neither the sibling's click nor the chip's own
+ * click changes this number, so only an ON chip being switched off over an
+ * empty category leaves the row.
+ */
+export function isRevealChipShown(
+  prs: readonly FilterablePr[],
+  state: FilterState,
+  key: RevealKey,
+): boolean {
+  if (state[REVEAL_FLAG[key]]) return true;
+  const sibling = REVEAL_FLAG[key === "drafts" ? "ignored" : "drafts"];
+  return revealDelta(prs, { ...state, [sibling]: false }, key) > 0;
+}
+
+/**
+ * Tooltip for `Hide my approvals`, saying what its badge counts: the rows it
+ * hides (while on) or would hide (while off). The badge itself is dropped at 0,
+ * so the title is the only place a 0 is spelled out.
+ */
+export function hideApprovalsTitle(active: boolean, hidden: number): string {
+  const rows = hidden === 1 ? "1 PR you approved that isn't" : `${hidden} PRs you approved that aren't`;
+  return `${active ? "Hiding" : "Hide"} ${rows} asking for you again`;
+}
+
+/**
  * Badge for the exclude chip: how many rows the click TAKES AWAY (or, while it
  * is on, how many turning it off would bring back). The mirror of `revealDelta`,
  * and a delta for the same reason — a PR already hidden by the sources or
@@ -295,9 +330,6 @@ export function excludeDelta(prs: readonly FilterablePr[], state: FilterState): 
 /** Header summary: the standing "is there work for me" picture. */
 export interface BaselineStats {
   total: number;
-  attention: number;
-  failing: number;
-  fresh: number;
   returned: number;
 }
 
@@ -305,7 +337,10 @@ export interface BaselineStats {
  * The header stats, over the PRs that are neither ignored nor drafts — the same
  * base `buddyMood` reads, so the mascot and the numbers can't disagree.
  * Deliberately independent of the filters: it answers "how much work is there",
- * not "what's on screen" (the `· N shown` suffix covers the latter).
+ * not "what's on screen" (`headerCountLabel` covers the latter). Only
+ * the two numbers no filter chip shows: the attention / failing / new-comments
+ * totals lived here too, and next to the chips' role-scoped counts for the same
+ * names they read as a bug.
  */
 export function baselineStats(
   prs: readonly (FilterablePr & Pick<PullRequest, "returnedToMe">)[],
@@ -313,11 +348,25 @@ export function baselineStats(
   const base = prs.filter(isBaselinePr);
   return {
     total: base.length,
-    attention: base.filter((pr) => pr.needsAttention).length,
-    failing: base.filter((pr) => pr.failingChecks.length > 0).length,
-    fresh: base.filter((pr) => pr.hasNewActivity).length,
     returned: base.filter((pr) => pr.returnedToMe).length,
   };
+}
+
+/**
+ * The header's count: `M PRs` while the rendered rows ARE the standing workload,
+ * `N of M shown` while they are a strict subset of it. "of" claims containment,
+ * so it is only said when it holds: a reveal chip ADDS drafts / ignored PRs on
+ * top of the baseline, and "13 of 10 shown" read as a bug. With revealed rows on
+ * screen the two numbers are given side by side instead. Equal counts aren't
+ * equal sets either — one baseline PR filtered out and one draft revealed in its
+ * place tie — which is why the revealed-row check comes first.
+ */
+export function headerCountLabel(
+  rendered: readonly Pick<PullRequest, "isDraft" | "isIgnored">[],
+  total: number,
+): string {
+  if (rendered.some((pr) => !isBaselinePr(pr))) return `${total} PRs · ${rendered.length} shown`;
+  return rendered.length === total ? `${total} PRs` : `${rendered.length} of ${total} shown`;
 }
 
 /**
@@ -327,11 +376,12 @@ export function baselineStats(
  * means "show me more", the same promise clearing a source makes.
  * `Drafts`/`Ignored` are left out on purpose — they REVEAL rows, so clearing
  * them would shrink the list and break that promise.
+ * The role switch is left out too: it picks whose PRs you are looking at, a
+ * scope the user set on purpose, so `Clear filters` keeps it.
  */
 export function activeFilterCount(state: FilterState): number {
   let n = 0;
   if (state.search.trim()) n += 1;
-  if (state.role !== "all") n += 1;
   if (state.host !== "all") n += 1;
   if (state.hideApproved) n += 1;
   for (const chip of SOURCE_CHIPS) {
@@ -356,7 +406,8 @@ export type EmptyStateKind = "no-prs" | "all-hidden" | "no-match";
 
 export function emptyStateKind(state: FilterState, totalCount: number): EmptyStateKind {
   if (totalCount === 0) return "no-prs";
-  return activeFilterCount(state) === 0 ? "all-hidden" : "no-match";
+  // Role is not counted by `activeFilterCount`, but it still narrows the list.
+  return activeFilterCount(state) === 0 && state.role === "all" ? "all-hidden" : "no-match";
 }
 
 /**
@@ -433,7 +484,8 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
  *    since those are unfinished work. In practice this branch only reaches a
  *    non-author PR you're reviewing: an approved PR you authored with open
  *    threads was already caught by `blocked`.
- *  - attention (amber): new comments, open threads, CI running.
+ *  - attention (amber): new comments, open threads, CI running — and an
+ *    otherwise green PR that waits for a lower PR of its stack (`blockedByStack`).
  *
  * `trackComments` mirrors the same flag in `state.ts`'s `needsAttention`: off,
  * `hasUnaddressedComments` and `unresolvedThreads` stop feeding the accent too,
@@ -451,8 +503,11 @@ export function prSignal(pr: PullRequest, { trackComments }: { trackComments: bo
     isAuthor &&
     (pr.failingChecks.length > 0 ||
       pr.hasUnaddressedChangeRequest ||
+      // Approval body feedback requires reviewer clearance, regardless of tracking.
+      pr.hasUnaddressedReviewFeedback ||
       (trackComments && pr.hasUnaddressedComments) ||
       pr.hasConflicts ||
+      pr.isBehindBase ||
       pr.unresolvedThreads > 0)
   ) {
     return "blocked";
@@ -475,7 +530,9 @@ export function prSignal(pr: PullRequest, { trackComments }: { trackComments: bo
     pr.ciState !== "pending" &&
     (!trackComments || pr.unresolvedThreads === 0)
   ) {
-    return "approved";
+    // Green means "can merge now". A PR above the bottom of a native stack
+    // cannot — GitHub merges stacks bottom-up — so it waits in amber instead.
+    return pr.blockedByStack ? "attention" : "approved";
   }
   if (pr.hasNewActivity || (trackComments && pr.unresolvedThreads > 0) || pr.pendingChecks.length > 0) {
     return "attention";

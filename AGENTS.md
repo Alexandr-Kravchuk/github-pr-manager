@@ -55,17 +55,59 @@ Three layers:
   header button), `pr-group.ts` (which Jira key a PR clusters under and what
   the heading above that cluster says — `"KEY · Summary"`, or the bare key when
   Jira resolved none; it lives here rather than as closures in `App.tsx` so the
-  rendered heading is unit-tested without a DOM), `view-mode.ts` (the three
+  rendered heading is unit-tested without a DOM; "by parent task" clusters by
+  the Jira hierarchy through `parentGroupKeys` — a task's PR, its subtasks' PRs
+  and a parentless task's PRs land together under the cluster's top key — plus `orderStacks`, which
+  keeps the PRs of one native GitHub stack together bottom-first in the
+  Roomy/Compact list; GitHub merges a stack bottom-up only yet reports the PRs
+  above the bottom as `CLEAN`, so `canBeMerged` in `github.ts` is gated on
+  `blockedByStack` and `prSignal` paints such a PR amber, not green; a host
+  whose schema has no `stack` field is read again without it and remembered for
+  the app run. The stack badge's menu is portalled to <body> because table
+  cells clip with `overflow-hidden`), `view-mode.ts` (the three
   display variants behind the header's Finder-style switch — `roomy` cards,
   `cozy` table, `compact` tiles — with the guard that validates the persisted
-  choice and the two predicates App.tsx gates grouping and the sort dropdown on)
-  and `pr-table.ts` (the Cozy table's ten columns and its ordering: a comparator
+  choice and the two predicates App.tsx gates grouping and the sort dropdown on),
+  `pr-table.ts` (the Cozy table's eleven columns and its ordering: a comparator
   per column, always ascending in terms of what the cell SHOWS, plus what a
-  header click does). Keep any such
+  header click does) and `claude-launch.ts` (the opt-in "start Claude on this
+  PR" button: which prompt a PR's state picks — blocked → drive, review due →
+  review, own mergeable → close, else the bare link — plus the shell quoting;
+  the renderer imports it for the tooltip, while finding the checkout by git
+  remote and opening the terminal live in `main/claude-launch.ts`, and the
+  renderer sends only the PR id so nothing it supplies reaches the shell),
+  `claude-sessions.ts` (which running Claude Code session works on which PR:
+  a session counts when the user sent it the PR's link — only human prompts,
+  never tool results, peer messages or task notifications, which quote PRs the
+  session was never asked about — or when its folder is a checkout of the PR's
+  repo on the PR's head branch; `main/claude-sessions.ts` reads Claude Code's
+  own live registry `~/.claude/sessions/<pid>.json` (skipping `spare` processes
+  started ahead of the next session; a `kind: "bg"` session runs in the
+  daemon's pty, so no terminal tab has its tty) plus each session's transcript
+  incrementally, on a 5 s timer gated on window visibility like the snapshot
+  pushes. Claude Desktop pauses idle sessions — stops the process, keeps the
+  session — so its own records (`claude-code-sessions/*/*/local_*.json`:
+  `isArchived`, the `prs` bound to it, `scheduledTaskId`) add those as
+  `paused` and drop archived ones; routine runs are left out because one run
+  touches every PR it drove. Those records are re-listed every 60 s and only
+  the last 14 days are read — thousands pile up. While a session holds a PR, the Claude button's main part
+  switches to it — Desktop through `claude://claude.ai/epitaxy/<hostSessionId>`,
+  a CLI session through the iTerm2/Terminal tab on its tty — and launching a
+  second one moves to the menu, since two sessions on one PR edit the same
+  branch),
+  `settings-search.ts` (the Settings screen's tabs, which section sits on which,
+  and the keywords its search box matches — every word of the query must hit a
+  section's title or keywords; a setting whose label is missing there cannot be
+  found, so extend its keywords when adding one) and `host-status.ts` (the
+  colour of a header host pill's dot — red on a failed fetch, amber on a spent
+  or low GraphQL budget, green otherwise; the pills replaced the raw budget
+  number and, with two or more hosts, the "All hosts" dropdown, since clicking a
+  pill toggles that host's filter). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
-  `pr-table.js` and `view-mode.js`
+  `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
+  `settings-search.js` and `host-status.js`
   stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
@@ -87,10 +129,12 @@ Three layers:
   `TABLE_MIN_WIDTH_REM` sums them and goes on the table as a `min-width`,
   because a fixed-layout table ignores a `min-width` set on the cells — that one
   number is what keeps a narrow window from squeezing the title column down to
-  one letter. The Pull-request column is the only resizable one (a grip on its
-  header edge, drag or arrow keys, double-click to reset, width persisted in rem
-  with the other view prefs): until it is dragged it carries no width and
-  absorbs the window's slack, and once dragged a trailing auto-width filler
+  one letter. Every column is resizable (a grip on its header edge, drag or
+  arrow keys, double-click to reset; the dragged widths persist in rem as one
+  `tableColumnWidths` map with the other view prefs, and cells clip with
+  `overflow-hidden` so a narrowed column can't paint over its neighbour). The
+  Pull-request column is the elastic one: until it is dragged it carries no
+  width and absorbs the window's slack, and once dragged a trailing auto-width filler
   column takes the slack instead — a declared width on every column would
   otherwise have the browser spread the leftovers proportionally and silently
   widen the column just set to an exact size. The table scrolls inside a box
@@ -119,7 +163,10 @@ Three layers:
 
 ## Build / run
 
-- `npm run dev` — Vite dev server (HMR) + Electron pointed at it.
+- `npm run dev` — Vite dev server (HMR) + Electron pointed at it. The main
+  process compiles in `tsc --watch` and Electron restarts after each clean
+  build: it reads `dist/main` only at startup, so a one-off compile kept a dev
+  app on stale main code while the renderer hot-reloaded and looked current.
 - `npm run build` — `tsc` (main) + `vite` (renderer) → `dist/`.
 - `npm run typecheck` and `npm test` — the gate before any push.
 - `npm run package` / `npm run package:dir` — electron-builder (dmg / nsis).

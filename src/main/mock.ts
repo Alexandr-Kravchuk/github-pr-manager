@@ -84,6 +84,17 @@ const myBlockingReview: Reviewer = {
 };
 const myApproval: Reviewer = { login: "me", avatarUrl: OCTOCAT, reviewState: "approved" };
 
+/** The one native stack the `waiting` case shows: #305 at the bottom, #306 on it. */
+const MOCK_STACK = {
+  number: 9,
+  size: 2,
+  baseRefName: "main",
+  entries: [
+    { position: 1, number: 305, title: "Stack bottom: live diagnostics", url: "https://github.com/acme/widgets/pull/305", state: "OPEN" },
+    { position: 2, number: 306, title: "Stack top: completion and hover", url: "https://github.com/acme/widgets/pull/306", state: "OPEN" },
+  ],
+};
+
 function pr(overrides: Partial<PullRequest> & { id: string; number: number }): PullRequest {
   return {
     hostLabel: HOST_LABEL,
@@ -93,6 +104,8 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     isDraft: false,
     baseRefName: "main",
     baseIsDefaultBranch: true,
+    stack: null,
+    blockedByStack: false,
     author: { login: "me", avatarUrl: OCTOCAT },
     createdAt: new Date(Date.now() - 2 * 864e5).toISOString(),
     updatedAt: new Date(Date.now() - 36e5).toISOString(),
@@ -120,8 +133,10 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     awaitingReview: false,
     hasUnaddressedChangeRequest: false,
     hasUnaddressedComments: false,
+    hasUnaddressedReviewFeedback: false,
     hasHumanApproval: false,
     hasConflicts: false,
+    isBehindBase: false,
     canBeMerged: false,
     // Overwritten by applyActivity:
     hasNewActivity: false,
@@ -275,6 +290,26 @@ const CASES: Record<string, () => PullRequest[]> = {
       // Stacked PR — based on a feature branch, not main.
       baseRefName: "feature/base-work",
       baseIsDefaultBranch: false,
+    }),
+    // A native GitHub stack: the bottom PR, and one above it that GitHub will
+    // not merge until the bottom one is in — approved and green all the same.
+    pr({
+      id: "mock-stack-bottom",
+      number: 305,
+      title: "Stack bottom: live diagnostics",
+      stack: { ...MOCK_STACK, position: 1, bottom: null },
+    }),
+    pr({
+      id: "mock-stack-top",
+      number: 306,
+      title: "Stack top: completion and hover",
+      baseRefName: "feature/live-diagnostics",
+      baseIsDefaultBranch: false,
+      stack: { ...MOCK_STACK, position: 2, bottom: { number: 305, url: "https://github.com/acme/widgets/pull/305" } },
+      blockedByStack: true,
+      reviewDecision: "APPROVED",
+      hasHumanApproval: true,
+      reviewers: [reviewerApproved],
     }),
   ],
   busy: () => [

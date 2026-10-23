@@ -14,7 +14,10 @@ import {
 } from "../shared/notify";
 import { markSeen } from "../shared/state";
 import type {
+  ClaudeLaunchResult,
+  ClaudeSessionInfo,
   ConfigResult,
+  FocusClaudeSessionResult,
   DashboardResult,
   GhStatus,
   JiraStatus,
@@ -23,6 +26,8 @@ import type {
   Settings,
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
+import { launchClaude } from "./claude-launch";
+import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
 import { clearJiraCaches } from "../shared/jira";
 import { buildJiraEnricher, getJiraStatus, setJiraToken } from "./jira-store";
@@ -31,6 +36,9 @@ import {
   validateExternalUrl,
   validateIgnoredArgs,
   validateJiraToken,
+  validateClaudeKind,
+  validateClaudeSessionId,
+  validatePrId,
   validateSeenItems,
   validateThemePreference,
 } from "./ipc-validation";
@@ -250,19 +258,16 @@ function handleNotifications(prs: PullRequest[]): void {
       return;
     }
 
-    // Decide delivery with the pure planner (focus suppression, summary-vs-
-    // individual split, chime-once, native-off sound fallback all live there and
-    // are unit-tested); this process only executes the descriptor.
-    const win = mainWindow;
-    const focused = Boolean(win && !win.isDestroyed() && win.isFocused());
+    // Decide delivery with the pure planner (summary-vs-individual split,
+    // chime-once, native-off sound fallback all live there and are unit-tested);
+    // this process only executes the descriptor.
     const kinds = events.map((e) => e.kind).join(", ");
     const plan = planDelivery(events, settings.notifications, {
-      focused,
       nativeSupported: Notification.isSupported(),
     });
 
     if (plan.mode === "none") {
-      dbg(focused ? `suppressed ${events.length} event(s) — window focused: ${kinds}` : `no delivery channel: ${kinds}`);
+      dbg(`no delivery channel: ${kinds}`);
       return;
     }
 
@@ -345,7 +350,45 @@ function applyPreferences(settings: Settings): void {
   // quitting (the controller says so) rather than hiding an unreachable window.
   trayController.setEnabled(settings.closeToTray);
   applyThemeSource(settings.theme);
+  claudeSessionsOn = settings.claude.enabled;
+  void refreshClaudeSessions();
 }
+
+// --- Running Claude sessions --------------------------------------------------
+// Which PR has a live Claude Code session. Read from Claude Code's own files on
+// a short timer of its own — a session's status changes within seconds, far
+// faster than the GraphQL tick — and only while the window is visible, like
+// the snapshot pushes: hidden is the app's normal idle state. The renderer
+// pulls the list again when it is shown.
+
+const CLAUDE_SESSIONS_INTERVAL_MS = 5_000;
+const claudeSessionScanner = createClaudeSessionScanner();
+let claudeSessionsOn = false;
+let claudeSessions: ClaudeSessionInfo[] = [];
+let claudeSessionsJson = "[]";
+
+/** Scans again and pushes the list when it changed. Empty while the integration is off. */
+async function refreshClaudeSessions(): Promise<ClaudeSessionInfo[]> {
+  let next: ClaudeSessionInfo[] = [];
+  if (claudeSessionsOn) {
+    try {
+      next = await claudeSessionScanner.scan();
+    } catch (e) {
+      if (process.env.PRD_DEBUG) console.error("[claude-sessions]", e);
+      return claudeSessions;
+    }
+  }
+  const json = JSON.stringify(next);
+  if (json !== claudeSessionsJson) {
+    claudeSessionsJson = json;
+    claudeSessions = next;
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+      sendToRenderer("claude-sessions", claudeSessions);
+    }
+  }
+  return claudeSessions;
+}
+
 
 /**
  * Content-Security-Policy as a response header (not a <meta> tag, which would
@@ -589,6 +632,40 @@ function registerIpc(): void {
     await shell.openExternal(validateExternalUrl(url));
   });
 
+  // The renderer sends only the PR id: the PR's state, its repository and the
+  // prompt are all read here, so nothing from the renderer reaches the shell.
+  ipcMain.handle("claude:launch", async (_event, raw: unknown, rawKind?: unknown): Promise<ClaudeLaunchResult> => {
+    const id = validatePrId(raw);
+    const kind = validateClaudeKind(rawKind);
+    const pr = poller?.getSnapshot()?.pullRequests.find((p) => p.id === id);
+    if (!pr) return { ok: false, error: "This PR is no longer on the dashboard." };
+    let settings: Settings;
+    try {
+      settings = loadSettings();
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+    const result = await launchClaude(pr, settings.claude, {
+      trackComments: settings.trackComments,
+      openUrl: (url) => shell.openExternal(url),
+      kind,
+    });
+    // The new session registers within seconds; look again soon after rather
+    // than leave the card without it for a full interval.
+    if (result.ok) setTimeout(() => void refreshClaudeSessions(), 2_000);
+    return result;
+  });
+
+  ipcMain.handle("claude:sessions", async (): Promise<ClaudeSessionInfo[]> => refreshClaudeSessions());
+
+  // Only the session id crosses over: what to open for it — the Desktop link or
+  // the terminal tab — comes from main's own scan of the registry.
+  ipcMain.handle("claude:focusSession", async (_event, raw: unknown): Promise<FocusClaudeSessionResult> => {
+    const id = validateClaudeSessionId(raw);
+    if (!claudeSessionsOn) return { ok: false, error: "Claude integration is off — turn it on in Settings." };
+    return claudeSessionScanner.focus(id, { openUrl: (url) => shell.openExternal(url) });
+  });
+
   ipcMain.handle("settings:get", async (): Promise<Settings> => loadSettings());
 
   ipcMain.handle("settings:save", async (_event, raw: unknown): Promise<SaveSettingsResult> => {
@@ -810,6 +887,12 @@ function startApp(): void {
   // The tray icon only exists once applyPreferences has run. If it failed to
   // appear, a hidden window would be unreachable, so show it after all.
   if (startInTray && !trayController.hidesToTray()) focusMainWindow();
+
+  setInterval(() => {
+    if (claudeSessionsOn && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+      void refreshClaudeSessions();
+    }
+  }, CLAUDE_SESSIONS_INTERVAL_MS);
 
   app.on("activate", () => {
     // A window may exist but be hidden in the tray — reactivating (dock click,

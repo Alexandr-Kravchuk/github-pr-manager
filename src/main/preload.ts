@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-import type { DashboardResponse, PrManagerApi, UpdateStatus } from "../shared/types";
+import type { ClaudeSessionInfo, DashboardResponse, PrManagerApi, UpdateStatus } from "../shared/types";
 
 const api: PrManagerApi = {
   getDashboard: () => ipcRenderer.invoke("dashboard:get"),
@@ -18,6 +18,9 @@ const api: PrManagerApi = {
   getAppVersion: () => ipcRenderer.invoke("app:getVersion"),
   getWhatsNew: () => ipcRenderer.invoke("app:getWhatsNew"),
   dismissWhatsNew: () => ipcRenderer.invoke("app:dismissWhatsNew"),
+  launchClaude: (prId, kind) => ipcRenderer.invoke("claude:launch", prId, kind),
+  getClaudeSessions: () => ipcRenderer.invoke("claude:sessions"),
+  focusClaudeSession: (sessionId) => ipcRenderer.invoke("claude:focusSession", sessionId),
   copyText: (text) => ipcRenderer.invoke("app:copyText", text),
   onSnapshot: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DashboardResponse) =>
@@ -25,6 +28,13 @@ const api: PrManagerApi = {
     ipcRenderer.on("snapshot", handler);
     return () => {
       ipcRenderer.removeListener("snapshot", handler);
+    };
+  },
+  onClaudeSessions: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, sessions: ClaudeSessionInfo[]) => listener(sessions);
+    ipcRenderer.on("claude-sessions", handler);
+    return () => {
+      ipcRenderer.removeListener("claude-sessions", handler);
     };
   },
   onConfigError: (listener) => {

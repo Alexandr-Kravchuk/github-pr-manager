@@ -252,6 +252,8 @@ export async function applyActivity(
           pr.returnedToMe ||
           pr.failingChecks.length > 0 ||
           pr.hasUnaddressedChangeRequest ||
+          (isAuthor && (pr.hasConflicts || pr.isBehindBase)) ||
+          (isAuthor && pr.hasUnaddressedReviewFeedback) ||
           (trackComments && pr.hasUnaddressedComments) ||
           pr.hasNewActivity ||
           (trackComments && pr.unresolvedThreads > 0 && !(isAuthor && pr.awaitingReview)) ||

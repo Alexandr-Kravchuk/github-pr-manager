@@ -1,9 +1,11 @@
 import { useCallback, useState } from "react";
 
 import { prSignal, type PrSignal } from "../../../shared/pr-filter";
-import { ageDays, approvalTally, primaryRole, reviewRank } from "../../../shared/pr-table";
+import { ageDays, approvalTally, primaryRole, repoShortName, reviewRank } from "../../../shared/pr-table";
 import type { PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
+import { ClaudeButton } from "./ClaudeButton";
+import { StackBadge } from "./StackBadge";
 
 /**
  * The Compact tile: the same information architecture as `PrCard` shrunk to
@@ -107,7 +109,9 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
     <div
       title={tileTooltip(pr, Date.now())}
       className={cn(
-        "group relative rounded-md border border-line border-l-[3px] bg-surface/60 px-2 py-1.5 transition-colors hover:bg-surface",
+        // Hover darkens every side but the left: that one is the accent stripe,
+        // and a plain `hover:border-*` colour repaints it grey.
+        "group relative rounded-md border border-line border-l-[3px] bg-surface px-2 py-1.5 shadow-sm transition-colors hover:border-y-line-strong hover:border-r-line-strong",
         ACCENT[prSignal(pr, { trackComments })],
         pr.isIgnored && "opacity-60 hover:opacity-100",
       )}
@@ -115,11 +119,11 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
       {/* Line 1 — where it lives and how old it is. */}
       <div className="flex items-center gap-1 text-[11px] leading-none text-fg-subtle">
         {hideRepo ? (
-          <span className="text-fg-faint">#{pr.number}</span>
+          <span className="shrink-0 text-xs font-semibold tabular-nums text-fg-secondary">#{pr.number}</span>
         ) : (
           <span className="flex min-w-0 items-center gap-1">
-            <span className="truncate">{pr.repo}</span>
-            <span className="shrink-0 text-fg-faint">#{pr.number}</span>
+            <span className="truncate">{repoShortName(pr.repo)}</span>
+            <span className="shrink-0 text-xs font-semibold tabular-nums text-fg-secondary">#{pr.number}</span>
           </span>
         )}
         {pr.isDraft && <span className="shrink-0 rounded bg-elevated px-1 text-fg-muted">D</span>}
@@ -176,7 +180,8 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
             ↩
           </span>
         )}
-        {!pr.baseIsDefaultBranch && (
+        <StackBadge pr={pr} />
+        {!pr.stack && !pr.baseIsDefaultBranch && (
           <span
             title={`Stacked on ${pr.baseRefName}, not on the default branch`}
             className="shrink-0 text-emerald-600 dark:text-emerald-400"
@@ -230,6 +235,9 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
             </span>
           )}
         </span>
+        {/* Icon only: a labelled button took a line of its own and made every
+            tile taller. Its colour still says which action a click starts. */}
+        <ClaudeButton pr={pr} trackComments={trackComments} iconOnly className="ml-1" />
       </div>
 
       {/* Hover-only actions, in the corner so they cost no layout width. */}

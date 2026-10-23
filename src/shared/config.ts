@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
 
+import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "./claude-launch";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "./notify";
 import type {
+  ClaudeSettings,
   GhStatus,
   HostConfig,
   JiraSettings,
@@ -191,6 +193,45 @@ export function validateSettings(raw: unknown): Settings {
     notifications,
     hosts,
     jira: validateJira(obj.jira),
+    claude: validateClaude(obj.claude),
+  };
+}
+
+/**
+ * Coerces the Claude launcher block, filling anything missing from the
+ * defaults. Never throws — like notifications, a bad shape falls back (to OFF)
+ * rather than blocking a settings save or making the app look unconfigured.
+ */
+export function validateClaude(raw: unknown): ClaudeSettings {
+  const d = DEFAULT_CLAUDE_SETTINGS;
+  const obj = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const repoPaths: Record<string, string> = {};
+  if (typeof obj.repoPaths === "object" && obj.repoPaths !== null) {
+    for (const [repo, dir] of Object.entries(obj.repoPaths as Record<string, unknown>)) {
+      if (repo.includes("/") && str(dir)) repoPaths[repo] = str(dir);
+    }
+  }
+  const rawPrompts = (typeof obj.prompts === "object" && obj.prompts !== null ? obj.prompts : {}) as Record<
+    string,
+    unknown
+  >;
+  const prompt = (k: keyof typeof DEFAULT_CLAUDE_PROMPTS): string => str(rawPrompts[k]) || DEFAULT_CLAUDE_PROMPTS[k];
+  return {
+    enabled: typeof obj.enabled === "boolean" ? obj.enabled : d.enabled,
+    projectsRoot: str(obj.projectsRoot),
+    repoPaths,
+    prompts: {
+      drive: prompt("drive"),
+      review: prompt("review"),
+      close: prompt("close"),
+      explain: prompt("explain"),
+      open: prompt("open"),
+    },
+    terminal:
+      obj.terminal === "iterm" || obj.terminal === "terminal" || obj.terminal === "desktop"
+        ? obj.terminal
+        : d.terminal,
   };
 }
 
@@ -234,6 +275,7 @@ export function defaultSettings(): Settings {
     trackComments: true,
     notifications: defaultNotificationSettings(),
     hosts: [],
+    claude: validateClaude(undefined),
   };
 }
 
@@ -257,6 +299,7 @@ export function toPublicConfig(settings: Settings): PublicConfig {
     pollIntervalSeconds: settings.pollIntervalSeconds,
     hosts: settings.hosts.map((h) => ({ label: h.label, repos: h.repos })),
     trackComments: settings.trackComments,
+    claudeEnabled: settings.claude.enabled,
   };
 }
 

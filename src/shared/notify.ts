@@ -202,9 +202,14 @@ export interface DeliveryPlan {
   summarySilent: boolean;
 }
 
+/**
+ * Deliberately carries no "window is focused" flag: a toast fires whether or not
+ * the dashboard has focus. Suppressing it for the focused window hid real
+ * transitions — a focused window is not one the user is reading (it may sit
+ * behind a maximized editor on a second monitor), and a missed approval or
+ * review request costs more than a toast for a change already on screen.
+ */
 export interface DeliveryContext {
-  /** Our window is the focused one — the dashboard already shows the change. */
-  focused: boolean;
   /** OS/Electron can show native notifications (`Notification.isSupported()`). */
   nativeSupported: boolean;
 }
@@ -266,7 +271,7 @@ export function hasDeliverableNotifications(
 /**
  * Decides how to deliver a batch of notification events, given the user's
  * settings and runtime context. Pure and Electron-free so every branch —
- * focus suppression, the summary-vs-individual split, chime-once, and the
+ * the summary-vs-individual split, chime-once, and the
  * native-off sound fallback — unit-tests in plain Node; `main.ts` only executes
  * the returned descriptor.
  */
@@ -277,9 +282,6 @@ export function planDelivery(
 ): DeliveryPlan {
   const none: DeliveryPlan = { mode: "none", silent: [], summarySilent: true };
   if (!settings.enabled || events.length === 0) return none;
-  // Don't notify for the window the user is actively viewing — a focus/restore
-  // tick would otherwise dump a burst of toasts for everything that moved away.
-  if (ctx.focused) return none;
 
   const { sound } = settings;
   // Which channel carries this batch — shared with hasDeliverableNotifications so

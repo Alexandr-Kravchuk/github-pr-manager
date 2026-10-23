@@ -95,6 +95,10 @@ for (const mod of [
   "pr-group.js",
   "pr-table.js",
   "view-mode.js",
+  "claude-launch.js",
+  "claude-sessions.js",
+  "settings-search.js",
+  "host-status.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -256,6 +260,23 @@ for (const mod of [
   });
 }
 
+// --- the accent stripe survives hover ----------------------------------------
+// A card's and a tile's left border is the coloured accent (`border-l-*`). A
+// hover colour for the whole border (`hover:border-line-strong`) outranks it and
+// painted the stripe grey under the pointer (2.3.0); hover may colour the other
+// sides only (`hover:border-y-*`, `hover:border-r-*`).
+for (const file of ["PrCard.tsx", "PrTile.tsx"]) {
+  test(`${file}: hover never recolours the accent stripe`, () => {
+    const src = require("node:fs").readFileSync(
+      path.join(__dirname, `../src/renderer/src/components/${file}`),
+      "utf8",
+    );
+    const hits = src.match(/hover:border-(?:line|[a-z]+-\d)[\w-]*/g) || [];
+    assert.deepStrictEqual(hits, [], `${file} sets a whole-border hover colour: ${hits.join(", ")}`);
+    assert.match(src, /hover:border-y-line-strong hover:border-r-line-strong/);
+  });
+}
+
 // --- renderer wiring for the trackComments setting ---------------------------
 // The renderer half of the setting has no other gate: this repo has no renderer
 // component tests, so without these the toggle could stop being persisted, or
@@ -296,12 +317,12 @@ for (const mod of [
     assert.match(src, /loadSettings\(\)\.trackComments/, "and read it from settings, not hardcode it");
   });
 
-  test("App.tsx gates the New comments chip and the header count on trackComments", () => {
+  test("App.tsx gates the New comments chip on trackComments", () => {
     const src = read("src/renderer/src/App.tsx");
     // Same reasoning: assert the gate co-occurs with what it gates, not the
-    // exact JSX or the header wording.
+    // exact JSX. (The header's new-comments count it also gated is gone: the
+    // chip is the only place that number shows now.)
     assert.match(src, /trackComments &&[\s\S]{0,120}?<FilterChip/, "the chip must be conditional");
-    assert.match(src, /trackComments &&[\s\S]{0,120}?stats\.fresh/, "the header stat must be conditional");
   });
 }
 
@@ -1390,18 +1411,25 @@ test("toPublicConfig: strips graphqlUrl, keeps label + repos", () => {
     pollIntervalSeconds: 60,
     trackComments: true,
     hosts: [{ label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"] }],
+    claude: cfg.validateClaude(undefined),
   });
   assert.deepStrictEqual(pub, {
     pollIntervalSeconds: 60,
     hosts: [{ label: "GH", repos: ["a/b"] }],
     trackComments: true,
+    claudeEnabled: false,
   });
 });
 test("toPublicConfig: trackComments is propagated, not assumed", () => {
   // The renderer's whole half of the feature reads this mirror, so asserting only
   // the `true` case would pass for a hardcoded `true` while the chip, the header
   // stat and the filter reset never turned off for anyone.
-  const pub = cfg.toPublicConfig({ pollIntervalSeconds: 60, trackComments: false, hosts: [] });
+  const pub = cfg.toPublicConfig({
+    pollIntervalSeconds: 60,
+    trackComments: false,
+    hosts: [],
+    claude: cfg.validateClaude(undefined),
+  });
   assert.strictEqual(pub.trackComments, false);
 });
 
@@ -1413,6 +1441,18 @@ test("hostIntervalMs: cheap host (cost 1) stays at base", () =>
   assert.strictEqual(
     poller.hostIntervalMs({ hostLabel: "GHE", remaining: 5000, cost: 1, resetAt: future(3600) }, 60_000),
     60_000,
+  ));
+// A GHE host costs ~7 a tick since the searches went ids-only plus one read by
+// id (it cost 1–3 before); that must not push it onto github.com's floor.
+test("hostIntervalMs: a GHE-sized tick (cost 7) stays at base", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs({ hostLabel: "GHE", remaining: 5000, cost: 7, resetAt: future(3600) }, 60_000),
+    60_000,
+  ));
+test("hostIntervalMs: a github.com-sized tick (cost 20) gets the 5-min floor", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs({ hostLabel: "GH", remaining: 5000, cost: 20, resetAt: future(3600) }, 60_000),
+    300_000,
   ));
 test("hostIntervalMs: expensive host (cost 35) gets the 5-min floor", () =>
   assert.strictEqual(
@@ -1429,6 +1469,96 @@ test("hostIntervalMs: exhausted budget waits at least the minute floor", () =>
     poller.hostIntervalMs({ hostLabel: "GHE", remaining: 0, cost: 1, resetAt: future(5) }, 60_000),
     60_000,
   ));
+
+// --- poller: budget reserve and spent budget --------------------------------
+// The GraphQL budget is per account, shared with every gh client (scheduled
+// routines, the sessions they start, the app on another machine). The app may
+// not take the last 10% of it, and once it stops — reserve or a spent budget —
+// the next fetch worth making is the first one after the reset.
+const within = (actual, expected, slackMs = 2_000) =>
+  assert.ok(Math.abs(actual - expected) <= slackMs, `expected ~${expected}, got ${actual}`);
+test("hostIntervalMs: down to the reserve, an expensive host waits for the reset", () =>
+  within(
+    poller.hostIntervalMs(
+      { hostLabel: "GH", remaining: 400, cost: 35, limit: 5000, resetAt: future(1800) },
+      60_000,
+    ),
+    1_805_000,
+  ));
+test("hostIntervalMs: down to the reserve, a cheap host waits for the reset too", () =>
+  within(
+    poller.hostIntervalMs(
+      { hostLabel: "GHE", remaining: 148, cost: 1, limit: 5000, resetAt: future(600) },
+      60_000,
+    ),
+    605_000,
+  ));
+test("hostIntervalMs: above the reserve the floor still applies", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs(
+      { hostLabel: "GH", remaining: 5000, cost: 35, limit: 5000, resetAt: future(3600) },
+      60_000,
+    ),
+    300_000,
+  ));
+test("hostIntervalMs: the reserve is spread over, not spent — safe ticks count usable points only", () =>
+  // 1000 left, 500 reserved, 50 a tick -> 10 ticks over 3600 s -> 360 s apart.
+  within(
+    poller.hostIntervalMs(
+      { hostLabel: "GH", remaining: 1000, cost: 50, limit: 5000, resetAt: future(3600) },
+      60_000,
+    ),
+    360_000,
+  ));
+test("hostIntervalMs: a spent budget resuming in 2 min waits 2 min, not the 5-min floor", () =>
+  within(
+    poller.hostIntervalMs({ hostLabel: "GH", remaining: 0, cost: 35, resetAt: future(120) }, 60_000),
+    125_000,
+  ));
+test("hostIntervalMs: a spent reading whose window already reset falls back to the floor", () =>
+  assert.strictEqual(
+    poller.hostIntervalMs({ hostLabel: "GH", remaining: 0, cost: 35, resetAt: future(-30) }, 60_000),
+    300_000,
+  ));
+test("isBudgetSpent: fewer points than a tick, before the reset", () => {
+  const now = Date.now();
+  assert.strictEqual(
+    poller.isBudgetSpent({ hostLabel: "GH", remaining: 20, cost: 35, resetAt: future(60) }, now),
+    true,
+  );
+  assert.strictEqual(
+    poller.isBudgetSpent({ hostLabel: "GH", remaining: 400, cost: 35, resetAt: future(60) }, now),
+    false,
+    "the reserve is not 'spent' — human activity may still use it",
+  );
+  assert.strictEqual(
+    poller.isBudgetSpent({ hostLabel: "GH", remaining: 0, cost: 35, resetAt: future(-5) }, now),
+    false,
+    "a window that has reset is not spent",
+  );
+  assert.strictEqual(poller.isBudgetSpent(null, now), false);
+});
+test("reserveNotice: only once the usable budget cannot pay for a tick", () => {
+  assert.strictEqual(
+    poller.reserveNotice({ hostLabel: "GH", remaining: 5000, cost: 35, limit: 5000, resetAt: future(60) }),
+    null,
+  );
+  assert.strictEqual(
+    poller.reserveNotice({ hostLabel: "GH", remaining: 400, cost: 35, resetAt: future(60) }),
+    null,
+    "no limit in the reading -> no reserve, so nothing to report",
+  );
+  const n = poller.reserveNotice({
+    hostLabel: "GHE",
+    remaining: 148,
+    cost: 1,
+    limit: 5000,
+    resetAt: "2026-10-02T13:00:00Z",
+  });
+  assert.strictEqual(n.hostLabel, "GHE");
+  assert.strictEqual(n.rateLimitedUntil, "2026-10-02T13:00:00Z");
+  assert.match(n.message, /148 of 5000/);
+});
 
 // --- poller: hotness floor ---------------------------------------------------
 const rl = (cost) => ({ hostLabel: "GH", remaining: 5000, cost, resetAt: future(3600) });
@@ -1546,6 +1676,72 @@ const rawPr = (overrides = {}) => ({
   commits: { nodes: [{ commit: { pushedDate: "2026-07-07T00:00:00Z", committedDate: "2026-07-07T00:00:00Z", statusCheckRollup: null } }] },
   ...overrides,
 });
+// Approval bodies have no resolvable-thread state: only reviewer clearance is
+// authoritative. Conservative unknown prose must never enter the merge queue.
+for (const body of ["", "LGTM!", "Looks good to me.", "Approved ✅", "Thanks!", "👍"]) {
+  test(`approval body: plain acknowledgement ${JSON.stringify(body)}`, () =>
+    assert.strictEqual(github.approvalBodyNeedsAttention(body), false));
+}
+for (const body of ["LGTM, but please add a regression test", "Fix x", "Consider avoiding shared mutable state", "Looks good. Could you handle null inputs?", "The implementation is carefully structured and I appreciate the extensive validation already included."]) {
+  test(`approval body: feedback or unknown intent ${JSON.stringify(body)}`, () =>
+    assert.strictEqual(github.approvalBodyNeedsAttention(body), true));
+}
+test("mapPr: approved review body blocks own PR even without inline comments, push/re-request cannot clear it", () => {
+  const feedback = { ...approvedReview, body: "LGTM, but please add null validation" };
+  for (const trackComments of [true, false]) {
+    for (const reviewRequests of [{ totalCount: 0, nodes: [] }, { totalCount: 1, nodes: [{ requestedReviewer: { login: "rev" } }] }]) {
+      const pr = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [feedback] }, reviewRequests }), "GH", ["author"], "auth");
+      assert.strictEqual(pr.hasHumanApproval, true);
+      assert.strictEqual(pr.hasUnaddressedReviewFeedback, true);
+      assert.strictEqual(pr.canBeMerged, false);
+      assert.strictEqual(prFilter.prSignal(pr, { trackComments }), "blocked");
+    }
+    const anotherApproval = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [feedback, { ...approvedReview, author: { __typename: "User", login: "other" }, body: "LGTM" }] } }), "GH", ["author"], "auth");
+    assert.strictEqual(anotherApproval.hasUnaddressedReviewFeedback, true);
+    assert.strictEqual(prFilter.prSignal(anotherApproval, { trackComments }), "blocked");
+    const clean = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [{ ...approvedReview, body: "LGTM" }] } }), "GH", ["author"], "auth");
+    assert.strictEqual(clean.hasUnaddressedReviewFeedback, false);
+    assert.strictEqual(prFilter.prSignal(clean, { trackComments }), "approved");
+  }
+});
+test("mapPr: bot approval and author's own review do not create human-feedback blocker", () => {
+  for (const author of [{ __typename: "Bot", login: "bot" }, { __typename: "User", login: "auth" }]) {
+    const pr = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [{ ...approvedReview, author, body: "Please fix this" }] } }), "GH", ["author"], "auth");
+    assert.strictEqual(pr.hasUnaddressedReviewFeedback, false);
+  }
+});
+test("approval feedback: only fresh author EYES on the exact review clears it", () => {
+  const feedback = { ...approvedReview, body: "Please add validation", updatedAt: "2026-10-01T10:00:00Z" };
+  const eyes = (login, createdAt = "2026-10-01T10:01:00Z", content = "EYES") => ({ content, createdAt, user: login == null ? null : { login } });
+  for (const [label, reactions, blocked] of [
+    ["absent", [], true], ["other person", [eyes("other")], true],
+    ["reviewer", [eyes("rev")], true], ["deleted actor", [eyes(null)], true],
+    ["wrong emoji", [eyes("auth", undefined, "THUMBS_UP")], true],
+    ["old ack before edit", [eyes("auth", "2026-10-01T09:00:00Z")], true],
+    ["invalid time", [eyes("auth", "invalid")], true],
+    ["author", [eyes("AUTH")], false],
+  ]) {
+    const review = { ...feedback, reactions: { nodes: reactions } };
+    const pr = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [review] } }), "GH", ["author"], "auth");
+    assert.strictEqual(pr.hasUnaddressedReviewFeedback, blocked, label);
+    assert.strictEqual(pr.canBeMerged, !blocked, label);
+    for (const trackComments of [true, false]) assert.strictEqual(prFilter.prSignal(pr, { trackComments }), blocked ? "blocked" : "approved", label);
+  }
+  const acknowledged = { ...feedback, reactions: { nodes: [eyes("auth")] } };
+  for (const extra of [
+    { ...feedback, author: { __typename: "User", login: "other-reviewer" } },
+    { ...feedback, updatedAt: "2026-10-01T10:02:00Z" }, // replacement review has no inherited reaction
+  ]) {
+    const pr = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [acknowledged, extra] } }), "GH", ["author"], "auth");
+    assert.strictEqual(pr.hasUnaddressedReviewFeedback, true);
+  }
+  const behind = github.mapPr(rawPr({ mergeStateStatus: "BEHIND", latestOpinionatedReviews: { nodes: [acknowledged] } }), "GH", ["author"], "auth");
+  assert.strictEqual(behind.hasUnaddressedReviewFeedback, false);
+  assert.strictEqual(behind.canBeMerged, false);
+  assert.strictEqual(prFilter.prSignal(behind, { trackComments: false }), "blocked");
+  const noAuthor = github.mapPr(rawPr({ author: null, latestOpinionatedReviews: { nodes: [acknowledged] } }), "GH", ["author"], "auth");
+  assert.strictEqual(noAuthor.hasUnaddressedReviewFeedback, true);
+});
 const canMerge = (overrides) => github.mapPr(rawPr(overrides), "GH", ["authored"], null).canBeMerged;
 const failingRollup = {
   nodes: [{ commit: { statusCheckRollup: { state: "FAILURE", contexts: {
@@ -1627,6 +1823,89 @@ test("mapPr.hasConflicts: MERGEABLE is false", () =>
   assert.strictEqual(conflicting({ mergeable: "MERGEABLE" }), false));
 test("mapPr.hasConflicts: transient UNKNOWN stays false", () =>
   assert.strictEqual(conflicting({ mergeable: "UNKNOWN" }), false));
+
+test("mapPr.isBehindBase: only BEHIND requests a base update", () => {
+  for (const mergeStateStatus of ["BEHIND", "CLEAN", "UNKNOWN", "BLOCKED", "DIRTY", undefined]) {
+    const pr = github.mapPr(rawPr({ mergeStateStatus }), "GH", ["authored"], null);
+    assert.strictEqual(pr.isBehindBase, mergeStateStatus === "BEHIND");
+    assert.strictEqual(pr.hasConflicts, false);
+    if (mergeStateStatus === "BEHIND") assert.strictEqual(pr.canBeMerged, false);
+  }
+});
+test("mapPr: approved conflict-free PR moves from red to green after base update", () => {
+  for (const trackComments of [true, false]) {
+    const before = github.mapPr(rawPr({ mergeStateStatus: "BEHIND" }), "GH", ["author"], null);
+    const after = github.mapPr(rawPr({ mergeStateStatus: "CLEAN" }), "GH", ["author"], null);
+    assert.strictEqual(before.hasHumanApproval, true);
+    assert.strictEqual(prFilter.prSignal(before, { trackComments }), "blocked");
+    assert.strictEqual(prFilter.prSignal(after, { trackComments }), "approved");
+    assert.strictEqual(after.canBeMerged, true);
+  }
+});
+
+// --- github: native PR stacks -------------------------------------------------
+// GitHub merges a stack bottom-up only, yet reports the PRs above the bottom as
+// CLEAN — measured on creatio.ghe.com core#1614 (position 2 of 2). Readiness
+// must come from the stack position, not from GitHub's merge state.
+const stackEntries = (...prs) => ({
+  nodes: prs.map(([position, number, state = "OPEN"]) => ({
+    position,
+    pullRequest: { number, title: `PR ${number}`, url: `https://github.com/a/b/pull/${number}`, state },
+  })),
+});
+const stacked = (position, entries) => rawPr({
+  mergeStateStatus: "CLEAN",
+  stackEntry: { position },
+  stack: { number: 7, size: entries.nodes.length, baseRefName: "trunk", entries },
+});
+test("mapPr.stack: outside a stack (or on a host without stacks) is null and not blocked", () => {
+  for (const pr of [rawPr(), rawPr({ stack: null, stackEntry: null })]) {
+    const mapped = github.mapPr(pr, "GH", ["author"], null);
+    assert.strictEqual(mapped.stack, null);
+    assert.strictEqual(mapped.blockedByStack, false);
+    assert.strictEqual(mapped.canBeMerged, true);
+  }
+});
+test("mapPr.stack: the bottom PR is mergeable, the one above it waits for it", () => {
+  const entries = stackEntries([1, 1613], [2, 1614]);
+  const bottom = github.mapPr(stacked(1, entries), "GH", ["author"], null);
+  assert.deepStrictEqual(bottom.stack, {
+    number: 7,
+    position: 1,
+    size: 2,
+    baseRefName: "trunk",
+    entries: [
+      { position: 1, number: 1613, title: "PR 1613", url: "https://github.com/a/b/pull/1613", state: "OPEN" },
+      { position: 2, number: 1614, title: "PR 1614", url: "https://github.com/a/b/pull/1614", state: "OPEN" },
+    ],
+    bottom: null,
+  });
+  assert.strictEqual(bottom.blockedByStack, false);
+  assert.strictEqual(bottom.canBeMerged, true);
+  const top = github.mapPr(stacked(2, entries), "GH", ["author"], null);
+  assert.deepStrictEqual(top.stack.bottom, { number: 1613, url: "https://github.com/a/b/pull/1613" });
+  assert.strictEqual(top.blockedByStack, true);
+  assert.strictEqual(top.canBeMerged, false);
+});
+test("prSignal: an approved green PR above the bottom of its stack is amber, not green", () => {
+  const entries = stackEntries([1, 1613], [2, 1614]);
+  for (const trackComments of [true, false]) {
+    assert.strictEqual(prFilter.prSignal(github.mapPr(stacked(1, entries), "GH", ["author"], null), { trackComments }), "approved");
+    assert.strictEqual(prFilter.prSignal(github.mapPr(stacked(2, entries), "GH", ["author"], null), { trackComments }), "attention");
+  }
+});
+test("mapPr.stack: entries come bottom first whatever order GitHub lists them in", () => {
+  const top = github.mapPr(stacked(2, stackEntries([2, 1614], [1, 1613])), "GH", ["author"], null);
+  assert.deepStrictEqual(top.stack.entries.map((e) => e.number), [1613, 1614]);
+});
+test("mapPr.stack: waits for the lowest OPEN PR; a merged one below no longer blocks", () => {
+  const third = github.mapPr(stacked(3, stackEntries([1, 10, "MERGED"], [2, 11], [3, 12])), "GH", ["author"], null);
+  assert.strictEqual(third.stack.bottom.number, 11);
+  const second = github.mapPr(stacked(2, stackEntries([1, 10, "MERGED"], [2, 11])), "GH", ["author"], null);
+  assert.strictEqual(second.stack.bottom, null);
+  assert.strictEqual(second.blockedByStack, false);
+  assert.strictEqual(second.canBeMerged, true);
+});
 
 // --- github: mapPr defaults isIgnored to false (set later by ignored.ts) -----
 test("mapPr.isIgnored: defaults to false", () =>
@@ -1919,6 +2198,61 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
   assert.strictEqual(issueKey.jiraBrowseUrl("https://org.atlassian.net", "eng-1"), null);
 });
 
+// --- pr-group: a native stack reads bottom-up wherever it landed --------------
+{
+  const prGroup = require(path.join(__dirname, "../dist/main/shared/pr-group.js"));
+  const spr = (number, stack = null, over = {}) => ({
+    number,
+    hostLabel: "GH",
+    repo: "a/b",
+    stack: stack && { number: stack[0], position: stack[1], size: 3, bottom: null },
+    ...over,
+  });
+  const hpr = (id, issueKey, parentKey = null, over = {}) => ({
+    id, issueKey, parentKey, issueSummary: `${issueKey} title`, parentSummary: parentKey && `${parentKey} title`, ...over,
+  });
+  const keysOf = (prs) => Object.fromEntries(prGroup.parentGroupKeys(prs));
+  test("parentGroupKeys: PRs on a task with no parent group under the task itself", () => {
+    // ENG-83724 "Code designer": a Task with no parent, five PRs — they were all in "Other".
+    assert.deepStrictEqual(keysOf([hpr("a", "ENG-1"), hpr("b", "ENG-1")]), { a: "ENG-1", b: "ENG-1" });
+  });
+  test("parentGroupKeys: a task's own PR joins its subtasks' PRs, under the top key", () => {
+    const prs = [hpr("sub1", "S-1", "T-1"), hpr("sub2", "S-2", "T-1"), hpr("task", "T-1", "E-1")];
+    assert.deepStrictEqual(keysOf(prs), { sub1: "E-1", sub2: "E-1", task: "E-1" });
+    assert.strictEqual(prGroup.groupLabel("E-1", prs, "parent"), "E-1 · E-1 title");
+  });
+  test("parentGroupKeys: without the task's PR, subtasks still group under their task", () => {
+    const prs = [hpr("sub1", "S-1", "T-1"), hpr("sub2", "S-2", "T-1"), hpr("other", "S-9", "T-9")];
+    assert.deepStrictEqual(keysOf(prs), { sub1: "T-1", sub2: "T-1", other: "T-9" });
+    assert.strictEqual(prGroup.groupLabel("T-1", prs.slice(0, 2), "parent"), "T-1 · T-1 title");
+  });
+  test("parentGroupKeys: a PR with no issue key has no group", () => {
+    assert.deepStrictEqual(keysOf([hpr("x", null), hpr("y", "ENG-2")]), { x: null, y: "ENG-2" });
+  });
+  test("groupLabel(parent): the key's summary comes from the PR whose own issue it is", () => {
+    assert.strictEqual(prGroup.groupLabel("ENG-1", [hpr("a", "ENG-1")], "parent"), "ENG-1 · ENG-1 title");
+    assert.strictEqual(prGroup.groupLabel("ENG-1", [hpr("a", "ENG-1", null, { issueSummary: null })], "parent"), "ENG-1");
+  });
+  test("orderStacks: a stack's PRs gather, bottom first, where the first of them was", () => {
+    const list = [spr(1), spr(13, [7, 3]), spr(2), spr(11, [7, 1]), spr(3), spr(12, [7, 2])];
+    assert.deepStrictEqual(prGroup.orderStacks(list).map((p) => p.number), [1, 11, 12, 13, 2, 3]);
+  });
+  test("orderStacks: the same stack number in another repo is another stack", () => {
+    const list = [spr(2, [7, 2]), spr(5, [7, 1], { repo: "a/c" }), spr(1, [7, 1])];
+    assert.deepStrictEqual(prGroup.orderStacks(list).map((p) => p.number), [1, 2, 5]);
+  });
+  test("orderStacks: a list without stacks comes back unchanged", () => {
+    const list = [spr(3), spr(1), spr(2)];
+    assert.strictEqual(prGroup.orderStacks(list), list);
+  });
+  test("stackTitle: names the PR that has to merge first", () => {
+    const top = spr(14, null, { stack: { number: 7, position: 2, size: 2, bottom: { number: 13, url: "u" } } });
+    assert.match(prGroup.stackTitle(top), /Stack #7: 2 of 2.*waits for #13/);
+    assert.match(prGroup.stackTitle(spr(13, [7, 1])), /bottom PR/);
+    assert.strictEqual(prGroup.stackTitle(spr(1)), "");
+  });
+}
+
 // --- pr-group: what a Jira-keyed group heading says --------------------------
 // The rendered heading is this PR's whole point, so it is a pure rule here rather
 // than a closure inside App.tsx's grouping memo: these cases are what actually
@@ -2066,13 +2400,14 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
   });
   const rev = (login, reviewState) => ({ login, avatarUrl: "", reviewState });
 
-  test("TABLE_COLUMNS: ten unique columns, Actions the only unsortable one", () => {
+  test("TABLE_COLUMNS: eleven unique columns, only Reviewers and Actions unsortable", () => {
     const keys = prTable.TABLE_COLUMNS.map((c) => c.key);
-    assert.strictEqual(keys.length, 10);
+    assert.strictEqual(keys.length, 11);
     assert.strictEqual(new Set(keys).size, keys.length, "duplicate column key");
+    assert.ok(!keys.includes("role"), "the Role column was removed");
     assert.deepStrictEqual(
       prTable.TABLE_COLUMNS.filter((c) => !c.sortable).map((c) => c.key),
-      ["actions"],
+      ["reviewers", "actions"],
     );
   });
 
@@ -2089,32 +2424,57 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     );
   });
 
-  test("clampPrColumnWidth: a dragged width is held inside the column's bounds", () => {
-    assert.strictEqual(prTable.clampPrColumnWidth(40), 40);
-    assert.strictEqual(prTable.clampPrColumnWidth(2), prTable.PR_COLUMN_MIN_REM);
-    assert.strictEqual(prTable.clampPrColumnWidth(5000), prTable.PR_COLUMN_MAX_REM);
-    assert.ok(prTable.PR_COLUMN_MIN_REM > 0 && prTable.PR_COLUMN_MAX_REM > prTable.PR_COLUMN_MIN_REM);
+  test("clampColumnWidth: a dragged width is held inside the bounds", () => {
+    assert.strictEqual(prTable.clampColumnWidth(40), 40);
+    assert.strictEqual(prTable.clampColumnWidth(0.5), prTable.COLUMN_MIN_REM);
+    assert.strictEqual(prTable.clampColumnWidth(5000), prTable.COLUMN_MAX_REM);
+    assert.ok(prTable.COLUMN_MIN_REM > 0 && prTable.COLUMN_MAX_REM > prTable.COLUMN_MIN_REM);
   });
-  test("clampPrColumnWidth: anything that isn't a width answers null — the elastic default", () => {
+  test("clampColumnWidth: anything that isn't a width answers null — the default width", () => {
     // Null is the un-dragged state, so a corrupt persisted value (or a NaN from
     // measuring a column that isn't on screen) restores the default layout
     // instead of collapsing the column to nothing.
     for (const bad of [NaN, Infinity, null, undefined, "32", {}]) {
-      assert.strictEqual(prTable.clampPrColumnWidth(bad), null, String(bad));
+      assert.strictEqual(prTable.clampColumnWidth(bad), null, String(bad));
     }
   });
-
-  test("tableMinWidthRem: un-dragged is the plain sum; dragged swaps in that width", () => {
-    assert.strictEqual(prTable.tableMinWidthRem(null), prTable.TABLE_MIN_WIDTH_REM);
-    const others = prTable.TABLE_MIN_WIDTH_REM - prTable.PR_COLUMN_MIN_REM;
-    assert.strictEqual(prTable.tableMinWidthRem(50), others + 50);
-    // A width outside the bounds must not widen the table past them either —
-    // the floor is what keeps the other nine columns from being squeezed.
-    assert.strictEqual(prTable.tableMinWidthRem(1), others + prTable.PR_COLUMN_MIN_REM);
-    assert.strictEqual(
-      prTable.tableMinWidthRem(5000),
-      others + prTable.PR_COLUMN_MAX_REM,
+  test("parseColumnWidths: keeps known columns, clamps, drops the rest one by one", () => {
+    assert.deepStrictEqual(
+      prTable.parseColumnWidths({ pr: 40, author: 0.1, role: 9, ci: "x", age: 5000 }),
+      { pr: 40, author: prTable.COLUMN_MIN_REM, age: prTable.COLUMN_MAX_REM },
     );
+    for (const bad of [null, undefined, 3, "pr"]) {
+      assert.deepStrictEqual(prTable.parseColumnWidths(bad), {}, String(bad));
+    }
+    // The pre-2.1 shape migrates through the same parser: `{ pr: null }` means elastic.
+    assert.deepStrictEqual(prTable.parseColumnWidths({ pr: null }), {});
+  });
+
+  test("repoShortName: drops the owner, keeps a bare name as is", () => {
+    assert.strictEqual(prTable.repoShortName("Advance-Technologies-Foundation/clio"), "clio");
+    assert.strictEqual(prTable.repoShortName("engineering/creatio-ui"), "creatio-ui");
+    assert.strictEqual(prTable.repoShortName("clio"), "clio");
+  });
+  test("compareForColumn repo: sorts by the short name the cell shows", () => {
+    const a = { repo: "zeta-org/alpha", number: 1 };
+    const b = { repo: "acme/beta", number: 1 };
+    assert.ok(prTable.compareForColumn(a, b, "repo", { trackComments: false }) < 0);
+  });
+
+  test("tableMinWidthRem: un-dragged is the plain sum; a dragged column swaps in its width", () => {
+    assert.strictEqual(prTable.tableMinWidthRem({}, false), prTable.TABLE_MIN_WIDTH_REM);
+    const prMin = prTable.TABLE_COLUMNS.find((c) => c.key === "pr").minWidthRem;
+    const authorMin = prTable.TABLE_COLUMNS.find((c) => c.key === "author").minWidthRem;
+    assert.strictEqual(
+      prTable.tableMinWidthRem({ pr: 50, author: 2 }, false),
+      prTable.TABLE_MIN_WIDTH_REM - prMin + 50 - authorMin + 2,
+    );
+    // The Claude button widens an undragged Actions column, not a dragged one.
+    assert.strictEqual(
+      prTable.tableMinWidthRem({}, true),
+      prTable.TABLE_MIN_WIDTH_REM + prTable.CLAUDE_ACTIONS_EXTRA_REM,
+    );
+    assert.strictEqual(prTable.tableMinWidthRem({ actions: 6 }, true), prTable.tableMinWidthRem({ actions: 6 }, false));
   });
 
   test("isTableSort: accepts a stored sortable column with a direction", () =>
@@ -2123,6 +2483,7 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     // The stored value drives `sortForTable`, so a column that no longer exists
     // must fall back to the default instead of ordering the table by nothing.
     for (const bad of [
+      { key: "role", dir: "asc" },
       { key: "reviewers", dir: "asc" },
       { key: "actions", dir: "asc" },
       { key: "age", dir: "up" },
@@ -2178,11 +2539,16 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
         CTX,
       ) < 0,
     ));
-  test("compareForColumn(pr): repository first, then number", () => {
-    assert.ok(prTable.compareForColumn(tpr({ repo: "aaa" }), tpr({ repo: "zzz" }), "pr", CTX) < 0);
+  test("compareForColumn(repo): repository first, then number", () => {
+    assert.ok(prTable.compareForColumn(tpr({ repo: "aaa" }), tpr({ repo: "zzz" }), "repo", CTX) < 0);
     assert.ok(
-      prTable.compareForColumn(tpr({ number: 7 }), tpr({ number: 700 }), "pr", CTX) < 0,
+      prTable.compareForColumn(tpr({ number: 7 }), tpr({ number: 700 }), "repo", CTX) < 0,
       "same repo orders by number, not by the number's text",
+    );
+  });
+  test("compareForColumn(pr): by number alone, across repositories", () => {
+    assert.ok(
+      prTable.compareForColumn(tpr({ repo: "zzz", number: 7 }), tpr({ repo: "aaa", number: 700 }), "pr", CTX) < 0,
     );
   });
   test("compareForColumn(author): a PR with no author sorts last, not first", () =>
@@ -2500,6 +2866,75 @@ test("revealDelta: Drafts is 0 while Ready to merge is on", () =>
     0,
   ));
 
+test("isRevealChipShown: an OFF chip whose category has rows to add renders", () => {
+  assert.strictEqual(prFilter.isRevealChipShown(IGNORED_DRAFTS, st(), "drafts"), true);
+  assert.strictEqual(prFilter.isRevealChipShown(IGNORED_DRAFTS, st(), "ignored"), true);
+});
+test("isRevealChipShown: an OFF chip over an empty category is hidden", () => {
+  assert.strictEqual(prFilter.isRevealChipShown([], st(), "drafts"), false);
+  assert.strictEqual(prFilter.isRevealChipShown([], st(), "ignored"), false);
+});
+test("isRevealChipShown: an OFF chip whose rows the other filters exclude is hidden", () =>
+  assert.strictEqual(
+    prFilter.isRevealChipShown(IGNORED_DRAFTS, st({ mergeableOnly: true }), "drafts"),
+    false,
+  ));
+// The guarantee the old "every chip always renders" rule gave: a persisted
+// reveal must keep its control, or it is an active filter nobody can switch off.
+test("isRevealChipShown: an ON chip renders even over an empty category", () => {
+  assert.strictEqual(prFilter.isRevealChipShown([], st({ showDrafts: true }), "drafts"), true);
+  assert.strictEqual(prFilter.isRevealChipShown([], st({ showIgnored: true }), "ignored"), true);
+});
+// Every draft here is also ignored, so the sibling-aware badge drops to 0 the
+// moment the other chip turns on. Visibility must not follow it, or a click on
+// Ignored mounts / unmounts Drafts next to it and the clicked chip slides away
+// from the cursor.
+for (const [key, sibling] of [
+  ["drafts", "showIgnored"],
+  ["ignored", "showDrafts"],
+]) {
+  test(`isRevealChipShown(${key}): the sibling chip's click does not change it`, () => {
+    for (const own of [false, true]) {
+      const flag = key === "drafts" ? "showDrafts" : "showIgnored";
+      const off = prFilter.isRevealChipShown(IGNORED_DRAFTS, st({ [flag]: own, [sibling]: false }), key);
+      const on = prFilter.isRevealChipShown(IGNORED_DRAFTS, st({ [flag]: own, [sibling]: true }), key);
+      assert.strictEqual(on, off);
+      assert.strictEqual(on, true);
+    }
+  });
+}
+
+// Crossed cases on purpose: verb and plural must each follow their own argument.
+test("hideApprovalsTitle: the verb follows `active`, the plural follows the count", () => {
+  assert.strictEqual(
+    prFilter.hideApprovalsTitle(false, 1),
+    "Hide 1 PR you approved that isn't asking for you again",
+  );
+  assert.strictEqual(
+    prFilter.hideApprovalsTitle(true, 1),
+    "Hiding 1 PR you approved that isn't asking for you again",
+  );
+  assert.strictEqual(
+    prFilter.hideApprovalsTitle(false, 3),
+    "Hide 3 PRs you approved that aren't asking for you again",
+  );
+  assert.strictEqual(
+    prFilter.hideApprovalsTitle(true, 3),
+    "Hiding 3 PRs you approved that aren't asking for you again",
+  );
+});
+// The badge is dropped at 0, so the title is the only place the 0 is spelled out.
+test("hideApprovalsTitle: spells out 0 in the plural", () => {
+  assert.strictEqual(
+    prFilter.hideApprovalsTitle(false, 0),
+    "Hide 0 PRs you approved that aren't asking for you again",
+  );
+  assert.strictEqual(
+    prFilter.hideApprovalsTitle(true, 0),
+    "Hiding 0 PRs you approved that aren't asking for you again",
+  );
+});
+
 // Partial overlap on purpose: a plain draft, a plain ignored PR and one ignored
 // draft, which is what IGNORED_DRAFTS cannot express.
 const MIXED = [
@@ -2804,20 +3239,69 @@ test("isBaselinePr: the standing workload is neither draft nor ignored", () => {
 test("baselineStats: excludes both ignored PRs and drafts", () => {
   const stats = prFilter.baselineStats(MIXED);
   assert.strictEqual(stats.total, 3);
-  assert.strictEqual(stats.attention, 2);
-  assert.strictEqual(stats.failing, 1);
-  assert.strictEqual(stats.fresh, 1);
   // Two PRs are returnedToMe; the ignored one is not part of the workload.
   assert.strictEqual(stats.returned, 1);
 });
 test("baselineStats: all-hidden inbox reports zero, matching the header", () =>
   assert.deepStrictEqual(prFilter.baselineStats(IGNORED_DRAFTS), {
     total: 0,
-    attention: 0,
-    failing: 0,
-    fresh: 0,
     returned: 0,
   }));
+
+// --- pr-filter: headerCountLabel --------------------------------------------
+{
+  const pr = (isDraft = false, isIgnored = false) => ({ isDraft, isIgnored });
+  test("headerCountLabel: the whole baseline on screen is just the total", () =>
+    assert.strictEqual(prFilter.headerCountLabel([pr(), pr()], 2), "2 PRs"));
+  test("headerCountLabel: a filtered subset of the baseline says 'N of M shown'", () =>
+    assert.strictEqual(prFilter.headerCountLabel([pr()], 3), "1 of 3 shown"));
+  test("headerCountLabel: revealed drafts never produce 'of' — they are not part of M", () => {
+    // 10 baseline + 3 drafts with Drafts on: "13 of 10 shown" was the bug.
+    const rendered = [...Array(10)].map(() => pr()).concat([pr(true), pr(true), pr(true)]);
+    assert.strictEqual(prFilter.headerCountLabel(rendered, 10), "10 PRs · 13 shown");
+    assert.strictEqual(prFilter.headerCountLabel([pr(true), pr(false, true)], 0), "0 PRs · 2 shown");
+  });
+  test("headerCountLabel: equal counts with a revealed row swapped in still say so", () =>
+    assert.strictEqual(prFilter.headerCountLabel([pr(), pr(true)], 2), "2 PRs · 2 shown"));
+  test("headerCountLabel: an empty inbox is '0 PRs'", () =>
+    assert.strictEqual(prFilter.headerCountLabel([], 0), "0 PRs"));
+}
+
+// --- host-status: the header host pill's dot -------------------------------
+{
+  const hs = require(path.join(__dirname, "../dist/main/shared/host-status.js"));
+  const rl = (remaining, limit, resetAt = "2026-10-23T12:00:00Z") => ({ remaining, limit, resetAt });
+  test("hostHealth: plain fetch error is red even with a reading", () =>
+    assert.strictEqual(hs.hostHealth(rl(4900, 5000), { message: "boom" }), "error"));
+  test("hostHealth: a spent-budget refusal is amber, with or without a reset time", () => {
+    assert.strictEqual(hs.hostHealth(rl(0, 5000), { rateLimitedUntil: "2026-10-23T12:00:00Z" }), "limited");
+    assert.strictEqual(hs.hostHealth(undefined, { rateLimitedUntil: "" }), "limited");
+  });
+  test("hostHealth: no reading yet is unknown", () =>
+    assert.strictEqual(hs.hostHealth(undefined, undefined), "unknown"));
+  test("hostHealth: amber below 10% of the reported limit, green at it", () => {
+    assert.strictEqual(hs.hostHealth(rl(499, 5000), undefined), "limited");
+    assert.strictEqual(hs.hostHealth(rl(500, 5000), undefined), "ok");
+    assert.strictEqual(hs.hostHealth(rl(4963, 5000), undefined), "ok");
+  });
+  test("hostHealth: without a reported limit the floor is 500 points", () => {
+    assert.strictEqual(hs.hostHealth(rl(499, undefined), undefined), "limited");
+    assert.strictEqual(hs.hostHealth(rl(500, undefined), undefined), "ok");
+  });
+  test("hostHealth: a limit of 0 falls back to the 500-point floor", () => {
+    assert.strictEqual(hs.hostHealth(rl(499, 0), undefined), "limited");
+    assert.strictEqual(hs.hostHealth(rl(500, 0), undefined), "ok");
+  });
+  // A host whose responses carried no `rateLimit` (GHES with rate limiting off):
+  // fetchHost still returns remaining 0 / no limit / resetAt "". That is "no
+  // budget reported", not "0 points left" — amber there would be a false alarm.
+  test("hostHealth: a reading without budget data is green, not amber", () => {
+    assert.strictEqual(hs.hasBudgetReading(rl(0, undefined, "")), false);
+    assert.strictEqual(hs.hostHealth(rl(0, undefined, ""), undefined), "ok");
+    // The spent-budget reading the poller synthesises carries resetAt, so it stays amber.
+    assert.strictEqual(hs.hostHealth(rl(0, 5000), undefined), "limited");
+  });
+}
 
 // --- pr-filter: activeFilterCount / emptyStateKind --------------------------
 // The reveal chips must not read as active filters — counting them let
@@ -2829,9 +3313,10 @@ test("activeFilterCount: nothing set is 0, and the reveal chips stay out of it",
 });
 test("activeFilterCount: a whitespace-only search is not a filter", () =>
   assert.strictEqual(prFilter.activeFilterCount(st({ search: "   " })), 0));
+test("activeFilterCount: the role switch is a scope, not a filter Clear filters resets", () =>
+  assert.strictEqual(prFilter.activeFilterCount(st({ role: "reviewer" })), 0));
 for (const over of [
   { search: "bump" },
-  { role: "reviewer" },
   { host: "GHE" },
   ...prFilter.SOURCE_CHIPS.map((chip) => ({ [chip.flag]: true })),
 ]) {
@@ -2852,7 +3337,7 @@ test("activeFilterCount: every narrowing control at once", () =>
         noReviewsOnly: true,
       }),
     ),
-    3 + prFilter.SOURCE_CHIPS.length,
+    2 + prFilter.SOURCE_CHIPS.length,
   ));
 
 // --- github: mapPr past the review-thread page -------------------------------
@@ -3052,7 +3537,11 @@ test("activeFilterCount: every narrowing control at once", () =>
         ["idle", sigPr()],
         ["blocked: failing CI", sigPr({ failingChecks: [{ name: "build", kind: "check", state: "failure", url: null }] })],
         ["blocked: unaddressed change request", sigPr({ hasUnaddressedChangeRequest: true })],
+        ["blocked: approval-body feedback", sigPr({ hasUnaddressedReviewFeedback: true, hasHumanApproval: true, awaitingReview: false })],
+        ["blocked: approved behind base", sigPr({ isBehindBase: true, awaitingReview: false, hasHumanApproval: true })],
+        ["not author: behind base", sigPr({ isBehindBase: true, roles: ["reviewed"], awaitingReview: false, hasHumanApproval: true })],
         ["blocked: merge conflict", sigPr({ hasConflicts: true })],
+        ["attention: approved but waits for a lower PR of its stack", sigPr({ hasHumanApproval: true, awaitingReview: false, blockedByStack: true })],
         [
           "blocked: unresolved thread on your own PR",
           sigPr({ awaitingReview: false, unresolvedThreads: 2 }),
@@ -3107,6 +3596,70 @@ test("activeFilterCount: every narrowing control at once", () =>
               `requiring it for this contract check would run that call as a side effect`,
           ));
         if (!guarded) continue;
+
+        if (detectorName === "red-prs.cjs" || detectorName === "green-prs.cjs") {
+          test(`contract: ${detectorName} selects behind PRs only for RED, then GREEN after update`, () => {
+            // Evaluate the guarded CLI with only its pure fallback/config wired.
+            // main() never runs: no settings reads, GitHub calls or live PR mutations.
+            const sandbox = { require, module: { exports: {} }, process, console, __dirname: path.dirname(file) };
+            require("node:vm").runInNewContext(source + "\nprSignal = localPrSignal; trackComments = false;", sandbox);
+            const detector = sandbox.module.exports;
+            const before = sigPr({ isBehindBase: true, isDraft: false, awaitingReview: false, hasHumanApproval: true });
+            const after = { ...before, isBehindBase: false };
+            const feedback = { ...after, hasUnaddressedReviewFeedback: true };
+            if (detectorName === "red-prs.cjs") {
+              assert.strictEqual(detector.isRed(feedback), true);
+              assert.strictEqual(detector.redReason(feedback), "approval-body-feedback");
+            } else {
+              assert.strictEqual(detector.isGreen(feedback), false);
+            }
+            if (detectorName === "red-prs.cjs") {
+              assert.strictEqual(detector.isRed(before), true);
+              assert.strictEqual(detector.redReason(before), "behind-base");
+              assert.strictEqual(detector.isRed(after), false);
+              assert.strictEqual(detector.isRed({ ...before, isDraft: true }), false);
+            } else {
+              assert.strictEqual(detector.isGreen(before), false);
+              assert.strictEqual(detector.isGreen(after), true);
+              assert.strictEqual(detector.isGreen({ ...after, isDraft: true }), false);
+            }
+          });
+        }
+
+        test(`contract: ${detectorName} queue selectors match dashboard signals across roles/blockers/reveal exclusions`, () => {
+          const sandbox = { require, module: { exports: {} }, process, console, __dirname: path.dirname(file), actual: prFilter.prSignal };
+          require("node:vm").runInNewContext(source + "\nprSignal = actual; module.exports.setTracking = value => { trackComments = value; };", sandbox);
+          const selector = detectorName === "red-prs.cjs" ? "isRed" : detectorName === "green-prs.cjs" ? "isGreen" : "isPurple";
+          const target = selector === "isRed" ? "blocked" : selector === "isGreen" ? "approved" : "myReview";
+          for (const trackComments of [true, false]) {
+            sandbox.module.exports.setTracking(trackComments);
+            for (const roles of [["author"], ["author", "reviewed"], ["reviewer"], ["reviewed"]]) {
+              for (let bits = 0; bits < 128; bits++) {
+                const pr = sigPr({ roles, isDraft: !!(bits & 1), isIgnored: !!(bits & 2), isBehindBase: !!(bits & 4), hasUnaddressedReviewFeedback: !!(bits & 8), unresolvedThreads: bits & 16 ? 1 : 0, hasHumanApproval: !!(bits & 32), returnedToMe: roles.includes("author") ? false : !!(bits & 64), awaitingReview: false });
+                const eligible = !pr.isDraft && !pr.isIgnored && (target !== "approved" || roles.includes("author"));
+                assert.strictEqual(!pr.isIgnored && sandbox.module.exports[selector](pr), eligible && prFilter.prSignal(pr, { trackComments }) === target);
+                assert.strictEqual(sandbox.module.exports.localPrSignal(pr, { trackComments }), prFilter.prSignal(pr, { trackComments }));
+              }
+            }
+          }
+        });
+
+        test(`contract: ${detectorName} shares dashboard settings validation/defaults`, () => {
+          const tempDir = fsSync.mkdtempSync(path.join(os2.tmpdir(), "pr-detector-config-"));
+          try {
+            const configFile = path.join(tempDir, "settings.json");
+            const sandbox = { require, module: { exports: {} }, process: { ...process, env: { ...process.env, PR_DASHBOARD_CONFIG: configFile } }, console, __dirname: path.dirname(file) };
+            const vmSource = source + "\nloadDeps(); loadConfig(); module.exports.auditConfig = { config, trackComments };";
+            for (const rawFlag of [undefined, true, false, "invalid"]) {
+              const raw = { hosts: [{ label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"] }] };
+              if (rawFlag !== undefined) raw.trackComments = rawFlag;
+              fsSync.writeFileSync(configFile, JSON.stringify(raw));
+              const fresh = { ...sandbox, module: { exports: {} } };
+              require("node:vm").runInNewContext(vmSource, fresh);
+              assert.strictEqual(fresh.module.exports.auditConfig.trackComments, cfg.validateSettings(raw).trackComments);
+            }
+          } finally { fsSync.rmSync(tempDir, { recursive: true, force: true }); }
+        });
 
         let mod;
         try {
@@ -3320,6 +3873,22 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     awaitingReview: false,
     ...o,
   });
+
+  for (const trackComments of [true, false]) {
+    await atest(`applyActivity: base-update attention clears after refresh (tracking=${trackComments})`, () =>
+      withTempStore(async (file) => {
+        const before = reviewPr({ roles: ["author"], isBehindBase: true });
+        await state.applyActivity([before], file, { trackComments });
+        assert.strictEqual(before.needsAttention, true);
+        assert.strictEqual(prFilter.hiddenAttentionCount([before]), 1);
+        const after = reviewPr({ roles: ["author"], isBehindBase: false });
+        await state.applyActivity([after], file, { trackComments });
+        assert.strictEqual(after.needsAttention, false);
+        const reviewed = reviewPr({ roles: ["reviewed"], isBehindBase: true });
+        await state.applyActivity([reviewed], file, { trackComments });
+        assert.strictEqual(reviewed.needsAttention, false);
+      }));
+  }
 
   await atest("applyActivity.returnedToMe: false on the first-seen baseline", () =>
     withTempStore(async (file) => {
@@ -3792,6 +4361,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }),
   );
 
+  for (const trackComments of [true, false]) {
+    await atest(`applyActivity: approval-body feedback persists until reviewer clears it (tracking=${trackComments})`, () =>
+      withTempStore(async (file) => {
+        const pr = reviewPr({ roles: ["author"], hasUnaddressedReviewFeedback: true });
+        await state.applyActivity([pr], file, { trackComments });
+        assert.strictEqual(pr.needsAttention, true);
+        await state.markSeen([{ id: pr.id, comments: pr.totalComments, updatedAt: pr.updatedAt, lastCommitPushedAt: pr.lastCommitPushedAt }], file, { trackComments });
+        await state.applyActivity([pr], file, { trackComments });
+        assert.strictEqual(pr.needsAttention, true);
+        const after = reviewPr({ roles: ["author"], hasUnaddressedReviewFeedback: false });
+        await state.applyActivity([after], file, { trackComments });
+        assert.strictEqual(after.needsAttention, false);
+      }));
+  }
+
   await atest("applyActivity(trackComments=true): a comment awaiting your reply still claims attention", () =>
     withTempStore(async (file) => {
       const unanswered = (o = {}) =>
@@ -3921,6 +4505,23 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   const realGithubFetch = global.fetch;
   let hostSeq = 0;
 
+  // The second step of a tick: every PR the searches found is read in full by
+  // id. Answers it from `pool` (every raw PR the stub's searches return), so a
+  // stub only has to describe its searches. Null for an id the pool lacks, as
+  // GitHub answers a PR that went away between the search and the read.
+  const isHydrate = (body) => body.query.includes("hydrated: nodes(ids: $ids)");
+  const hydrateResponse = (body, pool, cost = 4) => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        rateLimit: { remaining: 4990, cost, resetAt: "2026-07-07T01:00:00Z" },
+        hydrated: body.variables.ids.map((id) => pool.find((pr) => pr.id === id) ?? null),
+      },
+    }),
+  });
+
   // Drives fetchHost against a stubbed transport and returns both the requests it
   // sent and the PRs it produced. Every search travels as its OWN HTTP request
   // now (GitHub runs aliases inside one request serially and times the whole
@@ -3944,6 +4545,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         return { ok: true, status: 200, statusText: "OK", json: async () => teams };
       }
       const body = JSON.parse(init.body);
+      if (isHydrate(body)) {
+        sent.hydrate = body;
+        const pool = Object.entries(searches).flatMap(([k, v]) => (k === "teams" ? [] : v));
+        return hydrateResponse(body, pool);
+      }
       // The alias the request asked for, e.g. `reviewed: search(query: ...`.
       const alias = /\n  (\w+): search\(/.exec(body.query)[1];
       sent[alias] = body;
@@ -3970,10 +4576,217 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   }
 
   await atest("fetchHost: reads the NEWEST review threads, with their total count", async () => {
-    const { sent } = await runFetchHost({});
+    const { sent } = await runFetchHost({ authored: [rawPr({ id: "PR_a" })] });
     // `first:` would drop the newest threads on a long PR — the open ones.
-    assert.match(sent.authored.query, /reviewThreads\(last: 100\) \{\s+totalCount/);
-    assert.ok(!/reviewThreads\(first:/.test(sent.authored.query));
+    assert.match(sent.hydrate.query, /reviewThreads\(last: 100\) \{\s+totalCount/);
+    assert.ok(!/reviewThreads\(first:/.test(sent.hydrate.query));
+  });
+
+  // The full selection is what GitHub bills for: 30 points per search carrying
+  // it on github.com whatever it matched, against 1 for a search of ids. Nine
+  // searches made a tick cost 270 points; the searches must stay ids-only and
+  // the PRs they share must be read once.
+  await atest("fetchHost: searches carry ids only, and each distinct PR is read once", async () => {
+    const shared = rawPr({ id: "PR_shared" });
+    const { sent, result } = await runFetchHost({
+      teams: ["a/t1"],
+      authored: [shared, rawPr({ id: "PR_a" })],
+      reviewed: [shared],
+      team0: [shared],
+    });
+    for (const alias of ["authored", "reviewing", "reviewed", "team0"]) {
+      assert.ok(!sent[alias].query.includes("reviewThreads"), `${alias} must not carry the full selection`);
+      assert.ok(!sent[alias].query.includes("PrFields"), `${alias} must not carry the fragment`);
+    }
+    assert.deepStrictEqual(sent.hydrate.variables.ids, ["PR_shared", "PR_a"]);
+    assert.strictEqual(result.pullRequests.length, 2);
+  });
+
+  await atest("fetchHost: no PRs found means no hydrate request", async () => {
+    const { sent } = await runFetchHost({});
+    assert.strictEqual(sent.hydrate, undefined);
+  });
+
+  await atest("fetchHost: more PRs than one hydrate page go out as several reads", async () => {
+    const many = Array.from({ length: 30 }, (_, i) => rawPr({ id: `PR_${i}` }));
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    const reads = [];
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) {
+        reads.push(body.variables.ids.length);
+        return hydrateResponse(body, many);
+      }
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 1, resetAt: "" },
+            viewer: { login: "me" },
+            [alias]: { nodes: alias === "authored" ? many.slice(0, 25) : alias === "reviewed" ? many.slice(5) : [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" });
+    assert.deepStrictEqual(reads.sort((a, b) => b - a), [25, 5]);
+    assert.strictEqual(result.pullRequests.length, 30);
+    // 3 searches at 1 point + 2 reads at 4.
+    assert.strictEqual(result.rateLimit.cost, 11);
+  });
+
+  // What github.com answers for an id it cannot resolve: a null node plus a
+  // NOT_FOUND error beside the data for the rest.
+  await atest("fetchHost: a NOT_FOUND beside the hydrated data does not fail the host", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({
+            data: { rateLimit: { remaining: 4990, cost: 2, resetAt: "" }, hydrated: [rawPr({ id: "PR_kept" }), null] },
+            errors: [{ type: "NOT_FOUND", path: ["hydrated", 1], message: "Could not resolve to a node with the global id of 'PR_gone'" }],
+          }),
+        };
+      }
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 1, resetAt: "" },
+            viewer: { login: "me" },
+            [alias]: { nodes: alias === "authored" ? [{ id: "PR_kept" }, { id: "PR_gone" }] : [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" });
+    assert.deepStrictEqual(result.pullRequests.map((p) => p.id), ["PR_kept"]);
+  });
+
+  await atest("fetchHost: a PR gone between the search and the read is dropped", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) return hydrateResponse(body, [rawPr({ id: "PR_kept" })]);
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 1, resetAt: "" },
+            viewer: { login: "me" },
+            [alias]: { nodes: alias === "authored" ? [{ id: "PR_kept" }, { id: "PR_gone" }] : [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" });
+    assert.deepStrictEqual(result.pullRequests.map((p) => p.id), ["PR_kept"]);
+  });
+
+  // The searches only say which PRs exist; a "successful" host without their
+  // data would blank every card, so a failed read fails the host.
+  await atest("fetchHost: a failing hydrate fails the whole host", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) {
+        return { ok: false, status: 502, statusText: "Bad Gateway", text: async () => "" };
+      }
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 1, resetAt: "" },
+            viewer: { login: "me" },
+            [alias]: { nodes: alias === "authored" ? [{ id: "PR_a" }] : [] },
+          },
+        }),
+      };
+    };
+    await assert.rejects(
+      github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" }),
+      /HTTP 502 Bad Gateway/,
+    );
+  });
+
+  // An older GitHub Enterprise Server has no `stack` on PullRequest and fails
+  // the whole read naming the field; the host must still load, without stacks,
+  // and stop asking for them on later polls.
+  await atest("fetchHost: a host without PR stacks is read again without them, and remembered", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    const hydrates = [];
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) {
+        hydrates.push(body.query);
+        if (body.query.includes("stackEntry")) {
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            json: async () => ({ errors: [{ message: "Field 'stackEntry' doesn't exist on type 'PullRequest'" }] }),
+          };
+        }
+        return hydrateResponse(body, [rawPr({ id: "PR_a" })]);
+      }
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 1, resetAt: "" },
+            viewer: { login: "me" },
+            [alias]: { nodes: alias === "authored" ? [{ id: "PR_a", author: { login: "me" } }] : [] },
+          },
+        }),
+      };
+    };
+    const host = { label: "H", graphqlUrl, repos: ["a/b"], token: "t" };
+    const first = await github.fetchHost(host);
+    assert.strictEqual(first.pullRequests.length, 1);
+    assert.strictEqual(first.pullRequests[0].stack, null);
+    assert.deepStrictEqual(hydrates.map((q) => q.includes("stackEntry")), [true, false]);
+    await github.fetchHost(host);
+    assert.deepStrictEqual(hydrates.map((q) => q.includes("stackEntry")), [true, false, false]);
+  });
+
+  await atest("fetchHost: the read by id asks for the PR's stack", async () => {
+    const { sent } = await runFetchHost({ authored: [rawPr({ id: "PR_a" })] });
+    assert.match(sent.hydrate.query, /stackEntry \{ position \}/);
+    assert.match(sent.hydrate.query, /entries\(first: 10\) \{ nodes \{ position pullRequest \{ number title url state \} \} \}/);
   });
 
   await atest("fetchHost: asks for reviewed-by:@me over the same repos, as its own alias", async () => {
@@ -4099,6 +4912,138 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     );
   });
 
+  // A spent budget must reach the poller as a RateLimitedError carrying the
+  // reset time, from both shapes GitHub uses: a 200 whose errors[].type is
+  // RATE_LIMITED (primary hourly budget) and a 403/429 with retry-after
+  // (secondary limit). Anything else stays a plain error.
+  const stubSearchResponse = (response) => {
+    global.fetch = async (url) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      return response();
+    };
+    return github.fetchHost({
+      label: "H",
+      graphqlUrl: `https://api.stub${++hostSeq}.test/graphql`,
+      repos: ["a/b"],
+      token: "t",
+    });
+  };
+  const headersOf = (h) => ({ get: (name) => h[name.toLowerCase()] ?? null });
+
+  await atest("fetchHost: a RATE_LIMITED GraphQL error carries the x-ratelimit-reset time", async () => {
+    await assert.rejects(
+      stubSearchResponse(() => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: headersOf({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1790948255" }),
+        json: async () => ({
+          errors: [
+            { type: "RATE_LIMITED", message: "API rate limit already exceeded for user ID 12455901." },
+          ],
+        }),
+      })),
+      (e) => {
+        assert.ok(e instanceof github.RateLimitedError, `got ${e && e.name}`);
+        assert.strictEqual(e.message, "API rate limit already exceeded for user ID 12455901.");
+        assert.strictEqual(e.resetAt, new Date(1790948255 * 1000).toISOString());
+        return true;
+      },
+    );
+  });
+
+  // What github.com actually sends for a spent budget (seen 2026-10-05, and in
+  // other clients' fixtures): `RATE_LIMIT`, not `RATE_LIMITED`. Matching only
+  // the latter left 1.18.3 on a red failure strip, retrying all hour.
+  await atest("fetchHost: github.com's RATE_LIMIT / graphql_rate_limit error is a RateLimitedError", async () => {
+    await assert.rejects(
+      stubSearchResponse(() => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: headersOf({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1790948255" }),
+        json: async () => ({
+          errors: [
+            {
+              type: "RATE_LIMIT",
+              code: "graphql_rate_limit",
+              message: "API rate limit already exceeded for user ID 12455901.",
+            },
+          ],
+        }),
+      })),
+      (e) => {
+        assert.ok(e instanceof github.RateLimitedError, `got ${e && e.name}`);
+        assert.strictEqual(e.resetAt, new Date(1790948255 * 1000).toISOString());
+        return true;
+      },
+    );
+  });
+
+  await atest("fetchHost: a 403 with retry-after is a RateLimitedError resuming after it", async () => {
+    const before = Date.now();
+    await assert.rejects(
+      stubSearchResponse(() => ({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        headers: headersOf({ "retry-after": "60" }),
+        text: async () => '{"message":"You have exceeded a secondary rate limit."}',
+      })),
+      (e) => {
+        assert.ok(e instanceof github.RateLimitedError, `got ${e && e.name}`);
+        within(Date.parse(e.resetAt), before + 60_000);
+        return true;
+      },
+    );
+  });
+
+  await atest("fetchHost: a 403 without rate-limit headers stays a plain error", async () => {
+    await assert.rejects(
+      stubSearchResponse(() => ({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        headers: headersOf({}),
+        text: async () => '{"message":"Resource not accessible"}',
+      })),
+      (e) => {
+        assert.ok(!(e instanceof github.RateLimitedError));
+        return true;
+      },
+    );
+  });
+
+  await atest("fetchHost: the hourly limit is passed on with the reading", async () => {
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const alias = /\n  (\w+): search\(/.exec(JSON.parse(init.body).query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { limit: 5000, remaining: 4990, cost: 4, resetAt: "2026-07-07T01:00:00Z" },
+            viewer: { login: "me" },
+            [alias]: { nodes: [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({
+      label: "H",
+      graphqlUrl: `https://api.stub${++hostSeq}.test/graphql`,
+      repos: ["a/b"],
+      token: "t",
+    });
+    assert.strictEqual(result.rateLimit.limit, 5000);
+  });
+
   // Each request carries its own `viewer { login }`, and `isOwnPr` needs one: a
   // null login makes a team request on your OWN PR claim a review from you —
   // violet card, "Reviewer" pill, a "Needs attention" count you can never clear.
@@ -4117,7 +5062,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           json: async () => [{ slug: "t1", organization: { login: "a" } }],
         };
       }
-      const alias = /\n  (\w+): search\(/.exec(JSON.parse(init.body).query)[1];
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) return hydrateResponse(body, [mine]);
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
       return {
         ok: true,
         status: 200,
@@ -4154,6 +5101,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         };
       }
       const body = JSON.parse(init.body);
+      if (isHydrate(body)) return hydrateResponse(body, [rawPr({ id: "PR_a" })]);
       const alias = /\n  (\w+): search\(/.exec(body.query)[1];
       if (alias === "team0") {
         return { ok: false, status: 502, statusText: "Bad Gateway", text: async () => "" };
@@ -4869,6 +5817,45 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     p.stop();
   });
 
+  // --- poller: a spent budget is a wait until the reset ---------------------
+  // Before: the slot kept the previous reading, whose window had already reset,
+  // so the host was retried on its floor all hour and the banner stayed red.
+  await atest("Poller.tick: a spent budget holds the host until the reset and says when", async () => {
+    const snapshots = [];
+    let calls = 0;
+    const resetAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    const p = new poller.Poller({
+      loadSettings: () => cfg.defaultSettings(),
+      toHostConfigs: () => [
+        { label: "GitHub", graphqlUrl: "https://limited.test/graphql", token: "t", repos: ["o/r"] },
+      ],
+      statePath: path.join(os.tmpdir(), "prd-poller-state-missing.json"),
+      ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),
+      appVersion: "test",
+      onSnapshot: (s) => snapshots.push(s),
+      onConfigError: () => {},
+      probeNotificationsFn: async () => {
+        throw new Error("probe must not run in this test");
+      },
+      fetchHostFn: async () => {
+        calls++;
+        throw new github.RateLimitedError("API rate limit already exceeded for user ID 1.", resetAt);
+      },
+    });
+    p.start();
+    await p.awaitFirstTick();
+    assert.strictEqual(calls, 1);
+    const snap = snapshots[0];
+    assert.strictEqual(snap.errors[0].rateLimitedUntil, resetAt);
+    assert.strictEqual(snap.rateLimits[0].remaining, 0, "the chip shows the spent budget");
+    assert.strictEqual(snap.rateLimits[0].resetAt, resetAt);
+
+    // Window focus / resume respects spacing — it must not retry before the reset.
+    await p.wake();
+    assert.strictEqual(calls, 1, "wake() must not retry a spent host before its reset");
+    p.stop();
+  });
+
   // --- poller: the trackComments setting reaches the whole tick --------------
   // The tick is where the setting meets both consumers: `applyActivity` (which
   // writes hasNewActivity) and `hashSnapshot` (which decides whether the tick
@@ -5003,6 +5990,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       poller.hashSnapshot(hsnap()),
       poller.hashSnapshot(hsnap({ hasUnaddressedComments: true })),
     ));
+  test("hashSnapshot: approval-body feedback alone triggers a snapshot", () =>
+    assert.notStrictEqual(poller.hashSnapshot(hsnap()), poller.hashSnapshot(hsnap({ hasUnaddressedReviewFeedback: true }))));
   // The comment count is the unread channel's raw input and renders nowhere, so
   // with the setting off a change in it alone must not drive a push. Narrow on
   // purpose: a real new comment also bumps `updatedAt`, which stays hashed
@@ -5371,7 +6360,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // --- notify: planDelivery (pure delivery decision) -------------------------
   const evs = (n) =>
     Array.from({ length: n }, (_, i) => ({ prId: String(i), kind: "ci_failed", title: "t", body: "b", url: "u" }));
-  const CTX = { focused: false, nativeSupported: true };
+  const CTX = { nativeSupported: true };
   const NP = (o = {}) => ({ enabled: true, native: true, sound: false, ...o });
   const CAP = notify.MAX_INDIVIDUAL_NOTIFICATIONS;
 
@@ -5379,8 +6368,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.strictEqual(notify.planDelivery([], NP(), CTX).mode, "none"));
   test("planDelivery: disabled -> none", () =>
     assert.strictEqual(notify.planDelivery(evs(2), NP({ enabled: false }), CTX).mode, "none"));
-  test("planDelivery: focused window -> none (suppressed)", () =>
-    assert.strictEqual(notify.planDelivery(evs(1), NP(), { ...CTX, focused: true }).mode, "none"));
+  // A focused window used to swallow every toast; that hid real transitions, so
+  // the planner no longer takes focus into account at all. A stray `focused`
+  // flag from an old caller must not bring the suppression back.
+  test("planDelivery: a focused window still delivers", () =>
+    assert.strictEqual(notify.planDelivery(evs(1), NP(), { ...CTX, focused: true }).mode, "individual"));
   test("planDelivery: burst over the cap -> silent summary (no sound)", () => {
     const p = notify.planDelivery(evs(CAP + 1), NP(), CTX);
     assert.strictEqual(p.mode, "summary");
@@ -5605,9 +6597,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
             for (const nativeSupported of bools) {
               const s = { enabled, native, sound, events: ev(e) };
               const canFire = notify.hasDeliverableNotifications(s, nativeSupported);
-              // planDelivery is handed a non-empty batch and an unfocused window,
-              // so the ONLY thing left that can zero it out is channel viability.
-              const plan = notify.planDelivery(oneEvent, s, { focused: false, nativeSupported });
+              // planDelivery is handed a non-empty batch, so the ONLY thing left
+              // that can zero it out is channel viability.
+              const plan = notify.planDelivery(oneEvent, s, { nativeSupported });
               const wouldDeliver = plan.mode !== "none";
               // A settings state with no enabled event type can't produce events at
               // all, so planDelivery is never reached with one — exclude those from
@@ -5930,6 +6922,518 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.ok(applyIdx !== -1 && applyIdx < fallback.index, "the fallback must run after the tray is created");
     assert.match(src, /mainWindow\.once\("show", restoreSavedState\)/, "maximize must wait for the first show");
   });
+
+  // --- Claude session launcher -----------------------------------------------
+  {
+    const cl = require(path.join(__dirname, "../dist/main/shared/claude-launch.js"));
+    const launcher = require(path.join(__dirname, "../dist/main/main/claude-launch.js"));
+    const quiet = {
+      roles: ["author"], failingChecks: [], pendingChecks: [], hasUnaddressedChangeRequest: false,
+      hasUnaddressedReviewFeedback: false, hasUnaddressedComments: false, hasConflicts: false,
+      isBehindBase: false, unresolvedThreads: 0, returnedToMe: false, myReReviewDue: false,
+      awaitingReview: false, hasNewActivity: false, hasHumanApproval: false, reviewDecision: null,
+      ciState: "success", canBeMerged: false, url: "https://github.com/acme/widgets/pull/7", repo: "acme/widgets",
+    };
+    const pick = (patch) => cl.pickClaudeLaunch({ ...quiet, ...patch }, { trackComments: true });
+
+    test("claude launch: own blocked PR → drive, review due → review, own mergeable → close, else open", () => {
+      assert.strictEqual(pick({ failingChecks: [{ name: "ci" }] }), "drive");
+      assert.strictEqual(pick({ hasConflicts: true }), "drive");
+      assert.strictEqual(pick({ unresolvedThreads: 1 }), "drive");
+      assert.strictEqual(pick({ roles: ["reviewer"] }), "review");
+      assert.strictEqual(pick({ roles: ["reviewed"], myReReviewDue: true }), "review");
+      assert.strictEqual(pick({ canBeMerged: true, hasHumanApproval: true }), "close");
+      assert.strictEqual(pick({ roles: ["reviewed"], canBeMerged: true }), "open", "someone else's PR is not ours to close");
+      assert.strictEqual(pick({}), "open");
+    });
+
+    test("claude button: every launch kind has button text; the table widens only while it shows", () => {
+      for (const k of ["drive", "review", "close", "explain", "open"]) assert.ok(cl.CLAUDE_BUTTON_TEXT[k], k);
+      const tbl = require(path.join(__dirname, "../dist/main/shared/pr-table.js"));
+      assert.strictEqual(tbl.actionsColumnRem(false), 5);
+      assert.strictEqual(tbl.actionsColumnRem(true), 5 + tbl.CLAUDE_ACTIONS_EXTRA_REM);
+    });
+
+    test("claude launch: prompt template fills {url}, an empty one falls back to the default", () => {
+      assert.strictEqual(cl.renderClaudePrompt({ drive: "fix {url} now" }, "drive", quiet), `fix ${quiet.url} now`);
+      assert.strictEqual(cl.renderClaudePrompt({ review: "  " }, "review", quiet), `/creatio-code-review ${quiet.url}`);
+    });
+
+    test("claude launch: shell and AppleScript quoting survive quotes and backslashes", () => {
+      const cmd = cl.posixLaunchCommand("/a b/it's", "x");
+      assert.ok(cmd.endsWith(`; cd '/a b/it'\\''s' && claude 'x'`), cmd);
+      assert.ok(cmd.startsWith("unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION "), "session markers are dropped before claude starts");
+      assert.strictEqual(cl.appleScriptString(`say "hi" \\ there`), `"say \\"hi\\" \\\\ there"`);
+    });
+
+    test("claude launch: the launcher env drops a parent session's markers and keeps the rest", () => {
+      const env = cl.launcherEnv({
+        PATH: "/bin",
+        HOME: "/h",
+        CLAUDECODE: "1",
+        CLAUDE_CODE_CHILD_SESSION: "1",
+        CLAUDE_CODE_SESSION_ID: "s",
+        CLAUDE_AGENT_SDK_VERSION: "1",
+        CLAUDE_PID: "9",
+      });
+      assert.deepStrictEqual(env, { PATH: "/bin", HOME: "/h" });
+    });
+
+    test("claude launch: iTerm2 and Terminal scripts carry the command, quoted once", () => {
+      const it = cl.terminalScript("iterm", `cd '/x' && claude 'a "b"'`).join("\n");
+      assert.match(it, /tell application id "com\.googlecode\.iterm2"/);
+      assert.match(it, /create window with default profile/);
+      assert.match(it, /set wasRunning to running\nactivate/, "running is read before activate starts the app");
+      assert.match(it, /else if wasRunning then\nset w to current window\ntell w to create tab with default profile/, "a running iTerm2 gets a tab, not a window");
+      assert.ok(it.includes(`write text "cd '/x' && claude 'a \\"b\\"'"`), it);
+      const term = cl.terminalScript("terminal", "x").join("\n");
+      assert.match(term, /tell application "Terminal"[\s\S]*do script "x"/);
+      assert.strictEqual(cfg.validateClaude({}).terminal, "auto");
+      assert.strictEqual(cfg.validateClaude({ terminal: "iterm" }).terminal, "iterm");
+      assert.strictEqual(cfg.validateClaude({ terminal: "xterm" }).terminal, "auto");
+      assert.strictEqual(cfg.validateClaude({ terminal: "desktop" }).terminal, "desktop");
+      assert.strictEqual(
+        cl.claudeDesktopUrl("/Users/me/my repo", "/drive-pr-green https://x/pull/1?a=b&c"),
+        "claude://code/new?q=%2Fdrive-pr-green%20https%3A%2F%2Fx%2Fpull%2F1%3Fa%3Db%26c&folder=%2FUsers%2Fme%2Fmy%20repo",
+      );
+    });
+
+    test("settings search: every section is on a real tab, every tab has a section", () => {
+      const ss = require(path.join(__dirname, "../dist/main/shared/settings-search.js"));
+      const tabs = new Set(ss.SETTINGS_TABS.map((t) => t.id));
+      for (const sec of ss.SETTINGS_SECTIONS) assert.ok(tabs.has(sec.tab), sec.id);
+      for (const t of tabs) assert.ok(ss.sectionsOfTab(t).length > 0, t);
+      assert.strictEqual(ss.toSettingsTab("hosts"), "hosts");
+      assert.strictEqual(ss.toSettingsTab("nope"), "general");
+      assert.strictEqual(ss.toSettingsTab(null), "general");
+    });
+
+    test("settings search: all words must match, case-insensitive; blank finds nothing", () => {
+      const ss = require(path.join(__dirname, "../dist/main/shared/settings-search.js"));
+      const ids = (q) => ss.searchSettings(q).map((s) => s.id);
+      assert.deepStrictEqual(ids("   "), []);
+      assert.deepStrictEqual(ids("iTerm"), ["claude"]);
+      assert.deepStrictEqual(ids("close tray"), ["behavior"], "the Claude 'close' prompt has no 'tray'");
+      assert.deepStrictEqual(ids("token"), ["gh", "jira"]);
+      assert.deepStrictEqual(ids("DARK"), ["appearance"]);
+      assert.deepStrictEqual(ids("xyzzy"), []);
+    });
+
+    test("claude launch: remotes normalize across https, scp and ssh:// forms", () => {
+      for (const u of [
+        "https://github.com/Acme/Widgets.git",
+        "git@github.com:acme/widgets.git",
+        "ssh://git@github.com/acme/widgets",
+        "https://token@github.com/acme/widgets/",
+      ]) {
+        assert.strictEqual(cl.normalizeRemote(u), "github.com/acme/widgets", u);
+      }
+      assert.strictEqual(cl.prRemoteKey(quiet), "github.com/acme/widgets");
+    });
+
+    test("claude settings: off by default, garbage falls back, empty repo paths dropped", () => {
+      assert.strictEqual(cfg.defaultSettings().claude.enabled, false);
+      assert.strictEqual(cfg.validateSettings({ hosts: [] }).claude.enabled, false);
+      const c = cfg.validateClaude({ enabled: true, repoPaths: { "acme/widgets": " ~/w ", bad: "x", "a/b": "" }, prompts: { drive: "" } });
+      assert.deepStrictEqual(c.repoPaths, { "acme/widgets": "~/w" });
+      assert.strictEqual(c.prompts.drive, "/drive-pr-green {url}");
+      assert.strictEqual(c.prompts.explain, cl.DEFAULT_CLAUDE_PROMPTS.explain);
+      assert.strictEqual(cfg.toPublicConfig(cfg.validateSettings({ claude: c })).claudeEnabled, true);
+    });
+
+    test("claude launch: checkout found by remote on the PR's host, explicit path wins", () => {
+      const fsSync = require("node:fs");
+      const root = fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-claude-"));
+      const mk = (name, url) => {
+        fsSync.mkdirSync(path.join(root, name, ".git"), { recursive: true });
+        fsSync.writeFileSync(
+          path.join(root, name, ".git", "config"),
+          `[core]\n\tbare = false\n[remote "origin"]\n\turl = ${url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`,
+        );
+      };
+      mk("other-host", "git@ghe.example.com:acme/widgets.git");
+      mk("my-widgets", "https://github.com/acme/widgets.git");
+      try {
+        assert.strictEqual(launcher.findCheckout(quiet, { projectsRoot: root, repoPaths: {} }), path.join(root, "my-widgets"));
+        assert.strictEqual(
+          launcher.findCheckout(quiet, { projectsRoot: root, repoPaths: { "acme/widgets": path.join(root, "other-host") } }),
+          path.join(root, "other-host"),
+        );
+        assert.strictEqual(
+          launcher.findCheckout(quiet, { projectsRoot: root, repoPaths: { "acme/widgets": path.join(root, "missing") } }),
+          null,
+          "a stale explicit path must not fall through to a guess",
+        );
+        assert.strictEqual(launcher.findCheckout({ ...quiet, repo: "acme/none" }, { projectsRoot: root, repoPaths: {} }), null);
+      } finally {
+        fsSync.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("claude menu: only the fixed actions cross from the renderer", () => {
+      const v = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+      assert.strictEqual(v.validateClaudeKind(undefined), undefined);
+      for (const k of cl.CLAUDE_LAUNCH_KINDS) assert.strictEqual(v.validateClaudeKind(k), k);
+      for (const bad of ["", "merge", "close; rm -rf ~", 1, null, {}]) {
+        assert.throws(() => v.validateClaudeKind(bad), /unknown action/);
+      }
+    });
+
+    test("claude menu: Close PR only on your own PRs; Explain on every PR, never picked from the state", () => {
+      assert.deepStrictEqual(cl.claudeKindsFor({ roles: ["author"] }), ["drive", "review", "close", "explain", "open"]);
+      for (const roles of [["reviewer"], ["reviewed"], []]) {
+        assert.deepStrictEqual(cl.claudeKindsFor({ roles }), ["drive", "review", "explain", "open"], roles.join());
+      }
+      for (const patch of [{}, { failingChecks: [{ name: "ci" }] }, { roles: ["reviewer"] }, { canBeMerged: true, hasHumanApproval: true }]) {
+        assert.notStrictEqual(pick(patch), "explain");
+      }
+    });
+
+    // The point of the menu: a PR whose state suggests "Drive to green" can be
+    // closed on purpose. The picked kind replaces the state's pick, and its
+    // prompt still comes from Settings.
+    await atest("claude menu: a picked action overrides the one the PR's state suggests", async () => {
+      const dir = require("node:fs").mkdtempSync(path.join(require("node:os").tmpdir(), "prd-claude-"));
+      try {
+        const blocked = { ...quiet, roles: ["author"], failingChecks: [{ name: "ci", kind: "check", state: "failure", url: null }] };
+        assert.strictEqual(cl.pickClaudeLaunch(blocked, { trackComments: true }), "drive");
+        const settings = { enabled: true, projectsRoot: "", repoPaths: { [blocked.repo]: dir }, prompts: {}, terminal: "desktop" };
+        const opened = [];
+        const openUrl = async (url) => { opened.push(decodeURIComponent(url)); };
+        const picked = await launcher.launchClaude(blocked, settings, { trackComments: true, openUrl, kind: "close" });
+        assert.strictEqual(picked.ok && picked.kind, "close");
+        assert.match(opened[0], /\/drive-pr-close /);
+        const auto = await launcher.launchClaude(blocked, settings, { trackComments: true, openUrl });
+        assert.strictEqual(auto.ok && auto.kind, "drive");
+        assert.match(opened[1], /\/drive-pr-green /);
+        const explained = await launcher.launchClaude(blocked, settings, { trackComments: true, openUrl, kind: "explain" });
+        assert.strictEqual(explained.ok && explained.kind, "explain");
+        assert.match(opened[2], /\/usercustom-dev:pr-first-look https:\/\/github\.com\/acme\/widgets\/pull\/7 .*do not send a letter/);
+        const notMine = { ...blocked, roles: ["reviewer"] };
+        const refused = await launcher.launchClaude(notMine, settings, { trackComments: true, openUrl, kind: "close" });
+        assert.strictEqual(refused.ok, false);
+        assert.match(refused.error, /author/);
+        assert.strictEqual(opened.length, 3, "a refused close must not open anything");
+      } finally {
+        require("node:fs").rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("main.js wiring: claude:launch looks the PR up by id in the poller snapshot", () => {
+      const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /"claude:launch"[\s\S]{0,300}validatePrId[\s\S]{0,200}validateClaudeKind[\s\S]{0,200}getSnapshot\(\)/);
+    });
+  }
+
+
+  // --- Running Claude sessions -----------------------------------------------
+  {
+    const cs = require(path.join(__dirname, "../dist/main/shared/claude-sessions.js"));
+    const scanner = require(path.join(__dirname, "../dist/main/main/claude-sessions.js"));
+    const ipcv = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+    const nfs = require("node:fs");
+    const SID = "b885533b-56e7-40f9-b891-5b31e77a22a1";
+    const SID2 = "3527484f-1974-4a3b-b0ca-57b45c38321c";
+    // A prompt line as Claude Code 2.1 writes it (trimmed to the fields read).
+    const promptLine = (content, extra = {}) =>
+      JSON.stringify({ type: "user", message: { role: "user", content }, origin: { kind: "human" }, sessionId: SID, ...extra });
+
+    test("claude sessions: PR keys drop the scheme, /files, query and case", () => {
+      assert.strictEqual(cs.prUrlKey("https://creatio.ghe.com/Engineering/Core/pull/1628/files?w=1"), "creatio.ghe.com/engineering/core/pull/1628");
+      assert.strictEqual(cs.prUrlKey("https://github.com/acme/widgets/issues/3"), null);
+      assert.deepStrictEqual(
+        cs.extractPrKeys("see <https://github.com/a/b/pull/1>, https://github.com/a/b/pull/1/files and (https://x.io/c/d/pull/22)"),
+        ["github.com/a/b/pull/1", "x.io/c/d/pull/22"],
+      );
+    });
+
+    test("claude sessions: only a prompt the user sent counts, not what other turns quote", () => {
+      const slash = "<command-message>usercustom-dev:drive-pr-close</command-message>\n<command-name>/usercustom-dev:drive-pr-close</command-name>\n<command-args>https://creatio.ghe.com/engineering/core/pull/1628</command-args>";
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine(slash)), ["creatio.ghe.com/engineering/core/pull/1628"]);
+      const desktop = promptLine([
+        { type: "text", text: "<system-reminder>\nWorktree of https://github.com/a/b/pull/9\n</system-reminder>\n\n" },
+        { type: "text", text: "доведи https://github.com/a/b/pull/7" },
+      ]);
+      assert.deepStrictEqual(cs.promptPrKeys(desktop), ["github.com/a/b/pull/7"], "a system reminder is not what the user typed");
+      const toolResult = promptLine([{ type: "tool_result", tool_use_id: "t", content: "https://github.com/a/b/pull/8" }]);
+      assert.deepStrictEqual(cs.promptPrKeys(toolResult), []);
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine("https://github.com/a/b/pull/8", { origin: { kind: "peer" } })), []);
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine("https://github.com/a/b/pull/8", { origin: { kind: "task-notification" } })), []);
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine("https://github.com/a/b/pull/8", { isMeta: true })), []);
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine("https://github.com/a/b/pull/8", { isSidechain: true })), []);
+      const legacy = JSON.stringify({ type: "user", message: { role: "user", content: "https://github.com/a/b/pull/5" } });
+      assert.deepStrictEqual(cs.promptPrKeys(legacy), ["github.com/a/b/pull/5"], "a transcript older than `origin` is judged by content");
+      const blob = JSON.stringify({ type: "api-request-blob", message: { role: "user", content: "\"type\":\"user\" https://github.com/a/b/pull/4" } });
+      assert.deepStrictEqual(cs.promptPrKeys(blob), []);
+      assert.deepStrictEqual(cs.promptPrKeys('{"type":"user", "/pull/ broken'), []);
+    });
+
+    const session = (patch) => ({
+      id: SID, name: "s", status: "idle", where: "terminal", prKeys: [], repoKeys: [], branch: null, ...patch,
+    });
+    const prOf = { url: "https://github.com/acme/widgets/pull/7", repo: "acme/widgets", headRefName: "feature/x" };
+
+    test("claude sessions: matched by the PR link or by the PR's branch in its repository", () => {
+      const byLink = session({ id: "a", prKeys: ["github.com/acme/widgets/pull/7"] });
+      const byBranch = session({ id: "b", repoKeys: ["github.com/acme/widgets"], branch: "feature/x" });
+      const otherRepo = session({ id: "c", repoKeys: ["github.com/acme/other"], branch: "feature/x" });
+      const otherPr = session({ id: "d", prKeys: ["github.com/acme/widgets/pull/70"] });
+      const noBranch = session({ id: "e", repoKeys: ["github.com/acme/widgets"], branch: null });
+      const ids = cs.sessionsForPr(prOf, [byLink, byBranch, otherRepo, otherPr, noBranch]).map((x) => x.id);
+      assert.deepStrictEqual(ids.sort(), ["a", "b"]);
+    });
+
+    test("claude sessions: the one that needs the user comes first, a windowless one last", () => {
+      const k = ["github.com/acme/widgets/pull/7"];
+      const list = [
+        session({ id: "idle", name: "a", status: "idle", prKeys: k }),
+        session({ id: "bg", name: "b", status: "waiting", where: "background", prKeys: k }),
+        session({ id: "busy", name: "c", status: "busy", prKeys: k }),
+        session({ id: "wait", name: "d", status: "waiting", prKeys: k }),
+      ];
+      assert.deepStrictEqual(cs.sessionsForPr(prOf, list).map((x) => x.id), ["wait", "bg", "busy", "idle"]);
+      assert.match(cs.describeSession(session({ name: "ENG-1 · x", status: "waiting", waitingFor: "input needed" })), /waiting for you \(input needed\), in a terminal/);
+    });
+
+    test("claude sessions: the Desktop link and the terminal scripts", () => {
+      assert.strictEqual(
+        cs.claudeDesktopSessionUrl("local_04157f10-d434-496a-9d90-07a57b1c7479"),
+        "claude://claude.ai/epitaxy/local_04157f10-d434-496a-9d90-07a57b1c7479",
+      );
+      const it = cs.focusTtyScript("iterm", "/dev/ttys001").join("\n");
+      assert.match(it, /^if application id "com\.googlecode\.iterm2" is not running then return "missing"/, "a closed iTerm2 is not started");
+      assert.match(
+        it,
+        /if tty of s is "\/dev\/ttys001" then\ntell t to select\ntell s to select\ntell w to select\nactivate/,
+        "the window is raised last — raising it first reorders `windows` under `t` and `s`",
+      );
+      const term = cs.focusTtyScript("terminal", "/dev/ttys002").join("\n");
+      assert.match(term, /^if application "Terminal" is not running then return "missing"/);
+      assert.match(term, /if tty of t is "\/dev\/ttys002" then[\s\S]*set selected tab of w to t[\s\S]*set index of w to 1/);
+    });
+
+    test("claude sessions: a registry file is read defensively", () => {
+      // Copied from a real ~/.claude/sessions/<pid>.json (Claude Code 2.1.308).
+      const real = {
+        pid: 91853, sessionId: SID2, cwd: "/Users/me/Projects/github-pr-manager/.claude/worktrees/x",
+        startedAt: 1792699615158, procStart: "Thu Oct 22 20:06:53 2026", version: "2.1.308", kind: "interactive",
+        entrypoint: "claude-desktop", hostSessionId: "local_04157f10-d434-496a-9d90-07a57b1c7479", pidDomain: "darwin",
+        name: "🔍 Зворотний зв'язок PR manager для сесій", status: "busy", updatedAt: 1792699630379,
+      };
+      const e = scanner.parseRegistryEntry(real);
+      assert.deepStrictEqual(e, {
+        pid: 91853, sessionId: SID2, cwd: real.cwd, kind: "interactive", entrypoint: "claude-desktop",
+        hostSessionId: real.hostSessionId, name: real.name, status: "busy",
+      });
+      assert.strictEqual(scanner.sessionWhere(e), "desktop");
+      assert.strictEqual(scanner.sessionWhere({ kind: "interactive", entrypoint: "cli" }), "terminal");
+      // `claude` with no prompt opens the session list; its sessions run in the
+      // daemon's own pty and keep running after the terminal closes.
+      assert.strictEqual(scanner.sessionWhere({ kind: "bg", entrypoint: "cli" }), "background");
+      // Copied from a real spare (Claude Code 2.1.308): a process started ahead of the next session.
+      const spare = {
+        pid: 40972, sessionId: "975813af-6746-4cf3-afb8-3f77567b4f44", cwd: real.cwd, kind: "bg", entrypoint: "cli",
+        name: "975813af", agent: "claude", jobId: "975813af", spare: true, status: "idle",
+      };
+      assert.strictEqual(scanner.parseRegistryEntry(spare), null, "a spare is no session");
+      assert.strictEqual(scanner.parseRegistryEntry({ ...spare, spare: false }).kind, "bg");
+      assert.strictEqual(scanner.sessionWhere({ entrypoint: "sdk-cli" }), "background");
+      assert.strictEqual(scanner.sessionWhere({ entrypoint: "claude-desktop" }), "background", "no Desktop id, nothing to open");
+      const waiting = scanner.parseRegistryEntry({ ...real, status: "waiting", waitingFor: "input needed", hostSessionId: "local_x\"; rm" });
+      assert.strictEqual(waiting.waitingFor, "input needed");
+      assert.strictEqual(waiting.hostSessionId, undefined, "an id that isn't Desktop's shape never reaches a link");
+      assert.strictEqual(scanner.parseRegistryEntry({ ...real, status: "weird" }).status, "idle");
+      assert.strictEqual(scanner.parseRegistryEntry({ ...real, name: "" }).name, "x", "no title → the folder's name");
+      assert.strictEqual(scanner.parseRegistryEntry({ ...real, pid: "1" }), null);
+      assert.strictEqual(scanner.parseRegistryEntry({ ...real, sessionId: "../../etc" }), null);
+      assert.strictEqual(scanner.parseRegistryEntry(null), null);
+      assert.strictEqual(scanner.projectDirName("/Users/a.kravchuk/Projects/x/.claude/worktrees/y-1"), "-Users-a-kravchuk-Projects-x--claude-worktrees-y-1");
+    });
+
+    test("claude sessions: ipc accepts only a session id", () => {
+      assert.strictEqual(ipcv.validateClaudeSessionId(SID), SID);
+      for (const bad of [undefined, 1, "", "local_04157f10", `${SID} ; x`]) {
+        assert.throws(() => ipcv.validateClaudeSessionId(bad), /session id/);
+      }
+    });
+
+    await atest("claude sessions: scan reads the registry, the transcript and the checkout's branch", async () => {
+      const root = nfs.mkdtempSync(path.join(os.tmpdir(), "prd-sessions-"));
+      try {
+        const configDir = path.join(root, "claude");
+        // A main checkout and a linked worktree of it on the PR's branch.
+        const repo = path.join(root, "widgets");
+        nfs.mkdirSync(path.join(repo, ".git", "worktrees", "wt"), { recursive: true });
+        nfs.writeFileSync(path.join(repo, ".git", "config"), '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@github.com:Acme/Widgets.git\n');
+        nfs.writeFileSync(path.join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
+        const wt = path.join(root, "wt");
+        nfs.mkdirSync(path.join(wt, "src"), { recursive: true });
+        nfs.writeFileSync(path.join(wt, ".git"), `gitdir: ${path.join(repo, ".git", "worktrees", "wt")}\n`);
+        nfs.writeFileSync(path.join(repo, ".git", "worktrees", "wt", "HEAD"), "ref: refs/heads/feature/x\n");
+        nfs.writeFileSync(path.join(repo, ".git", "worktrees", "wt", "commondir"), "../..\n");
+        assert.deepStrictEqual(scanner.gitInfo(path.join(wt, "src")), { branch: "feature/x", remotes: ["git@github.com:Acme/Widgets.git"] });
+        assert.deepStrictEqual(scanner.gitInfo(repo).branch, "main");
+
+        nfs.mkdirSync(path.join(configDir, "sessions"), { recursive: true });
+        const reg = (pid, sid, cwd, extra) =>
+          nfs.writeFileSync(path.join(configDir, "sessions", `${pid}.json`), JSON.stringify({ pid, sessionId: sid, cwd, entrypoint: "cli", name: `s${pid}`, status: "busy", ...extra }));
+        reg(101, SID, repo, {});
+        reg(102, SID2, wt, { entrypoint: "claude-desktop", hostSessionId: "local_abc", status: "waiting", waitingFor: "input needed" });
+        reg(103, "11111111-2222-4333-8444-555555555555", repo, {}); // its process is gone
+        nfs.writeFileSync(path.join(configDir, "sessions", "104.json"), "{not json");
+        const tdir = path.join(configDir, "projects", scanner.projectDirName(repo));
+        nfs.mkdirSync(tdir, { recursive: true });
+        const transcript = path.join(tdir, `${SID}.jsonl`);
+        nfs.writeFileSync(transcript, promptLine("/drive-pr-green https://github.com/acme/widgets/pull/7") + "\n" +
+          JSON.stringify({ type: "assistant", message: { role: "assistant", content: "https://github.com/acme/widgets/pull/99" } }) + "\n");
+
+        // An empty Desktop folder: Desktop's records are covered by the next test.
+        const sc = scanner.createClaudeSessionScanner({ configDir, desktopDir: path.join(root, "desktop"), isAlive: (pid) => pid !== 103 });
+        let list = await sc.scan();
+        assert.deepStrictEqual(list.map((x) => x.id), [SID2, SID].sort(), "a dead pid and a broken file are dropped");
+        const cli = list.find((x) => x.id === SID);
+        assert.deepStrictEqual(cli.prKeys, ["github.com/acme/widgets/pull/7"], "the assistant's link is not the user's");
+        assert.deepStrictEqual(cli.repoKeys, ["github.com/acme/widgets"]);
+        assert.strictEqual(cli.branch, "main");
+        assert.strictEqual(cli.where, "terminal");
+        const desk = list.find((x) => x.id === SID2);
+        assert.deepStrictEqual(
+          { where: desk.where, status: desk.status, waitingFor: desk.waitingFor, branch: desk.branch, prKeys: desk.prKeys },
+          { where: "desktop", status: "waiting", waitingFor: "input needed", branch: "feature/x", prKeys: [] },
+          "no transcript yet, but the worktree's branch matches",
+        );
+        assert.deepStrictEqual(cs.sessionsForPr(prOf, list).map((x) => x.id).sort(), [SID, SID2].sort());
+
+        // Appended later: a half-written line counts only once it is complete.
+        const later = promptLine("а тепер https://github.com/acme/widgets/pull/8");
+        nfs.appendFileSync(transcript, later.slice(0, 40));
+        list = await sc.scan();
+        assert.deepStrictEqual(list.find((x) => x.id === SID).prKeys, ["github.com/acme/widgets/pull/7"]);
+        nfs.appendFileSync(transcript, later.slice(40) + "\n");
+        list = await sc.scan();
+        assert.deepStrictEqual(list.find((x) => x.id === SID).prKeys, ["github.com/acme/widgets/pull/7", "github.com/acme/widgets/pull/8"]);
+
+        // Switching: the Desktop session by its link; refusals say why.
+        const opened = [];
+        const openUrl = async (url) => { opened.push(url); };
+        assert.deepStrictEqual(await sc.focus(SID2, { openUrl }), { ok: true });
+        assert.deepStrictEqual(opened, ["claude://claude.ai/epitaxy/local_abc"]);
+        const linux = await sc.focus(SID, { openUrl, platform: "linux" });
+        assert.ok(!linux.ok && /macOS only/.test(linux.error), JSON.stringify(linux));
+        const gone = await sc.focus("11111111-2222-4333-8444-555555555555", { openUrl });
+        assert.ok(!gone.ok && /no longer running/.test(gone.error));
+        reg(105, "22222222-2222-4333-8444-555555555555", repo, { entrypoint: "sdk-cli" });
+        await sc.scan();
+        const bg = await sc.focus("22222222-2222-4333-8444-555555555555", { openUrl });
+        assert.ok(!bg.ok && /no window/.test(bg.error));
+        assert.strictEqual(opened.length, 1, "nothing else was opened");
+      } finally {
+        nfs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("claude sessions: a Desktop session record is read defensively", () => {
+      // Trimmed from a real claude-code-sessions/<account>/<org>/local_….json (Claude Desktop, 2026-10-22).
+      const real = {
+        sessionId: "local_4c884773-36af-4852-9c60-ca19bcd84234", cliSessionId: "283ce799-5a56-425c-a835-69b8636676cd",
+        cwd: "/Users/me/Projects/mac-setup", lastActivityAt: 1792699591065, isArchived: false, title: "✅ Drive red prs green",
+        prs: [
+          { prNumber: 3705, repo: "engineering/creatio-ui", host: "creatio.ghe.com", url: "https://creatio.ghe.com/engineering/creatio-ui/pull/3705", state: "MERGED" },
+          { prNumber: 3750, repo: "engineering/creatio-ui", host: "creatio.ghe.com", url: "https://creatio.ghe.com/engineering/creatio-ui/pull/3750", state: "OPEN" },
+        ],
+        scheduledTaskId: "drive-red-prs-green",
+      };
+      assert.deepStrictEqual(scanner.parseDesktopRecord(real), {
+        sessionId: real.sessionId, cliSessionId: real.cliSessionId, title: real.title, isArchived: false, scheduled: true,
+        prKeys: ["creatio.ghe.com/engineering/creatio-ui/pull/3705", "creatio.ghe.com/engineering/creatio-ui/pull/3750"],
+        lastActivityAt: 1792699591065,
+      });
+      const plain = scanner.parseDesktopRecord({ sessionId: "local_x", prs: [{ url: "nope" }, null, 3], cliSessionId: "../x" });
+      assert.deepStrictEqual(
+        { prKeys: plain.prKeys, cli: plain.cliSessionId, scheduled: plain.scheduled, title: plain.title },
+        { prKeys: [], cli: null, scheduled: false, title: "local_x" },
+      );
+      assert.strictEqual(scanner.parseDesktopRecord({ sessionId: "local_x\"; rm" }), null);
+      assert.strictEqual(scanner.parseDesktopRecord({ sessionId: "283ce799-5a56-425c-a835-69b8636676cd" }), null);
+    });
+
+    await atest("claude sessions: Desktop's records add paused sessions and drop archived ones", async () => {
+      const root = nfs.mkdtempSync(path.join(os.tmpdir(), "prd-desktop-"));
+      try {
+        const configDir = path.join(root, "claude");
+        const desktopDir = path.join(root, "desktop");
+        const org = path.join(desktopDir, "claude-code-sessions", "acct", "org");
+        nfs.mkdirSync(org, { recursive: true });
+        nfs.mkdirSync(path.join(configDir, "sessions"), { recursive: true });
+        let clock = Date.now();
+        const day = 24 * 3600 * 1000;
+        const pr7 = "https://github.com/acme/widgets/pull/7";
+        const record = (id, fields, mtime = clock) => {
+          const p = path.join(org, `${id}.json`);
+          nfs.writeFileSync(p, JSON.stringify({ sessionId: id, isArchived: false, ...fields }));
+          nfs.utimesSync(p, mtime / 1000, mtime / 1000);
+        };
+        // Live: a Desktop session whose process runs, with the title Desktop gave it.
+        nfs.writeFileSync(path.join(configDir, "sessions", "201.json"), JSON.stringify({
+          pid: 201, sessionId: SID2, cwd: root, entrypoint: "claude-desktop", hostSessionId: "local_live", name: "derived", status: "busy",
+        }));
+        record("local_live", { cliSessionId: SID2, title: "Live one", prs: [{ url: pr7 }] });
+        const P1 = "33333333-3333-4333-8333-333333333333";
+        const P2 = "44444444-4444-4444-8444-444444444444";
+        record("local_paused1", { cliSessionId: P1, title: "Paused older", prs: [{ url: pr7 }], lastActivityAt: 100 });
+        record("local_paused2", { cliSessionId: P2, title: "Paused newer", prs: [{ url: pr7 + "/files" }], lastActivityAt: 200 });
+        record("local_archived", { cliSessionId: "55555555-5555-4555-8555-555555555555", title: "A", prs: [{ url: pr7 }], isArchived: true });
+        record("local_routine", { cliSessionId: "66666666-6666-4666-8666-666666666666", title: "R", prs: [{ url: pr7 }], scheduledTaskId: "drive-red-prs-green" });
+        record("local_old", { cliSessionId: "77777777-7777-4777-8777-777777777777", title: "O", prs: [{ url: pr7 }] }, clock - 30 * day);
+        record("local_noprs", { cliSessionId: "88888888-8888-4888-8888-888888888888", title: "N" });
+
+        const sc = scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => true, now: () => clock });
+        let list = await sc.scan();
+        const ids = list.map((x) => x.id).sort();
+        assert.deepStrictEqual(ids, [P1, P2, SID2].sort(), "archived, routine, old and PR-less records stay out");
+        const live = list.find((x) => x.id === SID2);
+        assert.deepStrictEqual(
+          { name: live.name, status: live.status, prKeys: live.prKeys },
+          { name: "Live one", status: "busy", prKeys: ["github.com/acme/widgets/pull/7"] },
+          "a live Desktop session takes Desktop's title and the PRs bound to it",
+        );
+        assert.deepStrictEqual(
+          cs.sessionsForPr(prOf, list).map((x) => `${x.name}:${x.status}`),
+          ["Live one:busy", "Paused newer:paused", "Paused older:paused"],
+        );
+
+        const opened = [];
+        const openUrl = async (url) => { opened.push(url); };
+        assert.deepStrictEqual(await sc.focus(P2, { openUrl }), { ok: true });
+        assert.deepStrictEqual(opened, ["claude://claude.ai/epitaxy/local_paused2"], "opening a paused session resumes it in Desktop");
+
+        // Archived in Desktop: gone on the next scan, between listings too.
+        record("local_paused2", { cliSessionId: P2, title: "Paused newer", prs: [{ url: pr7 }], isArchived: true }, clock + 1000);
+        record("local_live", { cliSessionId: SID2, title: "Live one", prs: [{ url: pr7 }], isArchived: true }, clock + 1000);
+        clock += 5000;
+        list = await sc.scan();
+        assert.deepStrictEqual(list.map((x) => x.id), [P1], "an archived session leaves even while its process lingers");
+        const gone = await sc.focus(P2, { openUrl });
+        assert.ok(!gone.ok && /no longer running/.test(gone.error));
+
+        // A record written after the listing shows up once the folder is listed again.
+        record("local_new", { cliSessionId: "99999999-9999-4999-8999-999999999999", title: "New", prs: [{ url: pr7 }] }, clock);
+        assert.strictEqual((await sc.scan()).length, 1);
+        clock += 61_000;
+        assert.deepStrictEqual((await sc.scan()).map((x) => x.name).sort(), ["New", "Paused older"]);
+      } finally {
+        nfs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("main.js wiring: sessions are scanned on a timer, pushed only while visible, focused by id", () => {
+      const src = nfs.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /"claude:focusSession"[\s\S]{0,200}validateClaudeSessionId[\s\S]{0,300}claudeSessionScanner\.focus\(/);
+      assert.match(src, /"claude:sessions"[\s\S]{0,120}refreshClaudeSessions\(\)/);
+      assert.match(src, /isVisible\(\)\)\s*\{\s*sendToRenderer\("claude-sessions"/);
+      assert.match(src, /claudeSessionsOn = settings\.claude\.enabled/);
+    });
+  }
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

@@ -4,10 +4,9 @@ import { VIEW_MODES, VIEW_MODE_TITLES, type ViewMode } from "../../../shared/vie
 /**
  * The display-variant switch, shaped like Finder's view switch: one segmented
  * control of icon-only buttons in a recessed track, the active one lifted onto a
- * light "pressed" surface. It sits in the header's middle gap — the space
- * between the title block and the Refresh / Settings buttons — which is why it
- * is icons rather than labels: three words there would push Refresh off the row
- * on a narrow window.
+ * light "pressed" surface. It sits in the header's right-hand group, next to
+ * the host pills and Refresh / Settings, which is why it is icons rather than
+ * labels: three words there would push Refresh off the row on a narrow window.
  *
  * Icon-only means the tooltip and `aria-label` carry the whole meaning, so they
  * come from `VIEW_MODE_TITLES` ("Cozy — sortable table"), not from the mode name

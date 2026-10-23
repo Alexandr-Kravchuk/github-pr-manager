@@ -26,9 +26,10 @@ import type { PullRequest } from "./types";
 
 export type TableColumnKey =
   | "signal"
+  | "repo"
   | "pr"
   | "author"
-  | "role"
+  | "reviewers"
   | "review"
   | "ci"
   | "comments"
@@ -51,7 +52,7 @@ export interface TableColumn {
   /** Header tooltip — where an abbreviated column says what it means. */
   title: string;
   align: "left" | "right" | "center";
-  /** False only for `actions`: buttons have no order. */
+  /** False for `actions` (buttons have no order) and `reviewers` (a set of faces). */
   sortable: boolean;
   /**
    * The direction the FIRST click on this header selects — chosen so the first
@@ -75,7 +76,7 @@ export interface TableColumn {
   minWidthRem: number;
 }
 
-/** The ten columns, in render order. */
+/** The columns, in render order. */
 export const TABLE_COLUMNS: readonly TableColumn[] = [
   {
     key: "signal",
@@ -88,36 +89,47 @@ export const TABLE_COLUMNS: readonly TableColumn[] = [
     minWidthRem: 2,
   },
   {
+    key: "repo",
+    label: "Repository",
+    title: "Repository without its owner — sorts by repository, then by number",
+    align: "left",
+    sortable: true,
+    defaultDir: "asc",
+    // Its own column so every row's number and title start at the same x; a
+    // longer name truncates, the full `host · owner/repo` is on hover.
+    minWidthRem: 8,
+  },
+  {
     key: "pr",
     label: "Pull request",
-    title: "Repository, number and title — sorts by repository, then by number",
+    title: "Number and title — sorts by number",
     align: "left",
     sortable: true,
     defaultDir: "asc",
     // The only elastic column: it takes all the slack on a wide window, and
-    // this is the floor below which a row stops being readable at all (repo,
-    // number and enough of the title to tell two PRs apart).
+    // this is the floor below which a row stops being readable at all (number,
+    // Jira key and enough of the title to tell two PRs apart).
     minWidthRem: 24,
   },
   {
     key: "author",
     label: "Author",
-    title: "Who opened the PR",
-    align: "left",
+    title: "Who opened the PR (login on hover) — sorts by login",
+    align: "center",
     sortable: true,
     defaultDir: "asc",
-    // An avatar plus a long-ish login.
-    minWidthRem: 9,
+    // One avatar and the header word.
+    minWidthRem: 5,
   },
   {
-    key: "role",
-    label: "Role",
-    title: "Your part in it: author, reviewer, or already reviewed",
+    key: "reviewers",
+    label: "Reviewers",
+    title: "Requested reviewers — the ring is their state: green approved, red changes requested",
     align: "left",
-    sortable: true,
+    sortable: false,
     defaultDir: "asc",
-    // "To review" plus the ↩ marker.
-    minWidthRem: 6.5,
+    // Five overlapping avatars and a "+N".
+    minWidthRem: 7,
   },
   {
     key: "review",
@@ -136,8 +148,8 @@ export const TABLE_COLUMNS: readonly TableColumn[] = [
     align: "left",
     sortable: true,
     defaultDir: "asc",
-    // A glyph and a two-digit count.
-    minWidthRem: 4.5,
+    // A glyph and a two-digit count ("✓ 24" measures ~2rem) plus padding.
+    minWidthRem: 3.25,
   },
   {
     key: "comments",
@@ -146,8 +158,9 @@ export const TABLE_COLUMNS: readonly TableColumn[] = [
     align: "right",
     sortable: true,
     defaultDir: "desc",
-    // The header word is wider than any count it holds.
-    minWidthRem: 5.5,
+    // The header word (~3.1rem) is wider than any count it holds; this fits it,
+    // the sort arrow and the padding with nothing to spare.
+    minWidthRem: 5,
   },
   {
     key: "age",
@@ -172,11 +185,12 @@ export const TABLE_COLUMNS: readonly TableColumn[] = [
   {
     key: "actions",
     label: "",
-    title: "Copy link, ignore, mark as seen",
+    title: "Copy link, start Claude, ignore, mark as seen",
     align: "right",
     sortable: false,
     defaultDir: "asc",
     // Three icon buttons at their widest (mark-as-seen only appears sometimes).
+    // The labelled Claude button adds CLAUDE_ACTIONS_EXTRA_REM while it is on.
     minWidthRem: 5,
   },
 ];
@@ -193,40 +207,81 @@ export const DEFAULT_TABLE_SORT: TableSort = { key: "signal", dir: "asc" };
  * The renderer puts it on the table as a `min-width`, so a window narrower than
  * this scrolls the table sideways instead of squeezing columns (a fixed-layout
  * table ignores a `min-width` on the cells themselves, which is why the floor
- * has to be enforced once, here, rather than ten times in the markup).
+ * has to be enforced once, here, rather than once per column in the markup).
  */
 export const TABLE_MIN_WIDTH_REM = TABLE_COLUMNS.reduce((sum, col) => sum + col.minWidthRem, 0);
 
 /**
- * How wide the resizable Pull-request column may be dragged, in rem. The floor
- * is the column's own declared minimum (so the drag can't undo the thing
- * `TABLE_MIN_WIDTH_REM` guarantees); the ceiling only exists to stop a stray
- * drag — or a persisted value from a much larger screen — leaving a table whose
- * other nine columns are all off to the right.
+ * Widths the user dragged, in rem, per column. A column absent from the map has
+ * its default width — and for the Pull-request column that default is
+ * "elastic": it takes whatever the window has left over.
  */
-export const PR_COLUMN_MIN_REM = TABLE_COLUMNS.find((c) => c.key === "pr")?.minWidthRem ?? 24;
-export const PR_COLUMN_MAX_REM = 90;
+export type ColumnWidths = Partial<Record<TableColumnKey, number>>;
 
 /**
- * Holds a dragged Pull-request width inside those bounds, and rejects anything
- * that isn't a real width (a corrupt persisted value, a `NaN` from arithmetic on
- * a missing measurement) by answering `null` — the caller's "elastic, as before"
- * state, NOT a zero-width column.
+ * How wide a column may be dragged, in rem. The floor is low on purpose — a
+ * dragged width is a deliberate choice, and "just the avatar" or "just the
+ * dot" is a legitimate one — but above zero, so no column can vanish. The
+ * ceiling only exists to stop a stray drag, or a width persisted on a much
+ * larger screen, leaving a table whose other columns are all off to the right.
  */
-export function clampPrColumnWidth(rem: unknown): number | null {
+export const COLUMN_MIN_REM = 2;
+export const COLUMN_MAX_REM = 90;
+
+/**
+ * Holds a dragged width inside those bounds, and rejects anything that isn't a
+ * real width (a corrupt persisted value, a `NaN` from arithmetic on a missing
+ * measurement) by answering `null` — the caller's "default width" state, NOT a
+ * zero-width column.
+ */
+export function clampColumnWidth(rem: unknown): number | null {
   if (typeof rem !== "number" || !Number.isFinite(rem)) return null;
-  return Math.min(PR_COLUMN_MAX_REM, Math.max(PR_COLUMN_MIN_REM, rem));
+  return Math.min(COLUMN_MAX_REM, Math.max(COLUMN_MIN_REM, rem));
 }
 
 /**
- * The table's `min-width` given the Pull-request column's current width: the
- * other nine minimums plus whatever that column has been dragged to. `null`
- * leaves it at its own minimum — the un-dragged, elastic state — which is
- * exactly {@link TABLE_MIN_WIDTH_REM}.
+ * Narrows a persisted value to a width map: unknown columns and bad widths are
+ * dropped one by one, so one corrupt entry doesn't throw away the rest.
  */
-export function tableMinWidthRem(prWidthRem: number | null): number {
-  if (prWidthRem === null) return TABLE_MIN_WIDTH_REM;
-  return TABLE_MIN_WIDTH_REM - PR_COLUMN_MIN_REM + (clampPrColumnWidth(prWidthRem) ?? PR_COLUMN_MIN_REM);
+export function parseColumnWidths(value: unknown): ColumnWidths {
+  const out: ColumnWidths = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [key, rem] of Object.entries(value)) {
+    if (!(key in COLUMN_BY_KEY)) continue;
+    const clamped = clampColumnWidth(rem);
+    if (clamped !== null) out[key as TableColumnKey] = clamped;
+  }
+  return out;
+}
+
+/**
+ * Width the labelled Claude button adds to the actions column: the widest one
+ * ("Drive to green" with its menu arrow, ~7.4rem measured) plus its margin, so the cell fits copy,
+ * ignore, mark-as-seen and that button with nothing to spare. Any surplus shows
+ * up as a gap between Updated and the right-aligned buttons — 8 left ~2rem of it.
+ */
+export const CLAUDE_ACTIONS_EXTRA_REM = 7.5;
+
+/** The actions column's width — wider only while the Claude button is shown. */
+export function actionsColumnRem(claudeEnabled: boolean): number {
+  return COLUMN_BY_KEY.actions.minWidthRem + (claudeEnabled ? CLAUDE_ACTIONS_EXTRA_REM : 0);
+}
+
+/** A column's width before anyone drags it — the elastic PR column reports its floor. */
+export function defaultColumnRem(key: TableColumnKey, claudeEnabled: boolean): number {
+  return key === "actions" ? actionsColumnRem(claudeEnabled) : COLUMN_BY_KEY[key].minWidthRem;
+}
+
+/**
+ * The table's `min-width`: every column at its dragged width, or its default
+ * where it has none. With no widths and no Claude button that is exactly
+ * {@link TABLE_MIN_WIDTH_REM}.
+ */
+export function tableMinWidthRem(widths: ColumnWidths, claudeEnabled: boolean): number {
+  return TABLE_COLUMNS.reduce(
+    (sum, col) => sum + (widths[col.key] ?? defaultColumnRem(col.key, claudeEnabled)),
+    0,
+  );
 }
 
 const COLUMN_BY_KEY: Record<TableColumnKey, TableColumn> = TABLE_COLUMNS.reduce(
@@ -271,7 +326,7 @@ const SIGNAL_RANK: Record<PrSignal, number> = {
 };
 
 /**
- * The single role the Role cell shows. A PR can carry several (`reviewed` stays
+ * The single role a Compact tile's role letter shows. A PR can carry several (`reviewed` stays
  * on after a re-request adds `reviewer` back), so the most demanding one wins:
  * being the author outranks owing a review, which outranks having reviewed.
  */
@@ -281,8 +336,6 @@ export function primaryRole(pr: Pick<PullRequest, "roles">): "author" | "reviewe
   if (pr.roles.includes("reviewed")) return "reviewed";
   return null;
 }
-
-const ROLE_RANK = { author: 0, reviewer: 1, reviewed: 2 } as const;
 
 /**
  * How many of the PR's reviewers have approved, out of how many are on it —
@@ -345,6 +398,16 @@ export function ageDays(iso: string, now: number): number {
 }
 
 /**
+ * The repo name without its owner — `Advance-Technologies-Foundation/clio`
+ * shows as `clio`. The owner is the long, repeated part, and it is what pushed
+ * the name into an ellipsis; the full `owner/repo` stays on hover.
+ */
+export function repoShortName(repo: string): string {
+  const slash = repo.lastIndexOf("/");
+  return slash >= 0 ? repo.slice(slash + 1) : repo;
+}
+
+/**
  * Compares two PRs by one column, ALWAYS ascending in terms of what the cell
  * shows. Direction is applied by `sortForTable`, so a comparator never has to
  * know which way the header arrow points.
@@ -360,20 +423,23 @@ export function compareForColumn(
       return (
         SIGNAL_RANK[prSignal(a, { trackComments })] - SIGNAL_RANK[prSignal(b, { trackComments })]
       );
+    case "repo":
+      // Repo first, then number: "all of clio's PRs together, oldest number
+      // first" is how the column actually gets used. By the short name the cell
+      // shows; the full name only breaks a tie between two owners' repos of the
+      // same name.
+      return (
+        repoShortName(a.repo).localeCompare(repoShortName(b.repo)) ||
+        a.repo.localeCompare(b.repo) ||
+        a.number - b.number
+      );
     case "pr":
-      // Repo first, then number: the title is the one thing in this cell nobody
-      // looks up alphabetically, while "all of clio's PRs together, oldest
-      // number first" is how the column actually gets used.
-      return a.repo.localeCompare(b.repo) || a.number - b.number;
+      // The number, not the title: nobody looks a title up alphabetically.
+      return a.number - b.number;
     case "author":
       // A PR whose author GitHub no longer resolves (deleted account) sorts
       // last either way rather than ahead of every real login.
       return (a.author?.login ?? "￿").localeCompare(b.author?.login ?? "￿");
-    case "role": {
-      const ra = primaryRole(a);
-      const rb = primaryRole(b);
-      return (ra ? ROLE_RANK[ra] : 3) - (rb ? ROLE_RANK[rb] : 3);
-    }
     case "review":
       return reviewRank(a) - reviewRank(b);
     case "ci":

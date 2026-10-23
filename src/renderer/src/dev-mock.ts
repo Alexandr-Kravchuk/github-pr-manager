@@ -8,11 +8,13 @@
  * buddy into that mood (default: sleeping).
  */
 import type {
+  ClaudeSessionInfo,
   DashboardResponse,
   PrManagerApi,
   PullRequest,
   Settings,
 } from "../../shared/types";
+import { DEFAULT_CLAUDE_SETTINGS } from "../../shared/claude-launch";
 
 function pr(overrides: Partial<PullRequest>): PullRequest {
   return {
@@ -25,6 +27,8 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     isDraft: false,
     baseRefName: "main",
     baseIsDefaultBranch: true,
+    stack: null,
+    blockedByStack: false,
     author: { login: "octocat", avatarUrl: "https://avatars.githubusercontent.com/u/583231?v=4" },
     createdAt: new Date(Date.now() - 864e5).toISOString(),
     updatedAt: new Date(Date.now() - 36e5).toISOString(),
@@ -52,8 +56,10 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     awaitingReview: false,
     hasUnaddressedChangeRequest: false,
     hasUnaddressedComments: false,
+    hasUnaddressedReviewFeedback: false,
     hasHumanApproval: false,
     hasConflicts: false,
+    isBehindBase: false,
     canBeMerged: false,
     hasNewActivity: false,
     returnedToMe: false,
@@ -298,7 +304,12 @@ const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleepi
 const snapshot: DashboardResponse = {
   pullRequests: FIXTURES[mood] ?? FIXTURES.sleeping,
   errors: [],
-  rateLimits: [{ hostLabel: "GitHub", remaining: 4980, cost: 20, resetAt: new Date().toISOString(), fetchedAt: new Date().toISOString() }],
+  // Two hosts so the header's host pills act as filters; GHE's budget is low on
+  // purpose, so its dot shows the amber state.
+  rateLimits: [
+    { hostLabel: "GitHub", remaining: 4980, limit: 5000, cost: 20, resetAt: new Date().toISOString(), fetchedAt: new Date().toISOString() },
+    { hostLabel: "GHE", remaining: 320, limit: 5000, cost: 20, resetAt: new Date().toISOString(), fetchedAt: new Date().toISOString() },
+  ],
   fetchedAt: new Date().toISOString(),
   version: "dev",
 };
@@ -317,7 +328,59 @@ const settings: Settings = {
     events: { yourTurn: true, ciFailed: true, goodNews: true },
   },
   hosts: [{ label: "GitHub", graphqlUrl: "https://api.github.com/graphql", repos: ["acme/widgets"] }],
+  claude: { ...DEFAULT_CLAUDE_SETTINGS, enabled: true },
 };
+
+/** Running Claude sessions, matched to the `?buddy=review` fixtures by their head branch. */
+const CLAUDE_SESSIONS: ClaudeSessionInfo[] = [
+  {
+    id: "00000000-0000-4000-8000-000000000001",
+    name: "🚀 ENG-93373 · Deadline for the reminder job",
+    status: "busy",
+    where: "desktop",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "feature/eng-93373-deadline",
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000002",
+    name: "✋🏻 ENG-93374 · Retry the webhook delivery",
+    status: "waiting",
+    waitingFor: "input needed",
+    where: "terminal",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "feature/eng-93374-retry",
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000003",
+    name: "✅ ENG-93375 · Drive PR green",
+    status: "idle",
+    where: "terminal",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "feature/eng-93375",
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000005",
+    name: "🔀 ENG-93374 · Retry budget docs",
+    status: "paused",
+    where: "desktop",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio-knowledge"],
+    branch: "feature/eng-93374-docs",
+    lastActivityAt: Date.now() - 3 * 36e5,
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000004",
+    name: "widgets-7f",
+    status: "busy",
+    where: "background",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "feature/eng-93375",
+  },
+];
 
 const api: PrManagerApi = {
   getDashboard: async () => ({ ok: true, snapshot }),
@@ -326,8 +389,12 @@ const api: PrManagerApi = {
     ok: true,
     config: {
       pollIntervalSeconds: 60,
-      hosts: [{ label: "GitHub", repos: ["acme/widgets"] }],
+      hosts: [
+        { label: "GitHub", repos: ["acme/widgets"] },
+        { label: "GHE", repos: ["corp/widgets"] },
+      ],
       trackComments: true,
+      claudeEnabled: true,
     },
   }),
   markSeen: async () => {},
@@ -348,6 +415,10 @@ const api: PrManagerApi = {
   }),
   setJiraToken: async () => ({ ok: true }),
   getAppVersion: async () => "dev",
+  launchClaude: async () => ({ ok: false, error: "Not available in mock mode." }),
+  getClaudeSessions: async () => CLAUDE_SESSIONS,
+  focusClaudeSession: async () => ({ ok: false, error: "Not available in mock mode." }),
+  onClaudeSessions: () => () => {},
   copyText: async () => {},
   getWhatsNew: async () => null,
   dismissWhatsNew: async () => {},

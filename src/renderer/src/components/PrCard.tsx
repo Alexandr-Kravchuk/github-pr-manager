@@ -2,9 +2,12 @@ import { useCallback, useState } from "react";
 
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
 import { isPassiveReviewed, prSignal, type PrSignal } from "../../../shared/pr-filter";
+import { repoShortName } from "../../../shared/pr-table";
 import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { CheckBadge } from "./CheckBadge";
+import { ClaudeButton } from "./ClaudeButton";
+import { StackBadge } from "./StackBadge";
 
 interface Props {
   pr: PullRequest;
@@ -195,7 +198,9 @@ export function PrCard({
   return (
     <div
       className={cn(
-        "rounded-lg border border-line border-l-4 p-4 transition-colors hover:bg-surface bg-surface/60",
+        // Hover darkens every side but the left: that one is the accent stripe,
+        // and a plain `hover:border-*` colour repaints it grey.
+        "rounded-lg border border-line border-l-4 bg-surface p-4 shadow-sm transition-colors hover:border-y-line-strong hover:border-r-line-strong",
         accentClass(pr, trackComments),
         // Revealed by the Ignored chip: on screen, but not part of the workload
         // the header counts — so it reads as set aside rather than as normal.
@@ -206,15 +211,15 @@ export function PrCard({
       <div className="mb-1 flex items-center justify-between gap-2 text-xs text-fg-subtle">
         <div className="flex min-w-0 items-center gap-2">
           {hideRepo ? (
-            <span className="text-fg-faint">#{pr.number}</span>
+            <span className="shrink-0 text-sm font-semibold tabular-nums text-fg-secondary">#{pr.number}</span>
           ) : (
             <>
               <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">{pr.hostLabel}</span>
               {/* The number is the PR's identity — it must survive a long repo
                   name, so only the repo part truncates and #number stays put. */}
               <span className="flex min-w-0 items-center gap-1" title={`${pr.repo} #${pr.number}`}>
-                <span className="truncate">{pr.repo}</span>
-                <span className="shrink-0 text-fg-faint">#{pr.number}</span>
+                <span className="truncate">{repoShortName(pr.repo)}</span>
+                <span className="shrink-0 text-sm font-semibold tabular-nums text-fg-secondary">#{pr.number}</span>
               </span>
             </>
           )}
@@ -226,7 +231,10 @@ export function PrCard({
           {pr.isIgnored && (
             <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">Ignored</span>
           )}
-          {!pr.baseIsDefaultBranch && (
+          {/* A native stack says more than the base branch does — its badge
+              replaces the umbrella, which stays for hand-made stacks. */}
+          <StackBadge pr={pr} />
+          {!pr.stack && !pr.baseIsDefaultBranch && (
             <span
               title={`Based on ${pr.baseRefName}`}
               aria-label={`Based on branch ${pr.baseRefName}`}
@@ -264,9 +272,10 @@ export function PrCard({
             {pr.isIgnored ? <EyeIcon /> : <EyeOffIcon />}
           </button>
         </div>
-        <span className="shrink-0" title={new Date(pr.updatedAt).toLocaleString()}>
-          {relativeTime(pr.updatedAt)}
-        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <span title={new Date(pr.updatedAt).toLocaleString()}>{relativeTime(pr.updatedAt)}</span>
+          <ClaudeButton pr={pr} trackComments={trackComments} />
+        </div>
       </div>
 
       {/* Title — clicking opens the PR and marks it as seen */}
@@ -346,6 +355,21 @@ export function PrCard({
             className={cn(pill, "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300")}
           >
             ⚠ Merge conflict
+          </span>
+        )}
+
+        {pr.roles.includes("author") && pr.hasUnaddressedReviewFeedback && (
+          <span title="Approval includes feedback: process it, then acknowledge this review with 👀 as PR author" className={cn(pill, "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300")}>
+            💬 Review feedback
+          </span>
+        )}
+
+        {pr.roles.includes("author") && pr.isBehindBase && (
+          <span
+            title="GitHub requires this branch to be updated with the base branch before merging"
+            className={cn(pill, "border-red-500/40 bg-red-500/15 text-red-700 dark:text-red-300")}
+          >
+            ⚠ Update base
           </span>
         )}
 

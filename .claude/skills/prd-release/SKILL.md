@@ -160,6 +160,14 @@ at upload — that's the failure that led to hand-uploading in v1.13.0. Don't ha
 re-run with the token, or replay just the script's `upload_asset` loop over
 `dist/*.dmg dist/*.dmg.blockmap dist/*.zip dist/*.zip.blockmap dist/latest-mac.yml`.
 
+A big asset (the ~194 MB DMG / ZIP) can stall mid-upload and come back
+`HTTP 408 "Upload body timed out due to inactivity"`, leaving it in state `starter`
+— that hit both files in v2.0.0. `upload_asset` now uploads with
+`curl -4 --http1.1 -T` (what got them through), retries a non-201 up to three
+times, and finally checks every macOS asset's `state` is `uploaded`; any failure
+`die`s. A red `release:mac` at the upload step therefore means an asset is NOT
+in place — re-run the upload, never publish over it.
+
 **Never use `gh release upload` for these assets.** Three reasons, all of which bit v1.13.0:
 - `gh` renames `PR Dashboard-…` → `PR**.**Dashboard-…` (space→dot), but `latest-mac.yml`
   references dash-names (the script uses `tr ' ' '-'`), so the feed points at a

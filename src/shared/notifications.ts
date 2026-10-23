@@ -2,7 +2,7 @@
  * Cheap REST "did anything move?" detector, gating the expensive GraphQL tick.
  *
  * The dashboard's cost is github.com GraphQL points (a shared per-token budget,
- * ~35–100 per tick). The GitHub Notifications REST API lives in a *separate*
+ * ~20 per tick, 270 before the searches went ids-only). The GitHub Notifications REST API lives in a *separate*
  * rate-limit pool (`core`, 5000/h) and speaks conditional requests: send back
  * the previous `Last-Modified` as `If-Modified-Since` and an unchanged inbox
  * answers `304 Not Modified` — which does **not** count against the limit. So

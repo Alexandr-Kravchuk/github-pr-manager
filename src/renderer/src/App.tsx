@@ -15,8 +15,11 @@ import {
   emptyStateKind,
   excludeDelta,
   filterPrs,
+  headerCountLabel,
   hiddenAttentionCount,
+  hideApprovalsTitle,
   isBaselinePr,
+  isRevealChipShown,
   sourceFacetCount,
   prSignal,
   revealDelta,
@@ -25,10 +28,14 @@ import {
   type FilterState,
   type RoleFilter,
 } from "../../shared/pr-filter";
-import { groupKeyOf, groupLabel, type IssueGroupMode } from "../../shared/pr-group";
+import { groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
+import { hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
+import { ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
+import { Snowflakes } from "./components/Snowflakes";
 import {
   DEFAULT_TABLE_SORT,
-  clampPrColumnWidth,
+  parseColumnWidths,
+  type ColumnWidths,
   isTableSort,
   nextTableSort,
   sortForTable,
@@ -43,10 +50,13 @@ import {
   type ViewMode,
 } from "../../shared/view-mode";
 import type {
+  ClaudeSessionInfo,
   DashboardResponse,
+  HostError,
   JiraStatus,
   PublicConfig,
   PullRequest,
+  RateLimitInfo,
   UpdateStatus,
 } from "../../shared/types";
 
@@ -141,12 +151,12 @@ interface ViewPrefs {
    */
   tableSort: TableSort;
   /**
-   * The Cozy table's Pull-request column width in rem, or null for the elastic
-   * default (the column takes whatever the window has left over). Persisted
-   * because a dragged column width that resets on every launch is worse than
-   * not being draggable at all.
+   * The Cozy table's dragged column widths in rem; a column missing from the map
+   * has its default (the Pull-request column's default is elastic — it takes
+   * whatever the window has left over). Persisted because a dragged column
+   * width that resets on every launch is worse than not being draggable at all.
    */
-  tablePrWidthRem: number | null;
+  tableColumnWidths: ColumnWidths;
   groupBy: GroupMode;
   attentionOnly: boolean;
   failingOnly: boolean;
@@ -166,7 +176,7 @@ const DEFAULT_PREFS: ViewPrefs = {
   viewMode: DEFAULT_VIEW_MODE,
   sortBy: "action",
   tableSort: DEFAULT_TABLE_SORT,
-  tablePrWidthRem: null,
+  tableColumnWidths: {},
   groupBy: "repo",
   attentionOnly: false,
   failingOnly: false,
@@ -194,11 +204,12 @@ function loadPrefs(): ViewPrefs {
       // list with no way back to a working view.
       viewMode: isViewMode(p.viewMode) ? p.viewMode : DEFAULT_VIEW_MODE,
       tableSort: isTableSort(p.tableSort) ? p.tableSort : DEFAULT_TABLE_SORT,
-      // `clampPrColumnWidth` answers null for anything that isn't a real width,
-      // which is the elastic default — so a width saved on a 4K display can't
-      // come back as a column wider than a laptop screen, and a corrupt value
-      // can't come back as a zero-width column.
-      tablePrWidthRem: clampPrColumnWidth(p.tablePrWidthRem),
+      // `parseColumnWidths` clamps every width and drops anything that isn't
+      // one — so a width saved on a 4K display can't come back as a column
+      // wider than a laptop screen, and a corrupt value can't come back as a
+      // zero-width column. `tablePrWidthRem` is the pre-2.1 key, when only the
+      // Pull-request column could be dragged; its width carries over.
+      tableColumnWidths: parseColumnWidths(p.tableColumnWidths ?? { pr: p.tablePrWidthRem }),
       sortBy: oneOf(p.sortBy, ["action", "waiting", "active", "newest"] as const, "action"),
       groupBy: oneOf(p.groupBy, ["none", "repo", "issue", "parent"] as const, "repo"),
       attentionOnly: Boolean(p.attentionOnly),
@@ -227,6 +238,7 @@ export function App() {
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraStatus | null>(null);
+  const [claudeSessions, setClaudeSessions] = useState<ClaudeSessionInfo[]>([]);
   const [data, setData] = useState<DashboardResponse | null>(null);
   // Monotonic count of snapshots applied — the live-dot's remount key.
   const [beat, setBeat] = useState(0);
@@ -265,7 +277,7 @@ export function App() {
   // how the same rows are drawn, so `clearFilters` leaves them alone.
   const [viewMode, setViewMode] = useState<ViewMode>(boot.viewMode);
   const [tableSort, setTableSort] = useState<TableSort>(boot.tableSort);
-  const [tablePrWidthRem, setTablePrWidthRem] = useState<number | null>(boot.tablePrWidthRem);
+  const [tableColumnWidths, setTableColumnWidths] = useState<ColumnWidths>(boot.tableColumnWidths);
   const onTableSort = useCallback((key: TableColumnKey) => {
     setTableSort((current) => nextTableSort(current, key));
   }, []);
@@ -385,6 +397,26 @@ export function App() {
     };
   }, [loadInitial]);
 
+  // Running Claude sessions: main pushes changes while the window is visible
+  // and pushes nothing while it is hidden, so the list is pulled again on show.
+  useEffect(() => {
+    const off = window.api.onClaudeSessions(setClaudeSessions);
+    const load = () => {
+      window.api.getClaudeSessions().then(setClaudeSessions).catch(() => {});
+    };
+    const onWake = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    load();
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => {
+      off();
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+    };
+  }, []);
+
   // Tick to refresh relative times.
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 10000);
@@ -399,7 +431,7 @@ export function App() {
       viewMode,
       sortBy,
       tableSort,
-      tablePrWidthRem,
+      tableColumnWidths,
       groupBy,
       attentionOnly,
       failingOnly,
@@ -416,7 +448,7 @@ export function App() {
     viewMode,
     sortBy,
     tableSort,
-    tablePrWidthRem,
+    tableColumnWidths,
     groupBy,
     attentionOnly,
     failingOnly,
@@ -613,6 +645,14 @@ export function App() {
     }),
     [allPrs, filterState],
   );
+  const showDraftsChip = useMemo(
+    () => isRevealChipShown(allPrs, filterState, "drafts"),
+    [allPrs, filterState],
+  );
+  const showIgnoredChip = useMemo(
+    () => isRevealChipShown(allPrs, filterState, "ignored"),
+    [allPrs, filterState],
+  );
 
   // The role switch's four badges: how many rows each segment would leave, with
   // everything else still applied. One pass over the list, not four.
@@ -642,7 +682,9 @@ export function App() {
         arr.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
         break;
     }
-    return arr;
+    // A stack reads bottom-up wherever its first PR landed, so the PR GitHub
+    // will merge first is always the one on top of the run.
+    return orderStacks(arr);
   }, [filtered, sortBy, trackComments]);
 
   // The Cozy table's rows: the same filtered set, ordered by the active column
@@ -679,12 +721,15 @@ export function App() {
     // forest of one-card groups.
     //
     //  - "issue"  groups by the PR's own issue key (ENG-93374).
-    //  - "parent" groups by the parent task resolved from Jira (ENG-93367), so
-    //    the subtasks of one task sit together.
+    //  - "parent" groups by the Jira hierarchy (`parentGroupKeys`): the PRs of
+    //    a task's subtasks, of the task itself and of its epic sit together,
+    //    under the top key among them; a task with no parent still groups its
+    //    own PRs.
     // Which key and what the heading above it says are `shared/pr-group.ts` —
     // pure, and unit-tested there rather than eyeballed through the DOM.
     const mode: IssueGroupMode = groupBy === "parent" ? "parent" : "issue";
-    const keyOf = (p: PullRequest) => groupKeyOf(p, mode);
+    const parentKeys = mode === "parent" ? parentGroupKeys(sorted) : null;
+    const keyOf = (p: PullRequest) => (parentKeys ? (parentKeys.get(p.id) ?? null) : groupKeyOf(p, mode));
 
     const byKey = new Map<string, PullRequest[]>();
     for (const pr of sorted) {
@@ -730,6 +775,8 @@ export function App() {
   // (see `activeFilterCount`). It also decides which empty-state story we tell,
   // so it lives in `shared` where both promises are unit-tested.
   const activeFilters = useMemo(() => activeFilterCount(filterState), [filterState]);
+  // Same rule `activeFilterCount` applies: whitespace alone filters nothing.
+  const searchActive = search.trim() !== "";
 
   // What an empty list means. Only rendered while nothing is on screen, which is
   // what makes the `all-hidden` copy exact: with no narrowing filter active,
@@ -758,7 +805,6 @@ export function App() {
 
   const clearFilters = useCallback(() => {
     setSearch("");
-    setRole("all");
     setHost("all");
     setAttentionOnly(false);
     setFailingOnly(false);
@@ -792,78 +838,329 @@ export function App() {
   }
 
   return (
-    <div className="px-4 py-6">
+    <div className="px-4 pb-6">
       {/* Header */}
-      <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-line bg-canvas/85 px-4 pb-3 pt-1 backdrop-blur">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+      {/* No padding above the header in the page: the top gap lives INSIDE the
+          sticky header, so it already sits at top 0 and doesn't shift up by
+          that gap on the first pixels of scrolling before it sticks. */}
+      <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-line bg-canvas/85 px-4 pb-3 pt-2 backdrop-blur">
+        <div className="relative flex flex-wrap items-center justify-between gap-3">
+          <Snowflakes />
           <div className="flex items-center gap-3">
             <Buddy mood={buddyMood} />
             <div>
               <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
               <p className="text-xs text-fg-subtle">
-                {stats.total} PRs · {stats.attention} need attention · {stats.failing} failing CI
-                {trackComments && ` · ${stats.fresh} with new comments`}
+                {/* Only what the filter chips can't say. The attention / failing /
+                    new-comments totals used to sit here too, counted over every PR
+                    while the chips count within the current role — two numbers
+                    for one name, which read as a bug. The wording rules (when
+                    "of" is true) live in `headerCountLabel`. */}
+                {headerCountLabel(filtered, stats.total)}
+                {/* No chip covers "back to you", so it stays. */}
                 {stats.returned > 0 && ` · ${stats.returned} back to you`}
-                {/* The stats describe the standing workload, so say so whenever the
-                    rendered SET differs — otherwise "0 PRs" above two revealed
-                    cards reads as a bug. Equal counts aren't equal sets: one
-                    baseline PR filtered out and one revealed draft in its place
-                    would tie, so a rendered row outside the baseline is its own
-                    trigger. */}
-                {(filtered.length !== stats.total || filtered.some((p) => !isBaselinePr(p))) &&
-                  ` · ${filtered.length} shown`}
               </p>
             </div>
           </div>
-          {/* The display-variant switch sits in the header's middle gap — the
-              empty space `justify-between` leaves between the title block and
-              the Refresh / Settings buttons. It is a view control, not a filter,
-              so it belongs up here with Refresh rather than in the Filters row. */}
-          <ViewSwitch value={viewMode} onChange={setViewMode} />
           <div className="flex items-center gap-2 text-xs text-fg-muted">
-            {data?.rateLimits?.map((rl) => (
-              <span
-                key={rl.hostLabel}
-                title={`Resets: ${rl.resetAt ? new Date(rl.resetAt).toLocaleTimeString() : "—"}`}
-                className="flex items-center gap-1.5 rounded bg-elevated px-2 py-1"
-              >
-                {rl.hostLabel}: {rl.remaining}
-                <span className="text-fg-faint">·</span>
-                {rl.fetchedAt && <span className="text-fg-subtle">{relativeTime(rl.fetchedAt)}</span>}
-              </span>
-            ))}
-            {data && (
-              // One finite blink per incoming snapshot: `beat` remounts the node,
-              // the same monotonic-counter trick Buddy uses for its mood
-              // animations (`animationRun`). It used to carry Tailwind's
-              // `animate-pulse`, whose `infinite` keyframes kept the compositor
-              // producing frames around the clock: ~33% CPU in the GPU helper
-              // permanently, even with the window hidden.
-              <span
-                key={beat}
-                className="live-beat inline-block h-2 w-2 rounded-full bg-emerald-500"
-                title="Live — blinks when new data arrives"
+            {/* The display-variant switch sits with Refresh: it is a view control,
+                not a filter, and alone in the header's middle gap it read as
+                floating. */}
+            <ViewSwitch value={viewMode} onChange={setViewMode} />
+            {/* One pill per host, and with two or more hosts the pills ARE the
+                host filter (the "All hosts" dropdown they replaced repeated the
+                same two names one row lower). The budget number and fetch time
+                moved into the tooltip; the dot says what they meant. */}
+            {config?.hosts.map((h) => (
+              <HostPill
+                key={h.label}
+                label={h.label}
+                rateLimit={data?.rateLimits?.find((rl) => rl.hostLabel === h.label)}
+                error={data?.errors?.find((e) => e.hostLabel === h.label)}
+                beat={beat}
+                active={host === h.label}
+                onClick={
+                  config.hosts.length > 1
+                    ? () => setHost((cur) => (cur === h.label ? "all" : h.label))
+                    : undefined
+                }
               />
-            )}
+            ))}
             <button
               type="button"
               onClick={refresh}
               disabled={loading}
-              className="rounded-md border border-line-strong px-3 py-1 font-medium text-fg-secondary hover:bg-elevated disabled:opacity-50"
+              aria-busy={loading}
+              title={loading ? "Refreshing…" : "Refresh now"}
+              // The same glass as the filter chips: the old bare outline on the
+              // canvas read as a disabled button.
+              className={cn(
+                "inline-flex items-center gap-1 rounded-md border px-3 py-1 font-medium",
+                GLASS_BASE,
+                GLASS_IDLE,
+                "text-fg-secondary disabled:opacity-70",
+              )}
             >
-              {loading ? "Refreshing…" : "↻ Refresh"}
+              {/* The icon spins while the poll runs instead of the label
+                  changing, so the button keeps its width. `.refresh-spin` is a
+                  FINITE animation (see styles.css) and the class goes away when
+                  the poll ends. */}
+              <span aria-hidden className={cn("inline-block leading-none", loading && "refresh-spin")}>
+                ↻
+              </span>
+              Refresh
             </button>
             <button
               type="button"
               onClick={() => setView("settings")}
               title="Settings"
               aria-label="Settings"
-              className="inline-flex items-center rounded-md border border-line-strong px-2 py-1 text-fg-secondary hover:bg-elevated"
+              className={cn("inline-flex items-center rounded-md border px-2 py-1", GLASS_BASE, GLASS_IDLE, "text-fg-secondary")}
             >
               <GearIcon />
             </button>
           </div>
         </div>
+        {/* Toolbar: view controls (row 1) and filters (row 2). Inside the sticky
+            header so the filters stay on screen while the list scrolls. */}
+        {!configError && (
+          <div className="mt-3 space-y-2 border-t border-line pt-3">
+            {/* Row 1 — search + how the list is viewed (sort / group / scope). */}
+            <div className="flex flex-wrap items-center gap-2">
+              {/* A typed query hides rows as quietly as any chip, but unlike a chip
+                  it has no lit state of its own — so the box turns red while it
+                  narrows the list, and its ✕ stays put. Chromium's native cancel
+                  button shows only on hover/focus, hence our own (styles.css hides
+                  the native one). */}
+              <div className="relative min-w-[14rem] flex-1">
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search by title, repo, author…"
+                  className={cn(
+                    "w-full rounded-md border bg-surface py-1.5 pl-3 pr-8 text-sm text-fg placeholder:text-fg-faint focus:outline-none",
+                    searchActive
+                      ? "border-red-500 bg-red-500/10 ring-1 ring-red-500/60 focus:border-red-500"
+                      : "border-line-strong focus:border-sky-600",
+                  )}
+                />
+                {search !== "" && (
+                  <button
+                    type="button"
+                    onClick={() => setSearch("")}
+                    aria-label="Clear search"
+                    title="Clear search"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 rounded px-1.5 text-sm leading-6 text-fg-muted hover:bg-elevated hover:text-fg"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              {/* Role is one exclusive choice, so it is a segmented switch rather
+                  than chips: four buttons in one bordered group read as "pick one"
+                  where separate chips would read as "combine these". It was a
+                  <select> until the two clicks and the hidden labels made the one
+                  filter you flip most often the slowest one to reach. */}
+              <div
+                role="group"
+                aria-label="Role filter"
+                // Styled like the header's ViewSwitch (a sunken track, the active
+                // segment a raised surface), so the app's two segmented switches
+                // read as one control type.
+                className="inline-flex items-center gap-0.5 rounded-lg border border-line-strong bg-elevated p-0.5"
+              >
+                {ROLE_FILTERS.map((key) => {
+                  const active = role === key;
+                  const count = roleCounts[key];
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      // Clicking the active segment goes back to `all`, so the
+                      // switch is never a choice you can't undo from itself.
+                      onClick={() => setRole(active && key !== "all" ? "all" : key)}
+                      title={ROLE_FILTER_TITLES[key]}
+                      aria-label={ROLE_FILTER_TITLES[key]}
+                      aria-pressed={active}
+                      className={cn(
+                        "rounded-md px-2.5 py-1 text-sm transition-colors",
+                        active
+                          ? "bg-surface font-medium text-fg shadow-sm"
+                          : "text-fg-muted hover:bg-surface/60 hover:text-fg-secondary",
+                        count === 0 && !active && "opacity-50",
+                      )}
+                    >
+                      {ROLE_FILTER_LABELS[key]}{" "}
+                      <span className={active ? "text-fg-muted" : "text-fg-faint"}>
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Both view controls are disabled in Cozy rather than hidden: the
+                  table owns the ordering (its column headers) and is flat, and a
+                  control that vanished would read as a bug, where a disabled one
+                  with a title says which thing took it over. */}
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as SortKey)}
+                disabled={!usesListSort(viewMode)}
+                title={
+                  usesListSort(viewMode)
+                    ? "Sort order"
+                    : "In Cozy the column headers set the sort order"
+                }
+                aria-label="Sort order"
+                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
+              >
+                {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
+                  <option key={k} value={k}>
+                    Sort: {SORT_LABELS[k]}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={groupBy}
+                onChange={(e) => setGroupBy(e.target.value as GroupMode)}
+                disabled={!supportsGrouping(viewMode)}
+                title={
+                  supportsGrouping(viewMode) ? "Grouping" : "Cozy is one flat table — no grouping"
+                }
+                aria-label="Grouping"
+                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
+              >
+                <option value="none">No grouping</option>
+                <option value="repo">Group by repo</option>
+                <option value="issue">Group by issue</option>
+                {jiraStatus?.configured && <option value="parent">Group by parent task</option>}
+              </select>
+
+              {groups && groups.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCollapsed(allCollapsed ? new Set() : new Set(groups.map((g) => g.key)))
+                  }
+                  title={allCollapsed ? "Expand all groups" : "Collapse all groups"}
+                  aria-label={allCollapsed ? "Expand all groups" : "Collapse all groups"}
+                  className="inline-flex items-center rounded-md border border-line-strong bg-surface px-2.5 py-2 text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
+                >
+                  <FoldIcon expand={allCollapsed} />
+                </button>
+              )}
+            </div>
+
+            {/* Row 2 — the source chips, then what applies on top of them. */}
+            <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
+              <span className="mr-0.5 text-xs font-medium uppercase tracking-wide text-fg-muted">
+                Filters
+              </span>
+              {/* Three groups, separated by a hairline: the five OR-ed source chips,
+                  then the one chip that removes rows, then the two reveal chips.
+                  The source chips always render. A reveal chip goes only while it
+                  is OFF and its category, measured without the other reveal chip,
+                  has nothing to add (`isRevealChipShown`) — so clicking one reveal
+                  chip never adds or removes the other. An ON one always stays, so
+                  a persisted reveal can't hide as an invisible active filter; the
+                  one click that does reflow the row is switching such a chip off
+                  over an empty category, which is the chip leaving on purpose. */}
+              <FilterChip
+                active={attentionOnly}
+                count={chipCounts.attention}
+                onClick={() => setAttentionOnly((v) => !v)}
+                tone="amber"
+              >
+                ⚠ Needs attention
+              </FilterChip>
+              <FilterChip
+                active={failingOnly}
+                count={chipCounts.failing}
+                onClick={() => setFailingOnly((v) => !v)}
+                tone="red"
+              >
+                ✗ Failing CI
+              </FilterChip>
+              {/* The one chip that can be absent: with `trackComments` off there is
+                  no comment channel to filter on, so the chip is removed rather
+                  than left at a permanent 0. */}
+              {trackComments && (
+                <FilterChip
+                  active={newOnly}
+                  count={chipCounts.fresh}
+                  onClick={() => setNewOnly((v) => !v)}
+                  tone="violet"
+                >
+                  ✦ New comments
+                </FilterChip>
+              )}
+              <FilterChip
+                active={mergeableOnly}
+                count={chipCounts.mergeable}
+                onClick={() => setMergeableOnly((v) => !v)}
+                tone="green"
+              >
+                ✔ Ready to merge
+              </FilterChip>
+              <FilterChip
+                active={noReviewsOnly}
+                count={chipCounts.noReviews}
+                onClick={() => setNoReviewsOnly((v) => !v)}
+              >
+                ◷ No reviews yet
+              </FilterChip>
+              <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
+              {/* The one chip that REMOVES rows: PRs you approved and that aren't
+                  asking for you again. Its count is the rows it hides (or would),
+                  dropped at 0 so "(0)" doesn't read as "hides everything". */}
+              <FilterChip
+                active={hideApproved}
+                count={chipCounts.approved}
+                showCount={chipCounts.approved > 0}
+                title={hideApprovalsTitle(hideApproved, chipCounts.approved)}
+                onClick={() => setHideApproved((v) => !v)}
+                tone="green"
+              >
+                ✓ Hide my approvals
+              </FilterChip>
+              {(showDraftsChip || showIgnoredChip) && (
+                <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
+              )}
+              {showDraftsChip && (
+                <FilterChip
+                  active={showDrafts}
+                  count={chipCounts.drafts}
+                  onClick={() => setShowDrafts((v) => !v)}
+                >
+                  Drafts
+                </FilterChip>
+              )}
+              {showIgnoredChip && (
+                <FilterChip
+                  active={showIgnored}
+                  count={chipCounts.ignored}
+                  onClick={() => setShowIgnored((v) => !v)}
+                >
+                  Ignored
+                </FilterChip>
+              )}
+              {activeFilters > 0 && (
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  title="Resets the filters that hide rows. Drafts and Ignored stay as they are: they add rows, so clearing them would shrink the list."
+                  className="ml-auto rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
+                >
+                  ✕ Clear filters ({activeFilters})
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </header>
 
       {/* Config error */}
@@ -884,14 +1181,29 @@ export function App() {
       )}
 
       {/* Per-host errors */}
-      {data?.errors?.map((e) => (
-        <div
-          key={e.hostLabel}
-          className="mb-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/30 dark:text-red-200"
-        >
-          <span className="font-semibold">{e.hostLabel}:</span> {e.message}
-        </div>
-      ))}
+      {/* A spent GraphQL budget is a wait, not a failure: the account's budget is
+          shared with every gh client, the PRs below are the last good fetch, and
+          the poller fetches again right after the reset — so amber, with the time. */}
+      {data?.errors?.map((e) =>
+        e.rateLimitedUntil !== undefined ? (
+          <div
+            key={e.hostLabel}
+            className="mb-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-600/40 dark:bg-amber-950/30 dark:text-amber-200"
+          >
+            <span className="font-semibold">{e.hostLabel}:</span> {e.message}{" "}
+            {e.rateLimitedUntil
+              ? `Next update at ${new Date(e.rateLimitedUntil).toLocaleTimeString()}, showing the last fetched data.`
+              : "Showing the last fetched data."}
+          </div>
+        ) : (
+          <div
+            key={e.hostLabel}
+            className="mb-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/30 dark:text-red-200"
+          >
+            <span className="font-semibold">{e.hostLabel}:</span> {e.message}
+          </div>
+        ),
+      )}
 
       {/* Jira parent-enrichment health — explain a failed/empty pass rather than
           leaving "Group by parent task" silently empty. */}
@@ -908,227 +1220,6 @@ export function App() {
         </div>
       )}
 
-      {/* Toolbar: view controls (row 1) and filters (row 2), visually separated. */}
-      {!configError && (
-        <div className="mb-4 space-y-2">
-          {/* Row 1 — search + how the list is viewed (sort / group / scope). */}
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by title, repo, author…"
-              className="min-w-[14rem] flex-1 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none"
-            />
-
-            {/* Role is one exclusive choice, so it is a segmented switch rather
-                than chips: four buttons in one bordered group read as "pick one"
-                where separate chips would read as "combine these". It was a
-                <select> until the two clicks and the hidden labels made the one
-                filter you flip most often the slowest one to reach. */}
-            <div
-              role="group"
-              aria-label="Role filter"
-              className="inline-flex overflow-hidden rounded-md border border-line-strong"
-            >
-              {ROLE_FILTERS.map((key, i) => {
-                const active = role === key;
-                const count = roleCounts[key];
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    // Clicking the active segment goes back to `all`, so the
-                    // switch is never a choice you can't undo from itself.
-                    onClick={() => setRole(active && key !== "all" ? "all" : key)}
-                    title={ROLE_FILTER_TITLES[key]}
-                    aria-label={ROLE_FILTER_TITLES[key]}
-                    aria-pressed={active}
-                    className={cn(
-                      "px-3 py-1.5 text-sm transition-colors",
-                      i > 0 && "border-l border-line",
-                      // A separate constant, not CHIP_TONE_ACTIVE.sky: that one
-                      // carries its own border and `cn` is a plain join, so the
-                      // group's border would end up fighting the segment's.
-                      // Stronger than a chip's `/15` fill and bolder: a chip
-                      // carries its own border to mark itself active, a segment
-                      // sits inside the group's border and has only the fill.
-                      active
-                        ? "bg-sky-500/30 font-medium text-sky-800 dark:text-sky-100"
-                        : "bg-surface text-fg-muted hover:bg-elevated",
-                      count === 0 && !active && "opacity-50",
-                    )}
-                  >
-                    {ROLE_FILTER_LABELS[key]}{" "}
-                    <span className={active ? "text-sky-800/70 dark:text-sky-100/70" : "text-fg-faint"}>
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Both view controls are disabled in Cozy rather than hidden: the
-                table owns the ordering (its column headers) and is flat, and a
-                control that vanished would read as a bug, where a disabled one
-                with a title says which thing took it over. */}
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as SortKey)}
-              disabled={!usesListSort(viewMode)}
-              title={
-                usesListSort(viewMode)
-                  ? "Sort order"
-                  : "In Cozy the column headers set the sort order"
-              }
-              aria-label="Sort order"
-              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
-            >
-              {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
-                <option key={k} value={k}>
-                  Sort: {SORT_LABELS[k]}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={groupBy}
-              onChange={(e) => setGroupBy(e.target.value as GroupMode)}
-              disabled={!supportsGrouping(viewMode)}
-              title={
-                supportsGrouping(viewMode) ? "Grouping" : "Cozy is one flat table — no grouping"
-              }
-              aria-label="Grouping"
-              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
-            >
-              <option value="none">No grouping</option>
-              <option value="repo">Group by repo</option>
-              <option value="issue">Group by issue</option>
-              {jiraStatus?.configured && <option value="parent">Group by parent task</option>}
-            </select>
-
-            {config && config.hosts.length > 1 && (
-              <select
-                value={host}
-                onChange={(e) => setHost(e.target.value)}
-                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary"
-              >
-                <option value="all">All hosts</option>
-                {config.hosts.map((h) => (
-                  <option key={h.label} value={h.label}>
-                    {h.label}
-                  </option>
-                ))}
-              </select>
-            )}
-
-            {groups && groups.length > 0 && (
-              <button
-                type="button"
-                onClick={() =>
-                  setCollapsed(allCollapsed ? new Set() : new Set(groups.map((g) => g.key)))
-                }
-                title={allCollapsed ? "Expand all groups" : "Collapse all groups"}
-                aria-label={allCollapsed ? "Expand all groups" : "Collapse all groups"}
-                className="inline-flex items-center rounded-md border border-line-strong bg-surface px-2.5 py-2 text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
-              >
-                <FoldIcon expand={allCollapsed} />
-              </button>
-            )}
-          </div>
-
-          {/* Row 2 — the source chips, then what applies on top of them. */}
-          <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
-            <span className="mr-0.5 text-xs font-medium uppercase tracking-wide text-fg-muted">
-              Filters
-            </span>
-            {/* Three groups, separated by a hairline: the five OR-ed source chips,
-                then the one chip that removes rows, then the two reveal chips.
-                Every chip always renders, so the row never reflows under the
-                cursor and a persisted reveal can't hide as an invisible active
-                filter. */}
-            <FilterChip
-              active={attentionOnly}
-              count={chipCounts.attention}
-              onClick={() => setAttentionOnly((v) => !v)}
-              tone="amber"
-            >
-              ⚠ Needs attention
-            </FilterChip>
-            <FilterChip
-              active={failingOnly}
-              count={chipCounts.failing}
-              onClick={() => setFailingOnly((v) => !v)}
-              tone="red"
-            >
-              ✗ Failing CI
-            </FilterChip>
-            {/* The one chip that can be absent: with `trackComments` off there is
-                no comment channel to filter on, so the chip is removed rather
-                than left at a permanent 0. */}
-            {trackComments && (
-              <FilterChip
-                active={newOnly}
-                count={chipCounts.fresh}
-                onClick={() => setNewOnly((v) => !v)}
-                tone="violet"
-              >
-                ✦ New comments
-              </FilterChip>
-            )}
-            <FilterChip
-              active={mergeableOnly}
-              count={chipCounts.mergeable}
-              onClick={() => setMergeableOnly((v) => !v)}
-              tone="green"
-            >
-              ✔ Ready to merge
-            </FilterChip>
-            <FilterChip
-              active={noReviewsOnly}
-              count={chipCounts.noReviews}
-              onClick={() => setNoReviewsOnly((v) => !v)}
-            >
-              ◷ No reviews yet
-            </FilterChip>
-            <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
-            {/* The one chip that REMOVES rows: PRs you approved and that aren't
-                asking for you again. Its count is what the click takes away. */}
-            <FilterChip
-              active={hideApproved}
-              count={chipCounts.approved}
-              onClick={() => setHideApproved((v) => !v)}
-              tone="green"
-            >
-              ✓ Hide my approvals
-            </FilterChip>
-            <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
-            <FilterChip
-              active={showDrafts}
-              count={chipCounts.drafts}
-              onClick={() => setShowDrafts((v) => !v)}
-            >
-              Drafts
-            </FilterChip>
-            <FilterChip
-              active={showIgnored}
-              count={chipCounts.ignored}
-              onClick={() => setShowIgnored((v) => !v)}
-            >
-              Ignored
-            </FilterChip>
-            {activeFilters > 0 && (
-              <button
-                type="button"
-                onClick={clearFilters}
-                className="ml-auto rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-muted transition-colors hover:bg-elevated hover:text-fg-secondary"
-              >
-                ✕ Clear filters ({activeFilters})
-              </button>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* No hosts configured yet — guide to Settings. */}
       {!configError && noHosts && (
@@ -1155,14 +1246,16 @@ export function App() {
         <div className="p-8 text-center text-sm text-fg-subtle">Loading…</div>
       )}
 
+      <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
+      <ClaudeSessionsContext.Provider value={claudeSessions}>
       {viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable
             prs={tableRows}
             sort={tableSort}
             onSort={onTableSort}
-            prWidthRem={tablePrWidthRem}
-            onPrWidthChange={setTablePrWidthRem}
+            columnWidths={tableColumnWidths}
+            onColumnWidthsChange={setTableColumnWidths}
             jiraBaseUrl={jiraStatus?.baseUrl ?? null}
             trackComments={trackComments}
             onOpen={openPr}
@@ -1232,6 +1325,8 @@ export function App() {
           onToggleIgnore={toggleIgnore}
         />
       )}
+      </ClaudeSessionsContext.Provider>
+      </ClaudeEnabledContext.Provider>
 
       <div className="pointer-events-none fixed bottom-2 right-3 z-10 flex items-center gap-2 text-[11px]">
         {whatsNew && (
@@ -1242,26 +1337,36 @@ export function App() {
               window.api.dismissWhatsNew().catch(() => {});
               setWhatsNew(null);
             }}
-            className="pointer-events-auto rounded-md border border-sky-500/50 bg-sky-500/15 px-2 py-0.5 font-medium text-sky-600 transition-colors hover:bg-sky-500/25 dark:text-sky-300"
+            // Opaque: it floats over the list, and a translucent fill let the
+            // rows underneath show through the label.
+            className="pointer-events-auto rounded-md border border-sky-500/60 bg-sky-50 px-2 py-0.5 font-medium text-sky-700 shadow-md transition-colors hover:bg-sky-100 dark:bg-sky-950 dark:text-sky-200 dark:hover:bg-sky-900"
           >
             What&apos;s new in v{whatsNew.version}
           </button>
         )}
         {updateStatus?.state === "downloading" && (
-          <span className="text-fg-faint">
+          <span className={FLOATING_PILL}>
             Downloading v{updateStatus.version}… {updateStatus.percent}%
           </span>
         )}
         {updateStatus?.state === "downloaded" && (
-          <span className="text-fg-faint">Restarting to install v{updateStatus.version}…</span>
+          <span className={FLOATING_PILL}>Restarting to install v{updateStatus.version}…</span>
         )}
-        {data?.version && (
-          <span className="text-fg-faint">v{data.version}</span>
-        )}
+        {/* The What's new button already names the version, so the bare one
+            shows only without it. */}
+        {data?.version && !whatsNew && <span className={FLOATING_PILL}>v{data.version}</span>}
       </div>
     </div>
   );
 }
+
+/**
+ * The bottom-right status labels (version, update progress): framed and opaque,
+ * since they float over the list and a bare translucent label let the rows
+ * underneath show through it.
+ */
+const FLOATING_PILL =
+  "rounded-md border border-line-strong bg-surface px-2 py-0.5 text-fg-muted shadow-md";
 
 /**
  * A grid of PRs in the current card size — Roomy's full cards or Compact's
@@ -1421,15 +1526,36 @@ const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
  * competing `hover:bg-*` rules would be resolved by stylesheet order, not by
  * which one we meant.
  */
+/**
+ * A light glass look shared by the filter chips and the header buttons: a
+ * translucent top-lit fill over a blur, an inner highlight on the top edge and
+ * a soft drop shadow. Static only — the blur is free at rest but multiplies the
+ * cost of anything animating beneath it (see AGENTS.md), so nothing styled with
+ * it may animate except a short, finite icon spin.
+ */
+const GLASS_BASE =
+  "backdrop-blur-md transition-colors shadow-[inset_0_1px_0_rgb(255_255_255/0.14),0_1px_3px_rgb(0_0_0/0.12)]";
+/**
+ * The glass fill of a button that isn't lit — a chip that is off, or Refresh /
+ * Settings. No text colour here: `cn` is a plain join, so the caller's would
+ * fight it on stylesheet order.
+ */
+const GLASS_IDLE =
+  "border-line-strong/70 bg-gradient-to-b from-surface/90 to-surface/40 hover:from-elevated/90 hover:to-elevated/50";
+
 function FilterChip({
   active,
   count,
+  showCount = true,
+  title,
   onClick,
   children,
   tone = "sky",
 }: {
   active: boolean;
   count: number;
+  showCount?: boolean;
+  title?: string;
   onClick: () => void;
   children: React.ReactNode;
   tone?: ChipTone;
@@ -1439,15 +1565,93 @@ function FilterChip({
     <button
       type="button"
       onClick={onClick}
+      title={title}
       className={cn(
-        "rounded-md border px-3 py-1.5 text-sm transition-colors",
-        active
-          ? CHIP_TONE_ACTIVE[tone]
-          : "border-line-strong bg-surface text-fg-muted hover:bg-elevated",
+        "rounded-md border px-3 py-1.5 text-sm",
+        GLASS_BASE,
+        active ? CHIP_TONE_ACTIVE[tone] : cn(GLASS_IDLE, "text-fg-muted"),
         empty && !active && "opacity-50",
       )}
     >
-      {children} ({count})
+      {children}
+      {showCount && ` (${count})`}
+    </button>
+  );
+}
+
+const HOST_DOT: Record<HostHealth, string> = {
+  ok: "bg-emerald-500",
+  limited: "bg-amber-500",
+  error: "bg-red-500",
+  unknown: "bg-fg-faint",
+};
+
+const HOST_HEALTH_TEXT: Record<HostHealth, string> = {
+  ok: "Live",
+  limited: "Rate-limited or low on GraphQL budget",
+  error: "Last fetch failed",
+  unknown: "Not fetched yet",
+};
+
+/**
+ * A host's status pill: its label and a dot coloured by `hostHealth`. With
+ * `onClick` it is also that host's filter toggle and lights up like a chip while
+ * on; without it (a single host) it only reports status.
+ */
+function HostPill({
+  label,
+  rateLimit,
+  error,
+  beat,
+  active,
+  onClick,
+}: {
+  label: string;
+  rateLimit: RateLimitInfo | undefined;
+  error: HostError | undefined;
+  beat: number;
+  active: boolean;
+  onClick: (() => void) | undefined;
+}) {
+  const health = hostHealth(rateLimit, error);
+  const title = [
+    `${label}: ${HOST_HEALTH_TEXT[health]}`,
+    rateLimit?.fetchedAt && `Updated ${relativeTime(rateLimit.fetchedAt)}`,
+    // No budget line for a host that reported none — "0 points" would be false.
+    rateLimit &&
+      hasBudgetReading(rateLimit) &&
+      `GraphQL budget left this hour: ${rateLimit.remaining}${rateLimit.limit ? ` of ${rateLimit.limit}` : ""} points, resets at ${rateLimit.resetAt ? new Date(rateLimit.resetAt).toLocaleTimeString() : "—"}`,
+    onClick && (active ? "Click to show every host" : `Click to show only ${label}`),
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const body = (
+    <>
+      {label}
+      {/* One finite blink per incoming snapshot: `beat` remounts the dot, the
+          same monotonic-counter trick Buddy uses for its mood animations. The
+          live dot this replaced once carried Tailwind's `animate-pulse`, whose
+          `infinite` keyframes kept the GPU helper at ~33% CPU permanently. */}
+      <span key={beat} aria-hidden className={cn("live-beat inline-block h-2 w-2 rounded-full", HOST_DOT[health])} />
+    </>
+  );
+  const shape = "inline-flex items-center gap-1.5 rounded-md border px-2 py-1";
+  if (!onClick) {
+    return (
+      <span title={title} className={cn(shape, "border-transparent bg-elevated")}>
+        {body}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-pressed={active}
+      className={cn(shape, GLASS_BASE, active ? CHIP_TONE_ACTIVE.sky : cn(GLASS_IDLE, "text-fg-secondary"))}
+    >
+      {body}
     </button>
   );
 }
