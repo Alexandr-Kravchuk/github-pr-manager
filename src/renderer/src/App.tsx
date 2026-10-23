@@ -15,6 +15,7 @@ import {
   emptyStateKind,
   excludeDelta,
   filterPrs,
+  headerCountLabel,
   hiddenAttentionCount,
   isBaselinePr,
   sourceFacetCount,
@@ -26,7 +27,7 @@ import {
   type RoleFilter,
 } from "../../shared/pr-filter";
 import { groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
-import { hostHealth, type HostHealth } from "../../shared/host-status";
+import { hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
 import { ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
@@ -843,14 +844,9 @@ export function App() {
                 {/* Only what the filter chips can't say. The attention / failing /
                     new-comments totals used to sit here too, counted over every PR
                     while the chips count within the current role — two numbers
-                    for one name, which read as a bug. The total is the standing
-                    workload, so "N of M shown" whenever the rendered SET differs.
-                    Equal counts aren't equal sets: one baseline PR filtered out
-                    and one revealed draft in its place would tie, so a rendered
-                    row outside the baseline is its own trigger. */}
-                {filtered.length !== stats.total || filtered.some((p) => !isBaselinePr(p))
-                  ? `${filtered.length} of ${stats.total} shown`
-                  : `${stats.total} PRs`}
+                    for one name, which read as a bug. The wording rules (when
+                    "of" is true) live in `headerCountLabel`. */}
+                {headerCountLabel(filtered, stats.total)}
                 {/* No chip covers "back to you", so it stays. */}
                 {stats.returned > 0 && ` · ${stats.returned} back to you`}
               </p>
@@ -1591,7 +1587,9 @@ function HostPill({
   const title = [
     `${label}: ${HOST_HEALTH_TEXT[health]}`,
     rateLimit?.fetchedAt && `Updated ${relativeTime(rateLimit.fetchedAt)}`,
+    // No budget line for a host that reported none — "0 points" would be false.
     rateLimit &&
+      hasBudgetReading(rateLimit) &&
       `GraphQL budget left this hour: ${rateLimit.remaining}${rateLimit.limit ? ` of ${rateLimit.limit}` : ""} points, resets at ${rateLimit.resetAt ? new Date(rateLimit.resetAt).toLocaleTimeString() : "—"}`,
     onClick && (active ? "Click to show every host" : `Click to show only ${label}`),
   ]

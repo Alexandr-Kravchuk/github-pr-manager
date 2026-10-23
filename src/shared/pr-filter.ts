@@ -127,7 +127,7 @@ export const REVEAL_FLAG: Record<RevealKey, "showDrafts" | "showIgnored"> = {
 
 /**
  * The standing workload: PRs that are neither ignored nor drafts. The single
- * definition behind `baselineStats`, the header's `· N shown` reconciliation and
+ * definition behind `baselineStats`, the header's `headerCountLabel` and
  * the mascot's mood, so those three can't drift apart.
  */
 export function isBaselinePr(pr: Pick<PullRequest, "isDraft" | "isIgnored">): boolean {
@@ -302,7 +302,7 @@ export interface BaselineStats {
  * The header stats, over the PRs that are neither ignored nor drafts — the same
  * base `buddyMood` reads, so the mascot and the numbers can't disagree.
  * Deliberately independent of the filters: it answers "how much work is there",
- * not "what's on screen" (the `N of M shown` wording covers the latter). Only
+ * not "what's on screen" (`headerCountLabel` covers the latter). Only
  * the two numbers no filter chip shows: the attention / failing / new-comments
  * totals lived here too, and next to the chips' role-scoped counts for the same
  * names they read as a bug.
@@ -315,6 +315,23 @@ export function baselineStats(
     total: base.length,
     returned: base.filter((pr) => pr.returnedToMe).length,
   };
+}
+
+/**
+ * The header's count: `M PRs` while the rendered rows ARE the standing workload,
+ * `N of M shown` while they are a strict subset of it. "of" claims containment,
+ * so it is only said when it holds: a reveal chip ADDS drafts / ignored PRs on
+ * top of the baseline, and "13 of 10 shown" read as a bug. With revealed rows on
+ * screen the two numbers are given side by side instead. Equal counts aren't
+ * equal sets either — one baseline PR filtered out and one draft revealed in its
+ * place tie — which is why the revealed-row check comes first.
+ */
+export function headerCountLabel(
+  rendered: readonly Pick<PullRequest, "isDraft" | "isIgnored">[],
+  total: number,
+): string {
+  if (rendered.some((pr) => !isBaselinePr(pr))) return `${total} PRs · ${rendered.length} shown`;
+  return rendered.length === total ? `${total} PRs` : `${rendered.length} of ${total} shown`;
 }
 
 /**

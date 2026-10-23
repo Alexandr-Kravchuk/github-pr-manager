@@ -3178,10 +3178,29 @@ test("baselineStats: all-hidden inbox reports zero, matching the header", () =>
     returned: 0,
   }));
 
+// --- pr-filter: headerCountLabel --------------------------------------------
+{
+  const pr = (isDraft = false, isIgnored = false) => ({ isDraft, isIgnored });
+  test("headerCountLabel: the whole baseline on screen is just the total", () =>
+    assert.strictEqual(prFilter.headerCountLabel([pr(), pr()], 2), "2 PRs"));
+  test("headerCountLabel: a filtered subset of the baseline says 'N of M shown'", () =>
+    assert.strictEqual(prFilter.headerCountLabel([pr()], 3), "1 of 3 shown"));
+  test("headerCountLabel: revealed drafts never produce 'of' — they are not part of M", () => {
+    // 10 baseline + 3 drafts with Drafts on: "13 of 10 shown" was the bug.
+    const rendered = [...Array(10)].map(() => pr()).concat([pr(true), pr(true), pr(true)]);
+    assert.strictEqual(prFilter.headerCountLabel(rendered, 10), "10 PRs · 13 shown");
+    assert.strictEqual(prFilter.headerCountLabel([pr(true), pr(false, true)], 0), "0 PRs · 2 shown");
+  });
+  test("headerCountLabel: equal counts with a revealed row swapped in still say so", () =>
+    assert.strictEqual(prFilter.headerCountLabel([pr(), pr(true)], 2), "2 PRs · 2 shown"));
+  test("headerCountLabel: an empty inbox is '0 PRs'", () =>
+    assert.strictEqual(prFilter.headerCountLabel([], 0), "0 PRs"));
+}
+
 // --- host-status: the header host pill's dot -------------------------------
 {
   const hs = require(path.join(__dirname, "../dist/main/shared/host-status.js"));
-  const rl = (remaining, limit) => ({ remaining, limit });
+  const rl = (remaining, limit, resetAt = "2026-10-23T12:00:00Z") => ({ remaining, limit, resetAt });
   test("hostHealth: plain fetch error is red even with a reading", () =>
     assert.strictEqual(hs.hostHealth(rl(4900, 5000), { message: "boom" }), "error"));
   test("hostHealth: a spent-budget refusal is amber, with or without a reset time", () => {
@@ -3198,6 +3217,19 @@ test("baselineStats: all-hidden inbox reports zero, matching the header", () =>
   test("hostHealth: without a reported limit the floor is 500 points", () => {
     assert.strictEqual(hs.hostHealth(rl(499, undefined), undefined), "limited");
     assert.strictEqual(hs.hostHealth(rl(500, undefined), undefined), "ok");
+  });
+  test("hostHealth: a limit of 0 falls back to the 500-point floor", () => {
+    assert.strictEqual(hs.hostHealth(rl(499, 0), undefined), "limited");
+    assert.strictEqual(hs.hostHealth(rl(500, 0), undefined), "ok");
+  });
+  // A host whose responses carried no `rateLimit` (GHES with rate limiting off):
+  // fetchHost still returns remaining 0 / no limit / resetAt "". That is "no
+  // budget reported", not "0 points left" — amber there would be a false alarm.
+  test("hostHealth: a reading without budget data is green, not amber", () => {
+    assert.strictEqual(hs.hasBudgetReading(rl(0, undefined, "")), false);
+    assert.strictEqual(hs.hostHealth(rl(0, undefined, ""), undefined), "ok");
+    // The spent-budget reading the poller synthesises carries resetAt, so it stays amber.
+    assert.strictEqual(hs.hostHealth(rl(0, 5000), undefined), "limited");
   });
 }
 
