@@ -245,8 +245,13 @@ Three layers:
   from 6.9% to 0.0% at idle; the dev-vs-packaged spread was never attributed, so
   treat ~33% as the observation that started this, not as a measured delta). Use
   a **finite** animation remounted via a React `key` when the underlying event
-  fires — see `Buddy.tsx` (mood changes) and `.live-beat` in `styles.css` (one
-  blink per snapshot). Key it on something monotonic per event: `Buddy` uses a
+  fires — see `Buddy.tsx` (mood changes), `.live-beat` in `styles.css` (one
+  blink per snapshot) and `.claude-glow` (three breaths of a PR card's glow
+  when a Claude session on it starts working or waiting; only its own layer's
+  `opacity` animates, so nothing repaints per frame). The header snowfall is the one
+  animation that runs for as long as something holds it: it plays only while
+  the pointer is over the header row and is `animation-play-state: paused`
+  otherwise (a test pins both rules), with a finite iteration count. Key it on something monotonic per event: `Buddy` uses a
   run counter and `App.tsx` a snapshot counter, because `snapshot.fetchedAt` is
   the *oldest* host's stamp and stalls. A guard test in `tests/run-tests.cjs`
   scans `.ts`/`.tsx`/`.css`/`.html` under `src/renderer` for

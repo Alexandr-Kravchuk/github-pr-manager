@@ -185,6 +185,16 @@ for (const mod of [
     // which is a word character, so `linear_infinite` has no boundary to find.
     /\banimate-(?:pulse|spin|bounce|ping)\b|\banimate-\[[^\]]*infinite[^\]]*\]|\banimation(?:-iteration-count)?\s*:[^;{}]*\binfinite\b/g;
 
+  test("header snowfall is paused unless the header is hovered", () => {
+    const css = fs.readFileSync(path.join(rendererRoot, "src/styles.css"), "utf8");
+    const rule = (sel) => {
+      const m = css.match(new RegExp(`(?:^|\\n)${sel.replace(/[.:]/g, "\\$&")}\\s*\\{([^}]*)\\}`));
+      return m ? m[1] : "";
+    };
+    assert.match(rule(".snow-fall"), /animation-play-state:\s*paused/, "at rest the flakes must not animate");
+    assert.match(rule(".snow-host:hover .snow-fall"), /animation-play-state:\s*running/);
+  });
+
   test("infinite-animation detector matches what it claims", () => {
     const hit = (s) => new RegExp(FOREVER.source).test(s);
     assert.ok(hit('className="animate-pulse"'), "bare Tailwind utility");
@@ -7193,6 +7203,19 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       ];
       assert.deepStrictEqual(cs.sessionsForPr(prOf, list).map((x) => x.id), ["wait", "bg", "busy", "idle"]);
       assert.match(cs.describeSession(session({ name: "ENG-1 · x", status: "waiting", waitingFor: "input needed" })), /waiting for you \(input needed\), in a terminal/);
+    });
+
+    test("claude sessions: the card glows for the session the button shows, only while it works or waits", () => {
+      const bgBusy = session({ id: "bg", status: "busy", where: "background" });
+      const idle = session({ id: "idle", status: "idle" });
+      assert.strictEqual(cs.shownSession([bgBusy, idle]).id, "idle", "a session with a window wins");
+      assert.strictEqual(cs.shownSession([bgBusy]).id, "bg", "a windowless one when it is the only one");
+      assert.strictEqual(cs.shownSession([]), undefined);
+      assert.strictEqual(cs.sessionGlow(session({ status: "busy" })), "busy");
+      assert.strictEqual(cs.sessionGlow(session({ status: "waiting" })), "waiting");
+      assert.strictEqual(cs.sessionGlow(idle), null);
+      assert.strictEqual(cs.sessionGlow(session({ status: "paused" })), null);
+      assert.strictEqual(cs.sessionGlow(undefined), null);
     });
 
     test("claude sessions: the Desktop link and the terminal scripts", () => {

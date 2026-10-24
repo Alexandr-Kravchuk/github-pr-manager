@@ -844,7 +844,7 @@ export function App() {
           sticky header, so it already sits at top 0 and doesn't shift up by
           that gap on the first pixels of scrolling before it sticks. */}
       <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-line bg-canvas/85 px-4 pb-3 pt-2 backdrop-blur">
-        <div className="relative flex flex-wrap items-center justify-between gap-3">
+        <div className="snow-host relative flex flex-wrap items-center justify-between gap-3">
           <Snowflakes />
           <div className="flex items-center gap-3">
             <Buddy mood={buddyMood} />

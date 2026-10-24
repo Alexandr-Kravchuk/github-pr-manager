@@ -96,6 +96,22 @@ export function sessionsForPr(
     );
 }
 
+/**
+ * The session a PR's Claude button shows — one with a window first, since a
+ * click switches to it — taken from `sessionsForPr`'s ordering.
+ */
+export function shownSession(sessions: readonly ClaudeSessionInfo[]): ClaudeSessionInfo | undefined {
+  return sessions.find((s) => s.where !== "background") ?? sessions[0];
+}
+
+/**
+ * Whether the PR's card glows, and in which colour: only while the shown
+ * session works or waits for the user. Idle and paused ones leave the card plain.
+ */
+export function sessionGlow(session: ClaudeSessionInfo | undefined): "busy" | "waiting" | null {
+  return session?.status === "busy" || session?.status === "waiting" ? session.status : null;
+}
+
 /** What the button says while a session works on the PR. */
 export const SESSION_STATUS_TEXT: Record<ClaudeSessionInfo["status"], string> = {
   busy: "Working",

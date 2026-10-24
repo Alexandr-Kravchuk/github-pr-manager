@@ -6,7 +6,7 @@ import { repoShortName } from "../../../shared/pr-table";
 import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { CheckBadge } from "./CheckBadge";
-import { ClaudeButton } from "./ClaudeButton";
+import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
 
 interface Props {
@@ -200,13 +200,14 @@ export function PrCard({
       className={cn(
         // Hover darkens every side but the left: that one is the accent stripe,
         // and a plain `hover:border-*` colour repaints it grey.
-        "rounded-lg border border-line border-l-4 bg-surface p-4 shadow-sm transition-colors hover:border-y-line-strong hover:border-r-line-strong",
+        "relative isolate overflow-hidden rounded-lg border border-line border-l-4 bg-surface p-4 shadow-sm transition-colors hover:border-y-line-strong hover:border-r-line-strong",
         accentClass(pr, trackComments),
         // Revealed by the Ignored chip: on screen, but not part of the workload
         // the header counts — so it reads as set aside rather than as normal.
         pr.isIgnored && "opacity-60 hover:opacity-100",
       )}
     >
+      <ClaudeGlow pr={pr} />
       {/* Top row: repo/number + updated time */}
       <div className="mb-1 flex items-center justify-between gap-2 text-xs text-fg-subtle">
         <div className="flex min-w-0 items-center gap-2">

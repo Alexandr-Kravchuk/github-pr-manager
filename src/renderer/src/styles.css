@@ -226,6 +226,68 @@
 .refresh-spin {
   animation: refresh-spin 0.7s linear 25;
 }
+/*
+ * Claude-session glow on a PR card or tile (ClaudeGlow in ClaudeButton.tsx) —
+ * variant D: a wash from the corner the Claude button sits in. The gradient is
+ * painted once on its own layer and only that layer's `opacity` animates, so
+ * the compositor blends a cached texture instead of repainting the card each
+ * frame. Three breaths, then a static glow: the span is keyed on the session's
+ * id and status, so it breathes again only when the status changes.
+ */
+.claude-glow {
+  animation: claude-glow 2.4s ease-in-out 3;
+}
+.claude-glow-busy {
+  background: radial-gradient(120% 90% at 100% 0%, rgb(249 115 22 / 0.14), transparent 60%);
+}
+.claude-glow-waiting {
+  background: radial-gradient(120% 90% at 100% 0%, rgb(217 70 239 / 0.12), transparent 60%);
+}
+@media (prefers-color-scheme: dark) {
+  .claude-glow-busy {
+    background: radial-gradient(120% 90% at 100% 0%, rgb(249 115 22 / 0.2), transparent 60%);
+  }
+  .claude-glow-waiting {
+    background: radial-gradient(120% 90% at 100% 0%, rgb(217 70 239 / 0.18), transparent 60%);
+  }
+}
+@keyframes claude-glow {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/*
+ * Header snowfall (components/Snowflakes.tsx) — runs only while the pointer is
+ * over the header row and is paused otherwise, so at rest it produces no
+ * frames at all. The count is finite on purpose (~1.5 h of hovering at the
+ * shortest cycle): the guard test bans `infinite`, and this keeps the rule
+ * whole instead of carving an exception into it. Only `transform` animates,
+ * on HTML columns, which the compositor moves without repainting the flakes.
+ */
+.snow-fall {
+  animation: snow-fall var(--snow-dur, 9s) linear 800;
+  animation-play-state: paused;
+}
+.snow-host:hover .snow-fall {
+  animation-play-state: running;
+}
+@keyframes snow-fall {
+  0% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(var(--snow-sway, 0px), 50%);
+  }
+  100% {
+    transform: translate(0, 100%);
+  }
+}
+
 @keyframes refresh-spin {
   to {
     transform: rotate(360deg);
@@ -235,7 +297,9 @@
 @media (prefers-reduced-motion: reduce) {
   .buddy :is(g, path, circle, text),
   .refresh-spin,
-  .live-beat {
+  .live-beat,
+  .claude-glow,
+  .snow-fall {
     animation: none !important;
   }
 }

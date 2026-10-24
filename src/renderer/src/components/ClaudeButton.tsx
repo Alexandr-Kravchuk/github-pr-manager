@@ -11,7 +11,13 @@ import {
   pickClaudeLaunch,
   type ClaudeLaunchKind,
 } from "../../../shared/claude-launch";
-import { describeSession, SESSION_STATUS_TEXT, sessionsForPr } from "../../../shared/claude-sessions";
+import {
+  describeSession,
+  SESSION_STATUS_TEXT,
+  sessionGlow,
+  sessionsForPr,
+  shownSession,
+} from "../../../shared/claude-sessions";
 import { cn } from "../format";
 import { useAnchoredMenu } from "./anchored-menu";
 import { ClaudeEnabledContext, ClaudeSessionsContext } from "./claude-context";
@@ -89,8 +95,8 @@ export function ClaudeButton({
   if (!enabled) return null;
   const kind = pickClaudeLaunch(pr, { trackComments });
   // `sessionsForPr` puts the one that most needs the user first.
-  const current = sessions.find((s) => s.where !== "background");
-  const shown = current ?? sessions[0];
+  const shown = shownSession(sessions);
+  const current = shown?.where === "background" ? undefined : shown;
   const more = sessions.length > 1 ? ` ${sessions.length - 1} more in the menu.` : "";
   const label = current
     ? `Claude session ${describeSession(current)}. Click to switch to it.${more}`
@@ -187,6 +193,28 @@ export function ClaudeButton({
           document.body,
         )}
     </span>
+  );
+}
+
+/**
+ * The card's glow while a Claude session works on the PR (orange) or waits for
+ * the user (fuchsia), from the corner the button sits in. The parent needs
+ * `relative isolate overflow-hidden`: `-z-10` keeps the glow under the text,
+ * and `isolate` keeps it above the card's own background.
+ */
+export function ClaudeGlow({ pr }: { pr: PullRequest }) {
+  const enabled = useContext(ClaudeEnabledContext);
+  const allSessions = useContext(ClaudeSessionsContext);
+  const session = useMemo(() => shownSession(sessionsForPr(pr, allSessions)), [pr, allSessions]);
+  const glow = sessionGlow(session);
+  if (!enabled || !session || !glow) return null;
+  // Keyed on the status, not on the push: the breaths replay only when it changes.
+  return (
+    <span
+      key={`${session.id}:${glow}`}
+      aria-hidden
+      className={cn("claude-glow pointer-events-none absolute inset-0 -z-10", `claude-glow-${glow}`)}
+    />
   );
 }
 
