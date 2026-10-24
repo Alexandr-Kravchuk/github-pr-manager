@@ -39,7 +39,7 @@ export function ViewSwitch({
               "inline-flex items-center justify-center rounded-md px-2.5 py-1 transition-colors",
               active
                 ? "bg-surface text-fg shadow-sm"
-                : "text-fg-muted hover:bg-surface/60 hover:text-fg-secondary",
+                : "text-fg-muted hover:bg-surface hover:text-fg-secondary",
             )}
           >
             <ViewModeIcon mode={mode} />

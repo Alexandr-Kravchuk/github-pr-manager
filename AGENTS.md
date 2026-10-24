@@ -250,7 +250,7 @@ Three layers:
   when a Claude session on it starts working or waiting; only its own layer's
   `opacity` animates, so nothing repaints per frame). The header snowfall is the one
   animation that runs for as long as something holds it: it plays only while
-  the pointer is over the header row and is `animation-play-state: paused`
+  the pointer is over the header and is `animation-play-state: paused`
   otherwise (a test pins both rules), with a finite iteration count. Key it on something monotonic per event: `Buddy` uses a
   run counter and `App.tsx` a snapshot counter, because `snapshot.fetchedAt` is
   the *oldest* host's stamp and stalls. A guard test in `tests/run-tests.cjs`

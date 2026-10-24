@@ -843,9 +843,11 @@ export function App() {
       {/* No padding above the header in the page: the top gap lives INSIDE the
           sticky header, so it already sits at top 0 and doesn't shift up by
           that gap on the first pixels of scrolling before it sticks. */}
-      <header className="sticky top-0 z-10 -mx-4 mb-4 border-b border-line bg-canvas/85 px-4 pb-3 pt-2 backdrop-blur">
-        <div className="snow-host relative flex flex-wrap items-center justify-between gap-3">
-          <Snowflakes />
+      {/* No rule under the header: its lighter tone sets it off from the list
+          scrolling beneath it. The whole header hosts the snowfall. */}
+      <header className="snow-host sticky top-0 z-10 -mx-4 mb-2 bg-surface/70 px-4 pb-3 pt-2 backdrop-blur">
+        <Snowflakes />
+        <div className="relative flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <Buddy mood={buddyMood} />
             <div>
@@ -898,7 +900,7 @@ export function App() {
                 "inline-flex items-center gap-1 rounded-md border px-3 py-1 font-medium",
                 GLASS_BASE,
                 GLASS_IDLE,
-                "text-fg-secondary disabled:opacity-70",
+                "text-fg-secondary disabled:text-fg-muted",
               )}
             >
               {/* The icon spins while the poll runs instead of the label
@@ -924,7 +926,7 @@ export function App() {
         {/* Toolbar: view controls (row 1) and filters (row 2). Inside the sticky
             header so the filters stay on screen while the list scrolls. */}
         {!configError && (
-          <div className="mt-3 space-y-2 border-t border-line pt-3">
+          <div className="mt-3 space-y-2 pt-3">
             {/* Row 1 — search + how the list is viewed (sort / group / scope). */}
             <div className="flex flex-wrap items-center gap-2">
               {/* A typed query hides rows as quietly as any chip, but unlike a chip
@@ -939,10 +941,10 @@ export function App() {
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search by title, repo, author…"
                   className={cn(
-                    "w-full rounded-md border bg-surface py-1.5 pl-3 pr-8 text-sm text-fg placeholder:text-fg-faint focus:outline-none",
+                    "w-full rounded-md border py-1.5 pl-3 pr-8 text-sm text-fg placeholder:text-fg-faint focus:outline-none",
                     searchActive
-                      ? "border-red-500 bg-red-500/10 ring-1 ring-red-500/60 focus:border-red-500"
-                      : "border-line-strong focus:border-sky-600",
+                      ? "border-red-500 bg-[color-mix(in_srgb,var(--color-red-500)_10%,var(--surface))] ring-1 ring-red-500/60 focus:border-red-500"
+                      : "border-line-strong bg-surface focus:border-sky-600",
                   )}
                 />
                 {search !== "" && (
@@ -988,8 +990,7 @@ export function App() {
                         "rounded-md px-2.5 py-1 text-sm transition-colors",
                         active
                           ? "bg-surface font-medium text-fg shadow-sm"
-                          : "text-fg-muted hover:bg-surface/60 hover:text-fg-secondary",
-                        count === 0 && !active && "opacity-50",
+                          : cn(count === 0 ? "text-fg-faint" : "text-fg-muted", "hover:bg-surface hover:text-fg-secondary"),
                       )}
                     >
                       {ROLE_FILTER_LABELS[key]}{" "}
@@ -1015,7 +1016,7 @@ export function App() {
                     : "In Cozy the column headers set the sort order"
                 }
                 aria-label="Sort order"
-                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
+                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:text-fg-faint"
               >
                 {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
                   <option key={k} value={k}>
@@ -1032,7 +1033,7 @@ export function App() {
                   supportsGrouping(viewMode) ? "Grouping" : "Cozy is one flat table — no grouping"
                 }
                 aria-label="Grouping"
-                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:opacity-50"
+                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg-secondary disabled:text-fg-faint"
               >
                 <option value="none">No grouping</option>
                 <option value="repo">Group by repo</option>
@@ -1056,7 +1057,7 @@ export function App() {
             </div>
 
             {/* Row 2 — the source chips, then what applies on top of them. */}
-            <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
+            <div className="flex flex-wrap items-center gap-2 pt-2">
               <span className="mr-0.5 text-xs font-medium uppercase tracking-wide text-fg-muted">
                 Filters
               </span>
@@ -1274,7 +1275,7 @@ export function App() {
                   type="button"
                   onClick={() => toggleGroup(g.key)}
                   aria-expanded={!isCollapsed}
-                  className="-mt-2 flex w-full items-center gap-2 rounded-t-md border-b border-line py-2 text-left hover:bg-elevated/40"
+                  className="flex w-full items-center gap-2 rounded-md py-2 text-left hover:bg-elevated/40"
                 >
                   <ChevronIcon collapsed={isCollapsed} />
                   {g.hostLabel && (
@@ -1509,11 +1510,13 @@ function GearIcon() {
 type ChipTone = "sky" | "amber" | "red" | "violet" | "green";
 
 const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
-  sky: "border-sky-500/60 bg-sky-500/15 text-sky-700 dark:text-sky-200",
-  amber: "border-amber-500/60 bg-amber-500/15 text-amber-700 dark:text-amber-200",
-  red: "border-red-500/60 bg-red-500/15 text-red-700 dark:text-red-200",
-  violet: "border-violet-500/60 bg-violet-500/15 text-violet-700 dark:text-violet-200",
-  green: "border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200",
+  // The tint is mixed into the surface colour rather than laid over it at 15%
+  // alpha, so the chip stays opaque over the header's snowflakes.
+  sky: "border-sky-500/60 bg-[color-mix(in_srgb,var(--color-sky-500)_15%,var(--surface))] text-sky-700 dark:text-sky-200",
+  amber: "border-amber-500/60 bg-[color-mix(in_srgb,var(--color-amber-500)_15%,var(--surface))] text-amber-700 dark:text-amber-200",
+  red: "border-red-500/60 bg-[color-mix(in_srgb,var(--color-red-500)_15%,var(--surface))] text-red-700 dark:text-red-200",
+  violet: "border-violet-500/60 bg-[color-mix(in_srgb,var(--color-violet-500)_15%,var(--surface))] text-violet-700 dark:text-violet-200",
+  green: "border-emerald-500/60 bg-[color-mix(in_srgb,var(--color-emerald-500)_15%,var(--surface))] text-emerald-700 dark:text-emerald-200",
 };
 
 /**
@@ -1527,21 +1530,19 @@ const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
  * which one we meant.
  */
 /**
- * A light glass look shared by the filter chips and the header buttons: a
- * translucent top-lit fill over a blur, an inner highlight on the top edge and
- * a soft drop shadow. Static only — the blur is free at rest but multiplies the
- * cost of anything animating beneath it (see AGENTS.md), so nothing styled with
- * it may animate except a short, finite icon spin.
+ * The raised look shared by the filter chips and the header buttons: an inner
+ * highlight on the top edge and a soft drop shadow. Fills are opaque — the
+ * header's snowflakes fall behind the controls, and a translucent fill let
+ * them show through the buttons.
  */
 const GLASS_BASE =
-  "backdrop-blur-md transition-colors shadow-[inset_0_1px_0_rgb(255_255_255/0.14),0_1px_3px_rgb(0_0_0/0.12)]";
+  "transition-colors shadow-[inset_0_1px_0_rgb(255_255_255/0.14),0_1px_3px_rgb(0_0_0/0.12)]";
 /**
- * The glass fill of a button that isn't lit — a chip that is off, or Refresh /
+ * The fill of a button that isn't lit — a chip that is off, or Refresh /
  * Settings. No text colour here: `cn` is a plain join, so the caller's would
  * fight it on stylesheet order.
  */
-const GLASS_IDLE =
-  "border-line-strong/70 bg-gradient-to-b from-surface/90 to-surface/40 hover:from-elevated/90 hover:to-elevated/50";
+const GLASS_IDLE = "border-line-strong bg-surface hover:bg-elevated";
 
 function FilterChip({
   active,
@@ -1569,8 +1570,9 @@ function FilterChip({
       className={cn(
         "rounded-md border px-3 py-1.5 text-sm",
         GLASS_BASE,
-        active ? CHIP_TONE_ACTIVE[tone] : cn(GLASS_IDLE, "text-fg-muted"),
-        empty && !active && "opacity-50",
+        // Dimmed by its text, not by opacity: a half-transparent chip let the
+        // snowflakes behind it show through.
+        active ? CHIP_TONE_ACTIVE[tone] : cn(GLASS_IDLE, empty ? "text-fg-faint" : "text-fg-muted"),
       )}
     >
       {children}

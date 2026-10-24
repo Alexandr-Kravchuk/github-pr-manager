@@ -1,10 +1,13 @@
-// Barely-visible snowflakes behind the header's title row — pure decoration.
+// Barely-visible snowflakes across the whole header — pure decoration.
 //
-// They fall only while the pointer is over the header row (`.snow-host:hover`
+// They fall only while the pointer is over the header (`.snow-host:hover`
 // in styles.css) and stand still otherwise. A paused animation produces no
 // frames; one that always ran would keep the GPU compositor busy for as long
 // as the app runs, hidden window included (see "No always-running animation"
 // in AGENTS.md).
+
+/** The header with its toolbar is about twice as tall as the title row the flakes started in. */
+const FLAKE_COUNT = 60;
 
 /** Deterministic scatter (x, y, size, rotation) so the layout is the same on every render. */
 const FLAKES: ReadonlyArray<readonly [number, number, number, number]> = (() => {
@@ -14,9 +17,9 @@ const FLAKES: ReadonlyArray<readonly [number, number, number, number]> = (() => 
     seed = (seed * 16807) % 2147483647;
     return seed / 2147483647;
   };
-  for (let i = 0; i < 34; i++) {
+  for (let i = 0; i < FLAKE_COUNT; i++) {
     // Even spread along the width with jitter, so no clumps and no gaps.
-    const x = (i + 0.2 + rand() * 0.6) * (1600 / 34);
+    const x = (i + 0.2 + rand() * 0.6) * (1600 / FLAKE_COUNT);
     out.push([x, 8 + rand() * 74, 5 + rand() * 7, rand() * 60]);
   }
   return out;
@@ -93,7 +96,7 @@ export function Snowflakes() {
       aria-hidden
       // -z-10 inside the sticky header's stacking context: above the header's
       // own background, below the title, stats and buttons.
-      className="pointer-events-none absolute inset-y-0 -left-4 -right-4 -z-10 overflow-hidden text-fg opacity-[0.07]"
+      className="pointer-events-none absolute inset-0 -z-10 overflow-hidden text-fg opacity-[0.07]"
     >
       {FLAKES.map(([x, y, r, rot], i) => (
         <FallingFlake key={i} x={x} y={y} r={r} rot={rot} i={i} />

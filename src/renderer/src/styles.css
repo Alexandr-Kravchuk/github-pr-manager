@@ -263,7 +263,7 @@
 
 /*
  * Header snowfall (components/Snowflakes.tsx) — runs only while the pointer is
- * over the header row and is paused otherwise, so at rest it produces no
+ * over the header and is paused otherwise, so at rest it produces no
  * frames at all. The count is finite on purpose (~1.5 h of hovering at the
  * shortest cycle): the guard test bans `infinite`, and this keeps the rule
  * whole instead of carving an exception into it. Only `transform` animates,
