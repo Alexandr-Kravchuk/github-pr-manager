@@ -5279,6 +5279,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
     assert.ok(fields.includes("summary"), `fields were ${JSON.stringify(fields)}`);
     assert.ok(fields.includes("parent"), `fields were ${JSON.stringify(fields)}`);
+    // Without `issuetype` no issue is ever a subtask and the epic link silently stops.
+    assert.ok(fields.includes("issuetype"), `fields were ${JSON.stringify(fields)}`);
+  });
+
+  await atest("fetchIssues: isSubtask reads the subtask flag or a negative hierarchy level", async () => {
+    // Team-managed projects' custom subtask types carry `hierarchyLevel: -1` with
+    // the flag false, so each signal must be enough on its own.
+    const cases = [
+      [{ subtask: true }, true],
+      [{ subtask: false, hierarchyLevel: -1 }, true],
+      [{ subtask: false, hierarchyLevel: 0 }, false], // task
+      [{ hierarchyLevel: 1 }, false], // epic
+      [undefined, false], // no issuetype in the response
+    ];
+    for (const [issuetype, expected] of cases) {
+      jira.clearJiraCaches();
+      global.fetch = async (url) =>
+        isTenant(url) ? tenantOk() : okJson({ issues: [{ key: "ENG-1", fields: { summary: "S", issuetype } }] });
+      const map = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
+      assert.strictEqual(map.get("ENG-1").isSubtask, expected, `issuetype ${JSON.stringify(issuetype)}`);
+    }
   });
 
   await atest("fetchIssues: a summary-less issue resolves to null, not undefined", async () => {
@@ -5750,6 +5771,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // A task's parent already is the epic: nothing above it is looked up.
       assert.strictEqual(prs[1].grandparentKey, null);
       assert.deepStrictEqual(queries, ["key in (ENG-11,ENG-12)", "key in (ENG-10)"]);
+    });
+  });
+
+  await atest("buildJiraEnricher: a team-managed subtask (flag false, level -1) still reaches the epic", async () => {
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({
+      "ENG-31": { summary: "Sub", issuetype: { subtask: false, hierarchyLevel: -1 }, parent: { key: "ENG-30", fields: { summary: "Task" } } },
+      "ENG-30": { summary: "Task", issuetype: TASK, parent: { key: "ENG-3", fields: { summary: "Epic" } } },
+    });
+    await withMockedElectron(async (store) => {
+      assert.strictEqual(store.setJiraToken("tok").ok, true);
+      const prs = [blankPr("ENG-31")];
+      await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      assert.strictEqual(prs[0].grandparentKey, "ENG-3");
+      assert.strictEqual(prs[0].grandparentSummary, "Epic");
     });
   });
 
