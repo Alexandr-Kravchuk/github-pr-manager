@@ -6914,9 +6914,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(true, "darwin"), { openAtLogin: true, openAsHidden: true });
   });
 
-  test("staleLoginItemsFor: Windows removes the electron.app.<productName> entry of older builds", () => {
-    const productName = require(path.join(__dirname, "../package.json")).productName;
-    assert.strictEqual(loginLaunch.LEGACY_WINDOWS_LOGIN_ITEM_NAME, `electron.app.${productName}`);
+  test("staleLoginItemsFor: Windows removes the electron.app.PR Dashboard entry of older builds", () => {
+    // The literal names what shipped builds left in the Run key; it must not
+    // follow a later productName rename, or the real orphan stops being removed.
+    assert.strictEqual(loginLaunch.LEGACY_WINDOWS_LOGIN_ITEM_NAME, "electron.app.PR Dashboard");
     assert.deepStrictEqual(loginLaunch.staleLoginItemsFor("win32"), [
       { openAtLogin: false, name: loginLaunch.LEGACY_WINDOWS_LOGIN_ITEM_NAME },
     ]);
