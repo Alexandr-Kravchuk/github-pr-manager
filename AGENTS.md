@@ -233,6 +233,10 @@ Three layers:
   shown anyway if the tray icon failed to appear, since a hidden window with no
   icon is unreachable. The saved maximized/full-screen state waits for the
   first `show`, because `maximize()` would itself show the hidden window.
+  The Run-key value is named after the AppUserModelID, so a build that ran
+  before `setAppUserModelId` left an `electron.app.PR Dashboard` value behind
+  and the app started twice at sign-in, once without `--hidden`;
+  `staleLoginItemsFor` deletes it on every apply, whatever the preference is.
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes
   `electron .` self-quit after the renderer loads (a non-interactive boot check).
 - **No always-running animation in the renderer.** An `infinite` CSS animation —

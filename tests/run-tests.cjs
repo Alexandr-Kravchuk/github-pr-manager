@@ -6914,6 +6914,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(true, "darwin"), { openAtLogin: true, openAsHidden: true });
   });
 
+  test("staleLoginItemsFor: Windows removes the electron.app.PR Dashboard entry of older builds", () => {
+    // The literal names what shipped builds left in the Run key; it must not
+    // follow a later productName rename, or the real orphan stops being removed.
+    assert.strictEqual(loginLaunch.LEGACY_WINDOWS_LOGIN_ITEM_NAME, "electron.app.PR Dashboard");
+    assert.deepStrictEqual(loginLaunch.staleLoginItemsFor("win32"), [
+      { openAtLogin: false, name: loginLaunch.LEGACY_WINDOWS_LOGIN_ITEM_NAME },
+    ]);
+    assert.deepStrictEqual(loginLaunch.staleLoginItemsFor("darwin"), []);
+    assert.deepStrictEqual(loginLaunch.staleLoginItemsFor("linux"), []);
+  });
+
   test("wasLaunchedAtLogin: the argv marker or macOS wasOpenedAtLogin, nothing else", () => {
     assert.strictEqual(loginLaunch.wasLaunchedAtLogin(["app.exe", "--hidden"], undefined), true);
     assert.strictEqual(loginLaunch.wasLaunchedAtLogin(["app"], true), true);
@@ -6924,6 +6935,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   test("main.js wiring: a login launch starts hidden, and shows the window if no tray icon appeared", () => {
     const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
     assert.match(src, /loginItemSettingsFor\)\(enabled, process\.platform\)/, "the login item must carry the marker");
+    const staleIdx = src.indexOf("staleLoginItemsFor)(process.platform)");
+    assert.ok(staleIdx !== -1, "the legacy login item must be removed on every apply, enabled or not");
+    assert.ok(staleIdx < src.indexOf("loginItemSettingsFor)(enabled, process.platform)"), "removal runs before registering");
     assert.match(src, /startInTray = launchedAtLogin && prefs\.closeToTray/, "only close-to-tray may start hidden");
     assert.match(src, /createWindow\(\{ show: !startInTray \}\)/, "the first window must honor the tray start");
     const applyIdx = src.indexOf("applyPreferences(prefs);");

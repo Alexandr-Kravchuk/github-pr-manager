@@ -14,6 +14,8 @@ export interface LoginItemOptions {
   openAtLogin: boolean;
   openAsHidden?: boolean;
   args?: string[];
+  /** Windows only: the Run-key value name; defaults to the AppUserModelID. */
+  name?: string;
 }
 
 /**
@@ -28,6 +30,24 @@ export function loginItemSettingsFor(enabled: boolean, platform: NodeJS.Platform
   if (platform === "win32") return { openAtLogin: enabled, args: [HIDDEN_LAUNCH_ARG] };
   if (platform === "darwin") return { openAtLogin: enabled, openAsHidden: true };
   return { openAtLogin: enabled };
+}
+
+/**
+ * The Run-key value a build without `setAppUserModelId` registered: Electron
+ * falls back to `electron.app.<productName>` as the AppUserModelID and names the
+ * value after it. Registering under the real ID leaves that value behind, so the
+ * app starts twice at sign-in — once without the hidden-launch marker.
+ */
+export const LEGACY_WINDOWS_LOGIN_ITEM_NAME = "electron.app.PR Dashboard";
+
+/**
+ * Login items left by older builds that must be removed, whatever the current
+ * preference is — an orphan keeps launching the app after the user turns the
+ * setting off. Windows deletes a Run value by `name` alone.
+ */
+export function staleLoginItemsFor(platform: NodeJS.Platform): LoginItemOptions[] {
+  if (platform !== "win32") return [];
+  return [{ openAtLogin: false, name: LEGACY_WINDOWS_LOGIN_ITEM_NAME }];
 }
 
 /** Whether this process was started by the OS login item rather than the user. */
