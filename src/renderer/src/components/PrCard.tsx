@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
 import { isPassiveReviewed, prSignal, type PrSignal } from "../../../shared/pr-filter";
+import { hiddenParentOf } from "../../../shared/pr-group";
 import { repoShortName } from "../../../shared/pr-table";
 import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
@@ -25,6 +26,11 @@ interface Props {
    * sees no dead badge.
    */
   jiraBaseUrl?: string | null;
+  /**
+   * The "group by parent task" cluster the card sits in, or null outside one —
+   * what decides whether the task between the PR and the heading is named.
+   */
+  parentGroupKey?: string | null;
 }
 
 const ACCENT: Record<PrSignal, string> = {
@@ -164,9 +170,15 @@ export function PrCard({
   onToggleIgnore,
   hideRepo = false,
   jiraBaseUrl = null,
+  parentGroupKey = null,
   trackComments,
 }: Props) {
   const review = reviewLabel(pr.reviewDecision);
+  // Under an epic heading a subtask's PR would say nothing of the task it
+  // belongs to; this line names it, linked to Jira when a site is set.
+  const task = hiddenParentOf(pr, parentGroupKey);
+  const taskUrl = task ? jiraBrowseUrl(jiraBaseUrl, task.key) : null;
+  const taskLabel = task ? (task.summary ? `${task.key} · ${task.summary}` : task.key) : "";
   // Null unless both a site and a parsed key exist — the badge is the link, so
   // there is nothing to show without one.
   const jiraUrl = jiraBrowseUrl(jiraBaseUrl, pr.issueKey);
@@ -278,6 +290,22 @@ export function PrCard({
           <ClaudeButton pr={pr} trackComments={trackComments} />
         </div>
       </div>
+
+      {task &&
+        (taskUrl ? (
+          <button
+            type="button"
+            onClick={() => window.api.openExternal(taskUrl).catch(() => {})}
+            title={`Part of ${taskLabel} — open in Jira`}
+            className="mb-0.5 block max-w-full truncate text-left text-xs text-fg-subtle hover:text-sky-600 hover:underline dark:hover:text-sky-300"
+          >
+            ↳ {taskLabel}
+          </button>
+        ) : (
+          <div title={`Part of ${taskLabel}`} className="mb-0.5 truncate text-xs text-fg-subtle">
+            ↳ {taskLabel}
+          </div>
+        ))}
 
       {/* Title — clicking opens the PR and marks it as seen */}
       <button

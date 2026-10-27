@@ -28,6 +28,11 @@ export interface JiraIssue {
   parentKey: string | null;
   /** Summary of {@link parentKey}; null when there is no parent, or it has none. */
   parentSummary: string | null;
+  /**
+   * Whether the issue is a subtask — its parent is then a task, not the epic,
+   * so the enricher looks one level higher to reach the epic.
+   */
+  isSubtask: boolean;
 }
 
 interface CacheEntry {
@@ -245,7 +250,11 @@ function resultIsTrustworthy(bases: string[], cleanFallback: boolean, pinned: bo
 interface RawSearchResponse {
   issues?: Array<{
     key: string;
-    fields?: { summary?: string; parent?: { key: string; fields?: { summary?: string } } };
+    fields?: {
+      summary?: string;
+      parent?: { key: string; fields?: { summary?: string } };
+      issuetype?: { subtask?: boolean; hierarchyLevel?: number };
+    };
   }>;
 }
 
@@ -266,8 +275,9 @@ async function fetchChunk(
       "User-Agent": "github-pr-manager",
     },
     // `summary` is the issue's own title (the "group by issue" heading); `parent`
-    // brings the parent's key *and* its summary in the same round trip.
-    body: JSON.stringify({ jql, fields: ["summary", "parent"], maxResults: 100 }),
+    // brings the parent's key *and* its summary in the same round trip;
+    // `issuetype` says whether that parent is a task (a subtask's) or the epic.
+    body: JSON.stringify({ jql, fields: ["summary", "parent", "issuetype"], maxResults: 100 }),
     cache: "no-store",
   };
 
@@ -345,12 +355,16 @@ async function fetchChunk(
   for (const issue of json.issues ?? []) {
     returned.add(issue.key);
     const p = issue.fields?.parent;
+    const type = issue.fields?.issuetype;
     if (!writable) continue;
     issueCache.set(issue.key, {
       issue: {
         summary: issue.fields?.summary ?? null,
         parentKey: p?.key ?? null,
         parentSummary: p?.fields?.summary ?? null,
+        // `subtask` is the long-standing flag; team-managed projects' custom
+        // subtask types are recognised by their hierarchy level (-1) instead.
+        isSubtask: type?.subtask === true || (type?.hierarchyLevel ?? 0) < 0,
       },
       fetchedAt: now,
     });
@@ -396,4 +410,31 @@ export async function fetchIssues(
     if (issue) result.set(key, issue);
   }
   return result;
+}
+
+/**
+ * Resolves the tasks that the given subtasks belong to, so the caller can read
+ * each task's own parent — the epic. One level only: a task's parent is
+ * already the epic, and climbing past it would merge unrelated epics under a
+ * shared initiative. The tasks go through `fetchIssues` and its cache, so a
+ * task that also has a PR of its own costs nothing extra.
+ *
+ * Best-effort on top of a pass that already succeeded: a failure here returns
+ * an empty map instead of throwing, so it costs the epic link, not the issue
+ * summaries and parents already resolved.
+ */
+export async function fetchSubtaskParents(
+  config: JiraSettings,
+  token: string,
+  issues: Iterable<JiraIssue>,
+): Promise<Map<string, JiraIssue>> {
+  const keys = new Set<string>();
+  for (const issue of issues) if (issue.isSubtask && issue.parentKey) keys.add(issue.parentKey);
+  if (keys.size === 0) return new Map();
+  try {
+    return await fetchIssues(config, token, [...keys]);
+  } catch (e) {
+    debug(`subtask parents failed: ${(e as Error).message}`);
+    return new Map();
+  }
 }

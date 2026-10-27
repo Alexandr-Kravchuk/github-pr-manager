@@ -48,12 +48,20 @@ export function groupSummaryOf(pr: PullRequest, mode: IssueGroupMode): string | 
  */
 export function groupLabel(key: string, prs: PullRequest[], mode: IssueGroupMode): string {
   // A "parent" cluster can hold PRs whose own issue IS the key (a task next to
-  // its subtasks' PRs, or a task with no parent), so the key's summary may come
-  // from either side.
+  // its subtasks' PRs, or a task with no parent), or whose epic is the key two
+  // levels up (a subtask), so the key's summary may come from any of the three.
   const summary =
     mode === "parent"
       ? prs
-          .map((pr) => (pr.parentKey === key ? pr.parentSummary : pr.issueKey === key ? pr.issueSummary : null))
+          .map((pr) =>
+            pr.parentKey === key
+              ? pr.parentSummary
+              : pr.issueKey === key
+                ? pr.issueSummary
+                : pr.grandparentKey === key
+                  ? pr.grandparentSummary
+                  : null,
+          )
           .find((s): s is string => Boolean(s))
       : prs.map((pr) => groupSummaryOf(pr, mode)).find((s): s is string => Boolean(s));
   return summary ? `${key} · ${summary}` : key;
@@ -63,13 +71,17 @@ export function groupLabel(key: string, prs: PullRequest[], mode: IssueGroupMode
  * The "group by parent task" key of every PR, keyed by PR id — the top of the
  * Jira hierarchy its issue shares with the other PRs on the board.
  *
- * Grouping by `parentKey` alone missed two cases, both seen on the board:
+ * Grouping by `parentKey` alone missed three cases, all seen on the board:
  *  - a PR on a task with no parent (ENG-83724 "Code designer": five PRs, one
  *    key) had no parent key at all and fell into "Other";
  *  - a PR on a task sat apart from the PRs on that task's subtasks — the
- *    subtasks' parent is the task, while the task's parent is its epic.
- * So each PR links its issue to its parent, PRs that share any key end up in
- * one cluster, and the cluster is named after its top key: the one with no
+ *    subtasks' parent is the task, while the task's parent is its epic;
+ *  - a subtask whose task has no PR of its own (ENG-104627 under ENG-103702)
+ *    never reached the epic its sibling tasks' PRs cluster under — nothing on
+ *    the board linked the task to the epic, so the enricher now resolves that
+ *    link as `grandparentKey`.
+ * So each PR links its issue to its parent and, for a subtask, that parent to
+ * the epic; PRs that share any key end up in one cluster, and the cluster is named after its top key: the one with no
  * parent inside the cluster. Jira gives each issue one parent, so a cluster has
  * exactly one such key. A PR with no issue key has no group (null).
  */
@@ -85,15 +97,19 @@ export function parentGroupKeys(prs: PullRequest[]): Map<string, string | null> 
     if (!up.has(k)) up.set(k, k);
   };
   const parentOf = new Map<string, string>();
+  const link = (child: string, parent: string) => {
+    add(parent);
+    parentOf.set(child, parent);
+    const a = find(child);
+    const b = find(parent);
+    if (a !== b) up.set(a, b);
+  };
   for (const pr of prs) {
     if (!pr.issueKey) continue;
     add(pr.issueKey);
     if (pr.parentKey) {
-      add(pr.parentKey);
-      parentOf.set(pr.issueKey, pr.parentKey);
-      const a = find(pr.issueKey);
-      const b = find(pr.parentKey);
-      if (a !== b) up.set(a, b);
+      link(pr.issueKey, pr.parentKey);
+      if (pr.grandparentKey) link(pr.parentKey, pr.grandparentKey);
     }
   }
   // The top key of each cluster: the one whose parent is not in it.
@@ -105,6 +121,22 @@ export function parentGroupKeys(prs: PullRequest[]): Map<string, string | null> 
   const out = new Map<string, string | null>();
   for (const pr of prs) out.set(pr.id, pr.issueKey ? (top.get(find(pr.issueKey)) ?? null) : null);
   return out;
+}
+
+/**
+ * The task between a PR and the cluster it sits in, for the card to name —
+ * the heading says the epic, the badge says the subtask, and without this the
+ * task they belong to (ENG-103702, "footer…") is said nowhere. Null when the
+ * heading already is that task, the PR is on the task itself, or the PR is not
+ * in a "parent" cluster (`groupKey` null).
+ */
+export function hiddenParentOf(
+  pr: PullRequest,
+  groupKey: string | null,
+): { key: string; summary: string | null } | null {
+  if (!groupKey || !pr.parentKey) return null;
+  if (groupKey === pr.parentKey || groupKey === pr.issueKey) return null;
+  return { key: pr.parentKey, summary: pr.parentSummary };
 }
 
 /** Which stack a PR is in — stack numbers are per repository. Null outside one. */

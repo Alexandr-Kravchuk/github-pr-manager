@@ -1304,6 +1304,7 @@ export function App() {
                     mode={viewMode}
                     className="mt-3 pl-2"
                     hideRepo={groupBy === "repo"}
+                    parentGroupKey={groupBy === "parent" && g.key !== OTHER_GROUP_KEY ? g.key : null}
                     jiraBaseUrl={jiraStatus?.baseUrl ?? null}
                     trackComments={trackComments}
                     onOpen={openPr}
@@ -1386,6 +1387,7 @@ function PrList({
   mode,
   className,
   hideRepo = false,
+  parentGroupKey = null,
   jiraBaseUrl,
   trackComments,
   onOpen,
@@ -1396,6 +1398,8 @@ function PrList({
   mode: ViewMode;
   className?: string;
   hideRepo?: boolean;
+  /** The "group by parent task" cluster this grid renders, or null outside one. */
+  parentGroupKey?: string | null;
   jiraBaseUrl: string | null;
   trackComments: boolean;
   onOpen: (pr: PullRequest) => void;
@@ -1435,6 +1439,7 @@ function PrList({
           key={pr.id}
           pr={pr}
           hideRepo={hideRepo}
+          parentGroupKey={parentGroupKey}
           jiraBaseUrl={jiraBaseUrl}
           trackComments={trackComments}
           onOpen={onOpen}
