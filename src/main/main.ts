@@ -42,7 +42,7 @@ import {
   validateSeenItems,
   validateThemePreference,
 } from "./ipc-validation";
-import { loginItemSettingsFor, wasLaunchedAtLogin } from "./login-launch";
+import { loginItemSettingsFor, staleLoginItemsFor, wasLaunchedAtLogin } from "./login-launch";
 import { createMenuActions, installAppMenu } from "./menu";
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
@@ -318,6 +318,7 @@ function handleNotifications(prs: PullRequest[]): void {
  *  the item would point at the dev Electron binary. Not supported on Linux. */
 function applyLaunchAtLogin(enabled: boolean): void {
   if (!app.isPackaged || process.platform === "linux") return;
+  for (const stale of staleLoginItemsFor(process.platform)) app.setLoginItemSettings(stale);
   const options = loginItemSettingsFor(enabled, process.platform);
   app.setLoginItemSettings(options);
   if (process.env.PRD_DEBUG) {
