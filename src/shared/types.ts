@@ -357,6 +357,16 @@ export interface PullRequest {
   parentKey: string | null;
   /** Summary (title) of {@link parentKey}, for the group heading. */
   parentSummary: string | null;
+  /**
+   * The parent of {@link parentKey} when this PR's issue is a subtask — the epic
+   * above its task (ENG-104627 → ENG-103702 → ENG-102776). Without it a subtask
+   * whose task has no PR of its own clusters under the task and never joins
+   * the PRs of the epic's other tasks. Null for a task or epic PR, or when Jira
+   * resolved none.
+   */
+  grandparentKey: string | null;
+  /** Summary (title) of {@link grandparentKey}, for the group heading. */
+  grandparentSummary: string | null;
   reviewDecision: ReviewDecision;
   /** The current user's roles on this PR (author / reviewer / reviewed). */
   roles: PrRole[];

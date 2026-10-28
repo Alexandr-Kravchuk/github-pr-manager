@@ -236,6 +236,9 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
     // until some unrelated PR field happened to change.
     p.parentSummary,
     p.issueSummary,
+    // The epic above a subtask's task decides which cluster the PR joins.
+    p.grandparentKey,
+    p.grandparentSummary,
     // The stack badge, its menu and the list order read these;
     // the bottom PR merging moves nothing else on the PR above it.
     p.stack

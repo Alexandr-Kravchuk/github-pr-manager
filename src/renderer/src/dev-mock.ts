@@ -38,6 +38,8 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     issueSummary: null,
     parentKey: null,
     parentSummary: null,
+    grandparentKey: null,
+    grandparentSummary: null,
     reviewDecision: null,
     roles: ["author"],
     viewerHasReviewed: false,
@@ -231,8 +233,12 @@ const FIXTURES: Record<string, PullRequest[]> = {
       number: 929,
       issueKey: "ENG-93375",
       issueSummary: "Honor the static prefix when a column is renamed",
-      parentKey: "ENG-93367",
-      parentSummary: "Analyze long app creating",
+      // A subtask whose task has no PR here: it reaches the epic's cluster
+      // through `grandparentKey`, and the card names the task it skips over.
+      parentKey: "ENG-93368",
+      parentSummary: "Column rename keeps the schema prefix",
+      grandparentKey: "ENG-93367",
+      grandparentSummary: "Analyze long app creating",
       headRefName: "feature/eng-93375",
       // I reviewed this earlier and the author pushed new changes back to me —
       // so GitHub has cleared the review request and only `reviewed-by:@me`

@@ -18,7 +18,7 @@ import {
   healthFromError,
   healthFromIssues,
 } from "../shared/jira-health";
-import { clearJiraCaches, fetchIssues } from "../shared/jira";
+import { clearJiraCaches, fetchIssues, fetchSubtaskParents } from "../shared/jira";
 import type { JiraHealth, JiraStatus, PullRequest, Settings } from "../shared/types";
 
 function jiraTokenPath(): string {
@@ -136,11 +136,15 @@ export function buildJiraEnricher(
     try {
       const issues = await fetchIssues(jira, token, keys);
       debug(() => `resolved ${issues.size} issues: ${[...issues.entries()].map(([k, i]) => `${k}->${i.parentKey ?? "(no parent)"}`).join(", ") || "(none)"}`);
+      const tasks = await fetchSubtaskParents(jira, token, issues.values());
       for (const pr of prs) {
         const issue = pr.issueKey ? issues.get(pr.issueKey) : undefined;
+        const task = issue?.isSubtask && issue.parentKey ? tasks.get(issue.parentKey) : undefined;
         pr.issueSummary = issue?.summary ?? null;
         pr.parentKey = issue?.parentKey ?? null;
         pr.parentSummary = issue?.parentSummary ?? null;
+        pr.grandparentKey = task?.parentKey ?? null;
+        pr.grandparentSummary = task?.parentSummary ?? null;
       }
       // Counted in `healthFromIssues` (pure, and unit-tested for it): `resolved`
       // means parents, not issues — see the rule there for why the distinction

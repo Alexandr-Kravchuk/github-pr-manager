@@ -115,6 +115,8 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     issueSummary: null,
     parentKey: null,
     parentSummary: null,
+    grandparentKey: null,
+    grandparentSummary: null,
     reviewDecision: null,
     roles: ["author"],
     viewerHasReviewed: false,

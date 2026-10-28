@@ -729,6 +729,8 @@ export function mapPr(
     issueSummary: null,
     parentKey: null,
     parentSummary: null,
+    grandparentKey: null,
+    grandparentSummary: null,
     // Activity fields are overwritten in state.ts:
     hasNewActivity: false,
     returnedToMe: false,

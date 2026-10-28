@@ -2236,6 +2236,26 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     assert.deepStrictEqual(keysOf(prs), { sub1: "T-1", sub2: "T-1", other: "T-9" });
     assert.strictEqual(prGroup.groupLabel("T-1", prs.slice(0, 2), "parent"), "T-1 · T-1 title");
   });
+  test("parentGroupKeys: a subtask whose task has no PR joins the epic through its grandparent", () => {
+    // ENG-104627 (subtask) -> ENG-103702 (task, no PR) -> ENG-102776 (epic): it sat
+    // under the task while its sibling tasks' PRs clustered under the epic.
+    const prs = [
+      hpr("sub", "S-1", "T-1", { grandparentKey: "E-1", grandparentSummary: "E-1 title" }),
+      hpr("t2", "T-2", "E-1"),
+      hpr("t3", "T-3", "E-1"),
+    ];
+    assert.deepStrictEqual(keysOf(prs), { sub: "E-1", t2: "E-1", t3: "E-1" });
+    // With only the subtask on the board, the heading's summary comes from its grandparent.
+    assert.strictEqual(prGroup.groupLabel("E-1", prs.slice(0, 1), "parent"), "E-1 · E-1 title");
+  });
+  test("hiddenParentOf: names the task only when the heading skips over it", () => {
+    const sub = hpr("sub", "S-1", "T-1", { grandparentKey: "E-1" });
+    assert.deepStrictEqual(prGroup.hiddenParentOf(sub, "E-1"), { key: "T-1", summary: "T-1 title" });
+    assert.strictEqual(prGroup.hiddenParentOf(sub, "T-1"), null); // the heading is the task
+    assert.strictEqual(prGroup.hiddenParentOf(sub, null), null); // not in a parent cluster
+    assert.strictEqual(prGroup.hiddenParentOf(hpr("t", "T-1", "E-1"), "E-1"), null); // a task's own PR
+    assert.strictEqual(prGroup.hiddenParentOf(hpr("e", "E-1"), "E-1"), null); // no parent at all
+  });
   test("parentGroupKeys: a PR with no issue key has no group", () => {
     assert.deepStrictEqual(keysOf([hpr("x", null), hpr("y", "ENG-2")]), { x: null, y: "ENG-2" });
   });
@@ -5259,6 +5279,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
     assert.ok(fields.includes("summary"), `fields were ${JSON.stringify(fields)}`);
     assert.ok(fields.includes("parent"), `fields were ${JSON.stringify(fields)}`);
+    // Without `issuetype` no issue is ever a subtask and the epic link silently stops.
+    assert.ok(fields.includes("issuetype"), `fields were ${JSON.stringify(fields)}`);
+  });
+
+  await atest("fetchIssues: isSubtask reads the subtask flag or a negative hierarchy level", async () => {
+    // Team-managed projects' custom subtask types carry `hierarchyLevel: -1` with
+    // the flag false, so each signal must be enough on its own.
+    const cases = [
+      [{ subtask: true }, true],
+      [{ subtask: false, hierarchyLevel: -1 }, true],
+      [{ subtask: false, hierarchyLevel: 0 }, false], // task
+      [{ hierarchyLevel: 1 }, false], // epic
+      [undefined, false], // no issuetype in the response
+    ];
+    for (const [issuetype, expected] of cases) {
+      jira.clearJiraCaches();
+      global.fetch = async (url) =>
+        isTenant(url) ? tenantOk() : okJson({ issues: [{ key: "ENG-1", fields: { summary: "S", issuetype } }] });
+      const map = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-1"]);
+      assert.strictEqual(map.get("ENG-1").isSubtask, expected, `issuetype ${JSON.stringify(issuetype)}`);
+    }
   });
 
   await atest("fetchIssues: a summary-less issue resolves to null, not undefined", async () => {
@@ -5701,6 +5742,73 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
   });
 
+  // The board shape behind the grandparent link: a subtask under a task under an epic.
+  const blankPr = (issueKey) => ({
+    issueKey, issueSummary: null, parentKey: null, parentSummary: null, grandparentKey: null, grandparentSummary: null,
+  });
+  const SUBTASK = { subtask: true, hierarchyLevel: -1 };
+  const TASK = { subtask: false, hierarchyLevel: 0 };
+
+  await atest("buildJiraEnricher: a subtask's PR gets the epic above its task as grandparent", async () => {
+    jira.clearJiraCaches();
+    const queries = [];
+    const answer = jiraAnswers({
+      "ENG-11": { summary: "Footer runtime", issuetype: SUBTASK, parent: { key: "ENG-10", fields: { summary: "Footer" } } },
+      "ENG-12": { summary: "Other task", issuetype: TASK, parent: { key: "ENG-1", fields: { summary: "Stepper" } } },
+      "ENG-10": { summary: "Footer", issuetype: TASK, parent: { key: "ENG-1", fields: { summary: "Stepper" } } },
+    });
+    global.fetch = async (url, init) => {
+      if (!isTenant(url)) queries.push(JSON.parse(init.body).jql);
+      return answer(url, init);
+    };
+    await withMockedElectron(async (store) => {
+      assert.strictEqual(store.setJiraToken("tok").ok, true);
+      const prs = [blankPr("ENG-11"), blankPr("ENG-12")];
+      await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      assert.strictEqual(prs[0].parentKey, "ENG-10");
+      assert.strictEqual(prs[0].grandparentKey, "ENG-1");
+      assert.strictEqual(prs[0].grandparentSummary, "Stepper");
+      // A task's parent already is the epic: nothing above it is looked up.
+      assert.strictEqual(prs[1].grandparentKey, null);
+      assert.deepStrictEqual(queries, ["key in (ENG-11,ENG-12)", "key in (ENG-10)"]);
+    });
+  });
+
+  await atest("buildJiraEnricher: a team-managed subtask (flag false, level -1) still reaches the epic", async () => {
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({
+      "ENG-31": { summary: "Sub", issuetype: { subtask: false, hierarchyLevel: -1 }, parent: { key: "ENG-30", fields: { summary: "Task" } } },
+      "ENG-30": { summary: "Task", issuetype: TASK, parent: { key: "ENG-3", fields: { summary: "Epic" } } },
+    });
+    await withMockedElectron(async (store) => {
+      assert.strictEqual(store.setJiraToken("tok").ok, true);
+      const prs = [blankPr("ENG-31")];
+      await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      assert.strictEqual(prs[0].grandparentKey, "ENG-3");
+      assert.strictEqual(prs[0].grandparentSummary, "Epic");
+    });
+  });
+
+  await atest("buildJiraEnricher: a failed task lookup keeps the subtask's own summary and parent", async () => {
+    jira.clearJiraCaches();
+    const answer = jiraAnswers({
+      "ENG-21": { summary: "Sub", issuetype: SUBTASK, parent: { key: "ENG-20", fields: { summary: "Task" } } },
+    });
+    global.fetch = async (url, init) => {
+      if (!isTenant(url) && JSON.parse(init.body).jql.includes("ENG-20")) return errRes(500);
+      return answer(url, init);
+    };
+    await withMockedElectron(async (store) => {
+      assert.strictEqual(store.setJiraToken("tok").ok, true);
+      const prs = [blankPr("ENG-21")];
+      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      assert.strictEqual(prs[0].issueSummary, "Sub");
+      assert.strictEqual(prs[0].parentKey, "ENG-20");
+      assert.strictEqual(prs[0].grandparentKey, null);
+      assert.deepStrictEqual(health, { state: "ok", queried: 1, resolved: 1 });
+    });
+  });
+
   global.fetch = realFetch;
 
   // --- poller: tick folds jiraHealth into the snapshot + change detection ----
@@ -6027,6 +6135,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.notStrictEqual(
       poller.hashSnapshot(hsnap({ totalComments: 2 }), { trackComments: true }),
       poller.hashSnapshot(hsnap({ totalComments: 3 }), { trackComments: true }),
+    ));
+  test("hashSnapshot: a newly resolved epic above a subtask's task re-emits (it moves the PR's cluster)", () =>
+    assert.notStrictEqual(
+      poller.hashSnapshot(hsnap({ grandparentKey: null })),
+      poller.hashSnapshot(hsnap({ grandparentKey: "ENG-1" })),
     ));
   test("hashSnapshot: tracking on is the default, so an omitted flag hashes the count", () =>
     assert.notStrictEqual(
