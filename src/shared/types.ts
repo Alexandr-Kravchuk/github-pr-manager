@@ -401,6 +401,14 @@ export interface PullRequest {
    */
   viewerReviewedAt: string | null;
   /**
+   * true when your latest opinionated review was submitted on the PR's current
+   * head commit (matched by oid). Then no push is newer than your review, and
+   * `returnedToMe` and `myReReviewDue` ignore the date comparison: the date of
+   * the head commit falls back to `committedDate`, which can be later than the
+   * review on that same commit.
+   */
+  viewerReviewedHead: boolean;
+  /**
    * true when YOUR change request still stands and the author has since acted
    * (pushed a new commit, or replied and left nothing unresolved) — the merge is
    * blocked on your re-review and GitHub will not ask you for it, because

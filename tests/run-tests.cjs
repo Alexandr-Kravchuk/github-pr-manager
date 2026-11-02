@@ -2103,6 +2103,45 @@ test("mapPr.myReReviewDue: a comment-only re-review does NOT clear it, own later
 // The other direction of the same timestamp comparison: a change request you
 // submitted AFTER the last push starts the clock over — nothing has answered it
 // yet, so the ball is with the author again.
+// A commit GitHub creates itself has `pushedDate: null`, and its
+// `committedDate` can be later than your review of that very commit
+// (clio#1884: review 17:07 on 740205f3, committedDate 19:44). The oid decides.
+const headAt = (oid, at) => ({
+  nodes: [{ commit: { oid, pushedDate: null, committedDate: at, statusCheckRollup: null } }],
+});
+test("mapPr.viewerReviewedHead: your review on the head commit wins over a later commit date", () => {
+  const pr = github.mapPr(
+    rawPr({
+      latestOpinionatedReviews: { nodes: [{ ...myApproval, commit: { oid: "HEAD1" } }] },
+      commits: headAt("HEAD1", "2026-07-07T11:00:00Z"),
+    }),
+    "GH",
+    [],
+    "rev",
+  );
+  assert.strictEqual(pr.viewerReviewedHead, true);
+});
+test("mapPr.viewerReviewedHead: false once the head moves past your review", () =>
+  assert.strictEqual(
+    github.mapPr(
+      rawPr({
+        latestOpinionatedReviews: { nodes: [{ ...myApproval, commit: { oid: "OLD" } }] },
+        commits: headAt("HEAD2", "2026-07-07T11:00:00Z"),
+      }),
+      "GH",
+      [],
+      "rev",
+    ).viewerReviewedHead,
+    false,
+  ));
+test("mapPr.myReReviewDue: a later commit date on the commit you reviewed is not a push", () =>
+  assert.strictEqual(
+    reReviewDue({
+      latestOpinionatedReviews: { nodes: [{ ...myChangeRequest, commit: { oid: "HEAD1" } }] },
+      commits: headAt("HEAD1", "2026-07-07T11:00:00Z"),
+    }),
+    false,
+  ));
 test("mapPr.myReReviewDue: a fresh change request clears it", () =>
   assert.strictEqual(
     reReviewDue({
@@ -4113,6 +4152,23 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       await state.applyActivity([seenIt], file, { trackComments: false });
       assert.strictEqual(seenIt.returnedToMe, false);
     }));
+
+  for (const trackComments of [true, false]) {
+    await atest(`applyActivity.returnedToMe: a review on the head commit beats its later commit date (tracking=${trackComments})`, () =>
+      withTempStore(async (file) => {
+        const stale = reviewPr({ lastCommitPushedAt: "2026-07-06T00:00:00Z" });
+        await state.applyActivity([stale], file, { trackComments });
+        // committedDate 07-09 is later than my review at 07-08, yet the review
+        // sits on that same head commit.
+        const reviewedHead = reviewPr({
+          lastCommitPushedAt: "2026-07-09T00:00:00Z",
+          viewerReviewedAt: "2026-07-08T00:00:00Z",
+          viewerReviewedHead: true,
+        });
+        await state.applyActivity([reviewedHead], file, { trackComments });
+        assert.strictEqual(reviewedHead.returnedToMe, false);
+      }));
+  }
 
   await atest("applyActivity(trackComments=false): a comment-only reviewer gets no push signal", () =>
     withTempStore(async (file) => {

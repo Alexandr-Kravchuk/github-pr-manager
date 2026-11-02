@@ -84,6 +84,7 @@ fragment PrFields on PullRequest {
   latestOpinionatedReviews(first: 15) {
     nodes {
       author { __typename login avatarUrl } state submittedAt body updatedAt
+      commit { oid }
       reactions(first: 100, content: EYES) { nodes { content createdAt user { login } } }
     }
   }
@@ -99,6 +100,7 @@ fragment PrFields on PullRequest {
   commits(last: 1) {
     nodes {
       commit {
+        oid
         pushedDate
         committedDate
         statusCheckRollup {
@@ -284,6 +286,7 @@ interface RawPr {
       submittedAt: string | null;
       body?: string;
       updatedAt?: string;
+      commit?: { oid: string } | null;
       reactions?: { nodes: Array<{ content: string; createdAt: string; user: { login: string } | null }> };
     }>;
   };
@@ -301,6 +304,7 @@ interface RawPr {
   commits: {
     nodes: Array<{
       commit: {
+        oid?: string;
         pushedDate: string | null;
         committedDate: string | null;
         statusCheckRollup: { state: string | null; contexts: { nodes: RawContext[] } } | null;
@@ -595,6 +599,14 @@ export function mapPr(
       : pr.latestOpinionatedReviews.nodes.find((r) => r.author?.login === viewerLogin);
   const viewerRequestedChanges = viewerReview?.state === "CHANGES_REQUESTED";
   const viewerReviewedAt = viewerReview?.submittedAt ?? null;
+  // Your latest opinionated review sits on the current head commit, so there is
+  // no push you have not reviewed — whatever the commit dates say. The date
+  // comparisons below fall back to `committedDate`, which GitHub can set later
+  // than the review on the very commit you reviewed (a commit GitHub creates
+  // itself has `pushedDate: null`); the oid is the only exact answer.
+  const headOid = latestCommit?.oid ?? null;
+  const viewerReviewedHead =
+    headOid != null && viewerReview?.commit?.oid === headOid;
 
   // "My re-review is due": your change request still stands AND the author has
   // since acted, so the ball is back in your court. Deliberately computed here,
@@ -626,7 +638,7 @@ export function mapPr(
   const myReReviewDue =
     viewerRequestedChanges &&
     viewerReviewedAt != null &&
-    ((lastCommitPushedAt != null && lastCommitPushedAt > viewerReviewedAt) ||
+    ((lastCommitPushedAt != null && lastCommitPushedAt > viewerReviewedAt && !viewerReviewedHead) ||
       (unresolvedThreads === 0 && authorRepliedAfterReview));
 
   const issueKey = parseIssueKey(pr.title, pr.headRefName);
@@ -707,6 +719,7 @@ export function mapPr(
     viewerHasReviewed,
     viewerApproved,
     viewerReviewedAt,
+    viewerReviewedHead,
     myReReviewDue,
     hasNoReviews,
     unresolvedThreads,

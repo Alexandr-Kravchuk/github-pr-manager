@@ -45,6 +45,7 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     viewerHasReviewed: false,
     viewerApproved: false,
     viewerReviewedAt: null,
+    viewerReviewedHead: false,
     myReReviewDue: false,
     hasNoReviews: true,
     unresolvedThreads: 0,
