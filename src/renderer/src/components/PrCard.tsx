@@ -6,6 +6,7 @@ import { hiddenParentOf } from "../../../shared/pr-group";
 import { repoShortName } from "../../../shared/pr-table";
 import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
+import { AuthorButton } from "./AuthorButton";
 import { CheckBadge } from "./CheckBadge";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
@@ -321,7 +322,10 @@ export function PrCard({
       {/* Meta: author, roles, review decision, comments, new activity */}
       <div className="mb-2 flex flex-wrap items-center gap-2">
         {pr.author && (
-          <span className="inline-flex items-center gap-1.5 text-xs text-fg-muted">
+          <AuthorButton
+            login={pr.author.login}
+            className="inline-flex items-center gap-1.5 text-xs text-fg-muted"
+          >
             <img
               src={pr.author.avatarUrl}
               alt=""
@@ -330,7 +334,7 @@ export function PrCard({
               className="rounded-full"
             />
             {pr.author.login}
-          </span>
+          </AuthorButton>
         )}
 
         {/* The issue key, straight to Jira. First in the row because it answers
