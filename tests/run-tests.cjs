@@ -3111,9 +3111,11 @@ for (const [label, fixture, expected] of [
   ["approved but re-requested", mkPr({ viewerApproved: true, roles: ["reviewer", "reviewed"] }), false],
   ["reviewed without approving", mkPr({ viewerApproved: false, roles: ["reviewed"] }), false],
   ["my own PR, approved by others", mkPr({ viewerApproved: false, roles: ["author"] }), false],
+  // Back to you after your approval: the routine reviews it, so the chip keeps it.
+  ["approved but returned to me", mkPr({ viewerApproved: true, roles: ["reviewed"], returnedToMe: true }), false],
 ]) {
   test(`isFinishedApproval: ${label} -> ${expected}`, () =>
-    assert.strictEqual(prFilter.isFinishedApproval(fixture), expected));
+    assert.strictEqual(prFilter.isFinishedApproval(fixture, { trackComments: true }), expected));
 }
 
 const APPROVALS = [
@@ -3210,10 +3212,9 @@ test("filterPrs(role): 'reviewer' keeps drafts out even with the Drafts chip on"
   assert.deepStrictEqual(reviewTitles({ showDrafts: true }), ["asked of me", "back to me", "re-review due"]));
 test("filterPrs(role): 'reviewer' equals the routine detector's predicate", () => {
   const detector = (pr) => !pr.isDraft && prFilter.prSignal(pr, { trackComments: true }) === "myReview";
-  const visible = REVIEW_DUE.filter((pr) => prFilter.isRevealed(pr, ST) || pr.isDraft);
   assert.deepStrictEqual(
     prFilter.filterPrs(REVIEW_DUE, st({ role: "reviewer", showDrafts: true })),
-    visible.filter(detector),
+    REVIEW_DUE.filter(detector),
   );
 });
 test("filterPrs(role): a returned PR stays in 'reviewed' as well", () =>
@@ -3228,6 +3229,10 @@ test("roleFacetCounts: the 'reviewer' badge counts the myReview set, not the rol
     reviewer: 3,
     reviewed: 4,
   }));
+test("filterPrs(role): Hide my approvals keeps an approved PR that came back to you", () => {
+  const back = mkPr({ roles: ["reviewed"], viewerApproved: true, returnedToMe: true });
+  assert.deepStrictEqual(prFilter.filterPrs([back], st({ role: "reviewer", hideApproved: true })), [back]);
+});
 
 // The role switch's four badges. Numbers are written out rather than derived
 // from filterPrs, so the test would notice a helper that agrees with itself.

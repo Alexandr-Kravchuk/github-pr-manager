@@ -198,15 +198,19 @@ export function isRevealed(
  * The second half is the whole subtlety. A re-request outranks your approval —
  * if someone has asked for your review again, the PR is waiting on you no matter
  * what you said last time, and hiding it would drop live work off the dashboard
- * silently, which is the one thing a filter must never do. Your approval also
- * un-sets itself (`viewerApproved`) when you supersede it with a change request
- * or branch protection dismisses it on a new push, so nothing here has to track
- * staleness.
+ * silently, which is the one thing a filter must never do. "Asking for you
+ * again" is the `myReview` signal, not the `reviewer` role: an approved PR that
+ * came back to you (`returnedToMe`) carries only `reviewed`, yet the routine
+ * `review-purple-prs` takes it, so the chip must not hide it from `To review`.
+ * Your approval also un-sets itself (`viewerApproved`) when you supersede it
+ * with a change request or branch protection dismisses it on a new push, so
+ * nothing here has to track staleness.
  */
 export function isFinishedApproval(
-  pr: Pick<PullRequest, "viewerApproved" | "roles">,
+  pr: Pick<PullRequest, "viewerApproved"> & SignalPr,
+  { trackComments }: { trackComments: boolean },
 ): boolean {
-  return pr.viewerApproved && !pr.roles.includes("reviewer");
+  return pr.viewerApproved && prSignal(pr, { trackComments }) !== "myReview";
 }
 
 function matchesSearch(pr: FilterablePr, search: string): boolean {
@@ -249,7 +253,7 @@ function matchesRole(pr: FilterablePr, role: RoleFilter, trackComments: boolean)
 /** Whether a PR is rendered under the given view state. */
 export function isVisible(pr: FilterablePr, state: FilterState): boolean {
   if (!isRevealed(pr, state)) return false;
-  if (state.hideApproved && isFinishedApproval(pr)) return false;
+  if (state.hideApproved && isFinishedApproval(pr, state)) return false;
   if (!matchesRole(pr, state.role, state.trackComments)) return false;
   if (state.host !== "all" && pr.hostLabel !== state.host) return false;
   const sources = SOURCE_CHIPS.filter((chip) => state[chip.flag]);
@@ -315,8 +319,9 @@ export function roleFacetCounts(
     reviewer: 0,
     reviewed: 0,
   };
+  const roles = (Object.keys(counts) as RoleFilter[]).filter((role) => role !== "all");
   for (const pr of base) {
-    for (const role of ["author", "reviewer", "reviewed"] as const) {
+    for (const role of roles) {
       if (matchesRole(pr, role, state.trackComments)) counts[role] += 1;
     }
   }
