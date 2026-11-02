@@ -1516,8 +1516,11 @@ function GearIcon() {
   );
 }
 
-/** Active-state color per chip. Full literal class strings so Tailwind keeps them. */
 /**
+ * A chip's colour, used by both the lit look (`CHIP_TONE_ACTIVE`) and the idle
+ * label (`CHIP_TONE_IDLE_TEXT`). Both maps hold full literal class strings so
+ * Tailwind keeps them.
+ *
  * Needs attention is orange and New comments amber: new comments are one of the
  * reasons a PR needs attention, so the two chips share a warm family, yet they
  * sit side by side and must not read as the same chip.
@@ -1539,11 +1542,13 @@ const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
  * what the chip is about before it is clicked, while the fill and border stay
  * the plain idle ones, so only a lit chip reads as a coloured block. A chip at
  * 0 stays grey instead, so "nothing here" still reads differently from "off".
+ * Orange and amber take the 800 shade in the light theme: at 700 they fell
+ * below 4.5:1 on the hover fill (`bg-elevated`).
  */
 const CHIP_TONE_IDLE_TEXT: Record<ChipTone, string> = {
   sky: "text-sky-700 dark:text-sky-300",
-  orange: "text-orange-700 dark:text-orange-300",
-  amber: "text-amber-700 dark:text-amber-300",
+  orange: "text-orange-800 dark:text-orange-300",
+  amber: "text-amber-800 dark:text-amber-300",
   red: "text-red-700 dark:text-red-300",
   green: "text-emerald-700 dark:text-emerald-300",
 };
