@@ -96,7 +96,7 @@ const ROLE_FILTER_LABELS: Record<RoleFilter, string> = {
 const ROLE_FILTER_TITLES: Record<RoleFilter, string> = {
   all: "All roles",
   author: "I'm the author",
-  reviewer: "I'm a reviewer",
+  reviewer: "Waiting for my review",
   reviewed: "I already reviewed",
 };
 const ROLE_FILTERS = Object.keys(ROLE_FILTER_LABELS) as RoleFilter[];
@@ -560,11 +560,21 @@ export function App() {
 
   const allPrs = useMemo(() => data?.pullRequests ?? [], [data]);
 
+  // Whether the unread-comment channel exists at all (the `trackComments`
+  // setting). Off hides the chip and the header stat, drops a stored `newOnly`,
+  // and — via `hasNewActivity`, which the main process then never sets — the card
+  // badge with its `Mark as seen` button. Derived ONCE: two spellings with two
+  // implicit defaults would let the effect below treat an absent field as OFF
+  // (silently clearing a stored filter) while the chip stayed on. Defaults to on
+  // for the frame before `getConfig` answers, which is the original behavior.
+  const trackComments = config?.trackComments ?? true;
+
   // Every filter decision lives in `shared/pr-filter` so it can be unit-tested —
   // this is the whole view state that module needs.
   const filterState = useMemo<FilterState>(
     () => ({
       role,
+      trackComments,
       host,
       search,
       attentionOnly,
@@ -578,6 +588,7 @@ export function App() {
     }),
     [
       role,
+      trackComments,
       host,
       search,
       attentionOnly,
@@ -590,15 +601,6 @@ export function App() {
       showIgnored,
     ],
   );
-
-  // Whether the unread-comment channel exists at all (the `trackComments`
-  // setting). Off hides the chip and the header stat, drops a stored `newOnly`,
-  // and — via `hasNewActivity`, which the main process then never sets — the card
-  // badge with its `Mark as seen` button. Derived ONCE: two spellings with two
-  // implicit defaults would let the effect below treat an absent field as OFF
-  // (silently clearing a stored filter) while the chip stayed on. Defaults to on
-  // for the frame before `getConfig` answers, which is the original behavior.
-  const trackComments = config?.trackComments ?? true;
 
   // A stored filter the current config invalidates — the `New comments` chip's
   // flag under `trackComments: false`, which would otherwise empty the list with

@@ -66,7 +66,7 @@ export const CLAUDE_BUTTON_TEXT: Record<ClaudeLaunchKind, string> = {
   open: "Open session",
 };
 
-type LaunchPr = Parameters<typeof prSignal>[0];
+type LaunchPr = Parameters<typeof prSignal>[0] & Pick<PullRequest, "canBeMerged">;
 
 export function pickClaudeLaunch(pr: LaunchPr, opts: { trackComments: boolean }): ClaudeLaunchKind {
   const signal = prSignal(pr, opts);

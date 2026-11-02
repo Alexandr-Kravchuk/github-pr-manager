@@ -51,6 +51,12 @@ export type RoleFilter = "all" | PrRole;
 /** Everything that narrows or reveals rows. Sort/group are view controls, not filters. */
 export interface FilterState {
   role: RoleFilter;
+  /**
+   * The `trackComments` setting, not a view control. It is here because the
+   * `To review` segment is the `myReview` signal (`isReviewDue`), and that
+   * signal reads the setting.
+   */
+  trackComments: boolean;
   host: string;
   search: string;
   attentionOnly: boolean;
@@ -63,8 +69,30 @@ export interface FilterState {
   showIgnored: boolean;
 }
 
+/** The PR fields `prSignal` reads. */
+export type SignalPr = Pick<
+  PullRequest,
+  | "roles"
+  | "failingChecks"
+  | "pendingChecks"
+  | "hasUnaddressedChangeRequest"
+  | "hasUnaddressedReviewFeedback"
+  | "hasUnaddressedComments"
+  | "hasConflicts"
+  | "isBehindBase"
+  | "unresolvedThreads"
+  | "returnedToMe"
+  | "myReReviewDue"
+  | "awaitingReview"
+  | "hasNewActivity"
+  | "hasHumanApproval"
+  | "reviewDecision"
+  | "ciState"
+  | "blockedByStack"
+>;
+
 /** The PR fields the filters read — a structural subset, so tests can use light fixtures. */
-export type FilterablePr = Pick<
+export type FilterablePr = SignalPr & Pick<
   PullRequest,
   | "isDraft"
   | "isIgnored"
@@ -170,15 +198,19 @@ export function isRevealed(
  * The second half is the whole subtlety. A re-request outranks your approval —
  * if someone has asked for your review again, the PR is waiting on you no matter
  * what you said last time, and hiding it would drop live work off the dashboard
- * silently, which is the one thing a filter must never do. Your approval also
- * un-sets itself (`viewerApproved`) when you supersede it with a change request
- * or branch protection dismisses it on a new push, so nothing here has to track
- * staleness.
+ * silently, which is the one thing a filter must never do. "Asking for you
+ * again" is the `myReview` signal, not the `reviewer` role: an approved PR that
+ * came back to you (`returnedToMe`) carries only `reviewed`, yet the routine
+ * `review-purple-prs` takes it, so the chip must not hide it from `To review`.
+ * Your approval also un-sets itself (`viewerApproved`) when you supersede it
+ * with a change request or branch protection dismisses it on a new push, so
+ * nothing here has to track staleness.
  */
 export function isFinishedApproval(
-  pr: Pick<PullRequest, "viewerApproved" | "roles">,
+  pr: Pick<PullRequest, "viewerApproved"> & SignalPr,
+  { trackComments }: { trackComments: boolean },
 ): boolean {
-  return pr.viewerApproved && !pr.roles.includes("reviewer");
+  return pr.viewerApproved && prSignal(pr, { trackComments }) !== "myReview";
 }
 
 function matchesSearch(pr: FilterablePr, search: string): boolean {
@@ -188,11 +220,41 @@ function matchesSearch(pr: FilterablePr, search: string): boolean {
   return hay.includes(q);
 }
 
+/**
+ * Whether the PR waits for your review: the violet `myReview` signal, drafts
+ * excluded. The routine `review-purple-prs` takes exactly this set — its
+ * detector imports `prSignal` from `dist/main/shared/pr-filter.js` — so the
+ * `To review` segment shows the PRs the routine reviews.
+ *
+ * `myReview` is wider than the `reviewer` role: a PR that came back to you
+ * (`returnedToMe`) or waits for your re-review (`myReReviewDue`) carries only
+ * `reviewed`. A draft stays out even with the `Drafts` chip on; it is then
+ * listed under `All` only.
+ */
+export function isReviewDue(
+  pr: Pick<PullRequest, "isDraft"> & SignalPr,
+  { trackComments }: { trackComments: boolean },
+): boolean {
+  return !pr.isDraft && prSignal(pr, { trackComments }) === "myReview";
+}
+
+/**
+ * Whether the PR belongs to a role segment. `reviewer` is `isReviewDue`, not
+ * the role itself; the other two are plain `roles` membership. One function
+ * for the list and for `roleFacetCounts`, so a badge cannot disagree with the
+ * rows its segment shows.
+ */
+function matchesRole(pr: FilterablePr, role: RoleFilter, trackComments: boolean): boolean {
+  if (role === "all") return true;
+  if (role === "reviewer") return isReviewDue(pr, { trackComments });
+  return pr.roles.includes(role);
+}
+
 /** Whether a PR is rendered under the given view state. */
 export function isVisible(pr: FilterablePr, state: FilterState): boolean {
   if (!isRevealed(pr, state)) return false;
-  if (state.hideApproved && isFinishedApproval(pr)) return false;
-  if (state.role !== "all" && !pr.roles.includes(state.role)) return false;
+  if (state.hideApproved && isFinishedApproval(pr, state)) return false;
+  if (!matchesRole(pr, state.role, state.trackComments)) return false;
   if (state.host !== "all" && pr.hostLabel !== state.host) return false;
   const sources = SOURCE_CHIPS.filter((chip) => state[chip.flag]);
   if (sources.length > 0 && !sources.some((chip) => chip.matches(pr))) return false;
@@ -241,9 +303,10 @@ export function sourceFacetCount(
  *
  * One pass rather than four `filterPrs` calls: `isVisible` gates the role as a
  * plain AND, so a PR is visible under `role: X` exactly when it is visible under
- * `role: "all"` and carries X. The `roles` array can hold two of them at once
- * (a re-requested review is both `reviewer` and `reviewed`), which is why a PR
- * can count towards more than one button.
+ * `role: "all"` and matches X (`matchesRole`). A PR can match two segments at
+ * once (a re-requested review is both `reviewer` and `reviewed`; a PR that came
+ * back to you is `To review` and `reviewed`), which is why a PR can count
+ * towards more than one button.
  */
 export function roleFacetCounts(
   prs: readonly FilterablePr[],
@@ -256,8 +319,11 @@ export function roleFacetCounts(
     reviewer: 0,
     reviewed: 0,
   };
+  const roles = (Object.keys(counts) as RoleFilter[]).filter((role) => role !== "all");
   for (const pr of base) {
-    for (const role of pr.roles) counts[role] += 1;
+    for (const role of roles) {
+      if (matchesRole(pr, role, state.trackComments)) counts[role] += 1;
+    }
   }
   return counts;
 }
@@ -496,7 +562,7 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
  * signals go quiet by design, so gating it the same way would defeat its
  * purpose.
  */
-export function prSignal(pr: PullRequest, { trackComments }: { trackComments: boolean }): PrSignal {
+export function prSignal(pr: SignalPr, { trackComments }: { trackComments: boolean }): PrSignal {
   const isAuthor = pr.roles.includes("author");
 
   if (
