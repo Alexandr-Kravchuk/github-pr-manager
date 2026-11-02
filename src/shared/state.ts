@@ -189,10 +189,14 @@ export async function applyActivity(
         // Same `committedDate` fallback caveat as `myReReviewDue` in github.ts:
         // `pushedDate` is often null, so a rebase preserving old committer dates
         // can read as "already reviewed" and stay quiet.
+        //
+        // `viewerReviewedHead` answers the same question exactly: your review
+        // sits on the head commit, so whatever its date says, no push is newer.
         const pushPredatesMyReview =
-          pr.viewerReviewedAt != null &&
-          pr.lastCommitPushedAt != null &&
-          pr.lastCommitPushedAt <= pr.viewerReviewedAt;
+          pr.viewerReviewedHead ||
+          (pr.viewerReviewedAt != null &&
+            pr.lastCommitPushedAt != null &&
+            pr.lastCommitPushedAt <= pr.viewerReviewedAt);
         // With tracking OFF the push question is answered from live GitHub state
         // instead of the snapshot: "did the author push after my last review?".
         // That is a fact about the PR, not about when this app last looked, so it
@@ -201,6 +205,7 @@ export async function applyActivity(
         // opinionated review (`viewerReviewedAt` is null after a plain "Comment"
         // review — the 4-of-5 case above — and such a PR stays quiet).
         const pushAfterMyReview =
+          !pr.viewerReviewedHead &&
           pr.viewerReviewedAt != null &&
           pr.lastCommitPushedAt != null &&
           pr.lastCommitPushedAt > pr.viewerReviewedAt;
