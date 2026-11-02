@@ -1076,7 +1076,7 @@ export function App() {
                 active={attentionOnly}
                 count={chipCounts.attention}
                 onClick={() => setAttentionOnly((v) => !v)}
-                tone="amber"
+                tone="orange"
               >
                 ⚠ Needs attention
               </FilterChip>
@@ -1096,7 +1096,10 @@ export function App() {
                   active={newOnly}
                   count={chipCounts.fresh}
                   onClick={() => setNewOnly((v) => !v)}
-                  tone="violet"
+                  // Amber like the card's "✦ New comments" pill and its attention
+                  // stripe: new comments are one of the reasons a PR needs
+                  // attention. Violet is taken on the cards by "your review".
+                  tone="amber"
                 >
                   ✦ New comments
                 </FilterChip>
@@ -1116,7 +1119,7 @@ export function App() {
               >
                 ◷ No reviews yet
               </FilterChip>
-              <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
+              <span aria-hidden className="mx-1 h-5 w-px self-center bg-fg-faint" />
               {/* The one chip that REMOVES rows: PRs you approved and that aren't
                   asking for you again. Its count is the rows it hides (or would),
                   dropped at 0 so "(0)" doesn't read as "hides everything". */}
@@ -1131,7 +1134,7 @@ export function App() {
                 ✓ Hide my approvals
               </FilterChip>
               {(showDraftsChip || showIgnoredChip) && (
-                <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
+                <span aria-hidden className="mx-1 h-5 w-px self-center bg-fg-faint" />
               )}
               {showDraftsChip && (
                 <FilterChip
@@ -1513,17 +1516,41 @@ function GearIcon() {
   );
 }
 
-/** Active-state color per chip. Full literal class strings so Tailwind keeps them. */
-type ChipTone = "sky" | "amber" | "red" | "violet" | "green";
+/**
+ * A chip's colour, used by both the lit look (`CHIP_TONE_ACTIVE`) and the idle
+ * label (`CHIP_TONE_IDLE_TEXT`). Both maps hold full literal class strings so
+ * Tailwind keeps them.
+ *
+ * Needs attention is orange and New comments amber: new comments are one of the
+ * reasons a PR needs attention, so the two chips share a warm family, yet they
+ * sit side by side and must not read as the same chip.
+ */
+type ChipTone = "sky" | "orange" | "amber" | "red" | "green";
 
 const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
   // The tint is mixed into the surface colour rather than laid over it at 15%
   // alpha, so the chip stays opaque over the header's snowflakes.
   sky: "border-sky-500/60 bg-[color-mix(in_srgb,var(--color-sky-500)_15%,var(--surface))] text-sky-700 dark:text-sky-200",
+  orange: "border-orange-500/60 bg-[color-mix(in_srgb,var(--color-orange-500)_15%,var(--surface))] text-orange-700 dark:text-orange-200",
   amber: "border-amber-500/60 bg-[color-mix(in_srgb,var(--color-amber-500)_15%,var(--surface))] text-amber-700 dark:text-amber-200",
   red: "border-red-500/60 bg-[color-mix(in_srgb,var(--color-red-500)_15%,var(--surface))] text-red-700 dark:text-red-200",
-  violet: "border-violet-500/60 bg-[color-mix(in_srgb,var(--color-violet-500)_15%,var(--surface))] text-violet-700 dark:text-violet-200",
   green: "border-emerald-500/60 bg-[color-mix(in_srgb,var(--color-emerald-500)_15%,var(--surface))] text-emerald-700 dark:text-emerald-200",
+};
+
+/**
+ * The text colour of a chip that is off but has rows to show: the tone says
+ * what the chip is about before it is clicked, while the fill and border stay
+ * the plain idle ones, so only a lit chip reads as a coloured block. A chip at
+ * 0 stays grey instead, so "nothing here" still reads differently from "off".
+ * Orange and amber take the 800 shade in the light theme: at 700 they fell
+ * below 4.5:1 on the hover fill (`bg-elevated`).
+ */
+const CHIP_TONE_IDLE_TEXT: Record<ChipTone, string> = {
+  sky: "text-sky-700 dark:text-sky-300",
+  orange: "text-orange-800 dark:text-orange-300",
+  amber: "text-amber-800 dark:text-amber-300",
+  red: "text-red-700 dark:text-red-300",
+  green: "text-emerald-700 dark:text-emerald-300",
 };
 
 /**
@@ -1579,7 +1606,7 @@ function FilterChip({
         GLASS_BASE,
         // Dimmed by its text, not by opacity: a half-transparent chip let the
         // snowflakes behind it show through.
-        active ? CHIP_TONE_ACTIVE[tone] : cn(GLASS_IDLE, empty ? "text-fg-faint" : "text-fg-muted"),
+        active ? CHIP_TONE_ACTIVE[tone] : cn(GLASS_IDLE, empty ? "text-fg-faint" : CHIP_TONE_IDLE_TEXT[tone]),
       )}
     >
       {children}
