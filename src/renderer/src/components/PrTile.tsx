@@ -4,6 +4,7 @@ import { prSignal, type PrSignal } from "../../../shared/pr-filter";
 import { ageDays, approvalTally, primaryRole, repoShortName, reviewRank } from "../../../shared/pr-table";
 import type { PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
+import { AuthorButton } from "./AuthorButton";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
 
@@ -152,14 +153,9 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
           you can ask what a glyph means. */}
       <div className="mt-1.5 flex items-center gap-1 text-[11px] leading-none">
         {pr.author && (
-          <img
-            src={pr.author.avatarUrl}
-            alt=""
-            width={16}
-            height={16}
-            title={`Author: ${pr.author.login}`}
-            className="shrink-0 rounded-full"
-          />
+          <AuthorButton login={pr.author.login} className="shrink-0">
+            <img src={pr.author.avatarUrl} alt="" width={16} height={16} className="block rounded-full" />
+          </AuthorButton>
         )}
         {role && (
           <span

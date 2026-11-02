@@ -26,12 +26,12 @@ import type { PrRole, PullRequest } from "./types";
  *   made a live `Drafts (2)` / `Ignored (2)` pair show zero cards: the two PRs
  *   were ignored drafts, so each chip alone was vetoed by the other's gate.
  *
- * `role`, `host` and `search` are plain narrowing gates: they apply to whatever
- * the sources produced, so a source never smuggles a PR past them.
+ * `role`, `host`, `author` and `search` are plain narrowing gates: they apply to
+ * whatever the sources produced, so a source never smuggles a PR past them.
  *
  * Chip badges are facet counts (`sourceFacetCount` / `revealDelta` /
  * `excludeDelta`). A source badge is the size of that source within the
- * non-source narrowing (role / host / search / the reveal gate), so it is
+ * non-source narrowing (role / host / author / search / the reveal gate), so it is
  * unaffected by which sibling sources are on — the property that keeps every
  * source clickable while another one is active. The two delta badges answer
  * "what does clicking change", rows added or taken away, so they can never
@@ -58,6 +58,14 @@ export interface FilterState {
    */
   trackComments: boolean;
   host: string;
+  /**
+   * The login whose PRs alone are shown, or null for every author — set by a
+   * click on an author on a card, tile or table row. An exact login rather than
+   * the search box: a substring would also match titles and repo names. The
+   * login alone, not login + host: a person usually carries the same login on
+   * every host, and the host pills already narrow to one host when it is not.
+   */
+  author: string | null;
   search: string;
   attentionOnly: boolean;
   failingOnly: boolean;
@@ -256,6 +264,7 @@ export function isVisible(pr: FilterablePr, state: FilterState): boolean {
   if (state.hideApproved && isFinishedApproval(pr, state)) return false;
   if (!matchesRole(pr, state.role, state.trackComments)) return false;
   if (state.host !== "all" && pr.hostLabel !== state.host) return false;
+  if (state.author !== null && pr.author?.login !== state.author) return false;
   const sources = SOURCE_CHIPS.filter((chip) => state[chip.flag]);
   if (sources.length > 0 && !sources.some((chip) => chip.matches(pr))) return false;
   return matchesSearch(pr, state.search);
@@ -449,6 +458,7 @@ export function activeFilterCount(state: FilterState): number {
   let n = 0;
   if (state.search.trim()) n += 1;
   if (state.host !== "all") n += 1;
+  if (state.author !== null) n += 1;
   if (state.hideApproved) n += 1;
   for (const chip of SOURCE_CHIPS) {
     if (state[chip.flag]) n += 1;

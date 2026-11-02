@@ -43,8 +43,11 @@ Three layers:
   defaults), `pr-filter.ts` (the whole view-filter layer: the reveal gate, the
   filter pipeline and the chips' facet counts — the five `SOURCE_CHIPS`
   (`Needs attention`, `Failing CI`, `New comments`, `Ready to merge`,
-  `No reviews yet`) are OR-ed **sources**, and role / host / search /
-  `Hide my approvals` / the reveal gate narrow whatever union they produced;
+  `No reviews yet`) are OR-ed **sources**, and role / host / author / search /
+  `Hide my approvals` / the reveal gate narrow whatever union they produced
+  (author is an exact login set by clicking an author in any view, through
+  `AuthorFilterContext` and `AuthorButton`, transient like search and shown as
+  a chip that switches it off);
   they were AND-ed until a pair like attention + mergeable turned out to show
   nothing and to disable the second chip through its own 0 badge, which is why
   `sourceFacetCount` is blind to the sibling sources; `roleFacetCounts` badges

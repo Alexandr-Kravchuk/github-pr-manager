@@ -30,6 +30,7 @@ import {
 } from "../../shared/pr-filter";
 import { groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
 import { hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
+import { AuthorFilterContext } from "./components/author-filter-context";
 import { ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
@@ -265,6 +266,16 @@ export function App() {
   const [search, setSearch] = useState("");
   const [role, setRole] = useState<RoleFilter>(boot.role);
   const [host, setHost] = useState(boot.host);
+  // Transient like the search box: "whose PRs" is a look you take, not a view
+  // you come back to, and a persisted login would hide everyone else on launch.
+  const [author, setAuthor] = useState<string | null>(null);
+  const authorFilter = useMemo(
+    () => ({
+      author,
+      toggle: (login: string) => setAuthor((cur) => (cur === login ? null : login)),
+    }),
+    [author],
+  );
   const [attentionOnly, setAttentionOnly] = useState(boot.attentionOnly);
   const [failingOnly, setFailingOnly] = useState(boot.failingOnly);
   const [newOnly, setNewOnly] = useState(boot.newOnly);
@@ -576,6 +587,7 @@ export function App() {
       role,
       trackComments,
       host,
+      author,
       search,
       attentionOnly,
       failingOnly,
@@ -590,6 +602,7 @@ export function App() {
       role,
       trackComments,
       host,
+      author,
       search,
       attentionOnly,
       failingOnly,
@@ -808,6 +821,7 @@ export function App() {
   const clearFilters = useCallback(() => {
     setSearch("");
     setHost("all");
+    setAuthor(null);
     setAttentionOnly(false);
     setFailingOnly(false);
     setNewOnly(false);
@@ -1151,6 +1165,24 @@ export function App() {
                   Ignored
                 </FilterChip>
               )}
+              {/* The author filter has no control of its own — it is set by a
+                  click on an author — so while it is on, this chip is what shows
+                  it and switches it off. Last in the row, so its arrival doesn't
+                  slide the chips in front of it. */}
+              {author !== null && (
+                <>
+                  <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
+                  <FilterChip
+                    active
+                    count={filtered.length}
+                    showCount={false}
+                    title="Show PRs by every author"
+                    onClick={() => setAuthor(null)}
+                  >
+                    Author: {author} ✕
+                  </FilterChip>
+                </>
+              )}
               {activeFilters > 0 && (
                 <button
                   type="button"
@@ -1251,6 +1283,7 @@ export function App() {
 
       <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
       <ClaudeSessionsContext.Provider value={claudeSessions}>
+      <AuthorFilterContext.Provider value={authorFilter}>
       {viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable
@@ -1329,6 +1362,7 @@ export function App() {
           onToggleIgnore={toggleIgnore}
         />
       )}
+      </AuthorFilterContext.Provider>
       </ClaudeSessionsContext.Provider>
       </ClaudeEnabledContext.Provider>
 

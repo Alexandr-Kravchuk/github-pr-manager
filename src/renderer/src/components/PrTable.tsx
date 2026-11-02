@@ -17,6 +17,7 @@ import {
 } from "../../../shared/pr-table";
 import type { PullRequest, ReviewerState } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
+import { AuthorButton } from "./AuthorButton";
 import { ClaudeButton } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
 import { ClaudeEnabledContext } from "./claude-context";
@@ -528,15 +529,16 @@ function Row({
 
       <td className={cn("py-1.5", COLUMN_CLASS.author)}>
         {pr.author ? (
-          // Avatar only — the login is on hover, like the Reviewers column.
-          <img
-            src={pr.author.avatarUrl}
-            alt={pr.author.login}
-            title={pr.author.login}
-            width={18}
-            height={18}
-            className="rounded-full"
-          />
+          // Avatar only — the login is in the button's title.
+          <AuthorButton login={pr.author.login} className="inline-block align-middle">
+            <img
+              src={pr.author.avatarUrl}
+              alt={pr.author.login}
+              width={18}
+              height={18}
+              className="block rounded-full"
+            />
+          </AuthorButton>
         ) : (
           <span className="text-xs text-fg-faint">—</span>
         )}

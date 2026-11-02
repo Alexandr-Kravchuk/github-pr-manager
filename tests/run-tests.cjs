@@ -2845,6 +2845,7 @@ const ST = {
   role: "all",
   trackComments: true,
   host: "all",
+  author: null,
   search: "",
   attentionOnly: false,
   failingOnly: false,
@@ -2856,6 +2857,33 @@ const ST = {
   showIgnored: false,
 };
 const st = (over = {}) => ({ ...ST, ...over });
+
+// The author filter: an exact login, so it is not the search box's substring
+// match — "octo" in a title must not pull in a PR by someone else.
+const BY_OCTOCAT = mkPr({ author: { login: "octocat" } });
+const BY_OCTO = mkPr({ author: { login: "octo" }, title: "octocat docs" });
+const NO_AUTHOR = mkPr({ author: null });
+const AUTHORED = [BY_OCTOCAT, BY_OCTO, NO_AUTHOR];
+test("filterPrs: no author filter keeps every author, a missing one too", () =>
+  assert.strictEqual(prFilter.filterPrs(AUTHORED, st()).length, 3));
+test("filterPrs: the author filter keeps that exact login only", () => {
+  assert.deepStrictEqual(prFilter.filterPrs(AUTHORED, st({ author: "octocat" })), [BY_OCTOCAT]);
+  assert.deepStrictEqual(prFilter.filterPrs(AUTHORED, st({ author: "octo" })), [BY_OCTO]);
+});
+test("filterPrs: the author filter narrows the sources' union, like host", () => {
+  const failingOther = mkPr({ author: { login: "octo" }, failingChecks: [{ name: "build" }] });
+  assert.deepStrictEqual(
+    prFilter.filterPrs([BY_OCTOCAT, failingOther], st({ author: "octocat", failingOnly: true })),
+    [],
+  );
+});
+test("sourceFacetCount: a source badge counts within the author filter", () => {
+  const failing = mkPr({ author: { login: "octocat" }, failingChecks: [{ name: "build" }] });
+  const failingOther = mkPr({ author: { login: "octo" }, failingChecks: [{ name: "build" }] });
+  assert.strictEqual(prFilter.sourceFacetCount([failing, failingOther], st({ author: "octocat" }), "failing"), 1);
+});
+test("emptyStateKind: an author filter that matches nothing is a no-match, not all-hidden", () =>
+  assert.strictEqual(prFilter.emptyStateKind(st({ author: "ghost" }), 3), "no-match"));
 
 // The live shape that produced the bug report: every open PR is an ignored draft.
 const IGNORED_DRAFTS = [
@@ -3396,6 +3424,7 @@ test("activeFilterCount: the role switch is a scope, not a filter Clear filters 
 for (const over of [
   { search: "bump" },
   { host: "GHE" },
+  { author: "octocat" },
   ...prFilter.SOURCE_CHIPS.map((chip) => ({ [chip.flag]: true })),
 ]) {
   test(`activeFilterCount: ${Object.keys(over)[0]} adds exactly 1`, () =>
