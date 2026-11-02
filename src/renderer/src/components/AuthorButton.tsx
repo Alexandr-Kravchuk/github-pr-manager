@@ -29,7 +29,18 @@ export function AuthorButton({
       title={label}
       aria-label={label}
       aria-pressed={active}
-      className={cn("rounded-full hover:text-sky-600 dark:hover:text-sky-300", className)}
+      className={cn(
+        // The avatar-only views (tile, table) carry no text to take a focus or
+        // hover cue, so the ring is the only sign focus landed on the button.
+        "rounded-full hover:text-sky-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 dark:hover:text-sky-300",
+        className,
+        // The filtered author is marked on every PR left in the list, so the
+        // click that undoes the filter is visible where the user clicks, not
+        // only on the chip that may have scrolled away. A ring, not a text
+        // colour: `cn` is a plain join, so a colour would fight the caller's on
+        // stylesheet order.
+        active && "ring-2 ring-sky-500/70",
+      )}
     >
       {children}
     </button>

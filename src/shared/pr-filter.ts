@@ -258,6 +258,15 @@ function matchesRole(pr: FilterablePr, role: RoleFilter, trackComments: boolean)
   return pr.roles.includes(role);
 }
 
+/**
+ * What a click on an author does to the author filter: the filtered author
+ * switches it off, any other author replaces it — so the click that narrowed
+ * the list is also the one that undoes it.
+ */
+export function toggleAuthor(current: string | null, login: string): string | null {
+  return current === login ? null : login;
+}
+
 /** Whether a PR is rendered under the given view state. */
 export function isVisible(pr: FilterablePr, state: FilterState): boolean {
   if (!isRevealed(pr, state)) return false;

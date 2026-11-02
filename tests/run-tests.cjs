@@ -2882,6 +2882,11 @@ test("sourceFacetCount: a source badge counts within the author filter", () => {
   const failingOther = mkPr({ author: { login: "octo" }, failingChecks: [{ name: "build" }] });
   assert.strictEqual(prFilter.sourceFacetCount([failing, failingOther], st({ author: "octocat" }), "failing"), 1);
 });
+test("toggleAuthor: an author click sets, replaces and, on the same author, clears", () => {
+  assert.strictEqual(prFilter.toggleAuthor(null, "octocat"), "octocat");
+  assert.strictEqual(prFilter.toggleAuthor("octo", "octocat"), "octocat");
+  assert.strictEqual(prFilter.toggleAuthor("octocat", "octocat"), null);
+});
 test("emptyStateKind: an author filter that matches nothing is a no-match, not all-hidden", () =>
   assert.strictEqual(prFilter.emptyStateKind(st({ author: "ghost" }), 3), "no-match"));
 

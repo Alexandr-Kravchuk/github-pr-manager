@@ -25,6 +25,7 @@ import {
   revealDelta,
   roleFacetCounts,
   sanitizeFilterState,
+  toggleAuthor,
   type FilterState,
   type RoleFilter,
 } from "../../shared/pr-filter";
@@ -272,7 +273,7 @@ export function App() {
   const authorFilter = useMemo(
     () => ({
       author,
-      toggle: (login: string) => setAuthor((cur) => (cur === login ? null : login)),
+      toggle: (login: string) => setAuthor((cur) => toggleAuthor(cur, login)),
     }),
     [author],
   );
@@ -1174,8 +1175,6 @@ export function App() {
                   <span aria-hidden className="mx-1 h-5 w-px self-center bg-line" />
                   <FilterChip
                     active
-                    count={filtered.length}
-                    showCount={false}
                     title="Show PRs by every author"
                     onClick={() => setAuthor(null)}
                   >
@@ -1595,7 +1594,8 @@ function FilterChip({
   tone = "sky",
 }: {
   active: boolean;
-  count: number;
+  /** Omitted for a chip with no badge — the author chip, whose rows are the list itself. */
+  count?: number;
   showCount?: boolean;
   title?: string;
   onClick: () => void;
@@ -1617,7 +1617,7 @@ function FilterChip({
       )}
     >
       {children}
-      {showCount && ` (${count})`}
+      {showCount && count !== undefined && ` (${count})`}
     </button>
   );
 }
