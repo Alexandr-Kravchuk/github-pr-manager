@@ -1573,15 +1573,17 @@ const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
  * what the chip is about before it is clicked, while the fill and border stay
  * the plain idle ones, so only a lit chip reads as a coloured block. A chip at
  * 0 stays grey instead, so "nothing here" still reads differently from "off".
- * Orange and amber take the 800 shade in the light theme: at 700 they fell
- * below 4.5:1 on the hover fill (`bg-elevated`).
+ * The tone is mixed with `--fg-subtle`: at full strength it was the lit chip's
+ * own text colour (dark 300 vs 200), and an off chip read as already on.
+ * Orange and amber start from the 800 shade in the light theme: at 700 they
+ * fell below 4.5:1 on the hover fill (`bg-elevated`).
  */
 const CHIP_TONE_IDLE_TEXT: Record<ChipTone, string> = {
-  sky: "text-sky-700 dark:text-sky-300",
-  orange: "text-orange-800 dark:text-orange-300",
-  amber: "text-amber-800 dark:text-amber-300",
-  red: "text-red-700 dark:text-red-300",
-  green: "text-emerald-700 dark:text-emerald-300",
+  sky: "text-[color-mix(in_srgb,var(--color-sky-700)_60%,var(--fg-subtle))] dark:text-[color-mix(in_srgb,var(--color-sky-300)_55%,var(--fg-subtle))]",
+  orange: "text-[color-mix(in_srgb,var(--color-orange-800)_60%,var(--fg-subtle))] dark:text-[color-mix(in_srgb,var(--color-orange-300)_55%,var(--fg-subtle))]",
+  amber: "text-[color-mix(in_srgb,var(--color-amber-800)_60%,var(--fg-subtle))] dark:text-[color-mix(in_srgb,var(--color-amber-300)_55%,var(--fg-subtle))]",
+  red: "text-[color-mix(in_srgb,var(--color-red-700)_60%,var(--fg-subtle))] dark:text-[color-mix(in_srgb,var(--color-red-300)_55%,var(--fg-subtle))]",
+  green: "text-[color-mix(in_srgb,var(--color-emerald-700)_60%,var(--fg-subtle))] dark:text-[color-mix(in_srgb,var(--color-emerald-300)_55%,var(--fg-subtle))]",
 };
 
 /**
