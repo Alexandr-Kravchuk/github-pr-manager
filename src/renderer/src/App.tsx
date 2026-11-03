@@ -586,7 +586,6 @@ export function App() {
   const filterState = useMemo<FilterState>(
     () => ({
       role,
-      trackComments,
       host,
       author,
       search,
@@ -601,7 +600,6 @@ export function App() {
     }),
     [
       role,
-      trackComments,
       host,
       author,
       search,

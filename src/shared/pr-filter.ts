@@ -51,12 +51,6 @@ export type RoleFilter = "all" | PrRole;
 /** Everything that narrows or reveals rows. Sort/group are view controls, not filters. */
 export interface FilterState {
   role: RoleFilter;
-  /**
-   * The `trackComments` setting, not a view control. It is here because the
-   * `To review` segment is the `myReview` signal (`isReviewDue`), and that
-   * signal reads the setting.
-   */
-  trackComments: boolean;
   host: string;
   /**
    * The login whose PRs alone are shown, or null for every author — set by a
@@ -200,6 +194,21 @@ export function isRevealed(
 }
 
 /**
+ * Whether the PR is asking for your review: GitHub lists you as a requested
+ * reviewer (`reviewer`, which a re-request sets again), or your own change
+ * request blocks the merge and the author has since acted (`myReReviewDue`) —
+ * GitHub never re-requests you on its own there, and nobody else can unblock it.
+ *
+ * Deliberately narrower than the `myReview` signal: a PR that came back to you
+ * (`returnedToMe`) only because someone commented or pushed after your review is
+ * not a request. It keeps its violet accent and its "Back to you" badge, but it
+ * stays under `Reviewed` until someone asks for you again.
+ */
+function isAskedOfMe(pr: Pick<PullRequest, "roles" | "myReReviewDue">): boolean {
+  return pr.roles.includes("reviewer") || pr.myReReviewDue;
+}
+
+/**
  * What the `Hide my approvals` chip takes off the board: a PR whose last word
  * from you was "approved" and which is not asking for you again.
  *
@@ -207,18 +216,16 @@ export function isRevealed(
  * if someone has asked for your review again, the PR is waiting on you no matter
  * what you said last time, and hiding it would drop live work off the dashboard
  * silently, which is the one thing a filter must never do. "Asking for you
- * again" is the `myReview` signal, not the `reviewer` role: an approved PR that
- * came back to you (`returnedToMe`) carries only `reviewed`, yet the routine
- * `review-purple-prs` takes it, so the chip must not hide it from `To review`.
+ * again" is `isAskedOfMe`, the same test `To review` uses, so the chip never
+ * hides a row from that segment; new comments after your approval do not count.
  * Your approval also un-sets itself (`viewerApproved`) when you supersede it
  * with a change request or branch protection dismisses it on a new push, so
  * nothing here has to track staleness.
  */
 export function isFinishedApproval(
-  pr: Pick<PullRequest, "viewerApproved"> & SignalPr,
-  { trackComments }: { trackComments: boolean },
+  pr: Pick<PullRequest, "viewerApproved" | "roles" | "myReReviewDue">,
 ): boolean {
-  return pr.viewerApproved && prSignal(pr, { trackComments }) !== "myReview";
+  return pr.viewerApproved && !isAskedOfMe(pr);
 }
 
 function matchesSearch(pr: FilterablePr, search: string): boolean {
@@ -229,32 +236,35 @@ function matchesSearch(pr: FilterablePr, search: string): boolean {
 }
 
 /**
- * Whether the PR waits for your review: the violet `myReview` signal, drafts
- * excluded. The routine `review-purple-prs` takes exactly this set — its
- * detector imports `prSignal` from `dist/main/shared/pr-filter.js` — so the
- * `To review` segment shows the PRs the routine reviews.
+ * Whether the PR waits for your review — the `To review` segment: a review is
+ * asked of you (`isAskedOfMe`), drafts excluded. A draft stays out even with the
+ * `Drafts` chip on; it is then listed under `All` only.
  *
- * `myReview` is wider than the `reviewer` role: a PR that came back to you
- * (`returnedToMe`) or waits for your re-review (`myReReviewDue`) carries only
- * `reviewed`. A draft stays out even with the `Drafts` chip on; it is then
- * listed under `All` only.
+ * Not the `myReview` signal, which the routine `review-purple-prs` takes: that
+ * one also counts a PR that came back to you through new comments or a push
+ * (`returnedToMe`). Such a PR is listed under `Reviewed` until you are asked
+ * again — comments from others on a PR you already judged were filling this
+ * segment with PRs nobody was waiting on you for.
  */
-export function isReviewDue(
-  pr: Pick<PullRequest, "isDraft"> & SignalPr,
-  { trackComments }: { trackComments: boolean },
-): boolean {
-  return !pr.isDraft && prSignal(pr, { trackComments }) === "myReview";
+export function isReviewDue(pr: Pick<PullRequest, "isDraft" | "roles" | "myReReviewDue">): boolean {
+  return !pr.isDraft && isAskedOfMe(pr);
 }
 
 /**
  * Whether the PR belongs to a role segment. `reviewer` is `isReviewDue`, not
- * the role itself; the other two are plain `roles` membership. One function
- * for the list and for `roleFacetCounts`, so a badge cannot disagree with the
- * rows its segment shows.
+ * the role itself, and `reviewed` is `isPassiveReviewed` minus `isAskedOfMe`:
+ * a PR you reviewed and were asked about again waits on you, so it belongs to
+ * `To review` alone — `reviewed-by:@me` matches it for its whole open life, and
+ * in both segments it read as already done. Your own PR stays out too:
+ * `reviewed-by:@me` also matches it once you reply in one of its threads, which
+ * GitHub records as a "Commented" review. `author` is plain `roles` membership.
+ * One function for the list and for `roleFacetCounts`, so a badge cannot
+ * disagree with the rows its segment shows.
  */
-function matchesRole(pr: FilterablePr, role: RoleFilter, trackComments: boolean): boolean {
+function matchesRole(pr: FilterablePr, role: RoleFilter): boolean {
   if (role === "all") return true;
-  if (role === "reviewer") return isReviewDue(pr, { trackComments });
+  if (role === "reviewer") return isReviewDue(pr);
+  if (role === "reviewed") return isPassiveReviewed(pr) && !isAskedOfMe(pr);
   return pr.roles.includes(role);
 }
 
@@ -270,8 +280,8 @@ export function toggleAuthor(current: string | null, login: string): string | nu
 /** Whether a PR is rendered under the given view state. */
 export function isVisible(pr: FilterablePr, state: FilterState): boolean {
   if (!isRevealed(pr, state)) return false;
-  if (state.hideApproved && isFinishedApproval(pr, state)) return false;
-  if (!matchesRole(pr, state.role, state.trackComments)) return false;
+  if (state.hideApproved && isFinishedApproval(pr)) return false;
+  if (!matchesRole(pr, state.role)) return false;
   if (state.host !== "all" && pr.hostLabel !== state.host) return false;
   if (state.author !== null && pr.author?.login !== state.author) return false;
   const sources = SOURCE_CHIPS.filter((chip) => state[chip.flag]);
@@ -321,10 +331,10 @@ export function sourceFacetCount(
  *
  * One pass rather than four `filterPrs` calls: `isVisible` gates the role as a
  * plain AND, so a PR is visible under `role: X` exactly when it is visible under
- * `role: "all"` and matches X (`matchesRole`). A PR can match two segments at
- * once (a re-requested review is both `reviewer` and `reviewed`; a PR that came
- * back to you is `To review` and `reviewed`), which is why a PR can count
- * towards more than one button.
+ * `role: "all"` and matches X (`matchesRole`). `To review` and `Reviewed` are
+ * disjoint — a PR asked of you is in `To review` only — but neither covers
+ * every PR: a draft asked of you is in `All` alone, so the role badges need not
+ * add up to `All`.
  */
 export function roleFacetCounts(
   prs: readonly FilterablePr[],
@@ -340,7 +350,7 @@ export function roleFacetCounts(
   const roles = (Object.keys(counts) as RoleFilter[]).filter((role) => role !== "all");
   for (const pr of base) {
     for (const role of roles) {
-      if (matchesRole(pr, role, state.trackComments)) counts[role] += 1;
+      if (matchesRole(pr, role)) counts[role] += 1;
     }
   }
   return counts;
