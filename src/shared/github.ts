@@ -1121,6 +1121,10 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
   // than on an already-collected `author` role: the authored search is capped at
   // `first: 25`, so your own PR can arrive from a team search with no entry yet,
   // and it must still land as `author` (dropping it would lose the card).
+  //
+  // The same holds for `reviewed`: a reply in a thread of your own PR is a
+  // "Commented" review, so `reviewed-by:@me` matches it, and past that cap it
+  // would arrive as a PR you reviewed — listed under `Reviewed`.
   const isOwnPr = (node: RawSearchPr) =>
     viewerLogin != null && node.author?.login.toLowerCase() === viewerLogin.toLowerCase();
 
@@ -1129,7 +1133,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
       if (!isSearchPr(node)) continue;
       const full = fullById.get(node.id);
       if (!full) continue;
-      const effectiveRole: PrRole = role === "reviewer" && isOwnPr(node) ? "author" : role;
+      const effectiveRole: PrRole = role !== "author" && isOwnPr(node) ? "author" : role;
       const existing = byId.get(node.id);
       if (existing) {
         if (!existing.roles.includes(effectiveRole)) existing.roles.push(effectiveRole);

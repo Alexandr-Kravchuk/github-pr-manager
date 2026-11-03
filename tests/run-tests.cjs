@@ -3196,6 +3196,8 @@ const APPROVALS = [
   mkPr({ viewerApproved: true, roles: ["reviewed"], isDraft: true, title: "approved draft" }),
   mkPr({ roles: ["reviewer"], needsAttention: true, title: "still waiting on me" }),
   mkPr({ roles: ["author"], hasNewActivity: true, title: "mine" }),
+  // Back to you only through comments: not a request, so the chip hides it.
+  mkPr({ viewerApproved: true, roles: ["reviewed"], returnedToMe: true, title: "approved, comments since" }),
 ];
 test("filterPrs(hideApproved): drops finished approvals, keeps the re-requested one", () =>
   assert.deepStrictEqual(
@@ -3203,8 +3205,8 @@ test("filterPrs(hideApproved): drops finished approvals, keeps the re-requested 
     ["approved then re-requested", "still waiting on me", "mine"],
   ));
 test("filterPrs(hideApproved): off by default — nothing disappears unasked", () =>
-  // Four of five: the approved draft is hidden by the draft gate, not by this chip.
-  assert.strictEqual(prFilter.filterPrs(APPROVALS, st()).length, 4));
+  // Five of six: the approved draft is hidden by the draft gate, not by this chip.
+  assert.strictEqual(prFilter.filterPrs(APPROVALS, st()).length, 5));
 test("activeFilterCount: hideApproved counts, so Clear filters brings the rows back", () => {
   assert.strictEqual(prFilter.activeFilterCount(st({ hideApproved: true })), 1);
   assert.strictEqual(prFilter.activeFilterCount(st()), 0);
@@ -3248,7 +3250,8 @@ for (const [roles, expected] of [
 
 // --- pr-filter: the role selector, including the passive `reviewed` role ------
 // A PR you already reviewed carries `reviewed`; being re-requested adds
-// `reviewer` back alongside it, so the two selections legitimately overlap.
+// `reviewer` back alongside it. The segments do not overlap: a PR asked of you
+// is under `To review` only, since in `Reviewed` it read as already done.
 const BY_ROLE = [
   mkPr({ roles: ["author"], title: "mine" }),
   mkPr({ roles: ["reviewer"], title: "asked of me" }),
@@ -3330,14 +3333,44 @@ test("roleFacetCounts: each segment promises the rows it would leave", () =>
 // The badge invariant, checked against the pipeline itself: the helper counts in
 // one pass over the `role: "all"` result, so this is a real comparison of two
 // implementations and it proves the pass doesn't drop the other filters.
+// MIXED alone has no `reviewed` PR, so it is extended with every role shape the
+// segments tell apart: re-requested, re-review due, back to you through
+// comments, your own PR you replied in, and drafts asked of you.
+const ROLE_MIXED = [
+  ...MIXED,
+  ...BY_ROLE,
+  ...REVIEW_DUE,
+  mkPr({ roles: ["author", "reviewed"], hostLabel: "GHE", title: "mine, replied" }),
+  mkPr({ roles: ["reviewed"], myReReviewDue: true, isDraft: true, title: "draft re-review due" }),
+];
 for (const [i, state] of FACET_STATES.entries()) {
   test(`roleFacetCounts equals filterPrs under each role [state ${i}]`, () => {
-    const counts = prFilter.roleFacetCounts(MIXED, state);
+    const counts = prFilter.roleFacetCounts(ROLE_MIXED, state);
     for (const role of ["all", "author", "reviewer", "reviewed"]) {
-      assert.strictEqual(counts[role], prFilter.filterPrs(MIXED, { ...state, role }).length);
+      assert.strictEqual(counts[role], prFilter.filterPrs(ROLE_MIXED, { ...state, role }).length);
     }
   });
 }
+test("filterPrs(role): 'reviewer' and 'reviewed' never share a PR", () => {
+  const state = st({ showDrafts: true, showIgnored: true });
+  const asked = new Set(prFilter.filterPrs(ROLE_MIXED, { ...state, role: "reviewer" }));
+  const shared = prFilter.filterPrs(ROLE_MIXED, { ...state, role: "reviewed" }).filter((pr) => asked.has(pr));
+  assert.deepStrictEqual(shared.map((pr) => pr.title), []);
+});
+test("filterPrs(role): a draft asked of you is in neither review segment", () => {
+  const drafts = ROLE_MIXED.filter((pr) => pr.isDraft && (pr.roles.includes("reviewer") || pr.myReReviewDue));
+  const state = st({ showDrafts: true });
+  for (const role of ["reviewer", "reviewed"]) {
+    assert.deepStrictEqual(prFilter.filterPrs(drafts, { ...state, role }), []);
+  }
+  assert.strictEqual(prFilter.filterPrs(drafts, state).length, drafts.length);
+});
+// Hide my approvals never takes a row out of To review, over every fixture.
+test("isFinishedApproval: never true for a PR in 'To review'", () => {
+  for (const pr of [...ROLE_MIXED, ...APPROVALS]) {
+    if (prFilter.isReviewDue(pr)) assert.strictEqual(prFilter.isFinishedApproval(pr), false, pr.title);
+  }
+});
 test("roleFacetCounts: the reveal gate and Hide my approvals apply to the badge", () => {
   const prs = [
     mkPr({ roles: ["author"] }),
@@ -5263,6 +5296,37 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       repos: ["a/b"],
       token: "t",
     });
+    assert.strictEqual(result.pullRequests.length, 1);
+    assert.deepStrictEqual(result.pullRequests[0].roles, ["author"]);
+  });
+
+  // Past the authored search's `first: 25` cap your own PR can arrive only
+  // through `reviewed-by:@me` — a reply in its own thread is a "Commented"
+  // review. It must still land as `author`, or it is listed under `Reviewed`.
+  await atest("fetchHost: your own PR found only by the reviewed search is still author", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    const mine = rawPr({ id: "PR_mine_replied", author: { login: "me", avatarUrl: "" } });
+    global.fetch = async (url, init) => {
+      if (url.includes("/user/teams")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => [] };
+      }
+      const body = JSON.parse(init.body);
+      if (isHydrate(body)) return hydrateResponse(body, [mine]);
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: {
+            rateLimit: { remaining: 4990, cost: 4, resetAt: "" },
+            viewer: { login: "me" },
+            [alias]: { nodes: alias === "reviewed" ? [mine] : [] },
+          },
+        }),
+      };
+    };
+    const result = await github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" });
     assert.strictEqual(result.pullRequests.length, 1);
     assert.deepStrictEqual(result.pullRequests[0].roles, ["author"]);
   });

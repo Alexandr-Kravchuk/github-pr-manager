@@ -252,7 +252,7 @@ export function isReviewDue(pr: Pick<PullRequest, "isDraft" | "roles" | "myReRev
 
 /**
  * Whether the PR belongs to a role segment. `reviewer` is `isReviewDue`, not
- * the role itself, and `reviewed` is `isPassiveReviewed` minus a due re-review:
+ * the role itself, and `reviewed` is `isPassiveReviewed` minus `isAskedOfMe`:
  * a PR you reviewed and were asked about again waits on you, so it belongs to
  * `To review` alone — `reviewed-by:@me` matches it for its whole open life, and
  * in both segments it read as already done. Your own PR stays out too:
@@ -264,7 +264,7 @@ export function isReviewDue(pr: Pick<PullRequest, "isDraft" | "roles" | "myReRev
 function matchesRole(pr: FilterablePr, role: RoleFilter): boolean {
   if (role === "all") return true;
   if (role === "reviewer") return isReviewDue(pr);
-  if (role === "reviewed") return isPassiveReviewed(pr) && !pr.myReReviewDue;
+  if (role === "reviewed") return isPassiveReviewed(pr) && !isAskedOfMe(pr);
   return pr.roles.includes(role);
 }
 
@@ -331,10 +331,10 @@ export function sourceFacetCount(
  *
  * One pass rather than four `filterPrs` calls: `isVisible` gates the role as a
  * plain AND, so a PR is visible under `role: X` exactly when it is visible under
- * `role: "all"` and matches X (`matchesRole`). A PR can match two segments at
- * once (a re-requested review is both `reviewer` and `reviewed`; a PR that came
- * back to you is `To review` and `reviewed`), which is why a PR can count
- * towards more than one button.
+ * `role: "all"` and matches X (`matchesRole`). `To review` and `Reviewed` are
+ * disjoint — a PR asked of you is in `To review` only — but neither covers
+ * every PR: a draft asked of you is in `All` alone, so the role badges need not
+ * add up to `All`.
  */
 export function roleFacetCounts(
   prs: readonly FilterablePr[],
