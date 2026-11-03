@@ -252,13 +252,17 @@ export function isReviewDue(pr: Pick<PullRequest, "isDraft" | "roles" | "myReRev
 
 /**
  * Whether the PR belongs to a role segment. `reviewer` is `isReviewDue`, not
- * the role itself; the other two are plain `roles` membership. One function
- * for the list and for `roleFacetCounts`, so a badge cannot disagree with the
- * rows its segment shows.
+ * the role itself, and `reviewed` is the role minus `isAskedOfMe`: a PR you
+ * reviewed and were asked about again waits on you, so it belongs to
+ * `To review` alone — `reviewed-by:@me` matches it for its whole open life, and
+ * in both segments it read as already done. `author` is plain `roles`
+ * membership. One function for the list and for `roleFacetCounts`, so a badge
+ * cannot disagree with the rows its segment shows.
  */
 function matchesRole(pr: FilterablePr, role: RoleFilter): boolean {
   if (role === "all") return true;
   if (role === "reviewer") return isReviewDue(pr);
+  if (role === "reviewed") return pr.roles.includes("reviewed") && !isAskedOfMe(pr);
   return pr.roles.includes(role);
 }
 

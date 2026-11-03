@@ -3256,8 +3256,8 @@ const BY_ROLE = [
   mkPr({ roles: ["reviewer", "reviewed"], title: "re-requested" }),
 ];
 const titlesFor = (role) => prFilter.filterPrs(BY_ROLE, st({ role })).map((pr) => pr.title);
-test("filterPrs(role): 'reviewed' selects the PRs you have reviewed, re-requested included", () =>
-  assert.deepStrictEqual(titlesFor("reviewed"), ["already reviewed", "re-requested"]));
+test("filterPrs(role): 'reviewed' leaves out a re-requested PR — it waits on you, so To review only", () =>
+  assert.deepStrictEqual(titlesFor("reviewed"), ["already reviewed"]));
 test("filterPrs(role): 'reviewer' still means an outstanding request, not a past review", () =>
   assert.deepStrictEqual(titlesFor("reviewer"), ["asked of me", "re-requested"]));
 test("filterPrs(role): 'author' is unaffected by the new role", () =>
@@ -3289,17 +3289,17 @@ test("filterPrs(role): a returned PR keeps its violet accent outside 'To review'
   assert.strictEqual(prFilter.prSignal(back, { trackComments: true }), "myReview");
   assert.strictEqual(prFilter.isReviewDue(back), false);
 });
-test("filterPrs(role): a returned PR stays in 'reviewed' as well", () =>
+test("filterPrs(role): 'reviewed' keeps a returned PR, not one whose re-review is due", () =>
   assert.deepStrictEqual(
     prFilter.filterPrs(REVIEW_DUE, st({ role: "reviewed" })).map((pr) => pr.title),
-    ["back to me", "re-review due", "passive"],
+    ["back to me", "passive"],
   ));
 test("roleFacetCounts: the 'reviewer' badge counts requests, not the role or the signal", () =>
   assert.deepStrictEqual(prFilter.roleFacetCounts(REVIEW_DUE, st({ showDrafts: true })), {
     all: 7,
     author: 1,
     reviewer: 2,
-    reviewed: 4,
+    reviewed: 3,
   }));
 test("filterPrs: Hide my approvals hides an approved PR that came back through comments", () => {
   const back = mkPr({ roles: ["reviewed"], viewerApproved: true, returnedToMe: true });
@@ -3316,9 +3316,9 @@ test("roleFacetCounts: each segment promises the rows it would leave", () =>
   assert.deepStrictEqual(prFilter.roleFacetCounts(BY_ROLE, st()), {
     all: 4,
     author: 1,
-    // The re-requested PR carries both roles, so it counts towards both.
+    // The re-requested PR carries both roles but waits on you: `To review` only.
     reviewer: 2,
-    reviewed: 2,
+    reviewed: 1,
   }));
 // The badge invariant, checked against the pipeline itself: the helper counts in
 // one pass over the `role: "all"` result, so this is a real comparison of two
