@@ -58,8 +58,10 @@ Three layers:
   back to you only through new comments or a push (`returnedToMe`) stays under
   `Reviewed`, so this is narrower than the `myReview` signal the
   `review-purple-prs` routine takes, and `Hide my approvals` uses the same
-  "asked of you" test; `Reviewed` is the `reviewed` role minus that test, so a
-  re-requested PR is listed under `To review` only),
+  "asked of you" test; `Reviewed` is the `reviewed` role minus that test and
+  minus your own PRs, so a re-requested PR is listed under `To review` only and
+  a reply in your own PR's thread — a "Commented" review that
+  `reviewed-by:@me` matches — does not put it there),
   `issue-key.ts` (the Jira issue-link builder used by `PrCard.tsx`),
   `hotkeys.ts` (the F5 refresh
   decision and the forced-refresh cooldown shared with CmdOrCtrl+R and the

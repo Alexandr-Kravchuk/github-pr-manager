@@ -3258,6 +3258,13 @@ const BY_ROLE = [
 const titlesFor = (role) => prFilter.filterPrs(BY_ROLE, st({ role })).map((pr) => pr.title);
 test("filterPrs(role): 'reviewed' leaves out a re-requested PR — it waits on you, so To review only", () =>
   assert.deepStrictEqual(titlesFor("reviewed"), ["already reviewed"]));
+test("filterPrs(role): 'reviewed' leaves out your own PR you replied in", () => {
+  // creatio-ui#3985: a reply in its own thread is a "Commented" review, so
+  // `reviewed-by:@me` handed the author's PR the `reviewed` role.
+  const mineReplied = mkPr({ roles: ["author", "reviewed"], title: "mine, replied" });
+  assert.deepStrictEqual(prFilter.filterPrs([mineReplied], st({ role: "reviewed" })), []);
+  assert.deepStrictEqual(prFilter.filterPrs([mineReplied], st({ role: "author" })), [mineReplied]);
+});
 test("filterPrs(role): 'reviewer' still means an outstanding request, not a past review", () =>
   assert.deepStrictEqual(titlesFor("reviewer"), ["asked of me", "re-requested"]));
 test("filterPrs(role): 'author' is unaffected by the new role", () =>
