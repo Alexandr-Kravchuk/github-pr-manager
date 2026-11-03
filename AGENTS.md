@@ -52,9 +52,13 @@ Three layers:
   nothing and to disable the second chip through its own 0 badge, which is why
   `sourceFacetCount` is blind to the sibling sources; `roleFacetCounts` badges
   the role switch's four segments in one pass, since role is a plain AND gate;
-  the `To review` segment is not the `reviewer` role but `isReviewDue` — the
-  `myReview` signal of `prSignal` minus drafts, the exact set the
-  `review-purple-prs` routine takes, so PRs that came back to you are there too),
+  the `To review` segment is not the `reviewer` role but `isReviewDue` — a
+  review asked of you (the role, which a re-request sets again, or your change
+  request after the author acted, `myReReviewDue`) minus drafts; a PR that came
+  back to you only through new comments or a push (`returnedToMe`) stays under
+  `Reviewed`, so this is narrower than the `myReview` signal the
+  `review-purple-prs` routine takes, and `Hide my approvals` uses the same
+  "asked of you" test),
   `issue-key.ts` (the Jira issue-link builder used by `PrCard.tsx`),
   `hotkeys.ts` (the F5 refresh
   decision and the forced-refresh cooldown shared with CmdOrCtrl+R and the

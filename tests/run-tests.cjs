@@ -2882,7 +2882,6 @@ const mkPr = (over = {}) => ({
 });
 const ST = {
   role: "all",
-  trackComments: true,
   host: "all",
   author: null,
   search: "",
@@ -3183,11 +3182,12 @@ for (const [label, fixture, expected] of [
   ["approved but re-requested", mkPr({ viewerApproved: true, roles: ["reviewer", "reviewed"] }), false],
   ["reviewed without approving", mkPr({ viewerApproved: false, roles: ["reviewed"] }), false],
   ["my own PR, approved by others", mkPr({ viewerApproved: false, roles: ["author"] }), false],
-  // Back to you after your approval: the routine reviews it, so the chip keeps it.
-  ["approved but returned to me", mkPr({ viewerApproved: true, roles: ["reviewed"], returnedToMe: true }), false],
+  // New comments after your approval are not a request: clio#1884, approved,
+  // "Back to you" only because someone commented, stayed on the board.
+  ["approved, new comments since", mkPr({ viewerApproved: true, roles: ["reviewed"], returnedToMe: true }), true],
 ]) {
   test(`isFinishedApproval: ${label} -> ${expected}`, () =>
-    assert.strictEqual(prFilter.isFinishedApproval(fixture, { trackComments: true }), expected));
+    assert.strictEqual(prFilter.isFinishedApproval(fixture), expected));
 }
 
 const APPROVALS = [
@@ -3263,10 +3263,11 @@ test("filterPrs(role): 'reviewer' still means an outstanding request, not a past
 test("filterPrs(role): 'author' is unaffected by the new role", () =>
   assert.deepStrictEqual(titlesFor("author"), ["mine"]));
 
-// `To review` is the routine's set (review-purple-prs): the `myReview` signal,
-// drafts excluded. A PR that came back to you carries only `reviewed` and still
-// belongs here — the 2026-11-02 case where the routine took three such PRs and
-// the segment showed 0.
+// `To review` is a review asked of you: the `reviewer` role, or your change
+// request after the author acted (`myReReviewDue`), drafts excluded. A PR that
+// came back to you only through new comments or a push (`returnedToMe`) is not
+// asked of you: it stays under `Reviewed` — the 2026-11-03 case where two PRs
+// with the user's verdict sat in `To review` because someone else commented.
 const REVIEW_DUE = [
   mkPr({ roles: ["reviewer"], title: "asked of me" }),
   mkPr({ roles: ["reviewed"], returnedToMe: true, title: "back to me" }),
@@ -3278,32 +3279,35 @@ const REVIEW_DUE = [
 ];
 const reviewTitles = (over = {}) =>
   prFilter.filterPrs(REVIEW_DUE, st({ role: "reviewer", ...over })).map((pr) => pr.title);
-test("filterPrs(role): 'reviewer' is the myReview signal — returned and re-review-due PRs included", () =>
-  assert.deepStrictEqual(reviewTitles(), ["asked of me", "back to me", "re-review due"]));
+test("filterPrs(role): 'reviewer' is a request — re-review due included, back-to-me left out", () =>
+  assert.deepStrictEqual(reviewTitles(), ["asked of me", "re-review due"]));
 test("filterPrs(role): 'reviewer' keeps drafts out even with the Drafts chip on", () =>
-  assert.deepStrictEqual(reviewTitles({ showDrafts: true }), ["asked of me", "back to me", "re-review due"]));
-test("filterPrs(role): 'reviewer' equals the routine detector's predicate", () => {
-  const detector = (pr) => !pr.isDraft && prFilter.prSignal(pr, { trackComments: true }) === "myReview";
-  assert.deepStrictEqual(
-    prFilter.filterPrs(REVIEW_DUE, st({ role: "reviewer", showDrafts: true })),
-    REVIEW_DUE.filter(detector),
-  );
+  assert.deepStrictEqual(reviewTitles({ showDrafts: true }), ["asked of me", "re-review due"]));
+test("filterPrs(role): a returned PR keeps its violet accent outside 'To review'", () => {
+  // The accent and the routine still read `myReview`; only the segment narrowed.
+  const back = REVIEW_DUE.find((pr) => pr.title === "back to me");
+  assert.strictEqual(prFilter.prSignal(back, { trackComments: true }), "myReview");
+  assert.strictEqual(prFilter.isReviewDue(back), false);
 });
 test("filterPrs(role): a returned PR stays in 'reviewed' as well", () =>
   assert.deepStrictEqual(
     prFilter.filterPrs(REVIEW_DUE, st({ role: "reviewed" })).map((pr) => pr.title),
     ["back to me", "re-review due", "passive"],
   ));
-test("roleFacetCounts: the 'reviewer' badge counts the myReview set, not the role", () =>
+test("roleFacetCounts: the 'reviewer' badge counts requests, not the role or the signal", () =>
   assert.deepStrictEqual(prFilter.roleFacetCounts(REVIEW_DUE, st({ showDrafts: true })), {
     all: 7,
     author: 1,
-    reviewer: 3,
+    reviewer: 2,
     reviewed: 4,
   }));
-test("filterPrs(role): Hide my approvals keeps an approved PR that came back to you", () => {
+test("filterPrs: Hide my approvals hides an approved PR that came back through comments", () => {
   const back = mkPr({ roles: ["reviewed"], viewerApproved: true, returnedToMe: true });
-  assert.deepStrictEqual(prFilter.filterPrs([back], st({ role: "reviewer", hideApproved: true })), [back]);
+  assert.deepStrictEqual(prFilter.filterPrs([back], st({ hideApproved: true })), []);
+});
+test("filterPrs: Hide my approvals never takes a row out of 'To review'", () => {
+  const requested = mkPr({ roles: ["reviewer", "reviewed"], viewerApproved: true });
+  assert.deepStrictEqual(prFilter.filterPrs([requested], st({ role: "reviewer", hideApproved: true })), [requested]);
 });
 
 // The role switch's four badges. Numbers are written out rather than derived
