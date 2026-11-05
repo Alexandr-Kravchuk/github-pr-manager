@@ -10105,6 +10105,31 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.rankBefore([], null), undefined, "an empty queue: its own time will do");
     });
 
+    test("agent board lanes: your PRs apart from the PRs you review — idle by role, work by scenario, one queue order", () => {
+      const today = view.todayKey(new Date());
+      const now = new Date().toISOString();
+      const prs = [{ id: "MINE", roles: ["author"] }, { id: "THEIRS", roles: ["reviewer"] }, { id: "OLD", roles: ["reviewed"] }];
+      const items = [
+        vItem({ prId: "A", state: "queued", scenario: "drive", queuedAt: "2026-11-05T09:00:00.000Z" }),
+        vItem({ prId: "B", state: "queued", scenario: "review", queuedAt: "2026-11-05T10:00:00.000Z" }),
+        vItem({ prId: "C", state: "queued", scenario: "rereview", queuedAt: "2026-11-05T08:00:00.000Z" }),
+        vItem({ prId: "D", state: "working", scenario: "brief" }),
+        vItem({ prId: "E", state: "needsYou", scenario: "merge" }),
+        vItem({ prId: "F", state: "done", scenario: "afterMerge", headline: "Jira dry run applied", finishedAt: now }),
+      ];
+      const all = view.boardColumns(prs, { enabled: true, items, running: [], idle: {} }, today);
+      const lanes = view.boardLanes(all);
+      assert.deepStrictEqual(lanes.mine.idle.map((x) => x.pr.id), ["MINE"]);
+      assert.deepStrictEqual(lanes.review.idle.map((x) => x.pr.id), ["THEIRS", "OLD"]);
+      assert.deepStrictEqual(lanes.mine.queued.map((i) => i.prId), ["A"]);
+      assert.deepStrictEqual(lanes.review.queued.map((i) => i.prId), ["C", "B"], "each lane keeps the queue's order");
+      assert.deepStrictEqual(all.queued.map((i) => i.prId), ["C", "A", "B"], "and the queue stays one");
+      assert.deepStrictEqual([lanes.review.working.map((i) => i.prId), lanes.mine.needsYou.map((i) => i.prId), lanes.mine.done.map((i) => i.prId)], [["D"], ["E"], ["F"]]);
+      for (const k of ["idle", "queued", "working", "needsYou", "done"]) {
+        assert.strictEqual(lanes.mine[k].length + lanes.review[k].length, all[k].length, `nothing lost or doubled in ${k}`);
+      }
+    });
+
     test("ipc: an idle PR can be queued in front of a run, and a queued run moved; nothing else rides along", () => {
       const RID = "00000000-0000-4000-8000-000000000001";
       const RID2 = "00000000-0000-4000-8000-000000000002";

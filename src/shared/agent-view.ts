@@ -236,3 +236,32 @@ export function rankBefore(queue: readonly AgentItem[], beforeRunId: string | nu
   const prev = at > 0 ? queueRank(ordered[at - 1]) : next - 2;
   return (prev + next) / 2;
 }
+
+/** The Board's two lanes: your own PRs, and the PRs you review. */
+export type BoardLane = "mine" | "review";
+export const BOARD_LANES: readonly BoardLane[] = ["mine", "review"];
+
+/** Your PR's work (drive, a merge, the Jira run after it) — or a review of someone else's (review, brief, re-review). */
+export function laneOfScenario(scenario: AgentItem["scenario"]): BoardLane {
+  return scenario === "drive" || scenario === "merge" || scenario === "afterMerge" ? "mine" : "review";
+}
+
+/** An idle PR's lane: yours if you wrote it. */
+export function laneOfPr(pr: Pick<PullRequest, "roles">): BoardLane {
+  return pr.roles.includes("author") ? "mine" : "review";
+}
+
+/**
+ * The Board's columns split into its two lanes, each in the columns' own
+ * order. The queue stays one queue — the lanes only show which of it is yours.
+ */
+export function boardLanes(cols: BoardColumns): Record<BoardLane, BoardColumns> {
+  const lane = (l: BoardLane): BoardColumns => ({
+    idle: cols.idle.filter((x) => laneOfPr(x.pr) === l),
+    queued: cols.queued.filter((i) => laneOfScenario(i.scenario) === l),
+    working: cols.working.filter((i) => laneOfScenario(i.scenario) === l),
+    needsYou: cols.needsYou.filter((i) => laneOfScenario(i.scenario) === l),
+    done: cols.done.filter((i) => laneOfScenario(i.scenario) === l),
+  });
+  return { mine: lane("mine"), review: lane("review") };
+}

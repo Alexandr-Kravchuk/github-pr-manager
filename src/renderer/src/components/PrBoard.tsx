@@ -1,7 +1,7 @@
 import { useContext, useMemo, useState, type DragEvent, type ReactNode } from "react";
 
 // Node-free (see AGENTS.md): the columns, the day, and the plan's current step.
-import { boardColumns, primaryActionLabel, runFor, todayKey } from "../../../shared/agent-view";
+import { BOARD_LANES, boardColumns, boardLanes, primaryActionLabel, runFor, todayKey, type BoardLane } from "../../../shared/agent-view";
 import { currentStep, type RunProgress } from "../../../shared/agent-stream";
 import { describePlan, type PublishSummary } from "../../../shared/agent-publish";
 import type { AgentAction, AgentItem, MergeMethod, PullRequest } from "../../../shared/types";
@@ -16,6 +16,13 @@ import { AGENT_STATE_DOT } from "./AgentStatus";
 // columns are its order, so Sort and Group-by are off while it is on. The
 // queue's order is yours: drag a queued card, or "Run next"; an idle PR
 // dropped on a queued card takes that place.
+
+const LANE_TITLE: Record<BoardLane, string> = { mine: "Your PRs", review: "PRs you review" };
+const LANE_HINT: Record<BoardLane, string> = {
+  mine: "driven to green, merge offers, Jira after a merge",
+  review: "reviews, briefs, re-reviews",
+};
+const LANE_DOT: Record<BoardLane, string> = { mine: "bg-violet-500", review: "bg-sky-500" };
 
 /** An idle PR dragged towards the queue. */
 const DRAG_TYPE = "application/x-prd-pr";
@@ -40,7 +47,8 @@ function shortRepo(repo: string): string {
 export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: PullRequest) => void }) {
   const { state, act } = useContext(AgentContext);
   const [idleOpen, setIdleOpen] = useState(false);
-  const [dropOn, setDropOn] = useState(false);
+  /** The lane whose queue a drag is over. */
+  const [dropOn, setDropOn] = useState<BoardLane | null>(null);
   /** The queued card a drag would land in front of. */
   const [dropBefore, setDropBefore] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -49,7 +57,10 @@ export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: Pull
   if (!state) {
     return <div className="rounded-lg border border-line bg-surface/40 p-8 text-center text-sm text-fg-subtle">The PR agent isn&apos;t available here.</div>;
   }
-  const cols = boardColumns(prs, state, todayKey(new Date()));
+  const all = boardColumns(prs, state, todayKey(new Date()));
+  const lanes = boardLanes(all);
+  // The queue is one queue: a card's place in it, whichever lane shows it.
+  const place = new Map(all.queued.map((i, n) => [i.runId, n + 1]));
   const run = async (action: AgentAction) => {
     const res = await act(action);
     setNotice(res.ok ? null : res.error);
@@ -64,7 +75,7 @@ export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: Pull
   const dropAt = (e: DragEvent, before: string | null) => {
     e.preventDefault();
     e.stopPropagation();
-    setDropOn(false);
+    setDropOn(null);
     setDropBefore(null);
     const runId = e.dataTransfer.getData(RUN_DRAG);
     if (runId) {
@@ -83,7 +94,7 @@ export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: Pull
         {state.enabled ? (
           <>
             <span>
-              Runs today {state.runsToday} of {state.perDay}
+              Running {all.working.length} of {state.parallel} · runs today {state.runsToday} of {state.perDay}
             </span>
             {state.paused ? (
               <span className="font-medium text-amber-700 dark:text-amber-300">Paused — nothing starts, and nothing goes out on its own</span>
@@ -114,125 +125,144 @@ export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: Pull
         </span>
       </div>
 
-      <div className="flex items-start gap-3 overflow-x-auto pb-2">
-        {idleOpen ? (
-          <Column label="Idle" count={cols.idle.length} dot="queued" className="min-w-[11rem] flex-1 basis-0 border-dashed" aside={<button type="button" onClick={() => setIdleOpen(false)} className="text-xs text-fg-subtle hover:text-fg">Fold</button>}>
-            {cols.idle.length === 0 ? (
-              <Empty>Every PR has the agent&apos;s attention.</Empty>
-            ) : (
-              cols.idle.map(({ pr, reason }) => <IdleCard key={pr.id} pr={pr} reason={reason} onOpen={onOpen} onQueue={state.enabled ? () => void run({ type: "enqueue", prId: pr.id }) : undefined} />)
-            )}
-          </Column>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setIdleOpen(true)}
-            title="Show the PRs the agent has nothing for"
-            className="flex w-10 shrink-0 flex-col items-center gap-2 self-stretch rounded-lg border border-dashed border-line-strong bg-elevated/30 py-3 text-xs text-fg-muted hover:bg-elevated/60"
-          >
-            <span className="rounded-full border border-line-strong px-1.5 tabular-nums">{cols.idle.length}</span>
-            <span className="[writing-mode:vertical-rl]">Idle — open to hand PRs to the agent</span>
-          </button>
-        )}
-
-        <Column
-          label="Queued"
-          count={cols.queued.length}
-          dot="queued"
-          className={cn("min-w-[11rem] flex-1 basis-0", dropOn && "border-sky-500 bg-sky-500/10")}
-          dropProps={{
-            onDragOver: (e) => {
-              if (accepts(e)) {
-                e.preventDefault();
-                setDropOn(true);
-                setDropBefore(null);
-              }
-            },
-            onDragLeave: () => setDropOn(false),
-            onDrop,
-          }}
-        >
-          {cols.queued.length === 0 ? (
-            <Empty>{state.enabled ? "Drop an idle PR here to hand it to the agent" : "Nothing queued"}</Empty>
-          ) : (
-            cols.queued.map((item, index) => (
-              <article
-                key={item.runId}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.setData(RUN_DRAG, item.runId);
-                  e.dataTransfer.effectAllowed = "move";
-                }}
-                onDragOver={(e) => {
-                  if (accepts(e)) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setDropOn(true);
-                    setDropBefore(item.runId);
-                  }
-                }}
-                onDrop={(e) => dropAt(e, item.runId)}
-                className={cn(
-                  "cursor-grab rounded-md border border-line bg-surface p-2.5 shadow-sm active:cursor-grabbing",
-                  // Where the drop lands: a line above this card.
-                  dropOn && dropBefore === item.runId && "border-t-2 border-t-sky-500",
-                )}
-              >
-                <CardHead item={item} onTitle={() => openItem(item)} />
-                <div className="mt-1 text-xs text-fg-muted">{item.headline}</div>
-                <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                  {index === 0 ? (
-                    <span className="text-[11px] font-medium text-sky-700 dark:text-sky-300">Next up</span>
+      {BOARD_LANES.map((lane) => {
+        const cols = lanes[lane];
+        const busy = cols.queued.length + cols.working.length + cols.needsYou.filter((i) => !i.later).length;
+        return (
+          <section key={lane} aria-label={LANE_TITLE[lane]} className="mb-4">
+            <h2 className="mb-2 flex items-baseline gap-2 px-1">
+              <span aria-hidden className={cn("inline-block size-2 self-center rounded-full", LANE_DOT[lane])} />
+              <span className="text-sm font-semibold text-fg">{LANE_TITLE[lane]}</span>
+              <span className="text-xs tabular-nums text-fg-muted">{busy}</span>
+              <span className="text-xs text-fg-subtle">— {LANE_HINT[lane]}</span>
+            </h2>
+            <div className="flex items-start gap-3 overflow-x-auto pb-2">
+              {idleOpen ? (
+                <Column label="Idle" count={cols.idle.length} dot="queued" className="min-w-[11rem] flex-1 basis-0 border-dashed" aside={<button type="button" onClick={() => setIdleOpen(false)} className="text-xs text-fg-subtle hover:text-fg">Fold</button>}>
+                  {cols.idle.length === 0 ? (
+                    <Empty>Every PR has the agent&apos;s attention.</Empty>
                   ) : (
-                    <button
-                      type="button"
-                      className={BTN}
-                      title="Put it at the front of the queue"
-                      onClick={() => void run({ type: "moveQueued", runId: item.runId, before: cols.queued[0].runId })}
-                    >
-                      Run next
-                    </button>
+                    cols.idle.map(({ pr, reason }) => <IdleCard key={pr.id} pr={pr} reason={reason} onOpen={onOpen} onQueue={state.enabled ? () => void run({ type: "enqueue", prId: pr.id }) : undefined} />)
                   )}
-                  <button type="button" className={BTN} title="Take it out of the queue — the agent won't queue it again for this head" onClick={() => void run({ type: "skip", runId: item.runId })}>
-                    Skip
-                  </button>
-                </div>
-              </article>
-            ))
-          )}
-        </Column>
+                </Column>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setIdleOpen(true)}
+                  title="Show the PRs the agent has nothing for"
+                  className="flex w-10 shrink-0 flex-col items-center gap-2 self-stretch rounded-lg border border-dashed border-line-strong bg-elevated/30 py-3 text-xs text-fg-muted hover:bg-elevated/60"
+                >
+                  <span className="rounded-full border border-line-strong px-1.5 tabular-nums">{cols.idle.length}</span>
+                  <span className="[writing-mode:vertical-rl]">Idle — open to hand PRs to the agent</span>
+                </button>
+              )}
 
-        <Column label="Working" count={cols.working.length} limit={state.parallel} dot="working" className="min-w-[11rem] flex-1 basis-0">
-          {cols.working.length === 0 ? (
-            <Empty>Nothing running</Empty>
-          ) : (
-            cols.working.map((item) => {
-              const r = runFor(state, item.runId);
-              return <WorkingCard key={item.runId} item={item} progress={r?.progress ?? null} paused={r?.paused ?? false} onTitle={() => openItem(item)} run={run} />;
-            })
-          )}
-        </Column>
+              <Column
+                label="Queued"
+                count={cols.queued.length}
+                dot="queued"
+                className={cn("min-w-[11rem] flex-1 basis-0", dropOn === lane && "border-sky-500 bg-sky-500/10")}
+                dropProps={{
+                  onDragOver: (e) => {
+                    if (accepts(e)) {
+                      e.preventDefault();
+                      setDropOn(lane);
+                      setDropBefore(null);
+                    }
+                  },
+                  onDragLeave: () => setDropOn(null),
+                  onDrop,
+                }}
+              >
+                {cols.queued.length === 0 ? (
+                  <Empty>{state.enabled ? "Drop an idle PR here to hand it to the agent" : "Nothing queued"}</Empty>
+                ) : (
+                  cols.queued.map((item) => (
+                    <article
+                      key={item.runId}
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.setData(RUN_DRAG, item.runId);
+                        e.dataTransfer.effectAllowed = "move";
+                      }}
+                      onDragOver={(e) => {
+                        if (accepts(e)) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setDropOn(lane);
+                          setDropBefore(item.runId);
+                        }
+                      }}
+                      onDrop={(e) => dropAt(e, item.runId)}
+                      className={cn(
+                        "cursor-grab rounded-md border border-line bg-surface p-2.5 shadow-sm active:cursor-grabbing",
+                        // Where the drop lands: a line above this card.
+                        dropOn === lane && dropBefore === item.runId && "border-t-2 border-t-sky-500",
+                      )}
+                    >
+                      <CardHead item={item} onTitle={() => openItem(item)} />
+                      <div className="mt-1 text-xs text-fg-muted">{item.headline}</div>
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        {place.get(item.runId) === 1 ? (
+                          <span className="text-[11px] font-medium text-sky-700 dark:text-sky-300">Next up</span>
+                        ) : (
+                          <>
+                            <span className="text-[11px] tabular-nums text-fg-subtle" title="Its place in the agent's one queue — both lanes">
+                              {place.get(item.runId)} of {all.queued.length}
+                            </span>
+                            <button
+                              type="button"
+                              className={BTN}
+                              title="Put it at the front of the queue"
+                              onClick={() => void run({ type: "moveQueued", runId: item.runId, before: all.queued[0].runId })}
+                            >
+                              Run next
+                            </button>
+                          </>
+                        )}
+                        <button type="button" className={BTN} title="Take it out of the queue — the agent won't queue it again for this head" onClick={() => void run({ type: "skip", runId: item.runId })}>
+                          Skip
+                        </button>
+                      </div>
+                    </article>
+                  ))
+                )}
+              </Column>
 
-        <Column label="Needs you" count={cols.needsYou.filter((i) => !i.later).length} dot="needsYou" className="min-w-[11rem] flex-1 basis-0 border-amber-500/50 bg-amber-500/[0.05]">
-          {cols.needsYou.length === 0 ? (
-            <Empty>Nothing waits for you</Empty>
-          ) : (
-            cols.needsYou.map((item) => <NeedsYouCard key={item.runId} item={item} onTitle={() => openItem(item)} run={run} />)
-          )}
-        </Column>
+              <Column label="Working" count={cols.working.length} dot="working" className="min-w-[11rem] flex-1 basis-0">
+                {cols.working.length === 0 ? (
+                  <Empty>Nothing running</Empty>
+                ) : (
+                  cols.working.map((item) => {
+                    const r = runFor(state, item.runId);
+                    return <WorkingCard key={item.runId} item={item} progress={r?.progress ?? null} paused={r?.paused ?? false} onTitle={() => openItem(item)} run={run} />;
+                  })
+                )}
+              </Column>
 
-        <Column label="Done today" count={cols.done.length} dot="done" className="min-w-[11rem] flex-1 basis-0">
-          {cols.done.length === 0 ? (
-            <Empty>Nothing finished yet</Empty>
-          ) : (
-            cols.done.map((item) => (
-              <ItemCard key={item.runId} item={item} onTitle={() => openItem(item)}>
-                {item.finishedAt && <span className="text-[11px] text-fg-subtle">{relativeTime(item.finishedAt)}</span>}
-              </ItemCard>
-            ))
-          )}
-        </Column>
-      </div>
+              <Column label="Needs you" count={cols.needsYou.filter((i) => !i.later).length} dot="needsYou" className="min-w-[11rem] flex-1 basis-0 border-amber-500/50 bg-amber-500/[0.05]">
+                {cols.needsYou.length === 0 ? (
+                  <Empty>Nothing waits for you</Empty>
+                ) : (
+                  cols.needsYou.map((item) => <NeedsYouCard key={item.runId} item={item} onTitle={() => openItem(item)} run={run} />)
+                )}
+              </Column>
+
+              <Column label="Done today" count={cols.done.length} dot="done" className="min-w-[11rem] flex-1 basis-0">
+                {cols.done.length === 0 ? (
+                  <Empty>Nothing finished yet</Empty>
+                ) : (
+                  cols.done.map((item) => (
+                    <ItemCard key={item.runId} item={item} onTitle={() => openItem(item)}>
+                      {item.finishedAt && <span className="text-[11px] text-fg-subtle">{relativeTime(item.finishedAt)}</span>}
+                    </ItemCard>
+                  ))
+                )}
+              </Column>
+            </div>
+          </section>
+        );
+      })}
     </div>
   );
 }
