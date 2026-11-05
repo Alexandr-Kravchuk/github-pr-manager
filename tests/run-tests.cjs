@@ -8489,6 +8489,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(wt.remoteFor(dir, { url: "https://github.com/x/y/pull/7", repo: "x/y" }), null);
       const target = wt.worktreeDir("/base", { repo: "a/b", number: 7, headOid: "abcdef0123456789" });
       assert.strictEqual(path.basename(target), "agent-b-7-abcdef0123");
+      assert.strictEqual(
+        path.basename(wt.worktreeDir("/base", { repo: "a/b", number: 7, headOid: "abcdef0123456789" }, "1a2b3c4d-5e6f-4000-8000-000000000000")),
+        "agent-b-7-abcdef0123-1a2b3c4d",
+        "each run its own folder: a second run on the same head never touches the first one's",
+      );
       assert.deepStrictEqual(wt.prepareCommands("upstream", { number: 7, headOid: "abcdef0123456789" }, target), [
         ["fetch", "--no-tags", "upstream", "pull/7/head"],
         ["worktree", "add", "--detach", "--force", target, "abcdef0123456789"],
@@ -8541,7 +8546,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9 } = {}) => {
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [] } = {}) => {
       // `home`: the folder of an earlier fixture — the same app started again.
       const dir = home ?? nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
@@ -8563,7 +8568,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         dir: path.join(dir, "agent"),
         loadSettings: () => settings,
         getSnapshot: () => snapshot,
-        getSessions: () => [],
+        // Your live Claude sessions; a test changes the array in place.
+        getSessions: () => sessions,
         findCheckout: () => (checkout ? co : null),
         hookScript: hookJs,
         execPath: process.execPath,
@@ -10158,6 +10164,32 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual([lanes.review.working.map((i) => i.prId), lanes.mine.needsYou.map((i) => i.prId), lanes.mine.done.map((i) => i.prId)], [["D"], ["E"], ["F"]]);
       for (const k of ["idle", "queued", "working", "needsYou", "done"]) {
         assert.strictEqual(lanes.mine[k].length + lanes.review[k].length, all[k].length, `nothing lost or doubled in ${k}`);
+      }
+    });
+
+    await atest("agent worktrees: Run again gets a folder of its own, and the old one stays while your session works in it", async () => {
+      const sessions = [];
+      const f = agentFixture({ script: succeed("Would post nothing."), sessions });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const first = only(f)[0];
+        // You continue its session in your terminal.
+        sessions.push({ id: first.sessionId, name: "x", status: "idle", where: "terminal", prKeys: [], repoKeys: [], branch: null });
+        assert.deepStrictEqual(await f.agent.act({ type: "retry", runId: first.runId }), { ok: true });
+        await until(() => only(f).some((i) => i.runId !== first.runId && i.worktree));
+        const second = only(f).find((i) => i.runId !== first.runId);
+        assert.notStrictEqual(second.worktree, first.worktree, "a folder of its own");
+        const removed = () => f.gitCalls.filter((a) => a[0] === "worktree" && a[1] === "remove").map((a) => a[3]);
+        assert.ok(!removed().includes(first.worktree), "your session's folder is left alone");
+        assert.strictEqual(only(f).find((i) => i.runId === first.runId).worktree, first.worktree, "and remembered, to go later");
+        // You closed the session: the next sweep takes the folder.
+        sessions.length = 0;
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => removed().includes(first.worktree));
+        await until(() => only(f).find((i) => i.runId === first.runId).worktree === undefined);
+      } finally {
+        f.agent.stop();
       }
     });
 

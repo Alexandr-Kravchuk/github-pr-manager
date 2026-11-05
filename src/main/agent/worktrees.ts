@@ -45,10 +45,17 @@ export function remoteFor(checkout: string, pr: Pick<PullRequest, "url" | "repo"
 }
 
 /** Where a run's worktree goes: one folder per PR head, so a rerun on the same head reuses the name. */
-export function worktreeDir(base: string, pr: Pick<PullRequest, "repo" | "number" | "headOid">): string {
+/**
+ * A run's own worktree folder. The run id is part of the name: a second run on
+ * the same PR and head (Run again, Review anyway) must never reuse — and so
+ * remove — a folder the first one's result still owns, where your session may
+ * be working ("Continue in session").
+ */
+export function worktreeDir(base: string, pr: Pick<PullRequest, "repo" | "number" | "headOid">, runId?: string): string {
   const repo = pr.repo.split("/")[1] ?? pr.repo;
   const safe = repo.replace(/[^A-Za-z0-9._-]/g, "_");
-  return path.join(base, `agent-${safe}-${pr.number}-${(pr.headOid ?? "head").slice(0, 10)}`);
+  const run = runId ? `-${runId.replace(/[^A-Za-z0-9]/g, "").slice(0, 8)}` : "";
+  return path.join(base, `agent-${safe}-${pr.number}-${(pr.headOid ?? "head").slice(0, 10)}${run}`);
 }
 
 /** The worktree base: the setting, else `<checkout>/.claude/worktrees`. */
@@ -81,9 +88,9 @@ export const runGit: GitRunner = (args, cwd) =>
 /** Creates (or recreates) the worktree for the PR's head commit and returns its folder. */
 export async function prepareWorktree(
   git: GitRunner,
-  opts: { checkout: string; remote: string; base: string; pr: Pick<PullRequest, "repo" | "number" | "headOid"> },
+  opts: { checkout: string; remote: string; base: string; pr: Pick<PullRequest, "repo" | "number" | "headOid">; runId?: string },
 ): Promise<string> {
-  const dir = worktreeDir(opts.base, opts.pr);
+  const dir = worktreeDir(opts.base, opts.pr, opts.runId);
   if (fs.existsSync(dir)) await removeWorktree(git, opts.checkout, dir);
   fs.mkdirSync(opts.base, { recursive: true });
   for (const args of prepareCommands(opts.remote, opts.pr, dir)) await git(args, opts.checkout);

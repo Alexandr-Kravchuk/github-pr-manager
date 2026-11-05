@@ -412,6 +412,7 @@ export function createAgent(deps: AgentDeps): Agent {
       },
     });
     idle = Object.fromEntries(plan.idle);
+    sweepWorktrees();
     const byId = new Map(snapshot.pullRequests.map((p) => [p.id, p]));
     const wanted = new Set(plan.jobs.map((j) => j.key));
     for (const job of plan.jobs) {
@@ -521,7 +522,7 @@ export function createAgent(deps: AgentDeps): Agent {
       checkout = item.checkout ?? null;
     } else if (pr && checkout && remote) {
       try {
-        dir = await prepareWorktree(git, { checkout, remote, base: worktreeBase(s.worktreeDir, checkout), pr });
+        dir = await prepareWorktree(git, { checkout, remote, base: worktreeBase(s.worktreeDir, checkout), pr, runId: item.runId });
       } catch (e) {
         return fail("Could not check out the PR", (e as Error).message);
       }
@@ -737,10 +738,46 @@ export function createAgent(deps: AgentDeps): Agent {
     tick();
   }
 
+  /** Worktrees being removed right now — a sweep and a close never race on one. */
+  const dropping = new Set<string>();
+
+  /**
+   * Removes an item's worktree — unless your session works in it: "Continue in
+   * session" resumes the run's session there, and removing a folder under it
+   * deletes its files from under you (on Windows the folder itself stays,
+   * empty, and git run in it then finds the checkout above it). A folder kept
+   * for that, or one something else still holds, keeps `item.worktree`, so the
+   * sweep tries again once it is free.
+   */
   async function dropWorktree(item: AgentItemRecord): Promise<void> {
-    if (item.worktree && item.checkout) await removeWorktree(git, item.checkout, item.worktree).catch(() => {});
-    item.worktree = undefined;
+    if (!item.worktree || !item.checkout) {
+      item.worktree = undefined;
+      return;
+    }
+    if (item.sessionId && deps.getSessions().some((x) => x.id === item.sessionId)) return;
+    const dir = item.worktree;
+    if (dropping.has(dir)) return;
+    dropping.add(dir);
+    try {
+      await removeWorktree(git, item.checkout, dir);
+      item.worktree = undefined;
+    } catch {
+      // Still in use: left for the next sweep.
+    } finally {
+      dropping.delete(dir);
+    }
   }
+
+  /** Worktrees of finished items that could not go when they finished (a session in them, a lock): tried again. */
+  function sweepWorktrees(): void {
+    const left = store.data.items.filter((i) => (i.state === "done" || i.state === "error") && i.worktree);
+    if (left.length === 0) return;
+    void (async () => {
+      for (const item of left) await dropWorktree(item);
+      void store.save();
+    })();
+  }
+  let lastSweep = 0;
 
   /** Closes an item a newer one replaced; it leaves the Board without a "Done today" card. */
   async function closeAs(item: AgentItemRecord, headline: string): Promise<void> {
@@ -1016,6 +1053,11 @@ export function createAgent(deps: AgentDeps): Agent {
     if (quiet !== lastQuiet) {
       lastQuiet = quiet;
       changed();
+    }
+    // Every ten minutes, whatever else holds: a session you closed frees its folder.
+    if (now().getTime() - lastSweep > 600_000) {
+      lastSweep = now().getTime();
+      sweepWorktrees();
     }
     // Paused: nothing starts, whoever asked.
     if (store.data.paused) return;
