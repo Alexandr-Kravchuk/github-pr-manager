@@ -1,17 +1,20 @@
 // A drive run's result, read by the app from the run's worktree, and the push
 // the app makes with it. The session commits; it never pushes — its guard
 // refuses `git push`, and its environment (NO_PUSH_ENV) takes away the means:
-// no credential helper, no SSH, every push URL rewritten to nowhere. The app
-// pushes, as a fast-forward only, the exact commit you were shown.
+// no network, no credential helper, no SSH. The app pushes, as a
+// fast-forward only, the exact commit you were shown.
 //
-// Every git command the app runs in the worktree ignores what the repository
-// could have been made to run: no hooks (an empty core.hooksPath, and
-// `--no-verify` on the push — a hook manager such as lefthook reads its
-// commands from files in the worktree), no fsmonitor, no external diff or
-// textconv. And before pushing, the app checks that the repository's git
-// config, its hooks and your global git config are what they were before the
-// session started: a session that ran code (tests you allowed it) and
-// changed them gets nothing pushed.
+// Every git command the app runs in the worktree names its git folder and
+// work tree outright (`--git-dir`, `--work-tree`: a rewritten `.git` file
+// can't send it elsewhere) and runs nothing the repository could have been
+// made to run: hooks point at a fresh empty folder of its own (and the push
+// adds `--no-verify` — a hook manager such as lefthook reads its commands
+// from worktree files), no fsmonitor, no external diff or textconv. Before
+// the push, a fingerprint of everything git would read — every config file
+// it loads (includes too), the repository's hooks, the worktree's links to
+// its git folder, and your SSH config for an SSH remote — must match the one
+// taken before the session. All of this matters only if you let a drive run
+// your tests: by default it runs no code of yours, and none of it can.
 
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -23,16 +26,36 @@ import type { GitRunner } from "./worktrees";
 
 const PATCH_MAX = 100_000;
 
-/** An empty folder for core.hooksPath: no hook runs from any git command the app makes in a run's worktree. */
-export function noHooksDir(): string {
-  const dir = path.join(os.tmpdir(), "prd-agent-no-hooks");
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+/** Where a worktree's git lives, as read before the session. */
+export interface GitPlace {
+  /** The worktree itself. */
+  workTree: string;
+  /** Its own git folder (`.git/worktrees/<name>`). */
+  gitDir: string;
 }
 
-/** `git -c …` options for every git command the app runs in a run's worktree. */
-export function safeGit(hooksDir: string): string[] {
-  return ["-c", `core.hooksPath=${hooksDir}`, "-c", "core.fsmonitor=false"];
+/**
+ * A fresh empty folder for core.hooksPath, made for one operation and
+ * removed after it: nothing can have been put there in advance.
+ */
+export function withNoHooks<T>(fn: (hooksDir: string) => Promise<T>): Promise<T> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "prd-nohooks-"));
+  const run = async () => {
+    if (fs.readdirSync(dir).length > 0) throw new Error("the empty hooks folder wasn't empty");
+    return fn(dir);
+  };
+  return run().finally(() => fs.rmSync(dir, { recursive: true, force: true }));
+}
+
+/** Global git options for an app command in a run's worktree. */
+export function safeGit(hooksDir: string, place?: GitPlace): string[] {
+  return [
+    ...(place ? [`--git-dir=${place.gitDir}`, `--work-tree=${place.workTree}`] : []),
+    "-c",
+    `core.hooksPath=${hooksDir}`,
+    "-c",
+    "core.fsmonitor=false",
+  ];
 }
 
 /** Plain-text diffs only: no external diff program, no textconv filter, whatever the repository configures. */
@@ -49,10 +72,11 @@ export async function collectDrive(
   dir: string,
   base: string,
   reasons: string[],
-  hooksDir: string = noHooksDir(),
+  hooksDir: string,
+  place?: GitPlace,
 ): Promise<{ drive: AgentDriveResult; fastForward: boolean }> {
   if (!/^[0-9a-f]{7,40}$/.test(base)) throw new Error(`no head commit to compare with (${base || "none"})`);
-  const g = (args: string[]) => git([...safeGit(hooksDir), ...args], dir);
+  const g = (args: string[]) => git([...safeGit(hooksDir, place), ...args], dir);
   const range = `${base}..HEAD`;
   const head = (await g(["rev-parse", "HEAD"])).trim();
   const log = await g(["log", "--no-color", "--format=%H%x09%s", range]);
@@ -82,26 +106,42 @@ export function isPlainBranch(name: string): boolean {
   return /^[A-Za-z0-9._/-]+$/.test(name) && !name.startsWith("-") && !name.includes("..") && !name.endsWith(".lock") && !name.endsWith("/");
 }
 
+/** An SSH remote: ssh reads ~/.ssh/config, which can name programs to run. */
+export function isSshUrl(url: string): boolean {
+  return /^(ssh:\/\/|git@|[^/:@\s]+@[^/:\s]+:)/.test(url);
+}
+
 /**
  * The push: the exact commit you were shown (`<oid>:refs/heads/<branch>`, not
  * HEAD), to the remote URL read before the session started (not a remote
  * name the session could have repointed), never `--force` — git itself
  * refuses anything but a fast-forward — and with no hook run.
  */
-export function pushArgs(url: string, oid: string, branch: string, hooksDir: string): string[] {
+export function pushArgs(url: string, oid: string, branch: string, hooksDir: string, place?: GitPlace): string[] {
   if (!isPlainBranch(branch)) throw new Error(`"${branch}" isn't a branch name the agent pushes to`);
   if (!/^[0-9a-f]{40}$/.test(oid)) throw new Error(`"${oid}" isn't a commit the agent pushes`);
   if (!/^(https?:\/\/|ssh:\/\/|git@)[^\s]+$/.test(url) || url.startsWith("-")) throw new Error(`"${url}" isn't a remote URL the agent pushes to`);
-  return [...safeGit(hooksDir), "push", "--no-verify", url, `${oid}:refs/heads/${branch}`];
+  return [...safeGit(hooksDir, place), "push", "--no-verify", url, `${oid}:refs/heads/${branch}`];
+}
+
+/** The config files git loads for this worktree — includes too — from `git config --list --show-origin`. */
+export async function configFiles(git: GitRunner, place: GitPlace, hooksDir: string): Promise<string[]> {
+  const out = await git([...safeGit(hooksDir, place), "config", "--list", "--show-origin", "--name-only"], place.workTree);
+  const files = new Set<string>();
+  for (const line of out.split("\n")) {
+    const m = /^file:(.+?)\t/.exec(line);
+    if (m) files.add(path.resolve(place.workTree, m[1]));
+  }
+  return [...files].sort();
 }
 
 /**
- * What git would run code from, read as one fingerprint: the repository's
- * config and hooks (the shared git folder all worktrees use, and this
- * worktree's own config), and your global git config. Taken before a drive
- * session and again before its push.
+ * One fingerprint of what git (and ssh) would read for a push: every config
+ * file git loads, the repository's hooks, the worktree's links to its git
+ * folder (`.git`, `commondir`, `gitdir`), and ~/.ssh/config for an SSH
+ * remote. Taken before a drive session and again before its push.
  */
-export function gitFingerprint(commonDir: string, worktreeGitDir: string | null): string {
+export async function gitFingerprint(git: GitRunner, place: GitPlace, commonDir: string, url: string): Promise<string> {
   const h = createHash("sha256");
   const add = (label: string, file: string) => {
     let text = "";
@@ -110,13 +150,17 @@ export function gitFingerprint(commonDir: string, worktreeGitDir: string | null)
     } catch {
       text = "<none>";
     }
-    h.update(`${label}\0${text}\0`);
+    h.update(`${label}\0${file}\0${text}\0`);
   };
+  const files = await withNoHooks((hooksDir) => configFiles(git, place, hooksDir));
+  for (const f of files) add("config", f);
   add("config", path.join(commonDir, "config"));
-  if (worktreeGitDir) add("config.worktree", path.join(worktreeGitDir, "config.worktree"));
-  const home = os.homedir();
-  add("global", path.join(home, ".gitconfig"));
-  add("xdg", path.join(process.env.XDG_CONFIG_HOME?.trim() || path.join(home, ".config"), "git", "config"));
+  add("config.worktree", path.join(place.gitDir, "config.worktree"));
+  add("commondir", path.join(place.gitDir, "commondir"));
+  add("gitdir", path.join(place.gitDir, "gitdir"));
+  add(".git", path.join(place.workTree, ".git"));
+  add("global", path.join(os.homedir(), ".gitconfig"));
+  if (isSshUrl(url)) add("ssh", path.join(os.homedir(), ".ssh", "config"));
   try {
     const hooks = path.join(commonDir, "hooks");
     for (const name of fs.readdirSync(hooks).sort()) add(`hook:${name}`, path.join(hooks, name));

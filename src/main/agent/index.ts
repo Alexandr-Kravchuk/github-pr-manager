@@ -27,7 +27,7 @@ import type {
 import { chooseMergeMethod, mergeArgs } from "./merge";
 import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
 import { ghError, prepareRunFolder, publishPlan, readPlan, runFolderRoots, runGh, type GhRunner, type RunFolder } from "./publish";
-import { collectDrive, gitFingerprint, isPlainBranch, noHooksDir, pushArgs, safeGit } from "./drive";
+import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, withNoHooks, type GitPlace } from "./drive";
 import { hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { openStore, type AgentItemRecord, type AgentStore } from "./store";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
@@ -435,11 +435,13 @@ export function createAgent(deps: AgentDeps): Agent {
           if (isPlainBranch(pr.baseRefName)) {
             await git(["fetch", "--no-tags", remote, `+refs/heads/${pr.baseRefName}:refs/remotes/${remote}/${pr.baseRefName}`], checkout).catch(() => {});
           }
-          const sg = safeGit(noHooksDir());
           const url = (await git(["remote", "get-url", "--push", remote], checkout)).trim();
-          const commonDir = path.resolve(dir, (await git([...sg, "rev-parse", "--git-common-dir"], dir)).trim());
-          const worktreeGitDir = path.resolve(dir, (await git([...sg, "rev-parse", "--git-dir"], dir)).trim());
-          item.pushTo = { url, commonDir, worktreeGitDir, fingerprint: gitFingerprint(commonDir, worktreeGitDir) };
+          const [commonDir, worktreeGitDir] = await withNoHooks(async (h) => [
+            path.resolve(dir, (await git([...safeGit(h), "rev-parse", "--git-common-dir"], dir)).trim()),
+            path.resolve(dir, (await git([...safeGit(h), "rev-parse", "--git-dir"], dir)).trim()),
+          ]);
+          const place: GitPlace = { workTree: dir, gitDir: worktreeGitDir };
+          item.pushTo = { url, commonDir, worktreeGitDir, fingerprint: await gitFingerprint(git, place, commonDir, url) };
         } catch (e) {
           return fail("Could not prepare the drive", (e as Error).message);
         }
@@ -563,7 +565,8 @@ export function createAgent(deps: AgentDeps): Agent {
         item.headline = "Jira dry run ready — apply it in a session";
       } else if (item.scenario === "drive") {
         const base = keyHead(item.key) ?? pr?.headOid ?? "";
-        const read = await collectDrive(git, dir, base, item.reasons ?? []).catch((e: Error) => ({ error: e.message }));
+        const place = item.pushTo?.worktreeGitDir ? { workTree: dir, gitDir: item.pushTo.worktreeGitDir } : undefined;
+        const read = await withNoHooks((h) => collectDrive(git, dir, base, item.reasons ?? [], h, place)).catch((e: Error) => ({ error: e.message }));
         if ("error" in read) {
           fail("Couldn't read the run's commits", read.error);
         } else if (read.drive.commits.length === 0) {
@@ -738,10 +741,14 @@ export function createAgent(deps: AgentDeps): Agent {
     if (!item.drive || item.drive.commits.length === 0) return { ok: false, error: "There is nothing to push." };
     if (!all.agent.permissions.pushOwnBranch) return { ok: false, error: "Pushing is off in Settings › Agent › Permissions." };
     if (!item.worktree || !item.checkout || !fs.existsSync(item.worktree)) return refuse("the run's checkout is gone — run it again");
-    if (!item.pushTo) return refuse("the run didn't record where to push — run it again");
-    // What git would run code from must be what it was before the session.
-    if (gitFingerprint(item.pushTo.commonDir, item.pushTo.worktreeGitDir) !== item.pushTo.fingerprint) {
-      return refuse("the repository's git config or hooks changed during the run — nothing pushed; look at them before anything else");
+    if (!item.pushTo?.worktreeGitDir) return refuse("the run didn't record where to push — run it again");
+    // Every app git command names the worktree's git folder outright: a
+    // rewritten .git file can't send it elsewhere.
+    const place: GitPlace = { workTree: item.worktree, gitDir: item.pushTo.worktreeGitDir };
+    // What git would read must be what it was before the session.
+    const fingerprint = await gitFingerprint(git, place, item.pushTo.commonDir, item.pushTo.url).catch(() => "");
+    if (fingerprint !== item.pushTo.fingerprint) {
+      return refuse("the repository's git config, hooks or links changed during the run — nothing pushed; look at them before anything else");
     }
     const read = await fresh(item, snapshotPr(item.prId)?.roles ?? ["author"]);
     if (!read.ok) return refuse(read.error);
@@ -752,22 +759,28 @@ export function createAgent(deps: AgentDeps): Agent {
     // What is in the checkout now — "Continue in session" may have added
     // commits. A Push sends only what you were shown: anything new goes back
     // on the Board for you to look at first.
-    const hooksDir = noHooksDir();
-    const now = await collectDrive(git, item.worktree, item.drive.base, item.drive.reasons, hooksDir).catch((e: Error) => ({ error: e.message }));
-    if ("error" in now) return refuse(`couldn't read the commits: ${now.error}`);
-    if (!now.fastForward) return refuse("the commits rewrite the branch's history — the app pushes fast-forwards only");
-    if (now.drive.head !== item.drive.head) {
-      item.drive = now.drive;
-      return refuse(`there are commits you haven't seen — look at the ${now.drive.commits.length} commits again, then Push`);
-    }
-    const head = item.drive.head;
-    item.headline = "Pushing…";
-    changed();
-    try {
-      await git(pushArgs(item.pushTo.url, head, pr.headRefName, hooksDir), item.worktree);
-    } catch (e) {
-      return refuse(`git refused the push: ${(e as Error).message}`);
-    }
+    const drive = item.drive;
+    const pushTo = item.pushTo;
+    const worktree = item.worktree;
+    const outcome = await withNoHooks(async (hooksDir): Promise<string | null> => {
+      const now = await collectDrive(git, worktree, drive.base, drive.reasons, hooksDir, place).catch((e: Error) => ({ error: e.message }));
+      if ("error" in now) return `couldn't read the commits: ${now.error}`;
+      if (!now.fastForward) return "the commits rewrite the branch's history — the app pushes fast-forwards only";
+      if (now.drive.head !== drive.head) {
+        item.drive = now.drive;
+        return `there are commits you haven't seen — look at the ${now.drive.commits.length} commits again, then Push`;
+      }
+      item.headline = "Pushing…";
+      changed();
+      try {
+        await git(pushArgs(pushTo.url, drive.head, pr.headRefName, hooksDir, place), worktree);
+      } catch (e) {
+        return `git refused the push: ${(e as Error).message}`;
+      }
+      return null;
+    }).catch((e: Error) => e.message);
+    if (outcome) return refuse(outcome);
+    const head = drive.head;
     const n = item.drive.commits.length;
     item.pushed = true;
     item.finishedAt = stamp();

@@ -9492,7 +9492,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         nfsA.writeFileSync(path.join(repo, "a.txt"), `${n}\n`);
         g("commit", "-q", "-am", msg);
       }
-      const read = await driveMod.collectDrive(wt.runGit, repo, base, ["ci"]);
+      const read = await driveMod.withNoHooks((h) => driveMod.collectDrive(wt.runGit, repo, base, ["ci"], h));
       assert.deepStrictEqual(read.drive.commits.map((c) => c.subject), ["fix: one", "fix: two"]);
       assert.strictEqual(read.fastForward, true);
       assert.strictEqual(read.drive.head, g("rev-parse", "HEAD").stdout.trim(), "the commit a Push would send");
@@ -9501,10 +9501,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       g("reset", "-q", "--hard", base);
       nfsA.writeFileSync(path.join(repo, "a.txt"), "amended\n");
       g("commit", "-q", "--amend", "-am", "base, amended");
-      assert.strictEqual((await driveMod.collectDrive(wt.runGit, repo, base, [])).fastForward, false, "an amended base is not a fast-forward");
+      assert.strictEqual((await driveMod.withNoHooks((h) => driveMod.collectDrive(wt.runGit, repo, base, [], h))).fastForward, false, "an amended base is not a fast-forward");
       g("reset", "-q", "--hard", base);
-      assert.deepStrictEqual((await driveMod.collectDrive(wt.runGit, repo, base, [])).drive.commits, []);
-      await assert.rejects(driveMod.collectDrive(wt.runGit, repo, "HEAD~1", []), /no head commit/);
+      assert.deepStrictEqual((await driveMod.withNoHooks((h) => driveMod.collectDrive(wt.runGit, repo, base, [], h))).drive.commits, []);
+      await assert.rejects(driveMod.withNoHooks((h) => driveMod.collectDrive(wt.runGit, repo, "HEAD~1", [], h)), /no head commit/);
     });
 
     test("drive: the app pushes the exact commit you saw, to the URL read before the run — no --force, no hooks", () => {
@@ -9535,17 +9535,53 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(NO.GIT_TERMINAL_PROMPT, "0");
     });
 
-    test("drive: a fingerprint of what git would run code from — config, hooks, your global config", () => {
-      const common = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-fp-"));
-      nfsA.mkdirSync(path.join(common, "hooks"));
-      nfsA.writeFileSync(path.join(common, "config"), "[core]\n");
-      const a = driveMod.gitFingerprint(common, null);
-      assert.strictEqual(driveMod.gitFingerprint(common, null), a, "stable");
-      nfsA.writeFileSync(path.join(common, "config"), "[core]\n\tfsmonitor = evil\n");
-      const b = driveMod.gitFingerprint(common, null);
+    await atest("drive: a fingerprint of everything git reads for a push — config files and includes, hooks, the worktree's links", async () => {
+      const base = nfsA.realpathSync.native(nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-fp-")));
+      const repo = path.join(base, "repo");
+      nfsA.mkdirSync(repo);
+      const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+      const g = (cwd, ...args) => spawnSync("git", args, { cwd, encoding: "utf8", env });
+      g(repo, "init", "-q");
+      nfsA.writeFileSync(path.join(repo, "a.txt"), "1\n");
+      g(repo, "add", "a.txt");
+      g(repo, "commit", "-q", "-m", "base");
+      const wtDir = path.join(base, "wt");
+      g(repo, "worktree", "add", "-q", "--detach", wtDir);
+      const gitDir = path.resolve(wtDir, g(wtDir, "rev-parse", "--git-dir").stdout.trim());
+      const commonDir = path.resolve(wtDir, g(wtDir, "rev-parse", "--git-common-dir").stdout.trim());
+      const place = { workTree: wtDir, gitDir };
+      const url = "https://github.com/a/b.git";
+      const fp = () => driveMod.gitFingerprint(wt.runGit, place, commonDir, url);
+      const a = await fp();
+      assert.strictEqual(await fp(), a, "stable");
+      // An include: the file it names is read too, so a change in it shows.
+      const extra = path.join(base, "extra.cfg");
+      nfsA.writeFileSync(extra, "[user]\n\tname = x\n");
+      nfsA.appendFileSync(path.join(commonDir, "config"), `[include]\n\tpath = ${extra.replace(/\\/g, "/")}\n`);
+      const b = await fp();
       assert.notStrictEqual(b, a, "a config change shows");
-      nfsA.writeFileSync(path.join(common, "hooks", "pre-push"), "#!/bin/sh\n");
-      assert.notStrictEqual(driveMod.gitFingerprint(common, null), b, "a new hook shows");
+      nfsA.writeFileSync(extra, "[core]\n\tfsmonitor = evil\n");
+      const c = await fp();
+      assert.notStrictEqual(c, b, "a change in an included file shows");
+      nfsA.writeFileSync(path.join(commonDir, "hooks", "reference-transaction"), "#!/bin/sh\n");
+      const d = await fp();
+      assert.notStrictEqual(d, c, "a new hook shows");
+      nfsA.appendFileSync(path.join(wtDir, ".git"), "\n");
+      assert.notStrictEqual(await fp(), d, "a rewritten .git link shows");
+    });
+
+    await atest("drive: each app git operation gets a fresh, empty hooks folder, gone afterwards", async () => {
+      let seen = null;
+      await driveMod.withNoHooks(async (dir) => {
+        seen = dir;
+        assert.deepStrictEqual(nfsA.readdirSync(dir), []);
+        assert.deepStrictEqual(driveMod.safeGit(dir, { workTree: "/w", gitDir: "/g" }).slice(0, 2), ["--git-dir=/g", "--work-tree=/w"], "the git folder is named, not discovered");
+      });
+      assert.ok(seen && !nfsA.existsSync(seen));
+      let other = null;
+      await driveMod.withNoHooks(async (dir) => (other = dir));
+      assert.notStrictEqual(other, seen, "never the same folder twice");
+      assert.ok(driveMod.isSshUrl("git@github.com:a/b.git") && driveMod.isSshUrl("ssh://git@h/a/b") && !driveMod.isSshUrl("https://h/a/b"));
     });
 
     await atest("agent drive: your red PR is driven in a session that can't push; on your Push the app pushes a fast-forward and counts the attempt", async () => {
@@ -9561,8 +9597,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         fetchPr: async () => ({ pr: { ...mine, headOid: freshHead }, state: "OPEN", viewer: "me" }),
         git: async (all) => {
           let i = 0;
-          while (all[i] === "-c") i += 2;
+          for (;;) {
+            if (all[i] === "-c") i += 2;
+            else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+            else break;
+          }
           const args = all.slice(i);
+          if (args[0] === "config") return `file:${commonDir}/config\tcore.bare\n`;
           // Newest first, as git log prints it.
           if (args[0] === "log") return "2222222222222222222222222222222222222222\tfix: the failing test\n1111111111111111111111111111111111111111\ttest: cover it\n";
           if (args[0] === "diff") return args.includes("--stat") ? " a.ts | 2 +-" : "+fixed";
@@ -9608,13 +9649,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         only(f)[0].drive.head = worktreeHead;
         // The repository's git config changed during the run: nothing pushed.
         nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n\tfsmonitor = evil\n");
-        assert.match((await f.agent.act({ type: "push", runId: item.runId })).error, /git config or hooks changed/);
+        assert.match((await f.agent.act({ type: "push", runId: item.runId })).error, /git config, hooks or links changed/);
         nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
         only(f)[0].state = "needsYou";
         assert.deepStrictEqual(await f.agent.act({ type: "push", runId: item.runId }), { ok: true });
         assert.strictEqual(pushes.length, 1);
         assert.deepStrictEqual(pushes[0].slice(-4), ["push", "--no-verify", "https://github.com/a/b.git", "2222222222222222222222222222222222222222:refs/heads/feature/x"]);
         assert.ok(pushes[0].some((a) => a.startsWith("core.hooksPath=")), "no hook runs in the app's push");
+        assert.ok(pushes[0].some((a) => a.startsWith("--git-dir=")), "the git folder is named, not discovered from the worktree");
         assert.deepStrictEqual([only(f)[0].state, only(f)[0].pushed, only(f)[0].headline], ["done", true, "Pushed 2 commits"]);
         const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
         assert.deepStrictEqual(state.drive["PR_R"], { attempts: 1, agentHead: "2222222222222222222222222222222222222222" });
