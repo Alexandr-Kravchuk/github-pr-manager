@@ -436,6 +436,8 @@ export function App() {
       window.removeEventListener("focus", onWake);
     };
   }, []);
+  // A clicked agent notification opens the Board: that is where its decision waits.
+  useEffect(() => window.api.onAgentShowBoard(() => setViewMode("board")), []);
   const agentAct = useCallback(async (action: AgentAction) => {
     const res = await window.api.agentAction(action);
     // The push may lag a moment behind; pull so the click shows at once.

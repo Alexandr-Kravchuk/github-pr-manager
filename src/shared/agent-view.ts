@@ -67,13 +67,15 @@ export function boardColumns(prs: readonly PullRequest[], allPrIds: ReadonlySet<
   const cols: BoardColumns = { idle: [], queued: [], working: [], needsYou: [], done: [] };
   const busy = new Set<string>();
   for (const item of state.items) {
-    const onBoard = shown.has(item.prId);
-    if (item.state === "queued" && onBoard) cols.queued.push(item);
-    else if (item.state === "working" && onBoard) cols.working.push(item);
-    else if ((item.state === "needsYou" || item.state === "error") && onBoard) cols.needsYou.push(item);
-    else if (item.state === "done" && !isQuiet(item) && finishedOn(item, today) && (onBoard || !allPrIds.has(item.prId))) {
-      cols.done.push(item);
-    }
+    // A PR the filters hide stays off the Board; one that left the dashboard
+    // (merged — the search sees open PRs only) still shows its work: the Jira
+    // dry run after a merge is exactly that.
+    const visible = shown.has(item.prId) || !allPrIds.has(item.prId);
+    if (!visible) continue;
+    if (item.state === "queued") cols.queued.push(item);
+    else if (item.state === "working") cols.working.push(item);
+    else if (item.state === "needsYou" || item.state === "error") cols.needsYou.push(item);
+    else if (item.state === "done" && !isQuiet(item) && finishedOn(item, today)) cols.done.push(item);
     if (item.state === "queued" || item.state === "working" || item.state === "needsYou" || item.state === "error") busy.add(item.prId);
   }
   for (const pr of prs) {
@@ -107,7 +109,9 @@ export function finishedOn(item: Pick<AgentItem, "finishedAt">, today: string): 
 export function primaryActionLabel(item: AgentItem): string | null {
   if (item.state === "error") return "Run again";
   if (item.state !== "needsYou") return null;
+  if (item.scenario === "merge") return "Merge";
+  if (item.plan && !item.published) return "Publish";
   if (item.scenario === "brief" && item.output) return "Review anyway";
-  if (item.sessionId) return "Continue in session";
+  if (item.sessionId) return item.scenario === "afterMerge" ? "Apply in session" : "Continue in session";
   return null;
 }

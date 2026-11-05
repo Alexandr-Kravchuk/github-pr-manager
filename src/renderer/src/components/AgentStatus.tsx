@@ -57,7 +57,7 @@ export function AgentStatusLine({ pr }: { pr: PullRequest }) {
     <div className="mt-2 flex items-center gap-2 border-t border-line pt-2 text-xs">
       <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", AGENT_STATE_DOT[item.state])} />
       <span className={cn("shrink-0 font-medium", STATE_TONE[item.state])}>
-        {item.mode === "shadow" && item.state === "needsYou" ? "Would post" : AGENT_STATE_TEXT[item.state]}
+        {item.scenario === "merge" && item.state === "needsYou" ? "Ready to merge" : item.plan && !item.published && item.state === "needsYou" ? "Would post" : AGENT_STATE_TEXT[item.state]}
       </span>
       <span className="min-w-0 flex-1 truncate text-fg-muted" title={text}>
         {text}

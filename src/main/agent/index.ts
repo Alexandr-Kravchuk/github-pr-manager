@@ -3,24 +3,31 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
-import { isBigPr, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
+import { isBigPr, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
+import { describePlan, gitBashPath, summarizePlan } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
+import { AGENT_CLOSED, todayKey } from "../../shared/agent-view";
 import { DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
+import type { FreshPullRequest } from "../../shared/github";
 import type {
   AgentAction,
   AgentActionResult,
+  AgentItem,
+  AgentRunKind,
   AgentSettings,
   AgentState,
   ClaudeSessionInfo,
   ClaudeSettings,
   DashboardResponse,
+  MergeMethod,
   PullRequest,
   Settings,
 } from "../../shared/types";
-import { readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
-import { hookCommand, startRun, writeRunSettings, type RunHandle, type Spawner } from "./runner";
-import { AGENT_CLOSED, todayKey } from "../../shared/agent-view";
+import { chooseMergeMethod, mergeArgs } from "./merge";
+import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
+import { ghError, prepareRunFolder, publishPlan, readPlan, runFolderRoots, runGh, type GhRunner, type RunFolder } from "./publish";
+import { hookCommand, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { openStore, type AgentItemRecord, type AgentStore } from "./store";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
 
@@ -29,8 +36,16 @@ import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type 
 // own timer — the poller only reports when something changed, while limits,
 // quiet spells and finished runs move on time alone.
 //
-// Reviews and briefs only prepare for now: whatever a run produces waits in
-// "Needs you"; publishing lands in stage 4.
+// A review session never posts: its publish step is captured by the app's
+// wrapper (`capture.ts`), and the app posts the plan itself (`publish.ts`) — at
+// once in On, on your Publish in Shadow. Your PRs that are ready get a Merge
+// button, and only your click merges them (`merge.ts`).
+
+/** What the agent tells you about, if Settings › Agent › notifications say so. */
+export interface AgentNotice {
+  kind: "needsYou" | "failed" | "finished";
+  item: AgentItem;
+}
 
 export interface AgentDeps {
   /** userData/agent — state, log and per-run settings files. */
@@ -45,6 +60,15 @@ export interface AgentDeps {
   execPath: string;
   /** Opens your terminal on an existing session: `claude --resume <id>` in `dir`. */
   openResume?: (dir: string, sessionId: string) => Promise<void>;
+  /** The compiled capture script (dist/main/main/agent/capture.js) behind a review's publish wrapper. Without it reviews run as plain dry runs. */
+  captureScript?: string;
+  /** One PR read again by id before posting or merging; null when it is gone. */
+  fetchPr?: (pr: Pick<PullRequest, "id" | "hostLabel" | "roles">) => Promise<FreshPullRequest | null>;
+  gh?: GhRunner;
+  /** Your own skills folder (~/.claude/skills) — the ones a prompt names are mounted for the run. */
+  userSkillsDir?: string;
+  /** Something you may want to hear about; main checks the notification settings. */
+  notify?: (notice: AgentNotice) => void;
   plugins?: () => InstalledPlugin[];
   git?: GitRunner;
   spawner?: Spawner;
@@ -71,24 +95,49 @@ const RECENT_MAX = 40;
 // The same local day the Board's "Done today" uses.
 const localDay = todayKey;
 
+/** The kind of session a scenario runs as — what the guard and the tool list go by. */
+export function runKindOf(scenario: AgentScenario): AgentRunKind {
+  return scenario === "brief" ? "brief" : scenario === "afterMerge" ? "afterMerge" : "review";
+}
+
 /** The rules every agent session gets on top of its prompt. */
-export function agentRules(scenario: AgentScenario, mode: "shadow" | "on"): string {
+export function agentRules(scenario: AgentScenario, mode: "shadow" | "on", folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null = null): string {
   const plan =
-    "You run unattended as the user's PR agent. First write your plan as a task list with TaskCreate — one short task per step — and keep it current with TaskUpdate as you go, so the user can follow along.";
+    "You run unattended as the user's PR agent. First write your plan as a task list with TaskCreate — one short task per step — and keep it current with TaskUpdate as you go, so the user can follow along. (A skill that runs as a Workflow shows its own phases; then no task list is needed.)";
   const never =
     "Never push, and never try to work around a refused tool call: if something is refused, say what you would have done and continue without it.";
+  const jira =
+    "Read Jira and Confluence with the twg CLI (for example `twg jira workitem get KEY -o json --output-summary none`) — there is no Atlassian MCP in this session.";
   if (scenario === "brief") {
-    return `${plan} Post nothing anywhere. End with the brief itself as your final message. ${never}`;
+    return `${plan} Post nothing anywhere. ${jira} End with the brief itself as your final message. ${never}`;
   }
-  const dry =
-    mode === "shadow"
-      ? "This is a dry run: post NOTHING to GitHub — no review, comments, approve, replies or resolves; if your skill has a dry-run mode, use it. End with exactly what you would post — the summary, every inline comment with its file and line, and whether you would approve — as your final message."
-      : "Posting is not enabled for agent runs yet: post nothing to GitHub. End with exactly what you would post — the summary, every inline comment with its file and line, and whether you would approve — as your final message.";
-  return `${plan} ${dry} ${never}`;
+  if (scenario === "afterMerge") {
+    return `${plan} This is a dry run: change nothing in Jira or anywhere else — read only, with twg and gh. ${jira} End with the changes you would make and the exact question to ask before making them, as your final message. ${never}`;
+  }
+  if (folder) {
+    // Forward slashes: the session passes these paths through Git Bash on Windows.
+    const out = folder.outDir.replace(/\\/g, "/");
+    const later = mode === "shadow" ? " once the user approves it" : " right after this session";
+    return (
+      `${plan} Publishing goes through the app: run the review with dryRun: false and publishCommand: "${gitBashPath(folder.wrapperPath)}". ` +
+      `That wrapper is the app's own — it records each write for the user and posts nothing; the app publishes what it recorded${later}. ` +
+      `Write every file the wrapper takes (the review JSON, a comment JSON, a reply's text) under ${out}/ and pass that absolute path — nothing else is writable — and never call gh api for a write. ` +
+      `${jira} End with a short summary of what you prepared. ${never}`
+    );
+  }
+  return `${plan} This is a dry run: post NOTHING to GitHub; if your skill has a dry-run mode (dryRun: true), use it. ${jira} End with exactly what you would post — the summary, every inline comment with its file and line, and whether you would approve — as your final message. ${never}`;
 }
 
 function promptFor(scenario: AgentScenario, claude: ClaudeSettings): string {
-  return scenario === "brief" ? claude.agentPrompts.triage || DEFAULT_AGENT_PROMPTS.triage : claude.prompts.review || DEFAULT_CLAUDE_PROMPTS.review;
+  if (scenario === "brief") return claude.agentPrompts.triage || DEFAULT_AGENT_PROMPTS.triage;
+  if (scenario === "afterMerge") return claude.agentPrompts.afterMerge || DEFAULT_AGENT_PROMPTS.afterMerge;
+  return claude.prompts.review || DEFAULT_CLAUDE_PROMPTS.review;
+}
+
+/** The head commit an item was keyed on ("<id>|<scenario>|<head>…"). */
+function keyHead(key: string): string | null {
+  const h = key.split("|")[2];
+  return h && h !== "-" ? h : null;
 }
 
 /** A host to leave alone for now: its last fetch failed, or its GitHub budget is nearly spent. */
@@ -142,6 +191,18 @@ export function createAgent(deps: AgentDeps): Agent {
   const changed = () => deps.onChange?.();
   const stamp = () => now().toISOString();
   const findItem = (runId: string) => store.data.items.find((i) => i.runId === runId);
+  const gh = deps.gh ?? runGh;
+  /** Merge offers whose click is being carried out — a snapshot in between must not close them. */
+  const merging = new Set<string>();
+  const announce = (item: AgentItemRecord, kind: AgentNotice["kind"]) => {
+    try {
+      deps.notify?.({ kind, item: { ...item } });
+    } catch {
+      // A notification is best-effort.
+    }
+  };
+  /** The PR as the dashboard last saw it (merged ones drop out of the snapshot; their after-merge run still needs a name). */
+  const snapshotPr = (prId: string) => deps.getSnapshot()?.pullRequests.find((p) => p.id === prId) ?? null;
 
   function newItem(job: Pick<AgentJob, "key" | "prId" | "prNumber" | "repo" | "url" | "scenario" | "mode">, pr: PullRequest, headline: string): AgentItemRecord {
     const item: AgentItemRecord = {
@@ -184,9 +245,34 @@ export function createAgent(deps: AgentDeps): Agent {
       dirty = true;
     }
     // A queued job the PR no longer wants (you reviewed it, it went away) leaves
-    // quietly — unless you asked for it yourself.
+    // quietly — unless you asked for it yourself. The Jira dry run after a merge
+    // is for a PR the snapshot no longer has, by design.
     for (const item of store.data.items) {
-      if (item.state === "queued" && !wanted.has(item.key) && !item.key.endsWith("|asked")) {
+      if (item.state === "queued" && item.scenario !== "afterMerge" && !wanted.has(item.key) && !item.key.endsWith("|asked")) {
+        item.state = "done";
+        item.headline = AGENT_CLOSED.gone;
+        item.finishedAt = stamp();
+        dirty = true;
+      }
+    }
+    // Your PRs ready to merge: an offer with a button, once per head commit —
+    // a dismissed offer stays dismissed until someone pushes.
+    const offered = new Set(plan.merges.map((j) => j.key));
+    for (const job of plan.merges) {
+      // An offer that only lapsed (CI ran again on the same head) comes back; a dismissed or merged one doesn't.
+      if (store.data.items.some((i) => i.key === job.key && !(i.state === "done" && i.headline === AGENT_CLOSED.gone))) continue;
+      const pr = byId.get(job.prId)!;
+      const item = newItem(job, pr, "Ready to merge");
+      item.state = "needsYou";
+      item.finishedAt = stamp();
+      item.mergeMethods = pr.mergeMethods;
+      item.mergeMethod = chooseMergeMethod(pr, s.scenarios.merge.method) ?? undefined;
+      if (item.mergeMethod) item.headline = `Ready to merge — ${item.mergeMethod}`;
+      announce(item, "needsYou");
+      dirty = true;
+    }
+    for (const item of store.data.items) {
+      if (item.scenario === "merge" && item.state === "needsYou" && !offered.has(item.key) && !merging.has(item.runId)) {
         item.state = "done";
         item.headline = AGENT_CLOSED.gone;
         item.finishedAt = stamp();
@@ -200,7 +286,7 @@ export function createAgent(deps: AgentDeps): Agent {
     tick();
   }
 
-  async function run(item: AgentItemRecord, pr: PullRequest, all: Settings): Promise<void> {
+  async function run(item: AgentItemRecord, pr: PullRequest | null, all: Settings): Promise<void> {
     const s = all.agent;
     const fail = (headline: string, error?: string) => {
       item.state = "error";
@@ -211,49 +297,71 @@ export function createAgent(deps: AgentDeps): Agent {
       // same PR again; a new head commit is a new key and gets another try.
       store.data.ledger[item.key] = { state: "failed", at: item.finishedAt, runId: item.runId };
       store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "failed", detail: error ?? headline });
+      void store.save();
+      changed();
+      announce(item, "failed");
     };
-    const checkout = deps.findCheckout(pr, all.claude);
-    if (!checkout) {
-      fail(`No checkout of ${pr.repo} — set its folder in Settings › Claude`);
-      void store.save();
-      changed();
-      return;
-    }
-    const remote = remoteFor(checkout, pr);
-    if (!remote) {
-      fail(`No remote of ${checkout} points at ${pr.repo}`);
-      void store.save();
-      changed();
-      return;
+    const kind = runKindOf(item.scenario);
+    const runDir = path.join(deps.dir, "runs", item.runId);
+
+    // Where the session works: a worktree of the PR's head for a review or a
+    // brief; an empty folder for the Jira dry run, which needs no code.
+    let checkout: string | null = null;
+    let remote: string | null = null;
+    if (item.scenario !== "afterMerge") {
+      if (!pr) return;
+      checkout = deps.findCheckout(pr, all.claude);
+      if (!checkout) return fail(`No checkout of ${pr.repo} — set its folder in Settings › Claude`);
+      remote = remoteFor(checkout, pr);
+      if (!remote) return fail(`No remote of ${checkout} points at ${pr.repo}`);
     }
 
     store.data.ledger[item.key] = { state: "started", at: stamp(), runId: item.runId };
     store.data.runsToday += 1;
     item.state = "working";
     item.startedAt = stamp();
-    item.headline = item.scenario === "brief" ? "Writing a brief" : "Reviewing";
-    item.checkout = checkout;
+    item.headline = item.scenario === "brief" ? "Writing a brief" : item.scenario === "afterMerge" ? "Checking Jira (dry run)" : "Reviewing";
+    item.checkout = checkout ?? undefined;
     void store.save();
     changed();
 
     let dir: string;
-    try {
-      dir = await prepareWorktree(git, { checkout, remote, base: worktreeBase(s.worktreeDir, checkout), pr });
-    } catch (e) {
-      fail("Could not check out the PR", (e as Error).message);
-      void store.save();
-      changed();
-      return;
+    if (pr && checkout && remote) {
+      try {
+        dir = await prepareWorktree(git, { checkout, remote, base: worktreeBase(s.worktreeDir, checkout), pr });
+      } catch (e) {
+        return fail("Could not check out the PR", (e as Error).message);
+      }
+      item.worktree = dir;
+    } else {
+      dir = path.join(runDir, "cwd");
+      fs.mkdirSync(dir, { recursive: true });
     }
-    item.worktree = dir;
 
-    const kind = item.scenario === "brief" ? "brief" : "review";
-    const resolved = resolveSkillRefs(renderAgentPrompt(promptFor(item.scenario, all.claude), "", item.url), plugins());
-    const settingsFile = path.join(deps.dir, "runs", item.runId, "settings.json");
-    writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url));
+    // A review's publish step goes through the app's wrapper; without a usable
+    // folder for it the review runs as a plain dry run (text only).
+    const folder =
+      kind === "review" && deps.captureScript
+        ? prepareRunFolder(runFolderRoots(checkout ? worktreeBase(s.worktreeDir, checkout) : null), item.runId, { repo: item.repo, number: item.prNumber }, deps.execPath, deps.captureScript)
+        : null;
+    if (folder) item.runFolder = folder.runDir;
+
+    const fromPlugins = resolveSkillRefs(renderAgentPrompt(promptFor(item.scenario, all.claude), "", item.url), plugins());
+    const mine = mountUserSkills(fromPlugins.prompt, plugins(), path.join(runDir, "user-skills"), deps.userSkillsDir);
+    const pluginDirs = [...fromPlugins.pluginDirs, ...mine.pluginDirs];
+    const settingsFile = path.join(runDir, "settings.json");
+    const guardFile = path.join(runDir, "guard.json");
+    // A skill's Workflow may run its script from the plugins this run mounted — never one from the PR.
+    writeGuardFile(guardFile, { ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}), workflowDirs: pluginDirs });
+    writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url, guardFile));
     const sessionId = randomUUID();
     item.sessionId = sessionId;
-    store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "started", headOid: pr.headOid, sessionId });
+    store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "started", headOid: pr?.headOid ?? keyHead(item.key) ?? undefined, sessionId });
+
+    // The wrapper's own rule, and Write — which the guard holds to the payload folder.
+    const allowedTools = [...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : [])];
+    // Read-only runs may read the plugins' folders (a skill's Workflow reads its script from there); a run that edits never gets them.
+    const addDirs = [...(folder ? [folder.outDir] : []), ...pluginDirs];
 
     const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false };
     const handle = startRun(
@@ -261,10 +369,11 @@ export function createAgent(deps: AgentDeps): Agent {
         cwd: dir,
         sessionId,
         kind,
-        prompt: resolved.prompt,
-        appendSystemPrompt: agentRules(item.scenario, item.mode),
-        allowedTools: s.permissions.tools[kind],
-        pluginDirs: resolved.pluginDirs,
+        prompt: mine.prompt,
+        appendSystemPrompt: agentRules(item.scenario, item.mode, folder),
+        allowedTools,
+        pluginDirs,
+        addDirs,
         model: s.model,
         effort: s.effort,
         settingsFile,
@@ -292,6 +401,7 @@ export function createAgent(deps: AgentDeps): Agent {
     running.delete(item.runId);
     const result = outcome.progress.result;
     item.finishedAt = stamp();
+    let publishNow = false;
     if (entry.takeOver) {
       item.state = "needsYou";
       item.headline = "You took it over in your terminal";
@@ -312,16 +422,38 @@ export function createAgent(deps: AgentDeps): Agent {
     } else if (result && !result.isError && result.subtype === "success") {
       item.state = "needsYou";
       item.output = result.text;
-      item.headline = item.scenario === "brief" ? "Brief ready" : "Review ready — it waits for your OK before posting";
       store.data.ledger[item.key].state = "prepared";
+      const steps = folder ? readPlan(folder.runDir) : [];
+      if (item.scenario === "brief") {
+        item.headline = "Brief ready";
+      } else if (item.scenario === "afterMerge") {
+        item.headline = "Jira dry run ready — apply it in a session";
+      } else if (steps.length > 0) {
+        item.plan = summarizePlan(steps);
+        item.headline = `Would post: ${describePlan(item.plan)}`;
+        publishNow = item.mode === "on";
+      } else {
+        item.headline = folder ? "Review ready — nothing to post" : "Review ready — it waits for your OK before posting";
+      }
     } else {
+      // `fail` saves, logs and tells; the rest of this function only cleans up.
       fail("The run failed", result?.text || outcome.stderr.trim().split("\n").slice(-3).join(" ") || `exit ${outcome.exitCode}`);
     }
-    store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: item.state, sessionId, detail: item.headline });
+    // `fail` changes the state behind TypeScript's back; read it afresh.
+    const ended = item.state as AgentItem["state"];
+    if (ended !== "error") {
+      store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: ended, sessionId, detail: item.headline });
+    }
     // Only a result you still have to look at keeps its worktree (to continue the session in it).
-    if (item.state !== "needsYou") await dropWorktree(item);
+    if (ended !== "needsYou") await dropWorktree(item);
     void store.save();
     changed();
+    if (publishNow) {
+      // On: the app posts what the review prepared, with the same checks as your Publish.
+      await publishItem(item, all, false);
+    } else if (item.state === "needsYou") {
+      announce(item, "needsYou");
+    }
     tick();
   }
 
@@ -337,8 +469,132 @@ export function createAgent(deps: AgentDeps): Agent {
     item.later = false;
     item.finishedAt = stamp();
     await dropWorktree(item);
+    dropRunFolder(item);
     void store.save();
     changed();
+  }
+
+  function dropRunFolder(item: AgentItemRecord): void {
+    if (!item.runFolder) return;
+    fs.rmSync(item.runFolder, { recursive: true, force: true });
+    item.runFolder = undefined;
+  }
+
+  /** The PR read again — what posting and merging check against, never the snapshot. */
+  async function fresh(item: AgentItemRecord, roles: PullRequest["roles"]): Promise<{ ok: true; fresh: FreshPullRequest } | { ok: false; error: string }> {
+    if (!deps.fetchPr) return { ok: false, error: "The app can't read the PR here." };
+    try {
+      const f = await deps.fetchPr({ id: item.prId, hostLabel: item.hostLabel, roles });
+      return f ? { ok: true, fresh: f } : { ok: false, error: "The PR is gone or out of reach." };
+    } catch (e) {
+      return { ok: false, error: `Couldn't read the PR: ${(e as Error).message}` };
+    }
+  }
+
+  /**
+   * Posts what a review prepared — on your Publish (`byYou`) or, in On, right
+   * after the run. The PR is read again first: a new push since the review
+   * stops it (the review would talk about code that isn't the head), as does
+   * a PR that was merged or closed.
+   */
+  async function publishItem(item: AgentItemRecord, all: Settings, byYou: boolean): Promise<AgentActionResult> {
+    const refuse = (error: string): AgentActionResult => {
+      item.state = "needsYou";
+      item.headline = `Not published — ${error}`;
+      void store.save();
+      changed();
+      announce(item, "failed");
+      return { ok: false, error };
+    };
+    if (!item.runFolder || !item.plan) return { ok: false, error: "Nothing prepared to publish." };
+    if (item.published) return { ok: false, error: "It is published already." };
+    const read = await fresh(item, snapshotPr(item.prId)?.roles ?? ["reviewer"]);
+    if (!read.ok) return refuse(read.error);
+    const { pr, state, viewer } = read.fresh;
+    if (state !== "OPEN") return refuse(`the PR was ${state.toLowerCase()} since`);
+    const head = item.plan.commitId ?? keyHead(item.key);
+    if (head && pr.headOid && pr.headOid !== head) return refuse("there are new commits since this review — run it again");
+    const me = viewer?.toLowerCase();
+    const holdApprove =
+      all.agent.scenarios.review.holdApproveOnChangeRequest && pr.reviewers.some((r) => r.reviewState === "changes_requested" && r.login.toLowerCase() !== me);
+    item.headline = "Publishing…";
+    changed();
+    const out = await publishPlan(item.runFolder, item.url, { repo: item.repo, number: item.prNumber, signature: all.agent.policy.signature, holdApprove }, gh);
+    if (!out.ok) {
+      store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "publish-failed", detail: out.error });
+      return refuse(`stopped after ${out.posted} of ${out.total}: ${out.error}`);
+    }
+    item.published = true;
+    item.state = "done";
+    const held = holdApprove && item.plan.event === "APPROVE";
+    item.headline = held ? `Published: ${describePlan({ ...item.plan, event: "COMMENT" })} (approve held)` : `Published: ${describePlan(item.plan)}`;
+    item.finishedAt = stamp();
+    item.later = false;
+    store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
+    if (byYou && item.mode === "shadow") store.data.acceptedUnchanged += 1;
+    store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "published", headOid: head ?? undefined, sessionId: item.sessionId, detail: describePlan(item.plan) });
+    await dropWorktree(item);
+    void store.save();
+    changed();
+    announce(item, "finished");
+    return { ok: true };
+  }
+
+  /**
+   * Merges your PR on your click: read again, still ready by the same rules,
+   * at the head you were offered — and `--match-head-commit` makes GitHub
+   * refuse it if a push lands in between. Then the Jira dry run, if there is a
+   * prompt for it.
+   */
+  async function mergeItem(item: AgentItemRecord, all: Settings, picked?: MergeMethod): Promise<AgentActionResult> {
+    const s = all.agent;
+    const head = keyHead(item.key);
+    if (!head) return { ok: false, error: "This offer has no head commit to merge." };
+    merging.add(item.runId);
+    try {
+      const read = await fresh(item, snapshotPr(item.prId)?.roles ?? ["author"]);
+      if (!read.ok) return { ok: false, error: read.error };
+      const { pr, state } = read.fresh;
+      if (state !== "OPEN") {
+        await closeAs(item, AGENT_CLOSED.gone);
+        return { ok: false, error: `The PR was ${state.toLowerCase()} already.` };
+      }
+      if (pr.headOid !== head) return { ok: false, error: "There are new commits since this offer — wait for the next one." };
+      const blocker = mergeBlocker(pr, s);
+      if (blocker) {
+        item.headline = `Not ready any more — ${blocker}`;
+        changed();
+        return { ok: false, error: blocker };
+      }
+      const method = chooseMergeMethod(pr, s.scenarios.merge.method, picked);
+      if (!method) return { ok: false, error: "The repository allows none of merge, squash and rebase." };
+      item.headline = `Merging (${method})…`;
+      changed();
+      const r = await gh(mergeArgs(item.url, method, head, s.scenarios.merge.deleteBranch));
+      if (r.code !== 0) {
+        item.headline = `GitHub refused the merge — ${ghError(r)}`;
+        void store.save();
+        changed();
+        return { ok: false, error: ghError(r) };
+      }
+      const queued = /merge queue/i.test(`${r.stdout}\n${r.stderr}`);
+      item.state = "done";
+      item.mergeMethod = method;
+      item.headline = queued ? "Added to the merge queue" : `Merged (${method})${s.scenarios.merge.deleteBranch ? ", branch deleted" : ""}`;
+      item.finishedAt = stamp();
+      store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
+      store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: "merge", runId: item.runId, event: queued ? "queued-to-merge" : "merged", headOid: head, detail: method });
+      if (!queued && all.claude.agentPrompts.afterMerge.trim()) {
+        newItem({ key: `${item.prId}|afterMerge|${head}`, prId: item.prId, prNumber: item.prNumber, repo: item.repo, url: item.url, scenario: "afterMerge", mode: "on" }, pr, "Queued: the Jira dry run");
+      }
+      void store.save();
+      changed();
+      announce(item, "finished");
+      tick();
+      return { ok: true };
+    } finally {
+      merging.delete(item.runId);
+    }
   }
 
   function tick(): void {
@@ -362,8 +618,9 @@ export function createAgent(deps: AgentDeps): Agent {
       // synchronous step, before its worktree exists and its process starts.
       const busy = store.data.items.filter((i) => i.state === "working").length;
       if (busy >= s.limits.parallel || store.data.runsToday >= s.limits.perDay) break;
-      const pr = byId.get(item.prId);
-      if (!pr) continue;
+      // A merged PR has left the snapshot; its Jira dry run goes by the item alone.
+      const pr = byId.get(item.prId) ?? null;
+      if (!pr && item.scenario !== "afterMerge") continue;
       const held = hostHeld(snapshot, item.hostLabel);
       if (held) {
         item.headline = `Queued — ${held}`;
@@ -438,16 +695,30 @@ export function createAgent(deps: AgentDeps): Agent {
         break;
       }
       case "continue": {
-        if (!item.sessionId || !item.worktree || !fs.existsSync(item.worktree)) {
+        // A session resumes in the folder it ran in: the PR's worktree, or the
+        // Jira dry run's own folder — where "apply it" then runs with your own
+        // settings and asks before every change.
+        const where = item.worktree ?? (item.scenario === "afterMerge" ? path.join(deps.dir, "runs", item.runId, "cwd") : undefined);
+        if (!item.sessionId || !where || !fs.existsSync(where)) {
           return { ok: false, error: "There is no session left to continue." };
         }
         if (!deps.openResume) return { ok: false, error: "Can't open a terminal here." };
         try {
-          await deps.openResume(item.worktree, item.sessionId);
+          await deps.openResume(where, item.sessionId);
         } catch (e) {
           return { ok: false, error: `Could not open your terminal: ${(e as Error).message}` };
         }
         return { ok: true };
+      }
+      case "publish": {
+        if (r) return { ok: false, error: "It is still running." };
+        if (item.state !== "needsYou" || item.scenario !== "review") return { ok: false, error: "Only a prepared review can be published." };
+        return publishItem(item, all, true);
+      }
+      case "merge": {
+        if (item.scenario !== "merge" || item.state !== "needsYou") return { ok: false, error: "There is nothing to merge here." };
+        if (merging.has(item.runId)) return { ok: false, error: "It is being merged already." };
+        return mergeItem(item, all, action.method);
       }
       case "skip": {
         if (r) return { ok: false, error: "Stop the run first." };
@@ -506,6 +777,8 @@ export function createAgent(deps: AgentDeps): Agent {
         parallel: s?.limits.parallel ?? 0,
         heldUntil: heldUntil !== null ? new Date(heldUntil).toISOString() : null,
         headerChip: s?.companion.headerChip ?? true,
+        acceptedUnchanged: store.data.acceptedUnchanged,
+        suggestOn: s?.scenarios.review.mode === "shadow" && store.data.acceptedUnchanged >= s.limits.promoteAfter,
       };
     },
     ownSessionIds: () => new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!)),

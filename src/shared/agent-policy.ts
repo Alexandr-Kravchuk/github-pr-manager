@@ -31,8 +31,32 @@ export interface PlanContext {
 
 export interface PlanResult {
   jobs: AgentJob[];
+  /** Your PRs ready to merge: an offer with a button, never a run. */
+  merges: AgentJob[];
   /** Why each PR the agent leaves alone is idle — shown on the Board's Idle column. */
   idle: Map<string, string>;
+}
+
+/**
+ * Why your PR is not ready to merge, or null when it is: the dashboard's own
+ * `canBeMerged` (not a draft, mergeable and up to date, not waiting on a stack
+ * below it, approved by a human, no change request or review feedback left,
+ * CI neither red nor running) and no reviewer still to answer — then each
+ * switch in Settings only narrows it.
+ */
+export function mergeBlocker(pr: PullRequest, s: AgentSettings): string | null {
+  const m = s.scenarios.merge;
+  if (pr.isDraft) return "Draft";
+  if (pr.blockedByStack) return "Waits for the PR below it in the stack";
+  if (pr.hasConflicts) return "Has conflicts";
+  if (pr.ciState === "failure") return "CI is red";
+  if (pr.ciState === "pending") return "CI is still running";
+  if (pr.awaitingReview) return "Waiting for reviewers";
+  if (!pr.canBeMerged) return "Not mergeable yet";
+  if (m.requireAllReviewers && pr.reviewers.some((r) => r.reviewState !== "approved")) return "Not every requested reviewer approved";
+  if (m.requireThreadsResolved && pr.unresolvedThreads > 0) return `${pr.unresolvedThreads} unresolved thread${pr.unresolvedThreads === 1 ? "" : "s"}`;
+  if (m.requireChecksGreen && pr.checks.length > 0 && pr.ciState !== "success") return "Not every check is green";
+  return null;
 }
 
 /** Over the review limit: too big for the agent to review on its own. */
@@ -61,10 +85,11 @@ function wantsFirstReview(pr: PullRequest, s: AgentSettings): string | null {
 
 export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: PlanContext): PlanResult {
   const jobs: AgentJob[] = [];
+  const merges: AgentJob[] = [];
   const idle = new Map<string, string>();
   if (!s.enabled) {
     for (const pr of prs) idle.set(pr.id, "The agent is off");
-    return { jobs, idle };
+    return { jobs, merges, idle };
   }
   for (const pr of prs) {
     const skip = (reason: string) => idle.set(pr.id, reason);
@@ -77,8 +102,27 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
       continue;
     }
     if (pr.roles.includes("author")) {
-      // Your own PRs: merge and drive land in later stages.
-      skip(pr.awaitingReview ? "Waiting for reviewers" : "Yours — nothing for the agent yet");
+      // Your own PRs: a Merge button once ready (driving them to green lands later).
+      if (s.scenarios.merge.mode === "off") {
+        skip("Yours — merge offers are off");
+        continue;
+      }
+      const blocker = mergeBlocker(pr, s);
+      if (blocker) {
+        skip(`Yours — ${blocker.charAt(0).toLowerCase()}${blocker.slice(1)}`);
+        continue;
+      }
+      merges.push({
+        key: jobKey(pr, "merge"),
+        prId: pr.id,
+        prNumber: pr.number,
+        repo: pr.repo,
+        url: pr.url,
+        scenario: "merge",
+        kind: "afterMerge",
+        mode: "on",
+        createdAt: pr.createdAt,
+      });
       continue;
     }
     const notWanted = wantsFirstReview(pr, s);
@@ -110,7 +154,7 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     });
   }
   jobs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  return { jobs, idle };
+  return { jobs, merges, idle };
 }
 
 /** `{url}` filled in; an empty template falls back to the given default. */

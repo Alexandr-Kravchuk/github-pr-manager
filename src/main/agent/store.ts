@@ -29,10 +29,12 @@ export interface AgentStoreData {
   day: string;
   runsToday: number;
   items: AgentItemRecord[];
+  /** Shadow reviews you published exactly as prepared — the Shadow → On hint counts these. */
+  acceptedUnchanged: number;
 }
 
 export function emptyStore(day: string): AgentStoreData {
-  return { version: 1, ledger: {}, day, runsToday: 0, items: [] };
+  return { version: 1, ledger: {}, day, runsToday: 0, items: [], acceptedUnchanged: 0 };
 }
 
 /** Reads state.json; a missing or broken file starts empty rather than failing the agent. */
@@ -46,6 +48,7 @@ export function readStore(file: string, day: string): AgentStoreData {
       day: typeof raw.day === "string" ? raw.day : day,
       runsToday: typeof raw.runsToday === "number" ? raw.runsToday : 0,
       items: raw.items,
+      acceptedUnchanged: typeof raw.acceptedUnchanged === "number" ? raw.acceptedUnchanged : 0,
     };
   } catch {
     return emptyStore(day);

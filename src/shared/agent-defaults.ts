@@ -30,6 +30,7 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "Glob",
     "Skill",
     "Agent",
+    "Workflow",
     "ToolSearch",
     "TaskCreate",
     "TaskUpdate",
@@ -37,6 +38,8 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "Bash(gh pr diff *)",
     "Bash(gh pr checks *)",
     "Bash(gh api *)",
+    "Bash(gh auth status*)",
+    "Bash(twg *)",
   ],
   brief: [
     "Read",
@@ -47,6 +50,7 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "TaskUpdate",
     "Bash(gh pr view *)",
     "Bash(gh pr diff *)",
+    "Bash(twg *)",
   ],
   rereview: [
     "Read",
@@ -54,6 +58,7 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "Glob",
     "Skill",
     "Agent",
+    "Workflow",
     "ToolSearch",
     "TaskCreate",
     "TaskUpdate",
@@ -83,7 +88,7 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "Bash(npm test*)",
     "Bash(npm run *)",
   ],
-  afterMerge: ["Skill", "ToolSearch", "TaskCreate", "TaskUpdate", "Bash(gh pr view *)"],
+  afterMerge: ["Read", "Grep", "Glob", "Skill", "ToolSearch", "TaskCreate", "TaskUpdate", "Bash(gh pr view *)", "Bash(gh api *)", "Bash(twg *)"],
 };
 
 export const DEFAULT_AGENT_SIGNATURE = "🤖 Prepared by the PR agent (Claude Code) on my behalf. Reply here — I read every reply.";

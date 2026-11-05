@@ -120,7 +120,8 @@ export function validateClaudeSessionId(value: unknown): string {
   return value;
 }
 
-const RUN_ACTIONS = ["skip", "later", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver"] as const;
+const RUN_ACTIONS = ["skip", "later", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver", "publish"] as const;
+const MERGE_METHODS = ["merge", "squash", "rebase"] as const;
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A hint is a note to the running session, not a document. */
 export const AGENT_HINT_MAX = 2_000;
@@ -139,6 +140,12 @@ export function validateAgentAction(value: unknown): AgentAction {
       throw new Error(`agentAction: a hint is 1–${AGENT_HINT_MAX} characters.`);
     }
     return { type: "hint", runId: v.runId, text: v.text.trim() };
+  }
+  if (v.type === "merge") {
+    // The method the button's menu picked, if any; main still checks the repository allows it.
+    if (v.method === undefined) return { type: "merge", runId: v.runId };
+    if (typeof v.method !== "string" || !(MERGE_METHODS as readonly string[]).includes(v.method)) throw new Error("agentAction: unknown merge method.");
+    return { type: "merge", runId: v.runId, method: v.method as (typeof MERGE_METHODS)[number] };
   }
   if (typeof v.type === "string" && (RUN_ACTIONS as readonly string[]).includes(v.type)) {
     return { type: v.type as (typeof RUN_ACTIONS)[number], runId: v.runId };

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { applyStreamEvent, initialProgress, parseStreamLine, type RunProgress } from "../../shared/agent-stream";
 import { launcherEnv } from "../../shared/claude-launch";
+import type { GuardRun } from "../../shared/agent-guard";
 import type { AgentRunKind } from "../../shared/types";
 
 // One agent session: `claude -p` with stream-json both ways, isolated from the
@@ -31,6 +32,13 @@ export interface RunSpec {
   /** The per-run settings file with the guard hook (see `writeRunSettings`). */
   settingsFile: string;
   timeoutMs: number;
+  /**
+   * More folders the session's file tools may use (`--add-dir`): a review's
+   * payload folder, and the plugins' own folders — a skill's Workflow reads its
+   * bundled script from there, and `--restricted` confines file access to the
+   * working folders.
+   */
+  addDirs?: string[];
 }
 
 /** Built-in tool names for `--tools`, from the `--allowedTools` rules ("Bash(gh pr view *)" → "Bash"). */
@@ -62,6 +70,7 @@ export function buildClaudeArgs(spec: RunSpec): string[] {
     "--append-system-prompt",
     spec.appendSystemPrompt,
     ...spec.pluginDirs.flatMap((d) => ["--plugin-dir", d]),
+    ...(spec.addDirs ?? []).flatMap((d) => ["--add-dir", d]),
     ...(spec.model ? ["--model", spec.model] : []),
     ...(spec.effort ? ["--effort", spec.effort] : []),
     "--tools",
@@ -78,9 +87,18 @@ export function buildClaudeArgs(spec: RunSpec): string[] {
  * through a shell. The URL is the PR's own (`https://host/owner/name/pull/N`),
  * so it carries no quote.
  */
-export function hookCommand(execPath: string, hookScript: string, kind: AgentRunKind, prUrl: string): string {
+export function hookCommand(execPath: string, hookScript: string, kind: AgentRunKind, prUrl: string, guardFile?: string): string {
   const q = (p: string) => `"${p.replace(/\\/g, "/").replace(/"/g, "")}"`;
-  return `${q(execPath)} ${q(hookScript)} ${kind} ${q(prUrl)}`;
+  return `${q(execPath)} ${q(hookScript)} ${kind} ${q(prUrl)}${guardFile ? ` ${q(guardFile)}` : ""}`;
+}
+
+/**
+ * The run's guard file, next to its settings file (outside every folder the
+ * session may write): what the guard allows beyond reading — see `GuardRun`.
+ */
+export function writeGuardFile(file: string, run: GuardRun): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(run, null, 2));
 }
 
 /** Writes the per-run settings file: nothing but the guard on every tool call. */
@@ -166,8 +184,10 @@ export function startRun(spec: RunSpec, onProgress: (p: RunProgress) => void, sp
       progress = applyStreamEvent(progress, ev);
       if (progress !== before) onProgress(progress);
       // An interrupted turn also ends in a result (error_during_execution), but
-      // the session goes on: only a finished turn closes stdin.
-      if (progress.result && progress.result !== before.result && progress.result.subtype !== "error_during_execution") {
+      // the session goes on: only a finished turn closes stdin — and not while
+      // a background workflow runs, whose notification starts another turn
+      // (Claude Code runs it either way; stdin stays open so hints still land).
+      if (progress.result && progress.result !== before.result && progress.result.subtype !== "error_during_execution" && progress.backgroundTasks === 0) {
         closeStdin();
       }
     }

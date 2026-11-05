@@ -120,17 +120,22 @@ Three layers:
   colour of a header host pill's dot — red on a failed fetch, amber on a spent
   or low GraphQL budget, green otherwise; the pills replaced the raw budget
   number and, with two or more hosts, the "All hosts" dropdown, since clicking a
-  pill toggles that host's filter) and the PR agent's three: `agent-defaults.ts`
+  pill toggles that host's filter) and the PR agent's four: `agent-defaults.ts`
   (the Agent tab's defaults and bounds), `agent-stream.ts` (a run's
-  stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list — and
-  current activity) and `agent-view.ts` (which of a PR's agent items its
-  card, Cozy cell and tile show, the Board's columns, and the *local* day
-  "Done today" and the daily run limit count on). Keep any such
+  stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
+  skill Workflow's phases — and current activity), `agent-view.ts` (which of
+  a PR's agent items its card, Cozy cell and tile show, the Board's columns,
+  and the *local* day "Done today" and the daily run limit count on) and
+  `agent-publish.ts` (what a review prepared to post: a review session never
+  posts — its skill's `publishCommand` is a wrapper of the app's that only
+  records each write, checked like the skill's own `pr-review-publish.sh`, and
+  the app posts the plan with `gh api` afterwards, signature added, one write
+  at a time with progress on disk so a retry never posts twice). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
-  `settings-search.js`, `host-status.js`, `agent-defaults.js`,
+  `settings-search.js`, `host-status.js`, `agent-defaults.js`, `agent-publish.js`,
   `agent-stream.js` and `agent-view.js`
   stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing

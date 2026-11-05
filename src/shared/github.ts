@@ -243,6 +243,45 @@ async function hydrate(host: HostConfig, ids: string[]): Promise<NonNullable<Raw
   }
 }
 
+/** A PR read fresh, with what the dashboard's search can't say: whether it is still open. */
+export interface FreshPullRequest {
+  pr: PullRequest;
+  state: "OPEN" | "MERGED" | "CLOSED";
+  /** Your login on that host. */
+  viewer: string | null;
+}
+
+/**
+ * One PR read again by id, right before the agent posts to it or merges it —
+ * the snapshot can be minutes old, and its search only ever sees open PRs.
+ * Mapped by the same `mapPr` as the dashboard, so "ready to merge" means the
+ * same thing in both places. Roles come from the caller: a read by id doesn't
+ * say how you relate to the PR. Null when the PR is gone or out of reach.
+ */
+export async function fetchPullRequest(host: HostConfig, id: string, roles: PrRole[]): Promise<FreshPullRequest | null> {
+  const query = (withStacks: boolean) => /* GraphQL */ `
+query ($ids: [ID!]!) {
+  viewer { login }
+  hydrated: nodes(ids: $ids) { ...PrFields }
+  status: nodes(ids: $ids) { ... on PullRequest { state } }
+}
+${prFieldsFragment(withStacks)}`;
+  const withStacks = !hostsWithoutStacks.has(host.graphqlUrl);
+  let data: NonNullable<RawResponse["data"]>;
+  try {
+    data = await postSearch(host, query(withStacks), { ids: [id] }, { allowNotFound: true });
+  } catch (e) {
+    if (!withStacks || !isMissingStackField(e)) throw e;
+    hostsWithoutStacks.add(host.graphqlUrl);
+    data = await postSearch(host, query(false), { ids: [id] }, { allowNotFound: true });
+  }
+  const node = (data.hydrated as HydratedNodes | undefined)?.[0] ?? null;
+  if (!isRawPr(node)) return null;
+  const state = ((data.status as Array<{ state?: string } | null> | undefined)?.[0]?.state ?? "OPEN") as FreshPullRequest["state"];
+  const viewer = (data.viewer as { login: string } | null | undefined)?.login ?? null;
+  return { pr: mapPr(node, host.label, [...roles], viewer), state, viewer };
+}
+
 // --- Raw GraphQL response types (narrowed to the fields we need) ---
 
 interface RawCheckRun {

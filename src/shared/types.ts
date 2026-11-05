@@ -770,8 +770,12 @@ export type FocusClaudeSessionResult = { ok: true } | { ok: false; error: string
 
 // --- The PR agent, as main shows it to the renderer -------------------------
 
-/** What the agent does with a PR (more scenarios land in later stages). */
-export type AgentScenario = "review" | "brief";
+/**
+ * What the agent does with a PR: review it, brief it, offer to merge it (no
+ * run — a button), or the Jira dry run after you merged one. Re-review and
+ * drive land in a later stage.
+ */
+export type AgentScenario = "review" | "brief" | "merge" | "afterMerge";
 
 export type AgentItemState = "queued" | "working" | "needsYou" | "done" | "error";
 
@@ -801,6 +805,19 @@ export interface AgentItem {
   error?: string;
   /** Put aside with "Later": still waiting, out of the way. */
   later?: boolean;
+  /**
+   * What a review prepared to post — captured by the app's publish wrapper,
+   * posted by the app (`main/agent/publish.ts`). Absent when it prepared
+   * nothing, or ran as a plain dry run.
+   */
+  plan?: import("./agent-publish").PublishSummary;
+  /** The review run's own folder (wrapper, payloads, plan, publish progress). */
+  runFolder?: string;
+  /** The plan is on GitHub. */
+  published?: boolean;
+  /** A merge offer: the methods the repository allows and the one the button uses. */
+  mergeMethods?: { suggested: MergeMethod | null; allowed: MergeMethod[] };
+  mergeMethod?: MergeMethod;
 }
 
 /** A run in flight: its plan and live line (see agent-stream.ts), the last few things it did. */
@@ -824,12 +841,17 @@ export interface AgentState {
   heldUntil: string | null;
   /** The companion settings, so the header shows the chip only when wanted. */
   headerChip: boolean;
+  /** Shadow reviews you published exactly as prepared — the count behind the Shadow → On hint. */
+  acceptedUnchanged: number;
+  /** Reviews are in Shadow and you've published enough of them unchanged to consider On. */
+  suggestOn: boolean;
 }
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
 export type AgentAction =
-  | { type: "skip" | "later" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver"; runId: string }
+  | { type: "skip" | "later" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish"; runId: string }
   | { type: "hint"; runId: string; text: string }
+  | { type: "merge"; runId: string; method?: MergeMethod }
   | { type: "enqueue"; prId: string };
 
 export type AgentActionResult = { ok: true } | { ok: false; error: string };
@@ -898,6 +920,8 @@ export interface PrManagerApi {
   agentAction(action: AgentAction): Promise<AgentActionResult>;
   /** Subscribe to agent state pushes (sent only while the window is visible). */
   onAgentState(listener: (state: AgentState) => void): () => void;
+  /** An agent notification was clicked: show the Board, where its decision waits. */
+  onAgentShowBoard(listener: () => void): () => void;
   /** Copy text (e.g. a PR URL) to the system clipboard. */
   copyText(text: string): Promise<void>;
   /** Returns release info if a new version was installed since last ack, or null. */

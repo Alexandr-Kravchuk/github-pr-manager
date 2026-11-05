@@ -38,6 +38,13 @@ export interface RunProgress {
   toolCalls: number;
   /** The latest Claude usage-limit reading: the scheduler holds runs back while it is not "allowed". */
   rateLimit: { status: string; resetsAt: number | null } | null;
+  /**
+   * Background tasks the session is still running — a skill's Workflow runs
+   * as one. A result while one runs is not the end: the session gets the
+   * task's notification and answers again, so stdin stays open for hints.
+   */
+  backgroundTasks: number;
+  /** The latest result; with a background workflow there are several, and the last one is the run's. */
   result: RunResult | null;
 }
 
@@ -50,8 +57,31 @@ export function initialProgress(): RunProgress {
     lastText: null,
     toolCalls: 0,
     rateLimit: null,
+    backgroundTasks: 0,
     result: null,
   };
+}
+
+/**
+ * A Workflow's phases as plan steps, from its `task_progress` report: a phase
+ * with an agent still running is in progress, a phase before the latest one
+ * that has agents is done. A skill that runs as a workflow (the review does)
+ * keeps no task list of its own, and its phases — Context, Review, Synthesize,
+ * Publish — are the steps worth showing anyway.
+ */
+export function workflowSteps(progress: unknown): PlanStep[] | null {
+  if (!Array.isArray(progress)) return null;
+  const phases = progress.filter((x): x is Obj => isObj(x) && x.type === "workflow_phase" && typeof x.index === "number");
+  if (phases.length === 0) return null;
+  const agents = progress.filter((x): x is Obj => isObj(x) && x.type === "workflow_agent" && typeof x.phaseIndex === "number");
+  const latest = agents.reduce((m, a) => Math.max(m, a.phaseIndex as number), 0);
+  return phases.map((ph) => {
+    const index = ph.index as number;
+    const own = agents.filter((a) => a.phaseIndex === index);
+    const busy = own.some((a) => a.state !== "done" && a.state !== "failed" && a.state !== "cancelled");
+    const status: PlanStatus = busy ? "in_progress" : own.length > 0 && (index < latest || own.every((a) => a.state === "done")) ? "completed" : "pending";
+    return { id: `wf-${index}`, subject: str(ph.title) || `Phase ${index}`, status };
+  });
 }
 
 /** One stream-json line, or null when it isn't one. */
@@ -106,6 +136,8 @@ export function describeToolUse(name: string, input: unknown): string | null {
       return `Using the ${str(i.skill) || "skill"} skill`;
     case "Agent":
       return `Agent: ${shorten(str(i.description) || str(i.prompt), 80)}`;
+    case "Workflow":
+      return `Running the ${str(i.name) || baseName(str(i.scriptPath)).replace(/(\.workflow)?\.js$/, "") || "skill's"} workflow`;
     default:
       return name.startsWith("mcp__") ? `Asking ${name.split("__")[1] ?? "a tool"}` : name;
   }
@@ -132,6 +164,17 @@ export function applyStreamEvent(p: RunProgress, ev: unknown): RunProgress {
 
   if (type === "system" && str(ev.subtype) === "init") {
     return { ...p, sessionId: str(ev.session_id) || p.sessionId };
+  }
+
+  if (type === "system" && str(ev.subtype) === "background_tasks_changed" && Array.isArray(ev.tasks)) {
+    return { ...p, backgroundTasks: ev.tasks.length };
+  }
+
+  if (type === "system" && str(ev.subtype) === "task_progress") {
+    const steps = workflowSteps(ev.workflow_progress);
+    const description = str(ev.description);
+    if (!steps && !description) return p;
+    return { ...p, steps: steps ?? p.steps, activity: description ? shorten(description, 100) : p.activity };
   }
 
   if (type === "rate_limit_event" && isObj(ev.rate_limit_info)) {

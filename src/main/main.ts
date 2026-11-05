@@ -3,6 +3,7 @@ import path from "node:path";
 import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
 import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
+import { fetchPullRequest } from "../shared/github";
 import { planPolling } from "../shared/idle-gate";
 import type { PollPlan } from "../shared/idle-gate";
 import { setIgnored } from "../shared/ignored";
@@ -29,7 +30,7 @@ import type {
   Settings,
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
-import { createAgent, type Agent } from "./agent";
+import { createAgent, type Agent, type AgentNotice } from "./agent";
 import { findCheckout, launchClaude, resumeClaudeSession } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
@@ -239,6 +240,37 @@ function showOsNotification(title: string, body: string, silent: boolean, onClic
   n.on("failed", release);
   liveNotifications.add(n);
   n.show();
+}
+
+/**
+ * What the PR agent tells you about, as Settings › Agent › notifications ask:
+ * a result waiting for you (a review to publish, a PR to merge), a failed run,
+ * a finished one. A click brings the window up on the Board, where the
+ * decision lives. Best-effort, like every notification.
+ */
+function handleAgentNotice({ kind, item }: AgentNotice): void {
+  try {
+    const s = loadSettings();
+    if (!s.agent.notifications[kind] || !Notification.isSupported()) return;
+    const title =
+      kind === "failed" ? "A PR agent run failed" : kind === "finished" ? "The PR agent finished" : item.scenario === "merge" ? "Ready to merge" : "The PR agent needs you";
+    showOsNotification(title, `#${item.prNumber} ${item.title}\n${item.headline}`, !s.notifications.sound, () => {
+      focusMainWindow();
+      sendToRenderer("agent-show-board", null);
+    });
+  } catch (e) {
+    console.warn(`[agent] notification failed: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * The compiled scripts Claude Code runs as Node — the guard hook and the
+ * publish capture — from outside app.asar: electron-builder unpacks them
+ * (`asarUnpack`), and a program started by another process can't read into
+ * the archive.
+ */
+function unpackedScript(file: string): string {
+  return path.join(__dirname, "agent", file).replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
 }
 
 /**
@@ -878,9 +910,16 @@ function startApp(): void {
       getSessions: () => claudeSessions,
       findCheckout,
       // Run by Claude Code before each tool call, as Node (ELECTRON_RUN_AS_NODE).
-      hookScript: path.join(__dirname, "agent", "hook.js"),
+      hookScript: unpackedScript("hook.js"),
+      // Behind each review's publish wrapper: records what the review would post.
+      captureScript: unpackedScript("capture.js"),
       execPath: process.execPath,
       openResume: (dir, sessionId) => resumeClaudeSession(dir, sessionId, loadSettings().claude.terminal),
+      fetchPr: async (pr) => {
+        const host = toHostConfigs(loadSettings()).find((h) => h.label === pr.hostLabel);
+        return host ? fetchPullRequest(host, pr.id, pr.roles) : null;
+      },
+      notify: handleAgentNotice,
       onChange: scheduleAgentPush,
     });
   }

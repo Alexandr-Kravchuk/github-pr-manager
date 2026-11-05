@@ -3,7 +3,8 @@ import { useContext, useMemo, useState, type DragEvent, type ReactNode } from "r
 // Node-free (see AGENTS.md): the columns, the day, and the plan's current step.
 import { boardColumns, primaryActionLabel, runFor, todayKey } from "../../../shared/agent-view";
 import { currentStep, type RunProgress } from "../../../shared/agent-stream";
-import type { AgentAction, AgentItem, PullRequest } from "../../../shared/types";
+import { describePlan, type PublishSummary } from "../../../shared/agent-publish";
+import type { AgentAction, AgentItem, MergeMethod, PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { AgentContext } from "./agent-context";
 import { AGENT_STATE_DOT } from "./AgentStatus";
@@ -16,6 +17,8 @@ import { AGENT_STATE_DOT } from "./AgentStatus";
 const DRAG_TYPE = "application/x-prd-pr";
 const BTN = "inline-flex items-center gap-1 rounded-md border border-line-strong bg-surface px-2.5 py-1 text-xs font-medium text-fg-secondary hover:bg-elevated";
 const BTN_PRIMARY = "inline-flex items-center gap-1 rounded-md border border-sky-600 bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-700";
+
+const SCENARIO_CHIP: Record<AgentItem["scenario"], string> = { review: "Review", brief: "Brief", merge: "Merge", afterMerge: "Jira" };
 
 function shortRepo(repo: string): string {
   return repo.split("/")[1] ?? repo;
@@ -66,6 +69,11 @@ export function PrBoard({
               Runs today {state.runsToday} of {state.perDay}
             </span>
             {state.heldUntil && <span className="text-amber-700 dark:text-amber-300">Claude&apos;s usage limit — new runs wait until {new Date(state.heldUntil).toLocaleTimeString()}</span>}
+            {state.suggestOn && (
+              <span className="text-emerald-700 dark:text-emerald-300">
+                You published {state.acceptedUnchanged} reviews exactly as prepared — reviews can go On in Settings › Agent.
+              </span>
+            )}
           </>
         ) : (
           <span>Off — switch it on in Settings › Agent.</span>
@@ -213,7 +221,7 @@ function CardHead({ item, onTitle }: { item: AgentItem; onTitle: () => void }) {
           {shortRepo(item.repo)} #{item.prNumber}
         </span>
         <span className="flex-1" />
-        <Chip>{item.scenario === "brief" ? "Brief" : "Review"}</Chip>
+        <Chip>{SCENARIO_CHIP[item.scenario]}</Chip>
         {item.mode === "shadow" && item.scenario === "review" && <Chip>shadow</Chip>}
       </div>
       <button type="button" onClick={onTitle} className="mt-0.5 line-clamp-2 text-left text-sm font-medium text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300">
@@ -286,24 +294,123 @@ function WorkingCard({
   );
 }
 
+const EVENT_TEXT: Record<NonNullable<PublishSummary["event"]>, string> = {
+  APPROVE: "Approve",
+  REQUEST_CHANGES: "Request changes",
+  COMMENT: "Comment",
+};
+
+/** What a review would post, as GitHub would show it: the event, the body, each inline comment, replies and resolves. */
+function PlanView({ plan }: { plan: PublishSummary }) {
+  return (
+    <div className="mt-1 max-h-80 space-y-2 overflow-y-auto rounded border border-line bg-elevated/40 p-2 text-xs text-fg-secondary">
+      {plan.event && (
+        <div>
+          <span
+            className={cn(
+              "rounded px-1.5 py-px text-[11px] font-semibold",
+              plan.event === "APPROVE" ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" : plan.event === "REQUEST_CHANGES" ? "bg-red-500/15 text-red-700 dark:text-red-300" : "bg-elevated text-fg-muted",
+            )}
+          >
+            {EVENT_TEXT[plan.event]}
+          </span>
+        </div>
+      )}
+      {plan.body && <div className="whitespace-pre-wrap">{plan.body}</div>}
+      {plan.comments.map((c, i) => (
+        <div key={i} className="border-l-2 border-line-strong pl-2">
+          <div className="font-mono text-[11px] text-fg-subtle">
+            {c.path}
+            {c.line !== undefined ? `:${c.line}` : ""}
+          </div>
+          <div className="whitespace-pre-wrap">{c.body}</div>
+        </div>
+      ))}
+      {plan.replies.map((r, i) => (
+        <div key={`r${i}`} className="border-l-2 border-sky-500/50 pl-2">
+          <div className="text-[11px] text-fg-subtle">Reply in a thread</div>
+          <div className="whitespace-pre-wrap">{r.body}</div>
+        </div>
+      ))}
+      {plan.resolves > 0 && <div className="text-[11px] text-fg-subtle">Resolves {plan.resolves} thread{plan.resolves === 1 ? "" : "s"}.</div>}
+    </div>
+  );
+}
+
+function MergeButton({ item, run }: { item: AgentItem; run: (a: AgentAction) => Promise<void> }) {
+  const allowed = item.mergeMethods?.allowed ?? [];
+  const [method, setMethod] = useState<MergeMethod | undefined>(item.mergeMethod);
+  const [busy, setBusy] = useState(false);
+  const merge = async () => {
+    setBusy(true);
+    await run({ type: "merge", runId: item.runId, method });
+    setBusy(false);
+  };
+  return (
+    <span className="inline-flex items-center gap-1">
+      <button type="button" className={BTN_PRIMARY} disabled={busy} onClick={() => void merge()}>
+        {busy ? "Merging…" : "Merge"}
+      </button>
+      {allowed.length > 1 && (
+        <select
+          aria-label="Merge method"
+          value={method ?? ""}
+          onChange={(e) => setMethod(e.target.value as MergeMethod)}
+          className="rounded-md border border-line-strong bg-surface px-1.5 py-1 text-xs text-fg-secondary"
+        >
+          {allowed.map((m) => (
+            <option key={m} value={m}>
+              {m}
+              {m === item.mergeMethods?.suggested ? " (GitHub's pick)" : ""}
+            </option>
+          ))}
+        </select>
+      )}
+    </span>
+  );
+}
+
 function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => void; run: (a: AgentAction) => Promise<void> }) {
   const [open, setOpen] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const primary = primaryActionLabel(item);
   const error = item.state === "error";
+  const merge = item.scenario === "merge";
+  const plan = item.plan && !item.published ? item.plan : null;
+  const publish = async () => {
+    setPublishing(true);
+    await run({ type: "publish", runId: item.runId });
+    setPublishing(false);
+  };
+  const showText = !plan && !!item.output;
   return (
-    <article className={cn("rounded-md border bg-surface p-2.5 shadow-sm", error ? "border-red-500/60" : "border-line", item.later && "opacity-60")}>
+    <article className={cn("rounded-md border bg-surface p-2.5 shadow-sm", error ? "border-red-500/60" : merge ? "border-emerald-500/50" : "border-line", item.later && "opacity-60")}>
       <CardHead item={item} onTitle={onTitle} />
       <div className={cn("mt-1 text-xs", error ? "text-red-700 dark:text-red-300" : "text-fg-secondary")}>{item.headline}</div>
       {error && item.error && <div className="mt-0.5 line-clamp-3 font-mono text-[11px] text-fg-subtle" title={item.error}>{item.error}</div>}
-      {item.output && (
+      {plan && (
         <>
           <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className="mt-1 text-xs text-sky-700 hover:underline dark:text-sky-300">
-            {open ? "Hide" : item.scenario === "brief" ? "Read the brief" : "See what it would post"}
+            {open ? "Hide" : `See what it would post (${describePlan(plan)})`}
+          </button>
+          {open && <PlanView plan={plan} />}
+        </>
+      )}
+      {showText && (
+        <>
+          <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className="mt-1 text-xs text-sky-700 hover:underline dark:text-sky-300">
+            {open ? "Hide" : item.scenario === "brief" ? "Read the brief" : item.scenario === "afterMerge" ? "See the Jira dry run" : "See what it found"}
           </button>
           {open && <div className="mt-1 max-h-72 overflow-y-auto whitespace-pre-wrap rounded border border-line bg-elevated/40 p-2 text-xs text-fg-secondary">{item.output}</div>}
         </>
       )}
       <div className="mt-2 flex flex-wrap gap-1.5">
+        {merge && <MergeButton item={item} run={run} />}
+        {primary === "Publish" && (
+          <button type="button" className={BTN_PRIMARY} disabled={publishing} onClick={() => void publish()}>
+            {publishing ? "Publishing…" : "Publish"}
+          </button>
+        )}
         {primary === "Run again" && (
           <button type="button" className={BTN_PRIMARY} onClick={() => void run({ type: "retry", runId: item.runId })}>
             Run again
@@ -314,12 +421,17 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
             Review anyway
           </button>
         )}
-        {item.sessionId && item.worktree && (
-          <button type="button" className={primary === "Continue in session" ? BTN_PRIMARY : BTN} onClick={() => void run({ type: "continue", runId: item.runId })}>
-            Continue in session
+        {item.sessionId && (item.worktree || item.scenario === "afterMerge") && (
+          <button
+            type="button"
+            className={primary === "Continue in session" || primary === "Apply in session" ? BTN_PRIMARY : BTN}
+            title={plan ? "Open the session in your terminal to change the review before it goes out" : undefined}
+            onClick={() => void run({ type: "continue", runId: item.runId })}
+          >
+            {item.scenario === "afterMerge" ? "Apply in session" : plan ? "Edit first" : "Continue in session"}
           </button>
         )}
-        {!error && (
+        {!error && !merge && item.scenario !== "afterMerge" && primary !== "Run again" && (
           <button type="button" className={BTN} onClick={() => void run({ type: "retry", runId: item.runId })}>
             Run again
           </button>
@@ -331,9 +443,8 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
           Dismiss
         </button>
       </div>
-      {item.mode === "shadow" && item.scenario === "review" && !error && (
-        <div className="mt-1.5 text-[11px] text-fg-faint">Shadow: nothing was posted. Publishing comes in the next update.</div>
-      )}
+      {plan && item.mode === "shadow" && <div className="mt-1.5 text-[11px] text-fg-faint">Shadow: nothing is on GitHub until you press Publish. It goes out with the agent&apos;s signature.</div>}
+      {merge && <div className="mt-1.5 text-[11px] text-fg-faint">Merges only the commit shown here — GitHub refuses it if anyone pushes first.</div>}
     </article>
   );
 }

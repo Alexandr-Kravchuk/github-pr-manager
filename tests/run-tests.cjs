@@ -102,6 +102,7 @@ for (const mod of [
   "agent-defaults.js",
   "agent-stream.js",
   "agent-view.js",
+  "agent-publish.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -8024,6 +8025,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const agentCore = require(path.join(__dirname, "../dist/main/main/agent/index.js"));
     const idleGate = require(path.join(__dirname, "../dist/main/shared/idle-gate.js"));
     const hookJs = path.join(__dirname, "../dist/main/main/agent/hook.js");
+    const hookMod = require(hookJs);
 
     // Not value-imported by the renderer (yet), but kept Node-free all the same;
     // the ones it does import are in the list at the top of this file.
@@ -8037,7 +8039,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     const gpr = guard.guardPrFromUrl("https://github.com/Acme/Widgets/pull/12");
     test("agent guard: the PR a run works on is read from its URL", () => {
-      assert.deepStrictEqual(gpr, { url: "https://github.com/Acme/Widgets/pull/12", repo: "acme/widgets", number: 12 });
+      assert.deepStrictEqual(gpr, { url: "https://github.com/Acme/Widgets/pull/12", repo: "acme/widgets", number: 12, host: "github.com" });
+      assert.strictEqual(guard.guardPrFromUrl("https://Creatio.GHE.com/a/b/pull/3").host, "creatio.ghe.com");
       assert.strictEqual(guard.guardPrFromUrl("https://github.com/acme/widgets/issues/12"), null);
     });
 
@@ -8218,7 +8221,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         [reviewPr({ isDraft: true }), /Draft/],
         [reviewPr({ isIgnored: true }), /Ignored/],
         [reviewPr({ viewerHasReviewed: true }), /already reviewed/],
-        [reviewPr({ role: "author" }), /Yours|Waiting/],
+        [reviewPr({ role: "author", isDraft: true }), /Yours — draft/],
       ];
       for (const [pr, why] of cases) {
         const r = policy.planJobs([pr], agentOn(), noSessions);
@@ -8452,7 +8455,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume } = {}) => {
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify } = {}) => {
       const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
       nfsA.mkdirSync(path.join(co, ".git"), { recursive: true });
@@ -8460,9 +8463,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const snapshot = { pullRequests: [pr], errors: [], rateLimits: [], fetchedAt: "", version: "" };
       const gitCalls = [];
       const children = [];
-      const settings = cfg.validateSettings({ hosts: [], agent: { enabled } });
+      const settings = cfg.validateSettings({ hosts: [], agent: { enabled, ...agentOver } });
       const agent = agentCore.createAgent({
         openResume,
+        captureScript,
+        fetchPr,
+        gh,
+        notify,
+        // Not your real ~/.claude/skills: what a test mounts must not depend on the machine.
+        userSkillsDir: path.join(dir, "no-skills"),
         dir: path.join(dir, "agent"),
         loadSettings: () => settings,
         getSnapshot: () => snapshot,
@@ -8707,7 +8716,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         null,
         "pause",
         {},
-        { type: "merge", runId: RID },
+        { type: "merge", runId: RID, method: "fast-forward" },
+        { type: "publishAll", runId: RID },
         { type: "pause", runId: "../../etc" },
         { type: "pause" },
         { type: "hint", runId: RID, text: "   " },
@@ -8793,6 +8803,506 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "working", sessionId: "s" })), null);
     });
 
+    // --- stage 4: the publish wrapper, the app's own posting, merge, notifications ---
+    const pub = require(path.join(__dirname, "../dist/main/shared/agent-publish.js"));
+    const publishMod = require(path.join(__dirname, "../dist/main/main/agent/publish.js"));
+    const mergeMod = require(path.join(__dirname, "../dist/main/main/agent/merge.js"));
+    const captureJs = path.join(__dirname, "../dist/main/main/agent/capture.js");
+    const SHA = "a".repeat(40);
+
+    test("publish plan: a review is rebuilt from the allowed fields only, the way the skill's own wrapper checks it", () => {
+      const r = pub.parseReview({ event: "APPROVE", body: "ok", commit_id: SHA, extra: 1, comments: [{ path: "a.ts", line: 3, side: "RIGHT", body: "x", junk: true }] });
+      assert.deepStrictEqual(r, { ok: true, value: { kind: "review", event: "APPROVE", body: "ok", commitId: SHA, comments: [{ path: "a.ts", line: 3, side: "RIGHT", body: "x" }] } });
+      for (const [bad, why] of [
+        [{ event: "DISMISS" }, /event must be/],
+        [{ event: "COMMENT", body: 3 }, /body must be a string/],
+        [{ event: "COMMENT", commit_id: "abc" }, /40-hex/],
+        [{ event: "COMMENT", comments: {} }, /must be an array/],
+        [{ event: "COMMENT", comments: [{ path: "a", body: "x", side: "UP" }] }, /side must be/],
+        [{ event: "COMMENT", comments: [{ path: "", body: "x" }] }, /needs a path/],
+        ["[]", /JSON object/],
+      ]) {
+        const p = pub.parseReview(bad);
+        assert.strictEqual(p.ok, false, JSON.stringify(bad));
+        assert.match(p.error, why);
+      }
+      assert.match(pub.parseFileComment({ path: "a.ts", body: "x", subject_type: "file" }).error, /needs commit_id/);
+      assert.strictEqual(pub.parseFileComment({ path: "a.ts", body: "x", subject_type: "file", commit_id: SHA }).ok, true);
+    });
+
+    test("publish plan: the wrapper's four calls, with its own argument checks", () => {
+      assert.deepStrictEqual(pub.parsePublishCall(["review", "a/b", "7", "/x/r.json"]).value, { sub: "review", repo: "a/b", number: 7, file: "/x/r.json" });
+      assert.deepStrictEqual(pub.parsePublishCall(["reply", "a/b", "7", "123", "/x/t.txt"]).value, { sub: "reply", repo: "a/b", number: 7, replyTo: 123, file: "/x/t.txt" });
+      assert.deepStrictEqual(pub.parsePublishCall(["resolve", "PRRT_abc"]).value, { sub: "resolve", threadId: "PRRT_abc" });
+      for (const bad of [[], ["delete", "a/b"], ["review", "a/b", "7"], ["review", "a/../b", "7", "f"], ["review", "a/b", "07", "f"], ["reply", "a/b", "7", "x", "f"], ["resolve", "MDU6abc"], ["resolve", "PRRT_a b"]]) {
+        assert.strictEqual(pub.parsePublishCall(bad).ok, false, bad.join(" "));
+      }
+    });
+
+    test("publish plan: paths compare in Git Bash form, and a payload must sit inside the run's folder", () => {
+      assert.strictEqual(pub.gitBashPath("C:\\Users\\me\\x.sh"), "/c/Users/me/x.sh");
+      assert.strictEqual(pub.gitBashPath("/usr/x"), "/usr/x");
+      assert.ok(pub.samePath("C:\\A\\b.sh", "/c/a/b.sh"));
+      assert.ok(pub.isInsideDir("C:/T/run/out/review.json", "C:\\T\\run\\out"));
+      assert.ok(!pub.isInsideDir("C:/T/run/outside/x.json", "C:\\T\\run\\out"), "a sibling with the same prefix is outside");
+      assert.ok(!pub.isInsideDir("C:/T/run/out/../settings.json", "C:\\T\\run\\out"));
+      assert.ok(!pub.isInsideDir("C:/T/run/out", "C:\\T\\run\\out"), "the folder itself is not a file in it");
+      assert.ok(pub.isUsableWrapperPath("C:\\Users\\v.kuvarzin\\AppData\\Local\\Temp\\prd-agent\\1\\bin\\pr-review-publish.sh"));
+      assert.ok(!pub.isUsableWrapperPath("C:\\Users\\VB641~1.KUV\\Temp\\bin\\pr-review-publish.sh"), "an 8.3 name with ~");
+      assert.ok(!pub.isUsableWrapperPath("/Users/me/Library/Application Support/PR Dashboard/bin/pr-review-publish.sh"), "a space");
+      assert.ok(!pub.isUsableWrapperPath("/tmp/bin/other.sh"));
+    });
+
+    test("publish plan: every posted body ends with the signature; a held approve becomes a comment", () => {
+      const steps = [
+        { kind: "comment", comment: { path: "f.ts", body: "file note", subjectType: "file" }, commitId: SHA },
+        { kind: "review", event: "APPROVE", body: "LGTM", commitId: SHA, comments: [{ path: "a.ts", line: 3, side: "RIGHT", body: "nit" }] },
+        { kind: "reply", replyTo: 42, body: "still applies" },
+        { kind: "resolve", threadId: "PRRT_x" },
+      ];
+      const ctx = { repo: "a/b", number: 7, signature: "— sig", holdApprove: false };
+      const reqs = pub.planRequests(steps, ctx);
+      assert.deepStrictEqual(reqs.map((r) => r.endpoint), ["repos/a/b/pulls/7/comments", "repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/42/replies", "graphql"]);
+      assert.strictEqual(reqs[0].body.body, "file note\n\n— sig");
+      assert.strictEqual(reqs[0].body.commit_id, SHA);
+      assert.strictEqual(reqs[0].body.subject_type, "file");
+      assert.strictEqual(reqs[1].body.event, "APPROVE");
+      assert.strictEqual(reqs[1].body.body, "LGTM\n\n— sig");
+      assert.deepStrictEqual(reqs[1].body.comments, [{ path: "a.ts", line: 3, side: "RIGHT", body: "nit" }], "inline comments sit under the signed review body");
+      assert.strictEqual(reqs[2].body.body, "still applies\n\n— sig");
+      assert.match(reqs[3].body.query, /^mutation\(\$id:ID!\)\{ resolveReviewThread/);
+      assert.deepStrictEqual(reqs[3].body.variables, { id: "PRRT_x" });
+      const held = pub.planRequests(steps, { ...ctx, holdApprove: true })[1];
+      assert.strictEqual(held.body.event, "COMMENT");
+      assert.ok(held.body.body.includes(pub.HELD_APPROVE_NOTE) && held.body.body.endsWith("— sig"));
+      assert.strictEqual(pub.signedBody("", "— sig"), "— sig");
+      assert.strictEqual(pub.describePlan(pub.summarizePlan(steps)), "approve, 2 inline comments, 1 reply, 1 resolve");
+      assert.deepStrictEqual(pub.readPlanLines(`${steps.map((x) => JSON.stringify(x)).join("\n")}\n{torn`), steps, "the plan file reads back as written; a torn line is dropped");
+    });
+
+    test("agent guard: the reads the review skill needs — gh api user, GraphQL reads of its PR, --hostname, Accept, auth status, twg", () => {
+      const ok = (cmd) => assert.deepStrictEqual(guard.checkBash("review", cmd, gpr), { allow: true }, cmd);
+      ok("gh api user --jq .login");
+      ok("gh api repos/acme/widgets/pulls/12/files --paginate --hostname github.com");
+      ok("gh api -H 'Accept: application/vnd.github.raw' 'repos/acme/widgets/contents/a.md?ref=abc'");
+      ok("gh api graphql --hostname github.com -f query='query($owner:String!,$repo:String!,$number:Int!){ repository(owner:$owner,name:$repo){ pullRequest(number:$number){ reviewThreads(first:100){ nodes{ id isResolved } } } } }' -F owner=Acme -F repo=Widgets -F number=12");
+      ok("gh api graphql -f query='{ viewer { login } }'");
+      ok("gh api graphql -f query='query($ids:[ID!]!){ nodes(ids:$ids){ ... on PullRequestReviewThread { id isResolved comments(last:5){ nodes{ createdAt author{ login } } } } } }' -F 'ids[]=PRRT_1'");
+      ok("gh auth status --hostname github.com");
+      ok("twg jira workitem get ENG-123 -o json --output-summary none");
+      ok("twg confluence content get 3895230648 --detail full --format md -o json --output-summary none");
+      ok("twg help describe 'jira workitem get'");
+    });
+
+    test("agent guard: what a review must not do with those — write, read elsewhere, see the token, change Jira", () => {
+      const no = (cmd, why) => {
+        const d = guard.checkBash("review", cmd, gpr);
+        assert.strictEqual(d.allow, false, cmd);
+        if (why) assert.match(d.reason, why, cmd);
+      };
+      no(`gh api graphql -f query='mutation{ addComment(input:{subjectId:"x",body:"y"}){ clientMutationId } }'`, /only read/);
+      no(`gh api graphql -f query='query{ repository(owner:"evil",name:"secrets"){ id } }'`, /acme\/widgets only/);
+      no(`gh api graphql -f query='query($o:String!){ repository(owner:$o,name:"widgets"){ id } }' -F o=evil`, /acme\/widgets only/);
+      no(`gh api graphql -f query='{ search(query:"x",type:REPOSITORY,first:5){ nodes{ __typename } } }'`, /not from search/);
+      no("gh api graphql -f query='query($ids:[ID!]!){ nodes(ids:$ids){ ... on Repository { name } } }' -F 'ids[]=R_1'", /review threads/);
+      no("gh api graphql -f query='query{ ...F } fragment F on Query { viewer { login } }'", /fragment/i);
+      no("gh api graphql -F query=@q.graphql", /reads a file/);
+      no("gh api graphql --input q.json");
+      no("gh api repos/acme/widgets/issues/12/comments -f body=hi", /request body/);
+      no("gh api repos/acme/widgets/pulls --hostname evil.example.com", /github\.com only/);
+      no("gh api -H 'Authorization: token x' repos/acme/widgets/pulls", /Accept headers/);
+      no("gh api users/someone");
+      no("gh auth status --show-token");
+      no("gh auth token");
+      no("twg jira workitem update ENG-1 --summary x");
+      no("twg jira workitem transition ENG-1 Done");
+      no("twg api /rest/api/3/issue/ENG-1");
+      no("twg login");
+      no("twg jira workitem get ENG-1 --output-file /tmp/x", /writes or opens/);
+    });
+
+    test("agent guard: a review writes only its payload files and calls only its own wrapper", () => {
+      const run = { wrapperPath: "C:\\T\\prd-agent\\r1\\bin\\pr-review-publish.sh", outDir: "C:\\T\\prd-agent\\r1\\out" };
+      const w = "/c/T/prd-agent/r1/bin/pr-review-publish.sh";
+      assert.deepStrictEqual(guard.checkBash("review", `${w} review acme/widgets 12 C:/T/prd-agent/r1/out/review.json`, gpr, run), { allow: true });
+      assert.deepStrictEqual(guard.checkBash("review", `${w} resolve PRRT_abc`, gpr, run), { allow: true });
+      assert.match(guard.checkBash("review", `${w} review acme/other 12 C:/T/prd-agent/r1/out/r.json`, gpr, run).reason, /acme\/widgets#12 only/);
+      assert.match(guard.checkBash("review", `${w} review acme/widgets 12 C:/Users/me/.bashrc`, gpr, run).reason, /under/);
+      assert.match(guard.checkBash("review", `${w} delete acme/widgets 12 x`, gpr, run).reason, /PUBLISH-REJECTED/);
+      assert.strictEqual(guard.checkBash("review", `${w} review acme/widgets 12 C:/T/prd-agent/r1/out/r.json`, gpr, null).allow, false, "no run, no wrapper");
+      assert.deepStrictEqual(guard.checkToolUse("review", "Write", { file_path: "C:\\T\\prd-agent\\r1\\out\\review.json" }, gpr, run), { allow: true });
+      for (const file of ["C:\\T\\prd-agent\\r1\\bin\\pr-review-publish.sh", "C:\\T\\prd-agent\\r1\\run.json", "C:\\work\\src\\a.ts"]) {
+        assert.strictEqual(guard.checkToolUse("review", "Write", { file_path: file }, gpr, run).allow, false, file);
+      }
+      assert.strictEqual(guard.checkToolUse("review", "Edit", { file_path: "C:\\T\\prd-agent\\r1\\out\\review.json" }, gpr, run).allow, false, "new files only: no Edit");
+      assert.strictEqual(guard.checkToolUse("brief", "Write", { file_path: "C:\\T\\prd-agent\\r1\\out\\x" }, gpr, null).allow, false);
+    });
+
+    test("agent guard hook: a review's guard file lets its payload files through, and nothing else", () => {
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-hook-"));
+      const outDir = path.join(runDir, "out");
+      const guardFile = path.join(runDir, "guard.json");
+      runner.writeGuardFile(guardFile, { outDir, wrapperPath: path.join(runDir, "bin", "pr-review-publish.sh"), workflowDirs: [] });
+      const write = (file, withRun = true) =>
+        spawnSync(process.execPath, [hookJs, "review", "https://github.com/a/b/pull/7", ...(withRun ? [guardFile] : [])], {
+          input: JSON.stringify({ tool_name: "Write", tool_input: { file_path: file } }),
+          encoding: "utf8",
+        }).status;
+      assert.strictEqual(write(path.join(outDir, "review.json")), 0);
+      assert.strictEqual(write(guardFile), 2, "not its own guard file");
+      assert.strictEqual(write(path.join(outDir, "x.json"), false), 2, "without the guard file nothing is writable");
+      assert.deepStrictEqual(hookMod.readGuardFile(path.join(runDir, "missing.json")), null);
+    });
+
+    test("agent guard: a Workflow runs only a skill's own script from a mounted plugin — never the PR's, never by name", () => {
+      const plugin = "C:/Users/me/.claude/plugins/cache/x/creatio-development/1.7.142";
+      const run = { workflowDirs: [plugin] };
+      assert.deepStrictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: `${plugin}/skills/creatio-code-review/creatio-code-review-workflow.workflow.js`, args: "{}" }, gpr, run), { allow: true });
+      assert.deepStrictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: "C:\\Users\\ME\\.claude\\plugins\\cache\\x\\creatio-development\\1.7.142\\w.js" }, gpr, run), { allow: true }, "the Windows spelling of the same folder");
+      assert.strictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: "C:/work/pr/evil.workflow.js" }, gpr, run).allow, false, "a script the PR brings");
+      assert.strictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: `${plugin}/../../evil.js` }, gpr, run).allow, false, "no stepping out of the plugin");
+      assert.match(guard.checkToolUse("review", "Workflow", { name: "creatio-code-review-workflow" }, gpr, run).reason, /by its script path/, "a name could be the PR's .claude/workflows");
+      assert.strictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: "C:/x.js" }, gpr, null).allow, false, "no guard file, no workflow");
+    });
+
+    test("capture: the review's wrapper records a checked call and posts nothing", () => {
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-cap-"));
+      const outDir = path.join(runDir, "out");
+      nfsA.mkdirSync(outDir);
+      nfsA.writeFileSync(path.join(runDir, "run.json"), JSON.stringify({ repo: "a/b", number: 7, outDir, wrapperPath: "x" }));
+      const review = path.join(outDir, "review.json");
+      nfsA.writeFileSync(review, JSON.stringify({ event: "COMMENT", body: "hi", commit_id: SHA, comments: [], extra: true }));
+      const r = spawnSync(process.execPath, [captureJs, runDir, "review", "a/b", "7", review], { encoding: "utf8" });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.match(r.stdout, /Nothing was posted from here/);
+      const reply = path.join(outDir, "reply.txt");
+      nfsA.writeFileSync(reply, "still applies");
+      assert.strictEqual(spawnSync(process.execPath, [captureJs, runDir, "reply", "a/b", "7", "55", reply], { encoding: "utf8" }).status, 0);
+      const outside = path.join(runDir, "outside.json");
+      nfsA.writeFileSync(outside, "{}");
+      for (const args of [["review", "a/b", "7", outside], ["review", "a/c", "7", review], ["review", "a/b", "8", review], ["comment", "a/b", "7", review], ["resolve", "nope"]]) {
+        const bad = spawnSync(process.execPath, [captureJs, runDir, ...args], { encoding: "utf8" });
+        assert.strictEqual(bad.status, 2, args.join(" "));
+        assert.match(bad.stderr, /^PUBLISH-REJECTED: /, args.join(" "));
+      }
+      assert.deepStrictEqual(publishMod.readPlan(runDir), [
+        { kind: "review", event: "COMMENT", body: "hi", commitId: SHA, comments: [] },
+        { kind: "reply", replyTo: 55, body: "still applies" },
+      ]);
+    });
+
+    test("publish: a review run's folder — under a root the skill accepts, fresh, with a wrapper that only hands over", () => {
+      const base = nfsA.realpathSync.native(nfsA.mkdtempSync(path.join(os.tmpdir(), "prdroot")));
+      const bad = path.join(base, "with space");
+      const good = path.join(base, "ok");
+      const runId = "11111111-1111-4111-8111-111111111111";
+      const f = publishMod.prepareRunFolder([bad, good], runId, { repo: "a/b", number: 7 }, "C:\\Program Files\\PR Dashboard\\PR Dashboard.exe", "C:\\app\\capture.js");
+      assert.ok(f && f.runDir.startsWith(good), "a root with a space is skipped");
+      assert.ok(pub.isUsableWrapperPath(f.wrapperPath));
+      const script = nfsA.readFileSync(f.wrapperPath, "utf8");
+      assert.match(script, /^#!\/bin\/sh\n/);
+      assert.ok(script.includes(`ELECTRON_RUN_AS_NODE=1 exec 'C:/Program Files/PR Dashboard/PR Dashboard.exe' 'C:/app/capture.js' '${f.runDir.replace(/\\/g, "/")}' "$@"`), script);
+      assert.deepStrictEqual(JSON.parse(nfsA.readFileSync(path.join(f.runDir, "run.json"), "utf8")), { repo: "a/b", number: 7, outDir: f.outDir, wrapperPath: f.wrapperPath });
+      nfsA.writeFileSync(path.join(f.outDir, "stale.json"), "{}");
+      const again = publishMod.prepareRunFolder([good], runId, { repo: "a/b", number: 7 }, "node", "c.js");
+      assert.ok(!nfsA.existsSync(path.join(again.outDir, "stale.json")), "nothing from before is kept");
+      assert.strictEqual(publishMod.prepareRunFolder([bad], "x", { repo: "a/b", number: 7 }, "node", "c.js"), null);
+    });
+
+    await atest("publish: the plan goes out one write at a time, and a retry carries on where it stopped", async () => {
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-pub-"));
+      const steps = [
+        { kind: "review", event: "COMMENT", body: "b", commitId: SHA, comments: [] },
+        { kind: "reply", replyTo: 9, body: "r" },
+        { kind: "resolve", threadId: "PRRT_z" },
+      ];
+      nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), `${steps.map((x) => JSON.stringify(x)).join("\n")}\n`);
+      const calls = [];
+      let failAt = 1;
+      const gh = async (args, opts) => {
+        calls.push({ args, input: JSON.parse(opts.input) });
+        return calls.length - 1 === failAt ? { code: 1, stdout: "", stderr: "HTTP 422: line is not part of the diff" } : { code: 0, stdout: "{}", stderr: "" };
+      };
+      const ctx = { repo: "a/b", number: 7, signature: "sig", holdApprove: false };
+      const url = "https://creatio.ghe.com/a/b/pull/7";
+      const first = await publishMod.publishPlan(runDir, url, ctx, gh);
+      assert.deepStrictEqual([first.ok, first.posted, first.total], [false, 1, 3]);
+      assert.match(first.error, /reply to comment 9: HTTP 422/);
+      assert.deepStrictEqual(calls[0].args, ["api", "repos/a/b/pulls/7/reviews", "--method", "POST", "--input", "-", "--hostname", "creatio.ghe.com"]);
+      assert.strictEqual(calls[0].input.body, "b\n\nsig");
+      failAt = -1;
+      calls.length = 0;
+      const second = await publishMod.publishPlan(runDir, url, ctx, gh);
+      assert.deepStrictEqual([second.ok, second.posted], [true, 3]);
+      assert.deepStrictEqual(calls.map((c) => c.args[1]), ["repos/a/b/pulls/7/comments/9/replies", "graphql"], "the review is not posted twice");
+      calls.length = 0;
+      await publishMod.publishPlan(runDir, url, ctx, gh);
+      assert.strictEqual(calls.length, 0, "an all-posted plan posts nothing");
+      assert.deepStrictEqual(publishMod.ghApiArgs({ endpoint: "graphql" }, "https://github.com/a/b/pull/1"), ["api", "graphql", "--method", "POST", "--input", "-"]);
+    });
+
+    test("merge: the method you pick, else Settings', else GitHub's — only if the repository allows it", () => {
+      const pr = { mergeMethods: { suggested: "squash", allowed: ["merge", "squash"] } };
+      assert.strictEqual(mergeMod.chooseMergeMethod(pr, "github"), "squash");
+      assert.strictEqual(mergeMod.chooseMergeMethod(pr, "merge"), "merge");
+      assert.strictEqual(mergeMod.chooseMergeMethod(pr, "rebase"), "squash", "a method the repository forbids falls back to GitHub's");
+      assert.strictEqual(mergeMod.chooseMergeMethod(pr, "github", "merge"), "merge");
+      assert.strictEqual(mergeMod.chooseMergeMethod(pr, "github", "rebase"), "squash");
+      assert.strictEqual(mergeMod.chooseMergeMethod({ mergeMethods: { suggested: null, allowed: [] } }, "github"), null);
+      assert.deepStrictEqual(mergeMod.mergeArgs("https://github.com/a/b/pull/7", "squash", SHA, true), ["pr", "merge", "https://github.com/a/b/pull/7", "--squash", "--match-head-commit", SHA, "--delete-branch"]);
+      assert.ok(!mergeMod.mergeArgs("u", "merge", SHA, false).includes("--delete-branch"));
+    });
+
+    test("agent policy: your PR is offered for merge only when ready, and each switch only narrows it", () => {
+      const mine = (o = {}) => ({ ...reviewPr({ role: "author" }), ...o });
+      assert.strictEqual(policy.mergeBlocker(mine(), agentOn()), null, "the fixture is a clean, approved, green PR");
+      const r = policy.planJobs([mine()], agentOn(), noSessions);
+      assert.deepStrictEqual(r.merges.map((j) => [j.scenario, j.key]), [["merge", "PR_R|merge|aaa111"]]);
+      assert.strictEqual(r.jobs.length, 0);
+      for (const [o, why] of [
+        [{ isDraft: true }, /Draft/],
+        [{ blockedByStack: true }, /stack/],
+        [{ hasConflicts: true }, /conflicts/],
+        [{ ciState: "failure" }, /red/],
+        [{ ciState: "pending" }, /running/],
+        [{ awaitingReview: true }, /reviewers/],
+        [{ canBeMerged: false }, /Not mergeable/],
+      ]) {
+        assert.match(policy.mergeBlocker(mine(o), agentOn()), why, JSON.stringify(o));
+      }
+      const pendingReviewer = mine({ reviewers: [{ login: "x", avatarUrl: "", reviewState: "pending" }] });
+      assert.match(policy.mergeBlocker(pendingReviewer, agentOn()), /every requested reviewer/);
+      assert.strictEqual(policy.mergeBlocker(pendingReviewer, agentOn({ scenarios: { merge: { requireAllReviewers: false } } })), null);
+      assert.match(policy.mergeBlocker(mine({ unresolvedThreads: 2 }), agentOn()), /2 unresolved threads/);
+      assert.strictEqual(policy.mergeBlocker(mine({ unresolvedThreads: 2 }), agentOn({ scenarios: { merge: { requireThreadsResolved: false } } })), null);
+      assert.match(policy.planJobs([mine({ isDraft: true })], agentOn(), noSessions).idle.get("PR_R"), /^Yours — draft/);
+      assert.match(policy.planJobs([mine()], agentOn({ scenarios: { merge: { mode: "off" } } }), noSessions).idle.get("PR_R"), /merge offers are off/);
+    });
+
+    test("agent stream: a skill's Workflow — its phases are the plan, and it counts as a background task", () => {
+      let p = stream.initialProgress();
+      p = stream.applyStreamEvent(p, { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "w1" }] });
+      assert.strictEqual(p.backgroundTasks, 1);
+      p = stream.applyStreamEvent(p, {
+        type: "system",
+        subtype: "task_progress",
+        description: "Review: security",
+        workflow_progress: [
+          { type: "workflow_phase", index: 1, title: "Context" },
+          { type: "workflow_phase", index: 2, title: "Review" },
+          { type: "workflow_phase", index: 3, title: "Publish" },
+          { type: "workflow_agent", index: 1, phaseIndex: 1, state: "done" },
+          { type: "workflow_agent", index: 2, phaseIndex: 2, state: "start" },
+          { type: "workflow_agent", index: 3, phaseIndex: 2, state: "done" },
+        ],
+      });
+      assert.deepStrictEqual(p.steps.map((s) => [s.subject, s.status]), [["Context", "completed"], ["Review", "in_progress"], ["Publish", "pending"]]);
+      assert.strictEqual(p.activity, "Review: security");
+      assert.strictEqual(stream.currentStep(p).subject, "Review");
+      assert.strictEqual(stream.describeToolUse("Workflow", { scriptPath: "C:\\x\\creatio-code-review-workflow.workflow.js" }), "Running the creatio-code-review-workflow workflow");
+      p = stream.applyStreamEvent(p, { type: "system", subtype: "background_tasks_changed", tasks: [] });
+      assert.strictEqual(p.backgroundTasks, 0);
+    });
+
+    await atest("agent runner: a result while a workflow runs keeps stdin open; the one after it closes it", async () => {
+      const c = fakeChild();
+      const h = runner.startRun(spec(), () => {}, () => c);
+      emit(c, { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "w" }] });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "launched" });
+      await tickOnce();
+      assert.strictEqual(c.ended, false, "the workflow's notification starts another turn");
+      emit(c, { type: "system", subtype: "background_tasks_changed", tasks: [] });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "the review" });
+      await tickOnce();
+      assert.strictEqual(c.ended, true);
+      c.emit("exit", 0);
+      const out = await h.done;
+      assert.strictEqual(out.progress.result.text, "the review", "the last result is the run's");
+      const a = runner.buildClaudeArgs(spec({ addDirs: ["/o", "/p"] }));
+      assert.deepStrictEqual(a.slice(a.indexOf("--add-dir"), a.indexOf("--add-dir") + 4), ["--add-dir", "/o", "--add-dir", "/p"]);
+      assert.ok(a.indexOf("--add-dir") < a.indexOf("--allowedTools"), "--allowedTools stays last");
+    });
+
+    test("agent plugins: your own skills a prompt names are mounted as a plugin of the run's own", () => {
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-skills-"));
+      const skills = path.join(home, "skills");
+      nfsA.mkdirSync(path.join(skills, "twg-jira-resolve-merged-work"), { recursive: true });
+      nfsA.writeFileSync(path.join(skills, "twg-jira-resolve-merged-work", "SKILL.md"), "---\nname: twg-jira-resolve-merged-work\n---\n");
+      nfsA.mkdirSync(path.join(skills, "creatio-code-review"), { recursive: true });
+      nfsA.writeFileSync(path.join(skills, "creatio-code-review", "SKILL.md"), "x");
+      const owned = [{ name: "creatio-development", installPath: "/p", skills: ["creatio-code-review"] }];
+      const mount = path.join(home, "mount");
+      const r = plugins.mountUserSkills("/twg-jira-resolve-merged-work {url} and /creatio-code-review and /nope", owned, mount, skills);
+      assert.strictEqual(r.prompt, "/prd-user-skills:twg-jira-resolve-merged-work {url} and /creatio-code-review and /nope", "a plugin's skill and an unknown one stay as written");
+      assert.deepStrictEqual(r.pluginDirs, [mount]);
+      assert.strictEqual(JSON.parse(nfsA.readFileSync(path.join(mount, ".claude-plugin", "plugin.json"), "utf8")).name, "prd-user-skills");
+      assert.ok(nfsA.existsSync(path.join(mount, "skills", "twg-jira-resolve-merged-work", "SKILL.md")));
+      assert.ok(!nfsA.existsSync(path.join(mount, "skills", "creatio-code-review")), "only what the prompt names");
+      assert.deepStrictEqual(plugins.mountUserSkills("/nope", owned, mount, skills), { prompt: "/nope", pluginDirs: [] });
+    });
+
+    // A review session as the skill runs it: write the review JSON, hand it to
+    // the run's wrapper (the real capture script), finish.
+    const reviewWithPlan = (event = "REQUEST_CHANGES") => (c) => {
+      const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+      const runDir = path.dirname(outDir);
+      const run = JSON.parse(nfsA.readFileSync(path.join(runDir, "run.json"), "utf8"));
+      const file = path.join(outDir, "review.json");
+      nfsA.writeFileSync(file, JSON.stringify({ event, body: "Summary", comments: [{ path: "x.ts", line: 3, side: "RIGHT", body: "Major" }] }));
+      const r = spawnSync(process.execPath, [captureJs, runDir, "review", run.repo, String(run.number), file], { encoding: "utf8" });
+      if (r.status !== 0) throw new Error(r.stderr);
+      emit(c, { type: "system", subtype: "init", session_id: "s" });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review." });
+      setImmediate(() => c.emit("exit", 0));
+    };
+
+    await atest("agent publish: a shadow review's writes are captured, then posted on your Publish — signed, once, at the head it saw", async () => {
+      const posted = [];
+      const notices = [];
+      let head = "aaa111";
+      const f = agentFixture({
+        script: reviewWithPlan(),
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: { ...reviewPr(), headOid: head }, state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => (posted.push({ args, body: JSON.parse(opts.input) }), { code: 0, stdout: "{}", stderr: "" }),
+        notify: (n) => notices.push([n.kind, n.item.headline]),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.headline, "Would post: request changes, 1 inline comment");
+        assert.strictEqual(view.primaryActionLabel(item), "Publish");
+        assert.strictEqual(posted.length, 0, "Shadow posts nothing by itself");
+        assert.deepStrictEqual(notices, [["needsYou", item.headline]]);
+        const args = f.children[0].args;
+        assert.ok(args.includes("Write") && args.some((a) => /^Bash\(\/.*pr-review-publish\.sh \*\)$/.test(a)), "the wrapper's rule and Write are granted");
+        assert.match(args[args.indexOf("--append-system-prompt") + 1], /publishCommand: "\/.*pr-review-publish\.sh"/);
+        const sf = args[args.indexOf("--settings") + 1];
+        const g = JSON.parse(nfsA.readFileSync(path.join(path.dirname(sf), "guard.json"), "utf8"));
+        assert.ok(g.wrapperPath && g.outDir && Array.isArray(g.workflowDirs), "the guard knows the run's wrapper and payload folder");
+        assert.match(nfsA.readFileSync(sf, "utf8"), /guard\.json/, "and the hook is handed that file");
+        head = "bbb222";
+        assert.match((await f.agent.act({ type: "publish", runId: item.runId })).error, /new commits/);
+        assert.strictEqual(posted.length, 0);
+        head = "aaa111";
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.strictEqual(posted.length, 1);
+        assert.strictEqual(posted[0].args[1], `repos/${item.repo}/pulls/7/reviews`);
+        assert.strictEqual(posted[0].body.event, "REQUEST_CHANGES");
+        assert.ok(posted[0].body.body.endsWith(ad.DEFAULT_AGENT_SIGNATURE), "the signature is the app's");
+        assert.deepStrictEqual([only(f)[0].state, only(f)[0].published], ["done", true]);
+        assert.strictEqual(f.agent.getState().acceptedUnchanged, 1);
+        assert.strictEqual((await f.agent.act({ type: "publish", runId: item.runId })).ok, false, "never twice");
+        assert.strictEqual(posted.length, 1);
+        const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+        assert.strictEqual(state.ledger[item.key].state, "published");
+        assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"published"/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent publish: in On the app posts right after the run, and holds an approve while someone else asks for changes", async () => {
+      const posted = [];
+      const f = agentFixture({
+        agent: { scenarios: { review: { mode: "on", holdApproveOnChangeRequest: true } } },
+        script: reviewWithPlan("APPROVE"),
+        captureScript: captureJs,
+        fetchPr: async () => ({
+          pr: { ...reviewPr(), reviewers: [{ login: "other", avatarUrl: "", reviewState: "changes_requested" }, { login: "me", avatarUrl: "", reviewState: "approved" }] },
+          state: "OPEN",
+          viewer: "me",
+        }),
+        gh: async (_args, opts) => (posted.push(JSON.parse(opts.input)), { code: 0, stdout: "", stderr: "" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "done"));
+        assert.strictEqual(posted.length, 1);
+        assert.strictEqual(posted[0].event, "COMMENT");
+        assert.ok(posted[0].body.includes(pub.HELD_APPROVE_NOTE));
+        assert.match(only(f)[0].headline, /^Published: comment, 1 inline comment \(approve held\)$/);
+        assert.strictEqual(f.agent.getState().acceptedUnchanged, 0, "only your own Publish counts toward the On hint");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent merge: your ready PR gets an offer; the click merges that head only, then the Jira dry run runs", async () => {
+      const ghCalls = [];
+      const notices = [];
+      const mine = { ...reviewPr({ role: "author" }), mergeMethods: { suggested: "squash", allowed: ["squash", "merge"] } };
+      const f = agentFixture({
+        pr: mine,
+        script: succeed("Would resolve ENG-1."),
+        fetchPr: async () => ({ pr: mine, state: "OPEN", viewer: "me" }),
+        gh: async (args) => (ghCalls.push(args), { code: 0, stdout: "✓ Squashed and merged", stderr: "" }),
+        notify: (n) => notices.push(n.kind),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const offer = only(f)[0];
+        assert.deepStrictEqual([offer.scenario, offer.state, offer.headline, offer.mergeMethod], ["merge", "needsYou", "Ready to merge — squash", "squash"]);
+        assert.strictEqual(f.children.length, 0, "an offer starts no session");
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(only(f).length, 1, "one offer per head");
+        assert.deepStrictEqual(await f.agent.act({ type: "merge", runId: offer.runId, method: "merge" }), { ok: true });
+        assert.deepStrictEqual(ghCalls[0], ["pr", "merge", mine.url, "--merge", "--match-head-commit", "aaa111", "--delete-branch"]);
+        assert.match(only(f)[0].headline, /^Merged \(merge\), branch deleted$/);
+        // The PR leaves the dashboard; its Jira dry run still runs and still shows.
+        f.snapshot.pullRequests = [];
+        await until(() => only(f).some((i) => i.scenario === "afterMerge" && i.state === "needsYou"));
+        const dry = only(f).find((i) => i.scenario === "afterMerge");
+        assert.strictEqual(dry.headline, "Jira dry run ready — apply it in a session");
+        assert.strictEqual(view.primaryActionLabel(dry), "Apply in session");
+        const settingsFile = f.children[0].args[f.children[0].args.indexOf("--settings") + 1];
+        assert.match(nfsA.readFileSync(settingsFile, "utf8"), /hook\.js[\s\S]*afterMerge/, "the dry run runs under the read-only guard");
+        assert.match(f.children[0].args[f.children[0].args.indexOf("--append-system-prompt") + 1], /change nothing in Jira/);
+        assert.ok(notices.includes("needsYou") && notices.includes("finished"));
+        const board = view.boardColumns([], new Set(), f.agent.getState(), view.todayKey(new Date()));
+        assert.ok(board.needsYou.some((i) => i.runId === dry.runId), "it shows on the Board though its PR is gone");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent merge: a push since the offer, or a PR no longer ready, merges nothing", async () => {
+      const ghCalls = [];
+      const mine = { ...reviewPr({ role: "author" }), mergeMethods: { suggested: "squash", allowed: ["squash"] } };
+      let fresh = { ...mine, headOid: "ccc333" };
+      const f = agentFixture({
+        pr: mine,
+        script: succeed("x"),
+        fetchPr: async () => ({ pr: fresh, state: "OPEN", viewer: "me" }),
+        gh: async (args) => (ghCalls.push(args), { code: 0, stdout: "", stderr: "" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const offer = only(f)[0];
+        assert.match((await f.agent.act({ type: "merge", runId: offer.runId })).error, /new commits/);
+        fresh = { ...mine, ciState: "failure" };
+        assert.match((await f.agent.act({ type: "merge", runId: offer.runId })).error, /CI is red/);
+        assert.strictEqual(ghCalls.length, 0);
+        assert.strictEqual(only(f)[0].state, "needsYou");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("ipc: Publish names a run; Merge may name a method the app knows", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "publish", runId: RID }), { type: "publish", runId: RID });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "merge", runId: RID }), { type: "merge", runId: RID });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "merge", runId: RID, method: "rebase", extra: 1 }), { type: "merge", runId: RID, method: "rebase" });
+    });
+
+    test("agent view: the first button of a prepared review is Publish, of an offer Merge", () => {
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, sessionId: "s" })), "Publish");
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, published: true, sessionId: "s" })), "Continue in session");
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "merge" })), "Merge");
+    });
+
     test("main.js wiring: the agent's state is pulled and acted on over IPC, and pushed only to a visible window", () => {
       const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
       assert.match(src, /ipcMain\.handle\("agent:get", \(\) => agent\?\.getState\(\) \?\? null\)/);
@@ -8810,7 +9320,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(src, /handleNotifications\(snapshot\.pullRequests\);\s*agent\?\.onSnapshot\(snapshot\)/);
       assert.match(src, /agentActive: \(\) => agent\?\.isActive\(\)/);
       assert.match(src, /if \(!\(0, mock_1\.isMockMode\)\(\)\) \{\s*agent = \(0, agent_1\.createAgent\)/);
-      assert.match(src, /hookScript: node_path_1\.default\.join\(__dirname, "agent", "hook\.js"\)/);
+      assert.match(src, /hookScript: unpackedScript\("hook\.js"\)/);
+      assert.match(src, /captureScript: unpackedScript\("capture\.js"\)/);
+      assert.ok(src.includes('.replace(/app\\.asar([\\\\/])/, "app.asar.unpacked$1")'), "the scripts are read from outside app.asar");
+      assert.match(src, /fetchPr: async \(pr\) =>/);
+      assert.match(src, /notify: handleAgentNotice/);
+      const pkg = JSON.parse(nfsA.readFileSync(path.join(__dirname, "../package.json"), "utf8"));
+      assert.deepStrictEqual(pkg.build.asarUnpack, ["dist/main/main/agent/**", "dist/main/shared/**"], "Claude Code runs the hook and capture scripts as Node — they and what they require must be on disk");
       assert.match(src, /agent\?\.ownSessionIds\(\)/);
       assert.match(src, /markQuitting\(\);\s*agent\?\.stop\(\)/);
     });

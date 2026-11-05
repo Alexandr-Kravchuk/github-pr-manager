@@ -48,6 +48,10 @@
       "build/icon.png",
       "package.json"
     ],
+    "asarUnpack": [
+      "dist/main/main/agent/**",
+      "dist/main/shared/**"
+    ],
     "directories": {
       "buildResources": "build"
     },

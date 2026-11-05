@@ -453,14 +453,51 @@ function mockAgentState(): AgentState {
     item(118, { state: "error", headline: "No checkout of acme/clio-knowledge: set its folder in Settings > Claude", finishedAt: iso(30 * 60_000) }),
     item(929, {
       state: "needsYou",
-      headline: "Review ready: it waits for your OK before posting",
+      headline: "Would post: request changes, 1 inline comment, 1 reply",
       finishedAt: iso(5 * 60_000),
       sessionId: "44444444-4444-4444-8444-444444444444",
       worktree: "/tmp/agent-clio-929",
-      output: "Summary: the rename keeps the static prefix now.\n\nInline:\n- SchemaColumn.cs:142: the prefix is still dropped on rename (Minor)\n\nWould approve: no, one open finding.",
+      runFolder: "/tmp/prd-agent/929",
+      output: "Prepared a review: request changes, one inline comment, one reply.",
+      plan: {
+        event: "REQUEST_CHANGES",
+        body: "**Summary.** The rename keeps the static prefix in the designer now, but the schema column still drops it when the entity is renamed (AC-2).\n\n**Requirement coverage.** AC-1 covered, AC-2 missing, AC-3 covered.",
+        comments: [{ path: "src/Schema/SchemaColumn.cs", line: 142, body: "**Major — AC-2.** `Rename()` rebuilds the name from `Caption`, so the `Usr` prefix is lost: renaming `UsrAccount` gives `Account`. Keep the prefix from the old name." }],
+        replies: [{ replyTo: 1001, body: "Still applies at the head: the guard on line 88 checks the caption, not the name." }],
+        resolves: 0,
+      },
     }),
     item(934, { state: "done", headline: "Handed back: you reviewed it yourself", finishedAt: iso(60 * 60_000) }),
+    item(85, {
+      key: `${byNumber(85)?.id}|merge|${byNumber(85)?.headOid}`,
+      scenario: "merge",
+      mode: "on",
+      state: "needsYou",
+      headline: "Ready to merge — squash",
+      finishedAt: iso(2 * 60_000),
+      mergeMethods: byNumber(85)?.mergeMethods,
+      mergeMethod: "squash",
+    }),
   ].filter((i): i is AgentItem => i !== null);
+  // A PR you merged a moment ago: gone from the dashboard, its Jira dry run still waits on the Board.
+  items.push({
+    runId: runId(930),
+    key: "PR_merged_930|afterMerge|0f1e2d",
+    prId: "PR_merged_930",
+    prNumber: 930,
+    repo: "acme/clio",
+    url: "https://github.com/acme/clio/pull/930",
+    title: "Document the retry budget",
+    hostLabel: prs[0]?.hostLabel ?? "GitHub",
+    scenario: "afterMerge",
+    mode: "on",
+    state: "needsYou",
+    headline: "Jira dry run ready — apply it in a session",
+    queuedAt: iso(12 * 60_000),
+    finishedAt: iso(9 * 60_000),
+    sessionId: "55555555-5555-4555-8555-555555555555",
+    output: "Would resolve ENG-93380 (Done → Closed): merged PR #930 implements every acceptance criterion.\nWould leave ENG-93374 open: its PR #912 is still in review.\n\nApply these changes?",
+  });
   const run = (n: number, steps: Array<[string, "pending" | "in_progress" | "completed"]>, activity: string) => ({
     runId: runId(n),
     progress: {
@@ -471,6 +508,7 @@ function mockAgentState(): AgentState {
       lastText: null,
       toolCalls: 12,
       rateLimit: { status: "allowed", resetsAt: null },
+      backgroundTasks: 0,
       result: null,
     },
     recent: [
@@ -506,6 +544,8 @@ function mockAgentState(): AgentState {
     parallel: 2,
     heldUntil: null,
     headerChip: true,
+    acceptedUnchanged: 4,
+    suggestOn: false,
   };
 }
 
@@ -513,7 +553,7 @@ const agentListeners = new Set<(s: AgentState) => void>();
 let agentState: AgentState =
   mood === "agent"
     ? mockAgentState()
-    : { enabled: false, items: [], running: [], idle: {}, runsToday: 0, perDay: 30, parallel: 2, heldUntil: null, headerChip: true };
+    : { enabled: false, items: [], running: [], idle: {}, runsToday: 0, perDay: 30, parallel: 2, heldUntil: null, headerChip: true, acceptedUnchanged: 0, suggestOn: false };
 
 function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error: string } {
   if (!agentState.enabled) return { ok: false, error: "The agent is off: switch it on in Settings > Agent." };
@@ -570,6 +610,15 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
         if (running) running.recent = [...running.recent, { at, text: `You: ${action.text}` }];
         break;
       case "continue":
+        break;
+      case "publish":
+        if (!it.plan) return { ok: false, error: "Nothing prepared to publish." };
+        Object.assign(it, { state: "done", published: true, headline: "Published: request changes, 1 inline comment, 1 reply", finishedAt: at });
+        agentState = { ...agentState, acceptedUnchanged: agentState.acceptedUnchanged + 1 };
+        break;
+      case "merge":
+        Object.assign(it, { state: "done", headline: `Merged (${action.method ?? it.mergeMethod ?? "squash"}), branch deleted`, finishedAt: at });
+        items.push({ ...it, runId: crypto.randomUUID(), key: `${it.prId}|afterMerge|x`, scenario: "afterMerge", state: "queued", headline: "Queued: the Jira dry run", queuedAt: at });
         break;
     }
   }
@@ -632,6 +681,7 @@ const api: PrManagerApi = {
       agentListeners.delete(listener);
     };
   },
+  onAgentShowBoard: () => () => {},
 };
 
 (window as unknown as { api: PrManagerApi }).api = api;

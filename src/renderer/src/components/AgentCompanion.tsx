@@ -15,7 +15,7 @@ import { AgentContext } from "./agent-context";
 // taking over and stopping. Nothing animates for long: a new step blinks once
 // (`.live-beat`, a finite animation, re-keyed on the step).
 
-const VERB: Record<AgentItem["scenario"], string> = { review: "Reviewing", brief: "Briefing" };
+const VERB: Record<AgentItem["scenario"], string> = { review: "Reviewing", brief: "Briefing", merge: "Merging", afterMerge: "Checking Jira for" };
 
 function polar(c: number, r: number, deg: number): [number, number] {
   const rad = ((deg - 90) * Math.PI) / 180;
