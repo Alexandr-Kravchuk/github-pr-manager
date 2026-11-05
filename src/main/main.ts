@@ -797,6 +797,9 @@ function registerIpc(): void {
       // Apply immediately: a fresh poll re-resolves tokens and re-fetches, and
       // its snapshot/config-error is pushed to the renderer.
       await poller?.refresh();
+      // The agent plans on snapshots, and the poller sends one only when the
+      // PRs changed — switching the agent on must not wait for a PR to move.
+      agent?.refresh();
       // The tray preference is the one preference that can fail to take
       // effect (no usable icon, or the platform refused a tray). Saying
       // "saved" while close actually quits would strand the user believing

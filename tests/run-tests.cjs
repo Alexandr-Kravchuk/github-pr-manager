@@ -8510,7 +8510,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home } = {}) => {
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9 } = {}) => {
       // `home`: the folder of an earlier fixture — the same app started again.
       const dir = home ?? nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
@@ -8519,8 +8519,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const snapshot = { pullRequests: [pr], errors: [], rateLimits: [], fetchedAt: "", version: "" };
       const gitCalls = [];
       const children = [];
-      const settings = cfg.validateSettings({ hosts: [], agent: { enabled, ...agentOver } });
+      let settings = cfg.validateSettings({ hosts: [], agent: { enabled, ...agentOver } });
       const agent = agentCore.createAgent({
+        onChange,
         openResume,
         captureScript,
         fetchPr,
@@ -8546,9 +8547,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           setImmediate(() => script(c));
           return c;
         },
-        tickMs: 1e9,
+        tickMs,
       });
-      return { agent, snapshot, gitCalls, children, dir };
+      // Settings › Agent saved anew.
+      const setAgent = (over) => {
+        settings = cfg.validateSettings({ hosts: [], agent: over });
+      };
+      return { agent, snapshot, gitCalls, children, dir, setAgent };
     };
 
     await atest("agent: a review request becomes a shadow review waiting for you, run once per head", async () => {
@@ -10046,6 +10051,43 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: switched on in Settings, it plans at once — the poller reports a snapshot only when PRs change", async () => {
+      let pushes = 0;
+      const f = agentFixture({ enabled: false, script: keepWorking, onChange: () => pushes++ });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.agent.getState().idle.PR_R, "The agent is off");
+        f.setAgent({ enabled: true });
+        f.agent.refresh();
+        assert.ok(pushes > 0, "the new state is pushed");
+        assert.strictEqual(f.agent.getState().enabled, true);
+        assert.notStrictEqual(f.agent.getState().idle.PR_R, "The agent is off");
+        await until(() => f.children.length === 1);
+        const before = pushes;
+        f.agent.refresh();
+        assert.strictEqual(f.children.length, 1, "unchanged settings plan nothing new");
+        assert.ok(pushes > before, "a refresh still pushes: the chip and tray line are settings too");
+        f.setAgent({ enabled: false });
+        f.agent.refresh();
+        assert.deepStrictEqual([f.agent.getState().enabled, f.agent.getState().idle.PR_R], [false, "The agent is off"], "switched off: it says so at once");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a settings change is noticed on the agent's own tick too", async () => {
+      const f = agentFixture({ enabled: false, script: keepWorking, tickMs: 20 });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await new Promise((r) => setTimeout(r, 60));
+        assert.strictEqual(f.children.length, 0);
+        f.setAgent({ enabled: true });
+        await until(() => f.children.length === 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
     test("main.js wiring: the tray shows the agent hidden or not; Show agent opens its popover; toasts the agent took are left out", () => {
       const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
       assert.match(src, /showAgent: \(\) => showAgent\(\)/);
@@ -10053,6 +10095,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(src, /agentPushTimer = null;\s*(?:\/\/[^\n]*\n\s*)?updateTrayAgent\(\);\s*if \(agent && mainWindow/, "before the visibility gate");
       assert.match(src, /trayController\.setAgent\(s && s\.enabled && s\.trayState \? \{ line: \(0, agent_view_1\.agentTrayLine\)\(s\), paused: s\.paused \} : null\)/);
       assert.match(src, /sendToRenderer\("agent-open-companion", null\)/);
+      assert.match(src, /await poller\?\.refresh\(\);\s*(?:\/\/[^\n]*\n\s*)*agent\?\.refresh\(\);/, "saving settings wakes the agent");
       assert.match(src, /all\.filter\(\(e\) => !\(0, agent_view_1\.agentTakesToast\)\(agentItems, e\)\)/);
       const preload = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
       assert.match(preload, /"agent-open-companion"/);

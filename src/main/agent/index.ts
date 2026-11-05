@@ -92,6 +92,12 @@ export interface Agent {
   ownSessionIds(): ReadonlySet<string>;
   /** On: keep polling while the window is hidden (the agent acts on what it sees). */
   isActive(): boolean;
+  /**
+   * The settings were just saved: plan again now if the agent's changed (the
+   * poller reports only when the PRs change), and push the state either way —
+   * the header chip and the tray line are settings too.
+   */
+  refresh(): void;
   stop(): void;
 }
 
@@ -284,6 +290,13 @@ export function createAgent(deps: AgentDeps): Agent {
   const merging = new Set<string>();
   /** The quiet-hours end last reported, so entering or leaving them is a change worth a push. */
   let lastQuiet: string | null = null;
+  /**
+   * The agent settings the last plan was made with. The poller reports a
+   * snapshot only when the PRs change, so switching the agent on (or changing
+   * what it takes) would otherwise wait for some PR to move. The first plan
+   * is the poller's first snapshot, as before.
+   */
+  let plannedWith: string | null = JSON.stringify(settings());
   const announce = (item: AgentItemRecord, kind: AgentNotice["kind"]) => {
     try {
       deps.notify?.({ kind, item: { ...item } });
@@ -362,6 +375,7 @@ export function createAgent(deps: AgentDeps): Agent {
 
   function onSnapshot(snapshot: DashboardResponse): void {
     const s = settings();
+    plannedWith = JSON.stringify(s);
     if (!s?.enabled) {
       idle = Object.fromEntries(snapshot.pullRequests.map((p) => [p.id, "The agent is off"]));
       return;
@@ -961,8 +975,20 @@ export function createAgent(deps: AgentDeps): Agent {
     }
   }
 
+  /** Plans again with the last snapshot when the agent's settings changed since the last plan. */
+  function replanIfSettingsChanged(): boolean {
+    if (JSON.stringify(settings()) === plannedWith) return false;
+    const snapshot = deps.getSnapshot();
+    if (!snapshot) return false;
+    onSnapshot(snapshot);
+    changed();
+    return true;
+  }
+
   function tick(): void {
     if (stopped) return;
+    // A plan ends in a tick of its own.
+    if (replanIfSettingsChanged()) return;
     const all = loadAll();
     const s = all?.agent;
     if (!all || !s?.enabled) return;
@@ -1202,6 +1228,10 @@ export function createAgent(deps: AgentDeps): Agent {
     },
     ownSessionIds: () => new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!)),
     isActive: () => settings()?.enabled ?? false,
+    refresh: () => {
+      if (stopped) return;
+      if (!replanIfSettingsChanged()) changed();
+    },
     stop: () => {
       if (stopped) return;
       stopped = true;
