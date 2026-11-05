@@ -138,7 +138,7 @@ Three layers:
   only the PR id and its choices, the PR is closed first and the task second,
   and a missing Jira token stops it before anything changes. Jira writes need a
   token with write scope — the read-only one the Jira section recommends gets a
-  refusal that says so) and the PR agent's four: `agent-defaults.ts`
+  refusal that says so) and the PR agent's five: `agent-defaults.ts`
   (the Agent tab's defaults and bounds), `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (which of
@@ -147,6 +147,12 @@ Three layers:
   (`quietUntil`, a span that may wrap past midnight), the tray's one line, and
   which regular toasts the agent stands in for — `agentTakesToast`: a trigger
   it took in On; `main.ts` hands it the snapshot before deciding the toasts) and
+  `agent-result.ts` (what a run's final message means for the Needs-you card:
+  every session is told to end with a fenced `prd-result` JSON block — one
+  summary sentence, the questions only you can answer, findings by severity —
+  read here and held to its shapes; a message without it gets its first real
+  paragraph as the summary; answering a question from the card resumes the same
+  session with your answer) and
   `agent-publish.ts` (what a review prepared to post: a review session never
   posts — its skill's `publishCommand` is a wrapper of the app's that only
   records each write, checked like the skill's own `pr-review-publish.sh`, and
@@ -157,7 +163,7 @@ Three layers:
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
-  `agent-stream.js` and `agent-view.js`
+  `agent-stream.js`, `agent-result.js` and `agent-view.js`
   stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.

@@ -469,7 +469,12 @@ export function App() {
     return res;
   }, []);
   const agentContext = useMemo(
-    () => ({ state: agentState, act: agentAct, openCompanion: (runId?: string) => setCompanion({ open: true, focus: runId ?? null }) }),
+    () => ({
+      state: agentState,
+      act: agentAct,
+      openCompanion: (runId?: string) => setCompanion({ open: true, focus: runId ?? null }),
+      showBoard: () => setViewMode("board"),
+    }),
     [agentState, agentAct],
   );
 

@@ -489,6 +489,15 @@ function mockAgentState(): AgentState {
       scenario: "brief",
       mode: "on",
       state: "needsYou",
+      result: {
+        summary: "Retries every sync operation with a bounded budget; the retry itself has no overall time limit.",
+        asks: [
+          { question: "Is an unbounded total retry time acceptable for sync-schemas?", options: ["Yes", "No — cap it"] },
+          { question: "The public contract of sync-schemas changed. Agreed with its consumers?", options: ["Agreed", "Not yet"] },
+        ],
+        findings: [{ severity: "major", text: "No overall time limit on the retry loop", where: "src/sync/retry.ts:41" }],
+        structured: true,
+      },
       headline: "Brief ready",
       finishedAt: iso(15 * 60_000),
       sessionId: "33333333-3333-4333-8333-333333333333",
@@ -500,6 +509,17 @@ function mockAgentState(): AgentState {
     item(929, {
       state: "needsYou",
       headline: "Would post: request changes, 1 inline comment, 1 reply",
+      result: {
+        summary: "Renaming an entity still drops the Usr prefix from its schema column (AC-2); the rest of the change is sound.",
+        asks: [],
+        findings: [
+          { severity: "major", text: "Rename() rebuilds the name from Caption, losing the Usr prefix", where: "src/Schema/SchemaColumn.cs:142" },
+          { severity: "minor", text: "The guard checks the caption, not the name", where: "src/Schema/SchemaColumn.cs:88" },
+          { severity: "note", text: "AC-1 and AC-3 are covered by the new tests", where: "" },
+          { severity: "note", text: "No Jira task found for the follow-up refactoring", where: "" },
+        ],
+        structured: true,
+      },
       finishedAt: iso(5 * 60_000),
       sessionId: "44444444-4444-4444-8444-444444444444",
       worktree: "/tmp/agent-clio-929",
@@ -518,6 +538,12 @@ function mockAgentState(): AgentState {
       key: `${byNumber(934)?.id}|rereview|${byNumber(934)?.headOid}|reply@${iso(30 * 60_000)}`,
       scenario: "rereview",
       state: "needsYou",
+      result: {
+        summary: "The author fixed 2 of your 3 threads; on the third they argue the null check belongs to the caller.",
+        asks: [{ question: "Keep your finding that load() must handle a null config, or accept the author's point that the caller does?", options: ["Keep it", "Accept the author's point"] }],
+        findings: [{ severity: "major", text: "load() still dereferences a null config", where: "src/config/loader.ts:57" }],
+        structured: true,
+      },
       headline: "Would post: comment, 1 resolve, 1 dispute for you",
       finishedAt: iso(8 * 60_000),
       sessionId: "66666666-6666-4666-8666-666666666666",
@@ -714,6 +740,12 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
         else it.rank = rank;
         break;
       }
+      case "answer":
+        Object.assign(it, { state: "queued", resumeSession: true, answer: action.text, headline: "Queued: going on with your answer", finishedAt: undefined });
+        break;
+      case "ack":
+        Object.assign(it, { state: "done", finishedAt: at, later: false });
+        break;
       case "resumeSession":
         Object.assign(it, { state: "queued", resumeSession: true, headline: "Queued: resume (asked by you)", finishedAt: undefined });
         break;

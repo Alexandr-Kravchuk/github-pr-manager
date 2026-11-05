@@ -111,8 +111,11 @@ export function primaryActionLabel(item: AgentItem): string | null {
   if (item.scenario === "drive" && item.drive && item.drive.commits.length > 0 && !item.pushed) return "Push";
   if (item.plan && !item.published) return "Publish";
   if (item.scenario === "brief" && item.output) return "Review anyway";
-  if (item.sessionId) return item.scenario === "afterMerge" ? "Apply in session" : "Continue in session";
-  return null;
+  if (item.scenario === "afterMerge" && item.sessionId) return "Apply in session";
+  // A question waits: the card's answer box is the way on.
+  if ((item.result?.asks.length ?? 0) > 0) return "Answer";
+  // Nothing left for you: acknowledge it and it moves to Done today.
+  return "Done";
 }
 
 /** What a run of each scenario is doing, as the chip and the tray say it. */

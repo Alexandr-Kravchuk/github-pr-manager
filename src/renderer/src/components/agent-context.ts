@@ -8,10 +8,13 @@ export interface AgentContextValue {
   act: (action: AgentAction) => Promise<AgentActionResult>;
   /** Opens the companion's popover, on a run when given. */
   openCompanion: (runId?: string) => void;
+  /** Switches to the Board, where a result that waits for you has its card. */
+  showBoard: () => void;
 }
 
 export const AgentContext = createContext<AgentContextValue>({
   state: null,
   act: async () => ({ ok: false, error: "The agent is not available." }),
   openCompanion: () => {},
+  showBoard: () => {},
 });

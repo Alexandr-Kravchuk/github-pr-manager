@@ -6,6 +6,7 @@ import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, gitBashPath, summarizePlan } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
+import { answerMessage, parseRunResult, RESULT_RULE } from "../../shared/agent-result";
 import { AGENT_CLOSED, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
@@ -176,11 +177,21 @@ export const RESUME_PROMPT = "The app running you closed while you worked and ha
 export const RESUME_PROMPT_WRAPPER = `${RESUME_PROMPT} Whatever you recorded through the publish wrapper before is gone: if you had recorded your review, replies or resolves already, record them again — once.`;
 
 /** The rules every agent session gets on top of its prompt. */
+/** The rules every agent session gets on top of its prompt — ending with how to close its final message for the card. */
 export function agentRules(
   scenario: AgentScenario,
   mode: "shadow" | "on",
   folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null = null,
   pr: { repo: string; number: number; baseRef?: string } | null = null,
+): string {
+  return `${scenarioRules(scenario, mode, folder, pr)} ${RESULT_RULE}`;
+}
+
+function scenarioRules(
+  scenario: AgentScenario,
+  mode: "shadow" | "on",
+  folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null,
+  pr: { repo: string; number: number; baseRef?: string } | null,
 ): string {
   const plan =
     "You run unattended as the user's PR agent. First write your plan as a task list with TaskCreate — one short task per step — and keep it current with TaskUpdate as you go, so the user can follow along. (A skill that runs as a Workflow shows its own phases; then no task list is needed.)";
@@ -511,6 +522,10 @@ export function createAgent(deps: AgentDeps): Agent {
     item.startedAt = stamp();
     item.headline = runningHeadline(item);
     item.resumeSession = undefined;
+    // What an earlier run of this item showed (Resume, an answer) gives way to this run's.
+    for (const k of ["output", "result", "plan", "drive", "error", "published", "pushed", "interrupted"] as const) delete item[k];
+    const answer = item.answer;
+    item.answer = undefined;
     if (!resume) item.checkout = checkout ?? undefined;
     void store.save();
     changed();
@@ -588,7 +603,7 @@ export function createAgent(deps: AgentDeps): Agent {
     writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url, guardFile));
     const sessionId = resume ?? randomUUID();
     item.sessionId = sessionId;
-    store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: resume ? "resumed" : "started", headOid: pr?.headOid ?? keyHead(item.key) ?? undefined, sessionId });
+    store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: resume ? (answer ? "answered" : "resumed") : "started", ...(answer ? { detail: answer } : {}), headOid: pr?.headOid ?? keyHead(item.key) ?? undefined, sessionId });
 
     // The wrapper's own rule, and Write — which the guard holds to the payload folder.
     const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : [])])];
@@ -602,7 +617,7 @@ export function createAgent(deps: AgentDeps): Agent {
         sessionId,
         ...(resume ? { resume: true } : {}),
         kind,
-        prompt: resume ? (folder ? RESUME_PROMPT_WRAPPER : RESUME_PROMPT) : mine.prompt,
+        prompt: resume ? (answer ? answerMessage(answer, Boolean(folder)) : folder ? RESUME_PROMPT_WRAPPER : RESUME_PROMPT) : mine.prompt,
         appendSystemPrompt: agentRules(item.scenario, item.mode, folder, {
           repo: item.repo,
           number: item.prNumber,
@@ -665,7 +680,10 @@ export function createAgent(deps: AgentDeps): Agent {
       store.data.ledger[item.key].state = "failed";
     } else if (result && !result.isError && result.subtype === "success") {
       item.state = "needsYou";
-      item.output = result.text;
+      // The card's summary, questions and findings; the rest is the full report.
+      const read = parseRunResult(result.text);
+      item.output = read.body;
+      item.result = read.card;
       store.data.ledger[item.key].state = "prepared";
       const steps = folder ? readPlan(folder.runDir) : [];
       if (item.scenario === "brief") {
@@ -1164,6 +1182,36 @@ export function createAgent(deps: AgentDeps): Agent {
         if (!r || !r.paused) return { ok: false, error: "Nothing to resume." };
         resumeRun(item, r);
         break;
+      }
+      case "answer": {
+        if (r || item.state !== "needsYou") return { ok: false, error: "Only a finished run can be answered." };
+        if (item.scenario === "merge") return { ok: false, error: "A merge offer has no session to answer." };
+        if (item.scenario === "afterMerge") return { ok: false, error: "The Jira dry run changes nothing — apply it in a session." };
+        if (!item.sessionId) return { ok: false, error: "There is no session to answer — run it again." };
+        if (!item.worktree || !fs.existsSync(item.worktree)) return { ok: false, error: "Its folder is gone — run it again." };
+        // A drive pushes only what the app checked before its first session; after a restart that is gone.
+        if (item.scenario === "drive" && !item.pushTo) return { ok: false, error: "Since the app restarted, a drive starts over — run it again, or answer in a session." };
+        if (!snapshotPr(item.prId)) return { ok: false, error: "That PR is not on the dashboard any more." };
+        if (store.data.items.some((i) => i.prId === item.prId && i !== item && (i.state === "queued" || i.state === "working"))) {
+          return { ok: false, error: "The agent is already on this PR." };
+        }
+        item.state = "queued";
+        item.resumeSession = true;
+        item.answer = action.text;
+        item.headline = "Queued: going on with your answer";
+        item.finishedAt = undefined;
+        item.later = false;
+        void store.save();
+        changed();
+        tick();
+        return { ok: true };
+      }
+      case "ack": {
+        if (r || (item.state !== "needsYou" && item.state !== "error")) return { ok: false, error: "Only a result can be marked done." };
+        if (item.scenario === "merge") return { ok: false, error: "Merge it, or dismiss the offer." };
+        // Done, as it stands: it moves to Done today with its own headline.
+        await closeAs(item, item.headline);
+        return { ok: true };
       }
       case "resumeSession": {
         if (r || item.state !== "needsYou" || !item.interrupted) return { ok: false, error: "Only a run the app's closing interrupted can be resumed." };

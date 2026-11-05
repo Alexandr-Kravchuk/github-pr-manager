@@ -103,6 +103,7 @@ for (const mod of [
   "agent-stream.js",
   "agent-view.js",
   "agent-publish.js",
+  "agent-result.js",
   "stale.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
@@ -8899,8 +8900,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     test("agent view: the first button names what an item asks of you", () => {
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "error" })), "Run again");
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "brief", output: "x" })), "Review anyway");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", sessionId: "s" })), "Continue in session");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou" })), null);
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", sessionId: "s" })), "Done", "nothing left for you: acknowledge it");
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou" })), "Done");
+      const asks = { summary: "s", asks: [{ question: "q?", options: [] }], findings: [], structured: true };
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", sessionId: "s", result: asks })), "Answer", "a question waits");
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "working", sessionId: "s" })), null);
     });
 
@@ -9452,7 +9455,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("agent view: the first button of a prepared review is Publish, of an offer Merge", () => {
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, sessionId: "s" })), "Publish");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, published: true, sessionId: "s" })), "Continue in session");
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, published: true, sessionId: "s" })), "Done");
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "merge" })), "Merge");
     });
 
@@ -9859,7 +9862,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "push", runId: RID }), { type: "push", runId: RID });
       const drive = { base: "a".repeat(40), reasons: ["ci"], commits: [{ oid: "b".repeat(40), subject: "fix" }], stat: "", patch: "" };
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", drive, sessionId: "s" })), "Push");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", drive: { ...drive, commits: [] }, sessionId: "s" })), "Continue in session");
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", drive: { ...drive, commits: [] }, sessionId: "s" })), "Done");
     });
 
     test("main.js wiring: the agent's state is pulled and acted on over IPC, and pushed only to a visible window", () => {
@@ -10191,6 +10194,80 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       } finally {
         f.agent.stop();
       }
+    });
+
+    const agentResult = require(path.join(__dirname, "../dist/main/shared/agent-result.js"));
+    test("agent result: the card reads the session's prd-result block, held to its shapes; the rest is the report", () => {
+      const block = (o) => "## Summary\n\nLong prose.\n\n```prd-result\n" + JSON.stringify(o) + "\n```\n";
+      const r = agentResult.parseRunResult(
+        block({
+          summary: "Nothing to post: your approve stands.",
+          asks: [{ question: "Keep the finding?", options: ["Keep", "Drop", "", 3, "a", "b", "c"] }, { question: "" }, "junk"],
+          findings: [
+            { severity: "minor", text: "small", where: "a.ts:1" },
+            { severity: "BLOCKER", text: "big", where: "b.ts:2" },
+            { severity: "weird", text: "odd" },
+            { severity: "major", text: "" },
+          ],
+        }),
+      );
+      assert.strictEqual(r.card.structured, true);
+      assert.strictEqual(r.card.summary, "Nothing to post: your approve stands.");
+      assert.deepStrictEqual(r.card.asks, [{ question: "Keep the finding?", options: ["Keep", "Drop", "a", "b"] }], "only real questions, at most 4 string options");
+      assert.deepStrictEqual(r.card.findings.map((x) => [x.severity, x.text]), [["blocker", "big"], ["minor", "small"], ["note", "odd"]], "most severe first; unknown severity is a note; empty text dropped");
+      assert.strictEqual(r.body, "## Summary\n\nLong prose.", "the block is not part of the report");
+      // No block, or a broken one: the first real paragraph, without markdown.
+      const fallback = agentResult.parseRunResult("## Summary\n\n**Nothing was prepared** — see `x` and [the PR](https://x).\n\nMore.");
+      assert.deepStrictEqual([fallback.card.structured, fallback.card.summary, fallback.card.asks], [false, "Nothing was prepared — see x and the PR.", []]);
+      assert.strictEqual(agentResult.parseRunResult("```prd-result\n{not json\n```\nText after.").card.summary, "Text after.");
+      assert.strictEqual(agentResult.summarizeOutput("```\ncode\n```\n# H\n\n- first point\n- second"), "first point second");
+      assert.strictEqual(agentResult.summarizeOutput("x".repeat(400)).length, 240);
+      // The last block wins (a skill's own example earlier in the message doesn't).
+      const two = agentResult.parseRunResult(block({ summary: "first" }) + "\n" + block({ summary: "last" }));
+      assert.strictEqual(two.card.summary, "last");
+      assert.strictEqual(agentResult.resultCard({ output: "Plain words." }).summary, "Plain words.", "a result from before the block still has a summary");
+      assert.strictEqual(agentResult.resultCard({}), null);
+      for (const [scenario, mode] of [["review", "shadow"], ["brief", "on"], ["drive", "shadow"], ["afterMerge", "on"], ["rereview", "on"]]) {
+        assert.ok(agentCore.agentRules(scenario, mode).endsWith(agentResult.RESULT_RULE), `${scenario} sessions are told how to end`);
+      }
+    });
+
+    await atest("agent answer: a run that asks you waits with its question; your answer goes on in the same session; Done closes it", async () => {
+      const text = "Prose.\n\n```prd-result\n" + JSON.stringify({ summary: "One thread is disputed.", asks: [{ question: "Keep your finding?", options: ["Keep", "Drop"] }], findings: [] }) + "\n```";
+      const f = agentFixture({ script: succeed(text) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.deepStrictEqual([item.result.summary, item.result.asks[0].question, item.output], ["One thread is disputed.", "Keep your finding?", "Prose."]);
+        assert.strictEqual(view.primaryActionLabel(item), "Answer");
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        assert.deepStrictEqual(await f.agent.act({ type: "answer", runId: item.runId, text: "Q: Keep your finding?\nA: Keep" }), { ok: true });
+        await until(() => f.children.length === 2);
+        const c = f.children[1];
+        assert.strictEqual(c.args[c.args.indexOf("--resume") + 1], item.sessionId, "the same session");
+        assert.strictEqual(c.cwd, item.worktree);
+        await until(() => only(f)[0].state === "needsYou");
+        assert.match(c.written, /The user answered from the app: Q: Keep your finding\?\\nA: Keep/);
+        assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"answered"/);
+        assert.strictEqual(only(f)[0].answer, undefined, "the answer is used once");
+        // Done: it moves to Done today with its own headline.
+        assert.deepStrictEqual(await f.agent.act({ type: "ack", runId: item.runId }), { ok: true });
+        assert.strictEqual(only(f)[0].state, "done");
+        const board = view.boardColumns([], f.agent.getState(), view.todayKey(new Date()));
+        assert.ok(board.done.some((i) => i.runId === item.runId), "it shows in Done today");
+        assert.strictEqual((await f.agent.act({ type: "answer", runId: item.runId, text: "late" })).ok, false, "a closed result can't be answered");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("ipc: an answer is text held to a bound; Done names a run", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "answer", runId: RID, text: "  Keep  " }), { type: "answer", runId: RID, text: "Keep" });
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "answer", runId: RID, text: "" }));
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "answer", runId: RID, text: "x".repeat(ipcAgent.AGENT_HINT_MAX + 1) }));
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "ack", runId: RID }), { type: "ack", runId: RID });
     });
 
     test("ipc: an idle PR can be queued in front of a run, and a queued run moved; nothing else rides along", () => {

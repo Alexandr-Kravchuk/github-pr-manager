@@ -121,7 +121,7 @@ export function validateClaudeSessionId(value: unknown): string {
   return value;
 }
 
-const RUN_ACTIONS = ["skip", "later", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver", "publish", "push", "resumeSession"] as const;
+const RUN_ACTIONS = ["skip", "later", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver", "publish", "push", "resumeSession", "ack"] as const;
 const MERGE_METHODS = ["merge", "squash", "rebase"] as const;
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A hint is a note to the running session, not a document. */
@@ -148,11 +148,11 @@ export function validateAgentAction(value: unknown): AgentAction {
   if (v.type === "pauseAgent" || v.type === "resumeAgent") return { type: v.type };
   if (typeof v.runId !== "string" || !RUN_ID.test(v.runId)) throw new Error("agentAction: expected a run id.");
   if (v.type === "moveQueued") return { type: "moveQueued", runId: v.runId, before: before() };
-  if (v.type === "hint") {
+  if (v.type === "hint" || v.type === "answer") {
     if (typeof v.text !== "string" || !v.text.trim() || v.text.length > AGENT_HINT_MAX) {
-      throw new Error(`agentAction: a hint is 1–${AGENT_HINT_MAX} characters.`);
+      throw new Error(`agentAction: ${v.type === "hint" ? "a hint" : "an answer"} is 1–${AGENT_HINT_MAX} characters.`);
     }
-    return { type: "hint", runId: v.runId, text: v.text.trim() };
+    return { type: v.type, runId: v.runId, text: v.text.trim() };
   }
   if (v.type === "merge") {
     // The method the button's menu picked, if any; main still checks the repository allows it.

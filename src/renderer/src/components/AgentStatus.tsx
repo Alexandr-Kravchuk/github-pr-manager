@@ -1,6 +1,7 @@
 import { useContext } from "react";
 
 // Node-free (see AGENTS.md): which item a PR's card shows, and its run.
+import { resultCard } from "../../../shared/agent-result";
 import { itemForPr, runFor, todayKey } from "../../../shared/agent-view";
 import { currentStep } from "../../../shared/agent-stream";
 import type { AgentItem, PullRequest } from "../../../shared/types";
@@ -50,16 +51,21 @@ export function useAgentItem(pr: Pick<PullRequest, "id">): { item: AgentItem | n
 /** The line under a Roomy card. Nothing at all while the agent has nothing on this PR. */
 export function AgentStatusLine({ pr }: { pr: PullRequest }) {
   const { item, live } = useAgentItem(pr);
-  const { openCompanion } = useContext(AgentContext);
+  const { openCompanion, showBoard } = useContext(AgentContext);
   if (!item) return null;
-  const text = live ?? item.headline;
+  // Waiting for you: what it asks, else what it found — the headline only says the state.
+  const card = item.state === "needsYou" ? resultCard(item) : null;
+  const ask = card?.asks[0];
+  const text = live ?? (ask ? ask.question : card?.summary || item.headline);
   return (
     <div className="mt-2 flex items-center gap-2 border-t border-line pt-2 text-xs">
       <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", AGENT_STATE_DOT[item.state])} />
       <span className={cn("shrink-0 font-medium", STATE_TONE[item.state])}>
         {item.state !== "needsYou"
           ? AGENT_STATE_TEXT[item.state]
-          : item.scenario === "merge"
+          : ask
+            ? "Asks you"
+            : item.scenario === "merge"
             ? "Ready to merge"
             : item.scenario === "drive" && item.drive?.commits.length && !item.pushed
               ? "Would push"
@@ -73,7 +79,8 @@ export function AgentStatusLine({ pr }: { pr: PullRequest }) {
       {(item.state === "working" || item.state === "needsYou" || item.state === "error") && (
         <button
           type="button"
-          onClick={() => openCompanion(item.state === "working" ? item.runId : undefined)}
+          // A result waits on the Board, where its card is; a run is watched in the popover.
+          onClick={() => (item.state === "working" ? openCompanion(item.runId) : showBoard())}
           className="shrink-0 rounded-md border border-line-strong px-2 py-0.5 text-xs text-fg-secondary hover:bg-elevated"
         >
           {item.state === "working" ? "Watch" : "Open"}

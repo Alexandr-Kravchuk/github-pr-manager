@@ -818,8 +818,12 @@ export interface AgentItem {
   sessionId?: string;
   worktree?: string;
   checkout?: string;
-  /** The review it would post (shadow) or the brief — the session's final message. */
+  /** The review it would post (shadow) or the brief — the session's final message, without its result block. */
   output?: string;
+  /** What the final message means for you: one sentence, its questions to you, its findings (`shared/agent-result.ts`). */
+  result?: import("./agent-result").RunResultCard;
+  /** Your answer to its question, queued: the next run continues the session with it. */
+  answer?: string;
   error?: string;
   /** Put aside with "Later": still waiting, out of the way. */
   later?: boolean;
@@ -919,11 +923,14 @@ export interface AgentState {
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
 export type AgentAction =
-  | { type: "skip" | "later" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish" | "push" | "resumeSession"; runId: string }
+  | { type: "skip" | "later" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish" | "push" | "resumeSession" | "ack"; runId: string }
+
   // The whole agent — two members, so a check for both narrows the rest.
   | { type: "pauseAgent" }
   | { type: "resumeAgent" }
   | { type: "hint"; runId: string; text: string }
+  /** Your answer to a finished run's question: the same session goes on with it. */
+  | { type: "answer"; runId: string; text: string }
   | { type: "merge"; runId: string; method?: MergeMethod }
   /** `before`: the queued run it goes in front of; null or absent, the end of the queue. */
   | { type: "enqueue"; prId: string; before?: string | null }
