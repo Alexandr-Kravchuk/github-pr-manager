@@ -8016,15 +8016,25 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       });
     }
 
+    const gpr = guard.guardPrFromUrl("https://github.com/Acme/Widgets/pull/12");
+    test("agent guard: the PR a run works on is read from its URL", () => {
+      assert.deepStrictEqual(gpr, { url: "https://github.com/Acme/Widgets/pull/12", repo: "acme/widgets", number: 12 });
+      assert.strictEqual(guard.guardPrFromUrl("https://github.com/acme/widgets/issues/12"), null);
+    });
+
     test("agent guard: reads a review needs pass", () => {
       for (const cmd of [
         "gh pr view 12 --json title,body",
+        "gh pr view https://github.com/Acme/Widgets/pull/12 --json files",
+        "gh pr view 12 --repo acme/widgets --json title --jq .title",
         "gh pr diff 12",
         "gh pr checks 12",
         "gh api repos/acme/widgets/pulls/12/reviews --jq '.[].state'",
-        "gh api repos/acme/widgets/pulls/12/comments --paginate",
+        "gh api repos/Acme/Widgets/pulls/12/comments --jq '.[] | select(.user.login == \"x\") | .body'",
+        "gh api /repos/acme/widgets/pulls/12/comments --paginate",
+        "gh api 'repos/acme/widgets/pulls/12/files?per_page=100'",
       ]) {
-        assert.deepStrictEqual(guard.checkToolUse("review", "Bash", { command: cmd }), { allow: true }, cmd);
+        assert.deepStrictEqual(guard.checkToolUse("review", "Bash", { command: cmd }, gpr), { allow: true }, cmd);
       }
       assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "src/x.ts" }).allow, true);
       assert.strictEqual(guard.checkToolUse("review", "Skill", { skill: "x" }).allow, true);
@@ -8059,8 +8069,28 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ["drive", "git push origin HEAD:refs/heads/feature/x"],
         ["drive", "git -c core.hooksPath=/tmp commit -m x"],
         ["drive", "git diff --output=x"],
+        // Found by review: judged on text, these looked harmless.
+        ["review", "gh api -XDELETE repos/acme/widgets/issues/comments/1"],
+        ["review", "gh api repos/acme/widgets/pulls/12/reviews -fevent=APPROVE"],
+        ["review", "gh api repos/acme/widgets/pulls/12 '-X' POST"],
+        ["review", 'gh api repos/acme/widgets/pulls/12 "--method" POST'],
+        ["review", "gh api graphql -F query=@q.graphql"],
+        ["review", "gh api repos/acme/widgets/pulls/12/files *"],
+        ["review", 'gh api "$URL"'],
+        ["review", "gh api https://evil.example/repos/acme/widgets"],
+        ["review", "gh api repos/{owner}/{repo}/pulls/12"],
+        ["review", "gh api repos/other/repo/pulls/1"],
+        ["review", "gh pr view 99"],
+        ["review", "gh pr view https://github.com/other/repo/pull/12"],
+        ["review", "gh pr view 12 --repo other/repo"],
+        ["review", "gh pr view 12 --web"],
+        ["review", "gh pr view 12 'unbalanced"],
+        ["review", "gh api repos/acme/widgets/pulls/12/files?per_page=100"],
+        ["drive", "git diff '--output'=x"],
+        ["drive", "git '-c' core.pager=x log"],
+        ["drive", "git lg"],
       ]) {
-        assert.strictEqual(guard.checkToolUse(kind, "Bash", { command: cmd }).allow, false, `${kind}: ${cmd}`);
+        assert.strictEqual(guard.checkToolUse(kind, "Bash", { command: cmd }, gpr).allow, false, `${kind}: ${cmd}`);
       }
       for (const tool of ["Edit", "Write", "NotebookEdit"]) assert.strictEqual(guard.checkToolUse("review", tool, {}).allow, false, tool);
       for (const tool of ["WebFetch", "WebSearch", "PowerShell"]) assert.strictEqual(guard.checkToolUse("drive", tool, {}).allow, false, tool);
@@ -8080,14 +8110,25 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    test("agent guard: shell words — quotes, escapes, and what the shell would do instead of running one program", () => {
+      assert.deepStrictEqual(guard.shellWords(`gh api 'a b' "c \\"d\\"" e\\ f`), { words: ["gh", "api", "a b", 'c "d"', "e f"] });
+      assert.deepStrictEqual(guard.shellWords("x '.[] | .a; $b'"), { words: ["x", ".[] | .a; $b"] }, "single quotes are literal");
+      for (const cmd of ["a | b", "a > f", "a; b", "a && b", "a $(b)", "a `b`", 'a "$HOME"', "a $HOME", "a *", "a ?", "a [x]", "a\nb", "a 'b", 'a "b', "a \\"]) {
+        assert.ok("error" in guard.shellWords(cmd), cmd);
+      }
+    });
+
     test("agent guard hook: a refused call exits 2 with the reason, an allowed one exits 0", () => {
-      const run = (kind, call) => spawnSync(process.execPath, [hookJs, kind], { input: JSON.stringify(call), encoding: "utf8" });
+      const url = "https://github.com/acme/widgets/pull/1";
+      const run = (kind, call, prUrl = url) => spawnSync(process.execPath, [hookJs, kind, prUrl], { input: JSON.stringify(call), encoding: "utf8" });
       const bad = run("review", { tool_name: "Bash", tool_input: { command: "gh pr diff 1 > x" } });
       assert.strictEqual(bad.status, 2);
       assert.match(bad.stderr, /Shell operators/);
       assert.strictEqual(run("review", { tool_name: "Bash", tool_input: { command: "gh pr view 1" } }).status, 0);
+      assert.strictEqual(run("review", { tool_name: "Bash", tool_input: { command: "gh pr view 2" } }).status, 2, "another PR");
       assert.strictEqual(run("nonsense", { tool_name: "Read", tool_input: {} }).status, 2, "an unknown kind refuses everything");
-      assert.strictEqual(spawnSync(process.execPath, [hookJs, "review"], { input: "not json", encoding: "utf8" }).status, 2);
+      assert.strictEqual(run("review", { tool_name: "Read", tool_input: {} }, "not a pr url").status, 2, "an unreadable PR refuses everything");
+      assert.strictEqual(spawnSync(process.execPath, [hookJs, "review", url], { input: "not json", encoding: "utf8" }).status, 2);
     });
 
     const agentOn = (extra = {}) => cfg.validateAgent({ enabled: true, ...extra });
@@ -8260,7 +8301,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(at("--tools"), "Read,Bash,TaskCreate", "MCP tools aren't built-in tools");
       assert.ok(!a.includes("--model"), "no model flag means Claude Code's default");
       assert.deepStrictEqual(a.slice(a.indexOf("--allowedTools")), ["--allowedTools", "Read", "Bash(gh pr view *)", "mcp__jira__get", "TaskCreate"]);
-      assert.strictEqual(runner.hookCommand("C:\\App\\PR Dashboard.exe", "C:\\App\\hook.js", "review"), '"C:/App/PR Dashboard.exe" "C:/App/hook.js" review');
+      assert.strictEqual(
+        runner.hookCommand("C:\\App\\PR Dashboard.exe", "C:\\App\\hook.js", "review", "https://github.com/a/b/pull/7"),
+        '"C:/App/PR Dashboard.exe" "C:/App/hook.js" review "https://github.com/a/b/pull/7"',
+      );
     });
 
     const fakeChild = () => {

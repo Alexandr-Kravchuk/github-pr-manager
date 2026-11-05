@@ -226,7 +226,7 @@ export function createAgent(deps: AgentDeps): Agent {
     const kind = SCENARIO_KIND[item.scenario];
     const resolved = resolveSkillRefs(renderAgentPrompt(promptFor(item.scenario, all.claude), "", item.url), plugins());
     const settingsFile = path.join(deps.dir, "runs", item.runId, "settings.json");
-    writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind));
+    writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url));
     const sessionId = randomUUID();
     item.sessionId = sessionId;
     store.log({ at: now().toISOString(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "started", headOid: pr.headOid, sessionId });

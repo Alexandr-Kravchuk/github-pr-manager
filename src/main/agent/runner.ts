@@ -72,10 +72,15 @@ export function buildClaudeArgs(spec: RunSpec): string[] {
   ];
 }
 
-/** The command line Claude Code runs as the guard hook. Forward slashes: hooks run through a shell. */
-export function hookCommand(execPath: string, hookScript: string, kind: AgentRunKind): string {
-  const q = (p: string) => `"${p.replace(/\\/g, "/")}"`;
-  return `${q(execPath)} ${q(hookScript)} ${kind}`;
+/**
+ * The command line Claude Code runs as the guard hook: the run kind and the PR
+ * it works on, whose gh reads the guard holds it to. Forward slashes: hooks run
+ * through a shell. The URL is the PR's own (`https://host/owner/name/pull/N`),
+ * so it carries no quote.
+ */
+export function hookCommand(execPath: string, hookScript: string, kind: AgentRunKind, prUrl: string): string {
+  const q = (p: string) => `"${p.replace(/\\/g, "/").replace(/"/g, "")}"`;
+  return `${q(execPath)} ${q(hookScript)} ${kind} ${q(prUrl)}`;
 }
 
 /** Writes the per-run settings file: nothing but the guard on every tool call. */
