@@ -8892,6 +8892,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(cols.working.map((i) => i.prId), ["P3"]);
       assert.deepStrictEqual(cols.needsYou.map((i) => i.prId), ["P5", "P4"], "what you put off with Later comes last");
       assert.deepStrictEqual(cols.done.map((i) => i.prId).sort(), ["P6", "P8", "P9"], "a PR the filters hide still shows its work — the chip and the tray count it too");
+      const twice = view.boardColumns(prs, { enabled: true, items: [...items, vItem({ prId: "P6", state: "done", headline: "Reviewed", finishedAt: new Date(Date.now() - 1_000).toISOString() })], running: [], idle: {} }, today);
+      assert.deepStrictEqual(twice.done.map((i) => i.prId).sort(), ["P6", "P8", "P9"], "the same PR run twice today is one card");
+      const kept = twice.done.find((i) => i.prId === "P6");
+      assert.strictEqual(kept.finishedAt, now, "the latest run");
+      assert.strictEqual(twice.doneRuns[kept.runId], 2, "and it says it stands for two");
+      assert.deepStrictEqual(cols.doneRuns, {});
       assert.deepStrictEqual(cols.idle.map((x) => [x.pr.id, x.reason]), [["P6", "Nothing for the agent"], ["P7", "Draft"]]);
       const off = view.boardColumns(prs, { enabled: false, items: [], running: [], idle: {} }, today);
       assert.strictEqual(off.idle.length, prs.length);

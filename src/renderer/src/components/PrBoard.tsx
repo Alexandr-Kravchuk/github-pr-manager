@@ -281,6 +281,11 @@ export function PrBoard({ prs, onOpen, focus }: { prs: PullRequest[]; onOpen: (p
                   cols.done.map((item) => (
                     <ItemCard key={item.runId} item={item} onTitle={() => openItem(item)}>
                       {item.finishedAt && <span className="text-[11px] text-fg-subtle">{relativeTime(item.finishedAt)}</span>}
+                      {(cols.doneRuns[item.runId] ?? 1) > 1 && (
+                        <span className="text-[11px] text-fg-subtle" title="Today's earlier runs on this PR are folded into this card; this is the latest">
+                          · ran {cols.doneRuns[item.runId]} times today
+                        </span>
+                      )}
                       {resultCard(item)?.summary && <span className="line-clamp-2 w-full text-[11px] text-fg-subtle">{resultCard(item)?.summary}</span>}
                     </ItemCard>
                   ))

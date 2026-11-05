@@ -59,7 +59,10 @@ export interface BoardColumns {
   working: AgentItem[];
   /** Waiting for you; the ones put aside with "Later" come last. */
   needsYou: AgentItem[];
+  /** One card per PR and scenario: the latest of today's runs. */
   done: AgentItem[];
+  /** How many of today's runs a Done card stands for, by its run id — set only where more than one. */
+  doneRuns: Record<string, number>;
 }
 
 /**
@@ -70,7 +73,7 @@ export interface BoardColumns {
  * that left the dashboard (merged, closed): their work was still today's.
  */
 export function boardColumns(prs: readonly PullRequest[], state: AgentState, today: string): BoardColumns {
-  const cols: BoardColumns = { idle: [], queued: [], working: [], needsYou: [], done: [] };
+  const cols: BoardColumns = { idle: [], queued: [], working: [], needsYou: [], done: [], doneRuns: {} };
   const busy = new Set<string>();
   for (const item of state.items) {
     if (item.state === "queued") cols.queued.push(item);
@@ -86,6 +89,19 @@ export function boardColumns(prs: readonly PullRequest[], state: AgentState, tod
   cols.working.sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
   cols.needsYou.sort((a, b) => Number(a.later ?? false) - Number(b.later ?? false) || (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
   cols.done.sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""));
+  // The same PR run twice today (you handed it over again, a new answer came)
+  // is one card — its latest result — that says how many runs it stands for.
+  const latest = new Map<string, AgentItem>();
+  cols.done = cols.done.filter((item) => {
+    const key = `${item.prId}|${item.scenario}`;
+    const kept = latest.get(key);
+    if (!kept) {
+      latest.set(key, item);
+      return true;
+    }
+    cols.doneRuns[kept.runId] = (cols.doneRuns[kept.runId] ?? 1) + 1;
+    return false;
+  });
   return cols;
 }
 
@@ -329,6 +345,7 @@ export function boardLanes(cols: BoardColumns): Record<BoardLane, BoardColumns> 
     working: cols.working.filter((i) => laneOfScenario(i.scenario) === l),
     needsYou: cols.needsYou.filter((i) => laneOfScenario(i.scenario) === l),
     done: cols.done.filter((i) => laneOfScenario(i.scenario) === l),
+    doneRuns: cols.doneRuns,
   });
   return { mine: lane("mine"), review: lane("review") };
 }
