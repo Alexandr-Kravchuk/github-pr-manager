@@ -8941,7 +8941,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       no("twg jira workitem get ENG-1 -ojson", /short flags go on their own/);
       no("twg jira workitem get ENG-1 --detail create", /reads like a subcommand/);
       no("twg jira workitem query --fields summary", /reads like a subcommand/);
-      ok("twg jira workitem query --fields=summary --jql='key = ENG-1'");
+      assert.deepStrictEqual(guard.checkBash("review", "twg jira workitem query --fields=summary --jql='key = ENG-1'", gpr), { allow: true }, "anything goes attached");
       no("twg jira workitem comment create ENG-1 --body x");
       no("twg confluence content update 123 --body x");
       no("twg jira workitem get transition ENG-1", /not one of the reads/);
