@@ -9580,18 +9580,32 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(driveMod.sshTarget("https://github.com/a/b.git"), null);
       const snapDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-sshsnap-"));
       const asked = [];
-      const snap = path.join(snapDir, "ssh_config");
-      assert.strictEqual(driveMod.snapshotSsh("git@github-work:a/b.git", snap, (args) => (asked.push(args), "host github-work\nhostname github.com\nuser git\n")), true);
+      const snapshot = driveMod.snapshotSsh("git@github-work:a/b.git", (args) => (asked.push(args), "host github-work\nhostname github.com\nuser git\n"));
       assert.deepStrictEqual(asked, [["-G", "-l", "git", "github-work"]]);
-      assert.match(nfsA.readFileSync(snap, "utf8"), /^hostname github\.com$/m);
-      assert.strictEqual(driveMod.snapshotSsh("https://github.com/a/b.git", snap, () => ""), false, "nothing to snapshot for HTTPS");
-      assert.throws(() => driveMod.snapshotSsh("git@h:a/b", snap, () => "garbage"), /couldn't resolve/);
-      assert.throws(() => driveMod.snapshotSsh("ssh://-oProxyCommand=x@h/a", snap, () => "host h"), /isn't an SSH address|couldn't resolve/);
+      assert.match(snapshot, /^hostname github\.com$/m, "kept in memory, as text");
+      assert.strictEqual(driveMod.snapshotSsh("https://github.com/a/b.git", () => ""), null, "nothing to snapshot for HTTPS");
+      assert.throws(() => driveMod.snapshotSsh("git@h:a/b", () => "garbage"), /couldn't resolve/);
+      assert.throws(() => driveMod.snapshotSsh("ssh://-oProxyCommand=x@h/a", () => "host h"), /isn't an SSH address|couldn't resolve/);
       const withSsh = driveMod.pushArgs("git@github.com:a/b.git", "c".repeat(40), "main", "/h", undefined, "C:\\Users\\Me\\PR Dashboard\\agent\\runs\\r\\ssh_config");
       assert.ok(withSsh.includes('core.sshCommand=ssh -F "C:/Users/Me/PR Dashboard/agent/runs/r/ssh_config"'), withSsh.join(" "));
       assert.throws(() => driveMod.pushArgs("git@h:a", "c".repeat(40), "main", "/h", undefined, 'C:/x"y'), /can't be quoted/);
       const sg = driveMod.safeGit("/h");
       for (const c of ["log.showSignature=false", "core.pager=cat", "gpg.program=pr-agent-no-gpg", "core.fsmonitor=false"]) assert.ok(sg.includes(c), c);
+    });
+
+    await atest("drive: the SSH snapshot is a file only for the length of one push, and what a push is checked against never reaches disk", async () => {
+      let seen = null;
+      await driveMod.withSshSnapshot("host h\nhostname h\n", async (file) => {
+        seen = file;
+        assert.strictEqual(nfsA.readFileSync(file, "utf8"), "host h\nhostname h\n");
+      });
+      assert.ok(seen && !nfsA.existsSync(seen), "gone after the push");
+      await driveMod.withSshSnapshot(undefined, async (file) => assert.strictEqual(file, undefined, "HTTPS: no file"));
+      const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-store-"));
+      const st = agentStore.openStore(dir, "2026-11-05");
+      st.data.items.push({ runId: "r", key: "k", prId: "p", prNumber: 1, repo: "a/b", url: "u", title: "t", hostLabel: "GH", scenario: "drive", mode: "shadow", state: "needsYou", headline: "h", queuedAt: "", pushTo: { url: "https://h/a.git", commonDir: "c", worktreeGitDir: "g", fingerprint: "f", sshSnapshot: "host h" } });
+      await st.save();
+      assert.ok(!nfsA.readFileSync(path.join(dir, "state.json"), "utf8").includes("pushTo"), "a file a session could rewrite is never what a push trusts");
     });
 
     await atest("drive: each app git operation gets a fresh, empty hooks folder, gone afterwards", async () => {

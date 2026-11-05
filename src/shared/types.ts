@@ -839,7 +839,7 @@ export interface AgentItem {
    * a fingerprint of the repository's git config and hooks and your global
    * git config. A push goes out only while the fingerprint still matches.
    */
-  pushTo?: { url: string; commonDir: string; worktreeGitDir: string | null; fingerprint: string; sshConfig?: string };
+  pushTo?: { url: string; commonDir: string; worktreeGitDir: string | null; fingerprint: string; sshSnapshot?: string };
 }
 
 export interface AgentDriveResult {

@@ -30,7 +30,7 @@ import { ghError, prepareRunFolder, publishPlan, readPlan, runFolderRoots, runGh
 import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
-import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, type GitPlace } from "./drive";
+import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { openStore, type AgentItemRecord, type AgentStore } from "./store";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
@@ -446,10 +446,9 @@ export function createAgent(deps: AgentDeps): Agent {
             path.resolve(dir, (await git([...safeGit(h), "rev-parse", "--git-dir"], dir)).trim()),
           ]);
           const place: GitPlace = { workTree: dir, gitDir: worktreeGitDir };
-          // An SSH remote: your SSH settings resolved now, kept where the session can't write.
-          const sshFile = path.join(runDir, "ssh_config");
-          const ssh = snapshotSsh(url, sshFile, deps.sshResolve ?? ((args) => execFileSync("ssh", args, { encoding: "utf8", timeout: 15_000, env: launcherEnv(process.env), stdio: ["ignore", "pipe", "ignore"] })));
-          item.pushTo = { url, commonDir, worktreeGitDir, fingerprint: await gitFingerprint(git, place, commonDir, url), ...(ssh ? { sshConfig: sshFile } : {}) };
+          // An SSH remote: your SSH settings resolved now, kept in memory — no file a session could reach.
+          const ssh = snapshotSsh(url, deps.sshResolve ?? ((args) => execFileSync("ssh", args, { encoding: "utf8", timeout: 15_000, env: launcherEnv(process.env), stdio: ["ignore", "pipe", "ignore"] })));
+          item.pushTo = { url, commonDir, worktreeGitDir, fingerprint: await gitFingerprint(git, place, commonDir, url), ...(ssh !== null ? { sshSnapshot: ssh } : {}) };
         } catch (e) {
           return fail("Could not prepare the drive", (e as Error).message);
         }
@@ -786,7 +785,7 @@ export function createAgent(deps: AgentDeps): Agent {
       item.headline = "Pushing…";
       changed();
       try {
-        await git(pushArgs(pushTo.url, drive.head, pr.headRefName, hooksDir, place, pushTo.sshConfig), worktree);
+        await withSshSnapshot(pushTo.sshSnapshot, (sshFile) => git(pushArgs(pushTo.url, drive.head, pr.headRefName, hooksDir, place, sshFile), worktree));
       } catch (e) {
         return `git refused the push: ${(e as Error).message}`;
       }

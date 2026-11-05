@@ -115,7 +115,11 @@ export function openStore(dir: string, today: string): AgentStore {
   const store: AgentStore = {
     data,
     save() {
-      const text = JSON.stringify(store.data, null, 2);
+      // A drive's `pushTo` (where its push goes, the fingerprint and SSH
+      // snapshot it is checked against) lives in memory only: a file on disk
+      // is one a session that ran code could have rewritten. After a restart
+      // a drive's Push asks for the run again.
+      const text = JSON.stringify(store.data, (key, value: unknown) => (key === "pushTo" ? undefined : value), 2);
       chain = chain.then(() => writeFileAtomic(stateFile, text)).catch((e) => console.warn(`[agent] could not save state: ${(e as Error).message}`));
       return chain;
     },

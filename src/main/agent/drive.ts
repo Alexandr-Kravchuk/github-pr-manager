@@ -166,20 +166,29 @@ export type SshResolver = (args: string[]) => string;
 
 /**
  * Your SSH settings for a remote, resolved by ssh itself (`ssh -G`) before
- * the session and kept in a file of the app's — the push then runs
- * `ssh -F <that file>`, so nothing a session could change in ~/.ssh or the
- * system's ssh config (an Include, a ProxyCommand, a Match exec) is read for
- * it. Throws when ssh can't resolve the host.
+ * the session, as text the app keeps in memory — never in a file a session
+ * could reach. The push writes it to a fresh temporary file
+ * (`withSshSnapshot`) and runs `ssh -F <that file>`, so nothing in ~/.ssh
+ * or the system's ssh config (an Include, a ProxyCommand, a Match exec) is
+ * read for it. Null for a remote that isn't SSH; throws when ssh can't
+ * resolve the host.
  */
-export function snapshotSsh(url: string, file: string, resolve: SshResolver): boolean {
+export function snapshotSsh(url: string, resolve: SshResolver): string | null {
   const t = sshTarget(url);
-  if (!t) return false;
+  if (!t) return null;
   if (!/^[A-Za-z0-9._-]+$/.test(t.host) || (t.user && !/^[A-Za-z0-9._-]+$/.test(t.user))) throw new Error(`"${url}" isn't an SSH address the agent pushes to`);
   const out = resolve(["-G", ...(t.port ? ["-p", t.port] : []), ...(t.user ? ["-l", t.user] : []), t.host]);
   if (!/^host /m.test(out)) throw new Error(`ssh couldn't resolve ${t.host}`);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, out);
-  return true;
+  return out;
+}
+
+/** The snapshot in a fresh private file for the length of one push, then gone; no file without a snapshot. */
+export function withSshSnapshot<T>(snapshot: string | undefined, fn: (file: string | undefined) => Promise<T>): Promise<T> {
+  if (snapshot === undefined) return fn(undefined);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "prd-ssh-"));
+  const file = path.join(dir, "ssh_config");
+  fs.writeFileSync(file, snapshot, { mode: 0o600 });
+  return fn(file).finally(() => fs.rmSync(dir, { recursive: true, force: true }));
 }
 
 /**
