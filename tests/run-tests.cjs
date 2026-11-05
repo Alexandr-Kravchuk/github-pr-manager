@@ -9606,6 +9606,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       st.data.items.push({ runId: "r", key: "k", prId: "p", prNumber: 1, repo: "a/b", url: "u", title: "t", hostLabel: "GH", scenario: "drive", mode: "shadow", state: "needsYou", headline: "h", queuedAt: "", pushTo: { url: "https://h/a.git", commonDir: "c", worktreeGitDir: "g", fingerprint: "f", sshSnapshot: "host h" } });
       await st.save();
       assert.ok(!nfsA.readFileSync(path.join(dir, "state.json"), "utf8").includes("pushTo"), "a file a session could rewrite is never what a push trusts");
+      // Nor read back: a pushTo planted in the file is dropped on load.
+      const planted = JSON.parse(nfsA.readFileSync(path.join(dir, "state.json"), "utf8"));
+      planted.items[0].pushTo = { url: "https://evil/x.git", commonDir: "c", worktreeGitDir: "g", fingerprint: "f" };
+      nfsA.writeFileSync(path.join(dir, "state.json"), JSON.stringify(planted));
+      assert.strictEqual(agentStore.readStore(path.join(dir, "state.json"), "2026-11-05").items[0].pushTo, undefined);
     });
 
     await atest("drive: each app git operation gets a fresh, empty hooks folder, gone afterwards", async () => {

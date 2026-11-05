@@ -53,7 +53,11 @@ export function readStore(file: string, day: string): AgentStoreData {
       ledger: raw.ledger ?? {},
       day: typeof raw.day === "string" ? raw.day : day,
       runsToday: typeof raw.runsToday === "number" ? raw.runsToday : 0,
-      items: raw.items,
+      // Never from disk: a drive's push is checked against what the app took in memory before the session.
+      items: raw.items.map((item) => {
+        const { pushTo: _dropped, ...rest } = item as AgentItemRecord;
+        return rest as AgentItemRecord;
+      }),
       acceptedUnchanged: typeof raw.acceptedUnchanged === "number" ? raw.acceptedUnchanged : 0,
       drive: typeof raw.drive === "object" && raw.drive !== null ? raw.drive : {},
     };
