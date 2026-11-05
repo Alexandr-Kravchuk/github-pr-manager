@@ -349,11 +349,20 @@ export function describePlan(p: PublishSummary): string {
   return parts.length ? parts.join(", ") : "nothing";
 }
 
-/** The plan file's lines → steps; a line that doesn't parse is dropped (the capture script wrote only checked ones). */
+/**
+ * The plan file's lines → steps; a line that doesn't parse is dropped (the
+ * capture script wrote only checked ones). A session may record again — after
+ * "Edit first", after your answer — so a step recorded twice counts once, and
+ * of several reviews only the last stands: a run posts one review, and the
+ * summary you are shown is that one.
+ */
 export function readPlanLines(text: string): PublishStep[] {
   const steps: PublishStep[] = [];
+  const seen = new Set<string>();
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
+    if (seen.has(line.trim())) continue;
+    seen.add(line.trim());
     try {
       const raw = JSON.parse(line) as { kind?: unknown };
       if (raw.kind === "review") {
@@ -381,7 +390,8 @@ export function readPlanLines(text: string): PublishStep[] {
       // A torn last line from a killed session.
     }
   }
-  return steps;
+  const lastReview = steps.map((s) => s.kind).lastIndexOf("review");
+  return steps.filter((s, i) => s.kind !== "review" || i === lastReview);
 }
 
 /** A comment back in the API's spelling, so a stored step re-checks through the same parser. */

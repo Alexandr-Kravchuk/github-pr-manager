@@ -304,6 +304,8 @@ export interface AgentSettings {
   permissions: {
     /** `--allowedTools` rules per kind of run. */
     tools: Record<AgentRunKind, string[]>;
+    /** The defaults' version these lists were saved under (`AGENT_TOOLS_VERSION`): newer default rules are added on load. */
+    toolsVersion: number;
     /** Allow pushing to the head branch of your own PR (drive). */
     pushOwnBranch: boolean;
   };
@@ -848,6 +850,10 @@ export interface AgentItem {
   plan?: import("./agent-publish").PublishSummary;
   /** The review run's own folder (wrapper, payloads, plan, publish progress). */
   runFolder?: string;
+  /** The fingerprint of the plan file `plan` was read from: Publish posts only while the file still matches it. */
+  planHash?: string;
+  /** The plan changed in the session after you first saw it ("Edit first"): its Publish isn't "accepted unchanged". */
+  planEdited?: boolean;
   /** The plan is on GitHub. */
   published?: boolean;
   /** A merge offer: the methods the repository allows and the one the button uses. */

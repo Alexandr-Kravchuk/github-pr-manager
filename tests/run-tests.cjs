@@ -10270,6 +10270,102 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "ack", runId: RID }), { type: "ack", runId: RID });
     });
 
+    // --- blockers from the deep test: what you saw is what goes out; off is off; drive can do its job ---
+    test("agent publish: a plan recorded again counts once — one review, the last; a step written twice, once", () => {
+      const review = (body) => JSON.stringify({ kind: "review", event: "COMMENT", body, comments: [] });
+      const reply = JSON.stringify({ kind: "reply", replyTo: 5, body: "Fixed in the last commit." });
+      const steps = pub.readPlanLines([review("first"), reply, reply, review("second")].join("\n"));
+      assert.deepStrictEqual(steps.map((x) => x.kind), ["reply", "review"]);
+      assert.strictEqual(steps[1].body, "second", "the summary you see and what is posted are the same review");
+    });
+
+    await atest("agent publish: a plan changed in the session since you saw it posts nothing; the card shows the new one and Publish then posts it", async () => {
+      const posted = [];
+      const f = agentFixture({
+        script: reviewWithPlan("REQUEST_CHANGES"),
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => (posted.push({ args, body: JSON.parse(opts.input) }), { code: 0, stdout: "{}", stderr: "" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.plan.event, "REQUEST_CHANGES");
+        // "Edit first": in the session you turn it into an approve, and it records the review again.
+        nfsA.appendFileSync(path.join(item.runFolder, "plan.jsonl"), JSON.stringify({ kind: "review", event: "APPROVE", body: "Edited: looks good", comments: [] }) + "\n");
+        const first = await f.agent.act({ type: "publish", runId: item.runId });
+        assert.strictEqual(first.ok, false);
+        assert.match(first.error, /changed in the session/);
+        assert.strictEqual(posted.length, 0, "nothing you hadn't seen went out");
+        assert.strictEqual(only(f)[0].plan.event, "APPROVE", "the card now shows what would go out");
+        assert.match(only(f)[0].headline, /changed in the session/);
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        const reviews = posted.filter((p) => /\/reviews$/.test(p.args[1]));
+        assert.strictEqual(reviews.length, 1, "one review, never two");
+        assert.strictEqual(reviews[0].body.event, "APPROVE");
+        assert.strictEqual(f.agent.getState().acceptedUnchanged, 0, "an edited plan isn't 'published exactly as prepared'");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent off: switching it off stops the runs in flight and says why; your clicks still work, nothing new starts", async () => {
+      const f = agentFixture({ script: keepWorking, agent: { scenarios: { review: { mode: "on" } } } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+        const runId = only(f)[0].runId;
+        f.setAgent({ enabled: false, scenarios: { review: { mode: "on" } } });
+        f.agent.refresh();
+        await until(() => only(f)[0].state === "needsYou");
+        assert.strictEqual(only(f)[0].headline, "Stopped — the agent was switched off");
+        assert.strictEqual(f.agent.getState().running.length, 0);
+        // Your own clicks, with the agent off.
+        assert.deepStrictEqual(await f.agent.act({ type: "later", runId }), { ok: true });
+        assert.match((await f.agent.act({ type: "retry", runId })).error, /The agent is off/, "a new run waits until it is on");
+        assert.match((await f.agent.act({ type: "enqueue", prId: "PR_R" })).error, /The agent is off/);
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId }), { ok: true });
+        assert.strictEqual(f.children.length, 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("agent tools: drive can merge the base in and read its threads; a list saved before that gets the new rules once", () => {
+      for (const rule of ["Bash(git merge *)", "Bash(gh api *)", "Bash(gh pr diff *)"]) assert.ok(ad.DEFAULT_AGENT_TOOLS.drive.includes(rule), rule);
+      assert.ok(!ad.DEFAULT_AGENT_TOOLS.drive.some((r) => /npm|test/.test(r)), "still no test commands by default");
+      // A list saved before versions: it gets the rules added since.
+      const old = ["Read", "Edit", "Bash(git commit *)"];
+      const migrated = cfg.validateAgent({ permissions: { tools: { drive: old } } });
+      assert.deepStrictEqual(migrated.permissions.tools.drive.slice(0, 3), old, "your own rules stay as they were");
+      assert.ok(migrated.permissions.tools.drive.includes("Bash(git merge *)"));
+      assert.strictEqual(migrated.permissions.toolsVersion, ad.AGENT_TOOLS_VERSION);
+      // Saved at this version, a rule you removed stays removed.
+      const mine = cfg.validateAgent({ permissions: { tools: { drive: old }, toolsVersion: ad.AGENT_TOOLS_VERSION } });
+      assert.deepStrictEqual(mine.permissions.tools.drive, old);
+      // The guard lets drive do exactly that.
+      const pr = guard.guardPrFromUrl("https://creatio.ghe.com/eng/core/pull/7");
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "git merge origin/main" }, pr).allow, true);
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "gh api repos/eng/core/pulls/7/comments --hostname creatio.ghe.com" }, pr).allow, true);
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "gh api repos/eng/core/pulls/7/comments --hostname github.com" }, pr).allow, false);
+    });
+
+    await atest("agent gh: every session's gh points at its PR's own host and repository", async () => {
+      const f = agentFixture({ script: succeed("ok") });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1);
+        assert.strictEqual(f.children[0].env.GH_HOST, "github.com");
+        assert.strictEqual(f.children[0].env.GH_REPO, "github.com/a/b");
+      } finally {
+        f.agent.stop();
+      }
+      assert.deepStrictEqual(agentCore.ghTarget("https://creatio.ghe.com/eng/core/pull/7", "eng/core"), { GH_HOST: "creatio.ghe.com", GH_REPO: "creatio.ghe.com/eng/core" });
+      assert.deepStrictEqual(agentCore.ghTarget("not a url", "eng/core"), {});
+      assert.deepStrictEqual(agentCore.ghTarget("https://h/x/y/pull/1", "x/y; rm -rf"), {}, "only a plain owner/name");
+    });
+
     test("ipc: an idle PR can be queued in front of a run, and a queued run moved; nothing else rides along", () => {
       const RID = "00000000-0000-4000-8000-000000000001";
       const RID2 = "00000000-0000-4000-8000-000000000002";

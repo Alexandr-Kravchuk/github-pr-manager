@@ -79,11 +79,18 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "TaskCreate",
     "TaskUpdate",
     "Bash(gh pr view *)",
+    "Bash(gh pr diff *)",
     "Bash(gh pr checks *)",
     "Bash(gh run view *)",
+    // The review threads to answer, and anything else of this PR's — reads only (the guard holds them to it).
+    "Bash(gh api *)",
     "Bash(git status*)",
     "Bash(git diff *)",
     "Bash(git log *)",
+    "Bash(git show *)",
+    "Bash(git merge-base *)",
+    // A conflict is resolved by merging the base branch in (never by a rebase).
+    "Bash(git merge *)",
     "Bash(git add *)",
     "Bash(git commit *)",
     // No test commands by default: a test runs your repository's code, and the
@@ -92,6 +99,28 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
   ],
   afterMerge: ["Read", "Grep", "Glob", "Skill", "ToolSearch", "TaskCreate", "TaskUpdate", "Bash(gh pr view *)", "Bash(gh api *)", "Bash(twg *)"],
 };
+
+/**
+ * The version of the default tool lists. A saved list is yours and is kept as
+ * you left it — but rules added to the defaults later would then never reach
+ * it, so each version names what it added, and loading a list saved under an
+ * older version adds those rules (once: the list is saved at this version).
+ */
+export const AGENT_TOOLS_VERSION = 2;
+export const AGENT_TOOL_ADDITIONS: ReadonlyArray<{ version: number; add: Partial<Record<AgentRunKind, string[]>> }> = [
+  // Drive couldn't merge the base in (a conflict) nor read the threads it answers: every drive ended "No commits".
+  { version: 2, add: { drive: ["Bash(gh pr diff *)", "Bash(gh api *)", "Bash(git show *)", "Bash(git merge-base *)", "Bash(git merge *)"] } },
+];
+
+/** A saved tool list brought up to date: the rules added to the defaults since it was saved, appended. */
+export function migrateTools(kind: AgentRunKind, saved: readonly string[], savedVersion: number): string[] {
+  const out = [...saved];
+  for (const step of AGENT_TOOL_ADDITIONS) {
+    if (step.version <= savedVersion) continue;
+    for (const rule of step.add[kind] ?? []) if (!out.includes(rule)) out.push(rule);
+  }
+  return out;
+}
 
 export const DEFAULT_AGENT_SIGNATURE = "🤖 Prepared by the PR agent (Claude Code) on my behalf. Reply here — I read every reply.";
 
@@ -145,7 +174,7 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
     quietHours: { enabled: false, from: "20:00", to: "08:00" },
     promoteAfter: 10,
   },
-  permissions: { tools: DEFAULT_AGENT_TOOLS, pushOwnBranch: true },
+  permissions: { tools: DEFAULT_AGENT_TOOLS, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: true },
   companion: { headerChip: true, trayState: true },
   notifications: { needsYou: true, failed: true, finished: false },
   policy: { signature: DEFAULT_AGENT_SIGNATURE, logRetentionDays: 30 },

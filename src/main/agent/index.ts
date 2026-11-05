@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
-import { describePlan, gitBashPath, summarizePlan } from "../../shared/agent-publish";
+import { describePlan, gitBashPath, readPlanLines, summarizePlan } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { answerMessage, parseRunResult, RESULT_RULE } from "../../shared/agent-result";
 import { AGENT_CLOSED, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
@@ -27,7 +27,7 @@ import type {
 } from "../../shared/types";
 import { chooseMergeMethod, mergeArgs } from "./merge";
 import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
-import { ghError, prepareRunFolder, publishPlan, readPlan, runFolderRoots, runGh, type GhRunner, type RunFolder } from "./publish";
+import { ghError, planHash, prepareRunFolder, publishedCount, publishPlan, readPlanText, runFolderRoots, runGh, type GhRunner, type RunFolder } from "./publish";
 import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
@@ -171,6 +171,16 @@ const LEDGER_IDLE: Record<LedgerEntry["state"], string> = {
   dismissed: "You took it out of the queue — drag it back to run it",
 };
 
+/** The PR's host and "host/owner/name", for gh's GH_HOST and GH_REPO. */
+export function ghTarget(prUrl: string, repo: string): Record<string, string> {
+  try {
+    const host = new URL(prUrl).hostname.toLowerCase();
+    return /^[a-z0-9.-]+$/.test(host) && /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo) ? { GH_HOST: host, GH_REPO: `${host}/${repo}` } : {};
+  } catch {
+    return {};
+  }
+}
+
 /** The first message of a session Resume picks up again. */
 export const RESUME_PROMPT = "The app running you closed while you worked and has started you again. Continue where you stopped and finish the task.";
 /** …and of one with a publish wrapper, whose folder the app makes afresh. */
@@ -217,6 +227,7 @@ function scenarioRules(
       `Never push and never rewrite history (no rebase, no amend of a commit that was already there): the app pushes your commits to the PR's branch as a fast-forward${later}, after checking them. ` +
       `Resolve a conflict by merging the base branch in — it is fetched for you as ${pr?.baseRef ?? "<remote>/<base>"}; this session's git has no network — never by rebasing. CI runs once the app pushes, so don't wait for it. ` +
       (w ? `To answer a reviewer in a thread, write the reply to a file under ${out}/ and run \`${w} reply ${target} <comment-id> <file>\`; the app posts it after the push. ` : "") +
+      `Find what to fix with gh, which already points at this PR's host and repository: the failing checks with \`gh pr checks ${pr?.number ?? "<number>"}\` and \`gh run view <run-id> --log-failed\`, the review threads with \`gh api repos/${pr?.repo ?? "<owner/repo>"}/pulls/${pr?.number ?? "<number>"}/comments\`. ` +
       `Leave .git, .github, .claude, .husky, .npmrc and git attributes alone. End with what you changed and why. ${never}`
     );
   }
@@ -274,7 +285,12 @@ interface Running {
   takeOver: boolean;
   /** Paused by pausing the whole agent — resuming the agent resumes it; one you paused yourself stays paused. */
   byAgentPause: boolean;
+  /** Stopped because the agent was switched off. */
+  offStop: boolean;
 }
+
+/** What starts a session — refused while the agent is off; everything else is your own click and works. */
+const STARTS_A_RUN: ReadonlySet<AgentAction["type"]> = new Set(["enqueue", "retry", "reviewAnyway", "answer", "resumeSession"]);
 
 export function createAgent(deps: AgentDeps): Agent {
   const now = deps.now ?? (() => new Date());
@@ -393,11 +409,24 @@ export function createAgent(deps: AgentDeps): Agent {
     return item;
   }
 
+  /**
+   * Off means off: runs in flight stop (their results wait for you, with the
+   * reason), and nothing they prepared goes out on its own.
+   */
+  function stopRunsForOff(): void {
+    for (const r of running.values()) {
+      if (r.offStop) continue;
+      r.offStop = true;
+      r.handle.stop();
+    }
+  }
+
   function onSnapshot(snapshot: DashboardResponse): void {
     const s = settings();
     plannedWith = JSON.stringify(s);
     if (!s?.enabled) {
       idle = Object.fromEntries(snapshot.pullRequests.map((p) => [p.id, "The agent is off"]));
+      stopRunsForOff();
       return;
     }
     const own = new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!));
@@ -523,7 +552,7 @@ export function createAgent(deps: AgentDeps): Agent {
     item.headline = runningHeadline(item);
     item.resumeSession = undefined;
     // What an earlier run of this item showed (Resume, an answer) gives way to this run's.
-    for (const k of ["output", "result", "plan", "drive", "error", "published", "pushed", "interrupted"] as const) delete item[k];
+    for (const k of ["output", "result", "plan", "planHash", "planEdited", "drive", "error", "published", "pushed", "interrupted"] as const) delete item[k];
     const answer = item.answer;
     item.answer = undefined;
     if (!resume) item.checkout = checkout ?? undefined;
@@ -610,7 +639,7 @@ export function createAgent(deps: AgentDeps): Agent {
     // Read-only runs may read the plugins' folders (a skill's Workflow reads its script from there); a run that edits never gets them.
     const addDirs = [...(folder ? [folder.outDir] : []), ...pluginDirs];
 
-    const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false, byAgentPause: false };
+    const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false, byAgentPause: false, offStop: false };
     const handle = startRun(
       {
         cwd: dir,
@@ -630,8 +659,14 @@ export function createAgent(deps: AgentDeps): Agent {
         effort: s.effort,
         settingsFile,
         timeoutMs: s.limits.maxMinutes * 60_000,
-        // No push from anywhere in a drive session: the app pushes after checking the commits.
-        ...(kind === "drive" ? { env: NO_PUSH_ENV } : {}),
+        env: {
+          // No push from anywhere in a drive session: the app pushes after checking the commits.
+          ...(kind === "drive" ? NO_PUSH_ENV : {}),
+          // gh reads this PR's own host and repository. It can't tell them from
+          // git in a drive (every remote URL is rewritten there), and without
+          // a host it would ask github.com — the wrong place for an Enterprise PR.
+          ...ghTarget(item.url, item.repo),
+        },
       },
       (progress) => {
         if (progress.activity && progress.activity !== entry.progress?.activity) {
@@ -670,6 +705,10 @@ export function createAgent(deps: AgentDeps): Agent {
           item.headline = `Could not open your terminal: ${(e as Error).message}`;
         });
       }
+    } else if (entry.offStop) {
+      item.state = "needsYou";
+      item.headline = "Stopped — the agent was switched off";
+      store.data.ledger[item.key].state = "failed";
     } else if (outcome.stopped) {
       item.state = "needsYou";
       item.headline = "Stopped by you";
@@ -685,7 +724,9 @@ export function createAgent(deps: AgentDeps): Agent {
       item.output = read.body;
       item.result = read.card;
       store.data.ledger[item.key].state = "prepared";
-      const steps = folder ? readPlan(folder.runDir) : [];
+      // Read once: the summary you are shown and its fingerprint come from the same text.
+      const planText = folder ? readPlanText(folder.runDir) : "";
+      const steps = readPlanLines(planText);
       if (item.scenario === "brief") {
         item.headline = "Brief ready";
       } else if (item.scenario === "afterMerge") {
@@ -708,7 +749,10 @@ export function createAgent(deps: AgentDeps): Agent {
           fail("The run rewrote the branch's history — nothing to push", "The app pushes fast-forwards only; run it again.");
         } else {
           item.drive = read.drive;
-          if (steps.length > 0) item.plan = summarizePlan(steps);
+          if (steps.length > 0) {
+            item.plan = summarizePlan(steps);
+            item.planHash = planHash(planText);
+          }
           const n = read.drive.commits.length;
           const last = read.drive.commits[n - 1].subject;
           if (!s.permissions.pushOwnBranch) {
@@ -720,6 +764,7 @@ export function createAgent(deps: AgentDeps): Agent {
         }
       } else if (steps.length > 0) {
         item.plan = summarizePlan(steps);
+        item.planHash = planHash(planText);
         item.headline = `Would post: ${describePlan(item.plan)}`;
         publishNow = item.mode === "on";
       } else {
@@ -738,11 +783,12 @@ export function createAgent(deps: AgentDeps): Agent {
     if (ended !== "needsYou") await dropWorktree(item);
     void store.save();
     changed();
-    // Paused, nothing goes out on its own: it waits for your Publish or Push.
-    if (store.data.paused && (publishNow || pushNow)) {
+    // Paused or off, nothing goes out on its own: it waits for your Publish or Push.
+    // Read now, not at the start: the run may have taken half an hour.
+    if ((publishNow || pushNow) && (store.data.paused || !settings()?.enabled)) {
       publishNow = false;
       pushNow = false;
-      item.headline = `${item.headline} — held: the agent is paused`;
+      item.headline = `${item.headline} — held: the agent is ${store.data.paused ? "paused" : "off"}`;
     }
     if (publishNow) {
       // On: the app posts what the review prepared, with the same checks as your Publish.
@@ -868,7 +914,21 @@ export function createAgent(deps: AgentDeps): Agent {
       // A review answers and resolves only in threads you opened.
       { viewer, mine: true },
       gh,
+      item.planHash,
     );
+    if (!out.ok && out.changed) {
+      // Edited in the session since you saw it: show the new plan, post nothing.
+      if (publishedCount(item.runFolder) > 0) return refuse("part of it went out already and the rest changed in the session — run it again");
+      const text = readPlanText(item.runFolder);
+      item.plan = summarizePlan(readPlanLines(text));
+      item.planHash = planHash(text);
+      item.planEdited = true;
+      item.state = "needsYou";
+      item.headline = `Would post: ${describePlan(item.plan)} — changed in the session, check it again`;
+      void store.save();
+      changed();
+      return { ok: false, error: "It changed in the session since you saw it — check what it would post now, then Publish." };
+    }
     if (!out.ok) {
       store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "publish-failed", detail: out.error });
       return refuse(`stopped after ${out.posted} of ${out.total}: ${out.error}`);
@@ -880,7 +940,8 @@ export function createAgent(deps: AgentDeps): Agent {
     item.finishedAt = stamp();
     item.later = false;
     store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
-    if (byYou && item.mode === "shadow") store.data.acceptedUnchanged += 1;
+    // Published as the run prepared it — not after an edit in the session.
+    if (byYou && item.mode === "shadow" && !item.planEdited) store.data.acceptedUnchanged += 1;
     store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "published", headOid: head ?? undefined, sessionId: item.sessionId, detail: describePlan(item.plan) });
     await dropWorktree(item);
     void store.save();
@@ -972,10 +1033,14 @@ export function createAgent(deps: AgentDeps): Agent {
         // Your own PR: answering reviewers in their threads is the point; it resolves nothing.
         { viewer, mine: false },
         gh,
+        // Only the replies you were shown.
+        item.planHash,
       );
       if (!out.ok) {
         item.state = "needsYou";
-        item.headline = `${headline}; the replies stopped after ${out.posted} of ${out.total}: ${out.error}`;
+        item.headline = out.changed
+          ? `${headline}; the replies changed in the session since you saw them — none posted, run it again`
+          : `${headline}; the replies stopped after ${out.posted} of ${out.total}: ${out.error}`;
         void store.save();
         changed();
         announce(item, "failed");
@@ -1060,7 +1125,10 @@ export function createAgent(deps: AgentDeps): Agent {
     if (replanIfSettingsChanged()) return;
     const all = loadAll();
     const s = all?.agent;
-    if (!all || !s?.enabled) return;
+    if (!all || !s?.enabled) {
+      if (!s?.enabled) stopRunsForOff();
+      return;
+    }
     const day = localDay(now());
     if (store.data.day !== day) {
       store.data.day = day;
@@ -1141,7 +1209,9 @@ export function createAgent(deps: AgentDeps): Agent {
 
   async function act(action: AgentAction): Promise<AgentActionResult> {
     const all = loadAll();
-    if (!all?.agent.enabled) return { ok: false, error: "The agent is off — switch it on in Settings › Agent." };
+    if (!all) return { ok: false, error: "The settings can't be read — open Settings to fix them." };
+    // Off: nothing new starts; stopping, dismissing, publishing what you saw still work.
+    if (!all.agent.enabled && STARTS_A_RUN.has(action.type)) return { ok: false, error: "The agent is off — switch it on in Settings › Agent." };
     const snapshot = deps.getSnapshot();
     if (action.type === "pauseAgent" || action.type === "resumeAgent") {
       setPaused(action.type === "pauseAgent");

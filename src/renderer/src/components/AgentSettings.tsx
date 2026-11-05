@@ -2,7 +2,7 @@ import { useState, type Dispatch, type ReactNode, type SetStateAction } from "re
 
 // Node-free, like notify.ts — value-imported for the defaults and the number bounds,
 // the same ones `validateAgent` clamps with in the main process.
-import { AGENT_BOUNDS, DEFAULT_AGENT_SIGNATURE, type AgentBoundKey } from "../../../shared/agent-defaults";
+import { AGENT_BOUNDS, DEFAULT_AGENT_SIGNATURE, DEFAULT_AGENT_TOOLS, type AgentBoundKey } from "../../../shared/agent-defaults";
 import type { SettingsSectionId } from "../../../shared/settings-search";
 import type { AgentMode, AgentRunKind, AgentSettings, MergeMethod } from "../../../shared/types";
 import { cn } from "../format";
@@ -338,6 +338,7 @@ function PermissionsSection({ agent, setAgent, inputCls }: SectionProps) {
     setText((t) => ({ ...t, [kind]: value }));
     setAgent((a) => ({ ...a, permissions: { ...a.permissions, tools: { ...a.permissions.tools, [kind]: lines(value) } } }));
   };
+  const isDefault = lines(text[kind]).join("\n") === DEFAULT_AGENT_TOOLS[kind].join("\n");
   return (
     <section className={cn(SECTION, "space-y-3")}>
       <h2 className={H2}>Permissions</h2>
@@ -360,6 +361,14 @@ function PermissionsSection({ agent, setAgent, inputCls }: SectionProps) {
             ))}
           </div>
           <textarea value={text[kind]} onChange={(e) => setTools(e.target.value)} rows={6} className={cn(inputCls, "font-mono text-xs")} />
+          <button
+            type="button"
+            disabled={isDefault}
+            onClick={() => setTools(DEFAULT_AGENT_TOOLS[kind].join("\n"))}
+            className="mt-1 text-xs text-sky-700 hover:underline disabled:cursor-default disabled:text-fg-faint disabled:no-underline dark:text-sky-300"
+          >
+            {isDefault ? "These are the defaults" : `Reset ${RUN_KIND_LABEL[kind]} to the defaults`}
+          </button>
           {kind === "drive" && (
             <span className="mt-1 block text-xs text-amber-700 dark:text-amber-300">
               Test commands (npm test, npm run …) are off by default: a test runs your repository&apos;s code, and the session can edit that code. Add them only if you accept that — CI checks every push either way, and nothing reaches the branch until the app has checked the commits.

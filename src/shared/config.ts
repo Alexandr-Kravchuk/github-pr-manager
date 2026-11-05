@@ -5,8 +5,10 @@ import {
   DEFAULT_AGENT_PROMPTS,
   DEFAULT_AGENT_SETTINGS,
   DEFAULT_AGENT_SIGNATURE,
+  AGENT_TOOLS_VERSION,
   DEFAULT_AGENT_TOOLS,
   isClockTime,
+  migrateTools,
   type AgentBoundKey,
 } from "./agent-defaults";
 import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "./claude-launch";
@@ -326,8 +328,13 @@ export function validateAgent(raw: unknown): AgentSettings {
   const notifications = o(obj.notifications);
   const policy = o(obj.policy);
 
+  // A list saved before a newer default rule existed gets that rule; one saved without a version is from before versions (1).
+  const savedVersion = typeof permissions.toolsVersion === "number" && Number.isInteger(permissions.toolsVersion) ? permissions.toolsVersion : 1;
   const tools = {} as Record<AgentRunKind, string[]>;
-  for (const kind of AGENT_RUN_KINDS) tools[kind] = list(rawTools[kind]) ?? [...DEFAULT_AGENT_TOOLS[kind]];
+  for (const kind of AGENT_RUN_KINDS) {
+    const saved = list(rawTools[kind]);
+    tools[kind] = saved ? migrateTools(kind, saved, savedVersion) : [...DEFAULT_AGENT_TOOLS[kind]];
+  }
 
   return {
     enabled: bool(obj.enabled, d.enabled),
@@ -376,7 +383,7 @@ export function validateAgent(raw: unknown): AgentSettings {
       },
       promoteAfter: num(limits.promoteAfter, "promoteAfter", d.limits.promoteAfter),
     },
-    permissions: { tools, pushOwnBranch: bool(permissions.pushOwnBranch, d.permissions.pushOwnBranch) },
+    permissions: { tools, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: bool(permissions.pushOwnBranch, d.permissions.pushOwnBranch) },
     companion: {
       headerChip: bool(companion.headerChip, d.companion.headerChip),
       trayState: bool(companion.trayState, d.companion.trayState),

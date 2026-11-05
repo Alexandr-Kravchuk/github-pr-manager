@@ -9,6 +9,7 @@
 // the review twice.
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -146,15 +147,30 @@ export function prepareRunFolder(
   return null;
 }
 
-export function readPlan(runDir: string): PublishStep[] {
+/** The plan file as it is now; "" when there is none. */
+export function readPlanText(runDir: string): string {
   try {
-    return readPlanLines(fs.readFileSync(path.join(runDir, PLAN_FILE), "utf8"));
+    return fs.readFileSync(path.join(runDir, PLAN_FILE), "utf8");
   } catch {
-    return [];
+    return "";
   }
 }
 
+export function readPlan(runDir: string): PublishStep[] {
+  return readPlanLines(readPlanText(runDir));
+}
+
+/** A fingerprint of the plan as it was shown to you — Publish posts only that. */
+export function planHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
 const PROGRESS_FILE = "published.json";
+
+/** How many of the plan's writes went out already (a publish that stopped part-way). */
+export function publishedCount(runDir: string): number {
+  return readDone(runDir);
+}
 
 function readDone(runDir: string): number {
   try {
@@ -165,7 +181,8 @@ function readDone(runDir: string): number {
   }
 }
 
-export type PublishOutcome = { ok: true; posted: number; total: number } | { ok: false; error: string; posted: number; total: number };
+/** `changed`: the plan is not the one you were shown (edited in the session since) — nothing was posted. */
+export type PublishOutcome = { ok: true; posted: number; total: number } | { ok: false; error: string; posted: number; total: number; changed?: boolean };
 
 const THREAD_PR_QUERY =
   "query($id:ID!){ node(id:$id){ ... on PullRequestReviewThread { isResolved pullRequest { number repository { nameWithOwner } } comments(first:1){ nodes{ author{ login } } } } } }";
@@ -243,8 +260,21 @@ export async function checkPlanTargets(
  * first write that didn't land; called on a plan that is all posted, it posts
  * nothing.
  */
-export async function publishPlan(runDir: string, prUrl: string, ctx: PublishContext, targets: PlanTargets, gh: GhRunner = runGh): Promise<PublishOutcome> {
-  const steps = readPlan(runDir);
+export async function publishPlan(
+  runDir: string,
+  prUrl: string,
+  ctx: PublishContext,
+  targets: PlanTargets,
+  gh: GhRunner = runGh,
+  /** The fingerprint of the plan you were shown; a plan that differs posts nothing. */
+  shownHash?: string,
+): Promise<PublishOutcome> {
+  // Read once: what is checked against what you saw is exactly what goes out.
+  const text = readPlanText(runDir);
+  if (shownHash !== undefined && planHash(text) !== shownHash) {
+    return { ok: false, changed: true, error: "it changed since you saw it", posted: readDone(runDir), total: 0 };
+  }
+  const steps = readPlanLines(text);
   const requests = planRequests(steps, ctx);
   let done = Math.min(readDone(runDir), requests.length);
   // Nothing goes out unless every thread and comment the rest of the plan
