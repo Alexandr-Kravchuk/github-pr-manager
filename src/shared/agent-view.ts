@@ -59,18 +59,23 @@ export interface BoardColumns {
   working: AgentItem[];
   /** Waiting for you; the ones put aside with "Later" come last. */
   needsYou: AgentItem[];
-  /** One card per PR and scenario: the latest of today's runs. */
+  /** One card per PR: the latest of today's results, for a PR with no live work. */
   done: AgentItem[];
-  /** How many of today's runs a Done card stands for, by its run id — set only where more than one. */
+  /** How many of today's results a Done card stands for, by its run id — set only where more than one. */
   doneRuns: Record<string, number>;
 }
 
 /**
  * The Board: ALL of the agent's work in its columns — whatever the
  * dashboard's filters show, so the Board, the header chip and the tray count
- * the same runs and the same decisions — and the filtered PRs it has no live
- * work on as Idle, with the reason the agent gives. Done today also shows PRs
- * that left the dashboard (merged, closed): their work was still today's.
+ * the same runs and the same decisions — and the filtered PRs it has done
+ * nothing with today as Idle, with the reason the agent gives. Done today also
+ * shows PRs that left the dashboard (merged, closed): their work was today's.
+ *
+ * A kanban: a PR is in one column only. Live work (Queued, Working, Needs you)
+ * comes first, then today's result, then Idle — a PR the agent finished with
+ * today stays in Done today (its card can hand it over again) and is back in
+ * Idle tomorrow.
  */
 export function boardColumns(prs: readonly PullRequest[], state: AgentState, today: string): BoardColumns {
   const cols: BoardColumns = { idle: [], queued: [], working: [], needsYou: [], done: [], doneRuns: {} };
@@ -82,18 +87,21 @@ export function boardColumns(prs: readonly PullRequest[], state: AgentState, tod
     else if (item.state === "done" && !isQuiet(item) && finishedOn(item, today)) cols.done.push(item);
     if (item.state === "queued" || item.state === "working" || item.state === "needsYou" || item.state === "error") busy.add(item.prId);
   }
+  // Today's result only for a PR with no live work; Idle only for a PR with neither.
+  cols.done = cols.done.filter((item) => !busy.has(item.prId));
+  const doneToday = new Set(cols.done.map((item) => item.prId));
   for (const pr of prs) {
-    if (!busy.has(pr.id)) cols.idle.push({ pr, reason: state.idle[pr.id] ?? (state.enabled ? "Nothing for the agent" : "The agent is off") });
+    if (!busy.has(pr.id) && !doneToday.has(pr.id)) cols.idle.push({ pr, reason: state.idle[pr.id] ?? (state.enabled ? "Nothing for the agent" : "The agent is off") });
   }
   cols.queued = queueOrder(cols.queued);
   cols.working.sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
   cols.needsYou.sort((a, b) => Number(a.later ?? false) - Number(b.later ?? false) || (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
   cols.done.sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""));
-  // The same PR run twice today (you handed it over again, a new answer came)
-  // is one card — its latest result — that says how many runs it stands for.
+  // A PR with several results today (you handed it over again, it was merged
+  // and then its Jira run finished) is one card — the latest — that says so.
   const latest = new Map<string, AgentItem>();
   cols.done = cols.done.filter((item) => {
-    const key = `${item.prId}|${item.scenario}`;
+    const key = item.prId;
     const kept = latest.get(key);
     if (!kept) {
       latest.set(key, item);

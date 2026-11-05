@@ -8893,12 +8893,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(cols.needsYou.map((i) => i.prId), ["P5", "P4"], "what you put off with Later comes last");
       assert.deepStrictEqual(cols.done.map((i) => i.prId).sort(), ["P6", "P8", "P9"], "a PR the filters hide still shows its work — the chip and the tray count it too");
       const twice = view.boardColumns(prs, { enabled: true, items: [...items, vItem({ prId: "P6", state: "done", headline: "Reviewed", finishedAt: new Date(Date.now() - 1_000).toISOString() })], running: [], idle: {} }, today);
-      assert.deepStrictEqual(twice.done.map((i) => i.prId).sort(), ["P6", "P8", "P9"], "the same PR run twice today is one card");
+      assert.deepStrictEqual(twice.done.map((i) => i.prId).sort(), ["P6", "P8", "P9"], "a PR with two results today is one card");
       const kept = twice.done.find((i) => i.prId === "P6");
       assert.strictEqual(kept.finishedAt, now, "the latest run");
       assert.strictEqual(twice.doneRuns[kept.runId], 2, "and it says it stands for two");
       assert.deepStrictEqual(cols.doneRuns, {});
-      assert.deepStrictEqual(cols.idle.map((x) => [x.pr.id, x.reason]), [["P6", "Nothing for the agent"], ["P7", "Draft"]]);
+      assert.deepStrictEqual(cols.idle.map((x) => [x.pr.id, x.reason]), [["P7", "Draft"]], "a PR done today is in Done today only — one column per PR; a dismissed one is Idle");
+      // Live work wins over today's result: a PR queued again leaves Done today.
+      const again = view.boardColumns(prs, { enabled: true, items: [...items, vItem({ prId: "P6", state: "queued" })], running: [], idle: {} }, today);
+      assert.deepStrictEqual([again.queued.some((i) => i.prId === "P6"), again.done.some((i) => i.prId === "P6"), again.idle.some((x) => x.pr.id === "P6")], [true, false, false]);
+      // Every PR of the filtered list is in exactly one column.
+      for (const c of [cols, again]) {
+        const where = (id) => [c.idle.some((x) => x.pr.id === id), ...["queued", "working", "needsYou", "done"].map((k) => c[k].some((i) => i.prId === id))].filter(Boolean).length;
+        for (const p of prs) assert.strictEqual(where(p.id), 1, `${p.id} in one column`);
+      }
       const off = view.boardColumns(prs, { enabled: false, items: [], running: [], idle: {} }, today);
       assert.strictEqual(off.idle.length, prs.length);
       assert.strictEqual(off.idle[0].reason, "The agent is off");

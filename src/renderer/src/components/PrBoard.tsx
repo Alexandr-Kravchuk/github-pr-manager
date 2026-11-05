@@ -282,11 +282,22 @@ export function PrBoard({ prs, onOpen, focus }: { prs: PullRequest[]; onOpen: (p
                     <ItemCard key={item.runId} item={item} onTitle={() => openItem(item)}>
                       {item.finishedAt && <span className="text-[11px] text-fg-subtle">{relativeTime(item.finishedAt)}</span>}
                       {(cols.doneRuns[item.runId] ?? 1) > 1 && (
-                        <span className="text-[11px] text-fg-subtle" title="Today's earlier runs on this PR are folded into this card; this is the latest">
-                          · ran {cols.doneRuns[item.runId]} times today
+                        <span className="text-[11px] text-fg-subtle" title="This PR's earlier results today are folded into this card; this is the latest">
+                          · {cols.doneRuns[item.runId] - 1} earlier today
                         </span>
                       )}
                       {resultCard(item)?.summary && <span className="line-clamp-2 w-full text-[11px] text-fg-subtle">{resultCard(item)?.summary}</span>}
+                      {/* Off Idle until tomorrow, so the card itself hands the PR over again. */}
+                      {state.enabled && byId.has(item.prId) && item.scenario !== "afterMerge" && (
+                        <button
+                          type="button"
+                          className={cn(BTN, "mt-1 py-0.5")}
+                          title="Queue it for the agent again"
+                          onClick={() => void run({ type: "enqueue", prId: item.prId })}
+                        >
+                          Hand to agent again
+                        </button>
+                      )}
                     </ItemCard>
                   ))
                 )}
