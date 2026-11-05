@@ -60,6 +60,7 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 interface RawNotification {
   updated_at?: string;
   repository?: { full_name?: string };
+  subject?: { type?: string };
 }
 
 /**
@@ -87,15 +88,22 @@ function newestActivity(items: RawNotification[]): string | null {
  * or null when none. The `/notifications` inbox spans every repo the user
  * watches on the host, so this scopes the signal to what the dashboard shows.
  * Case-insensitive (GitHub owner/name are case-insensitive). Exported for tests.
+ *
+ * `"all"` is an `allRepos` host: the dashboard spans every repository there, so
+ * any pull-request notification counts — issues and discussions still don't,
+ * since no search would turn them into a card.
  */
-export function newestTrackedActivity(items: RawNotification[], repos: string[]): string | null {
+export function newestTrackedActivity(items: RawNotification[], repos: string[] | "all"): string | null {
   if (items.length === 0 || repos.length === 0) return null;
-  const tracked = new Set(repos.map((r) => r.toLowerCase()));
+  const tracked = repos === "all" ? null : new Set(repos.map((r) => r.toLowerCase()));
   let max: string | null = null;
   for (const n of items) {
     const full = n.repository?.full_name?.toLowerCase();
     const ts = n.updated_at;
-    if (full !== undefined && ts && tracked.has(full) && (max === null || ts > max)) max = ts;
+    const inScope = tracked
+      ? full !== undefined && tracked.has(full)
+      : n.subject?.type === "PullRequest";
+    if (ts && inScope && (max === null || ts > max)) max = ts;
   }
   return max;
 }
@@ -150,7 +158,7 @@ export async function probeNotifications(
     return { changed: false, lastModified, watermark: nextWatermark, pollIntervalMs, status: "ok" };
   }
 
-  const newestTracked = newestTrackedActivity(items, host.repos);
+  const newestTracked = newestTrackedActivity(items, host.allRepos ? "all" : host.repos);
   const changed = newestTracked !== null && newestTracked > prev.watermark;
 
   return { changed, lastModified, watermark: nextWatermark, pollIntervalMs, status: "ok" };

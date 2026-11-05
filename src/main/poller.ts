@@ -273,6 +273,15 @@ export function stableJiraMessage(message: string | undefined): string | undefin
 }
 
 /**
+ * Whether a fetch of this host sends any search: a host with neither listed
+ * repos nor `allRepos` is skipped by `fetchHost`, spends nothing, and has no
+ * inbox worth probing.
+ */
+function searchesHost(h: HostConfig): boolean {
+  return h.allRepos === true || h.repos.length > 0;
+}
+
+/**
  * Minimum spacing before a host may be fetched again, from its last rate-limit
  * reading. Expensive hosts get a floor so the shared token keeps headroom for
  * other clients; otherwise the remaining safe ticks are spread across the window
@@ -632,7 +641,7 @@ export class Poller {
     if (!force) {
       const probeFn = this.options.probeNotificationsFn ?? probeNotifications;
       const probeHosts = hosts.filter((h) => {
-        if (h.repos.length === 0) return false;
+        if (!searchesHost(h)) return false;
         const slot = this.hostSlots.get(h.graphqlUrl);
         return !!slot && !slot.notifDisabled && now >= slot.notifNextProbeAt;
       });
@@ -701,7 +710,7 @@ export class Poller {
       const prev = this.hostSlots.get(host.graphqlUrl);
       if (result.status === "fulfilled") {
         const prs = result.value.pullRequests;
-        const rateLimit = host.repos.length > 0 ? result.value.rateLimit : null;
+        const rateLimit = searchesHost(host) ? result.value.rateLimit : null;
         this.hostSlots.set(host.graphqlUrl, {
           prs,
           rateLimit,

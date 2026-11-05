@@ -38,10 +38,19 @@ interface DraftHost {
   label: string;
   graphqlUrl: string;
   reposText: string;
+  allRepos: boolean;
+  /** Raw input text, so clearing the field to retype isn't snapped back mid-edit. */
+  searchLimitText: string;
 }
 
+// Mirrors DEFAULT_SEARCH_LIMIT / MAX_SEARCH_LIMIT in shared/config.ts, which the
+// renderer can't value-import (it uses `node:` builtins). Only the input's hints
+// and bounds come from here: main clamps whatever is saved.
+const DEFAULT_SEARCH_LIMIT = 25;
+const MAX_SEARCH_LIMIT = 100;
+
 function emptyHost(): DraftHost {
-  return { label: "", graphqlUrl: "", reposText: "" };
+  return { label: "", graphqlUrl: "", reposText: "", allRepos: false, searchLimitText: String(DEFAULT_SEARCH_LIMIT) };
 }
 
 /** Derives the gh hostname from a GraphQL URL — renderer-side mirror of the
@@ -155,6 +164,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             label: h.label,
             graphqlUrl: h.graphqlUrl,
             reposText: h.repos.join("\n"),
+            allRepos: h.allRepos === true,
+            searchLimitText: String(h.searchLimit ?? DEFAULT_SEARCH_LIMIT),
           })),
         );
         setClaude(s.claude ?? DEFAULT_CLAUDE_SETTINGS);
@@ -225,6 +236,9 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           label: h.label,
           graphqlUrl: h.graphqlUrl,
           repos: parseRepos(h.reposText),
+          allRepos: h.allRepos,
+          // Blank or garbage falls back to the default in main's validation.
+          searchLimit: Number(h.searchLimitText) || DEFAULT_SEARCH_LIMIT,
         })),
         // Only persist Jira when both fields are present; otherwise leave it off.
         jira: baseUrl && email ? { baseUrl, email } : undefined,
@@ -483,7 +497,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => addHost({ label: "GitHub", graphqlUrl: GITHUB_GRAPHQL, reposText: "" })}
+              onClick={() => addHost({ ...emptyHost(), label: "GitHub", graphqlUrl: GITHUB_GRAPHQL })}
               className="rounded-md border border-line-strong px-2 py-0.5 text-xs text-fg-secondary hover:bg-elevated"
             >
               + GitHub.com
@@ -500,7 +514,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
 
         {hosts.length === 0 && (
           <p className="rounded-lg border border-line bg-surface/40 p-4 text-sm text-fg-subtle">
-            No hosts yet. Add GitHub.com or an Enterprise host, then list the repositories to watch.
+            No hosts yet. Add GitHub.com or an Enterprise host, then list the repositories to watch
+            or turn on “All repositories”.
           </p>
         )}
 
@@ -541,17 +556,57 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                   </button>
                 </div>
 
+                <div className="mt-3 flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+                  <label className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={host.allRepos}
+                      onChange={(e) => updateHost(i, { allRepos: e.target.checked })}
+                      className="mt-0.5 h-4 w-4 accent-sky-500"
+                    />
+                    <span>
+                      <span className="block text-sm text-fg-secondary">All repositories</span>
+                      <span className="block text-xs text-fg-faint">
+                        Every open PR on this host you opened, are asked to review (you or your
+                        team) or have reviewed — no list needed.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <span
+                      className="text-xs font-medium text-fg-muted"
+                      title="Each search (yours, review requests, each team, reviewed) returns up to this many PRs"
+                    >
+                      PRs per search
+                    </span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={MAX_SEARCH_LIMIT}
+                      value={host.searchLimitText}
+                      onChange={(e) => updateHost(i, { searchLimitText: e.target.value })}
+                      placeholder={String(DEFAULT_SEARCH_LIMIT)}
+                      aria-label="PRs per search"
+                      className="w-20 rounded-md border border-line-strong bg-surface px-2 py-1 text-sm text-fg focus:border-sky-600 focus:outline-none"
+                    />
+                  </label>
+                </div>
+
                 <div className="mt-3">
-                  <label className={labelCls}>Repositories (one owner/name per line)</label>
+                  <label className={labelCls}>
+                    Repositories (one owner/name per line)
+                    {host.allRepos && " — ignored while “All repositories” is on"}
+                  </label>
                   <textarea
                     value={host.reposText}
+                    disabled={host.allRepos}
                     onChange={(e) => updateHost(i, { reposText: e.target.value })}
                     // Grows with the list (a line to spare for the next entry),
                     // from 8 lines up to 24 — past that it scrolls; the corner
                     // grip still resizes it by hand.
                     rows={Math.min(24, Math.max(8, host.reposText.split("\n").length + 1))}
                     placeholder={"owner/repo-1\nowner/repo-2"}
-                    className={cn(inputCls, "resize-y font-mono text-xs leading-5")}
+                    className={cn(inputCls, "resize-y font-mono text-xs leading-5 disabled:opacity-50")}
                   />
                 </div>
 

@@ -180,7 +180,13 @@ export function validateSettings(raw: unknown): Settings {
     const repos = Array.isArray(host.repos)
       ? host.repos.filter((r): r is string => typeof r === "string" && r.includes("/"))
       : [];
-    return { label, graphqlUrl: host.graphqlUrl.trim(), repos };
+    return {
+      label,
+      graphqlUrl: host.graphqlUrl.trim(),
+      repos,
+      allRepos: host.allRepos === true,
+      searchLimit: validateSearchLimit(host.searchLimit),
+    };
   });
 
   return {
@@ -195,6 +201,22 @@ export function validateSettings(raw: unknown): Settings {
     jira: validateJira(obj.jira),
     claude: validateClaude(obj.claude),
   };
+}
+
+/** A host's per-search page size when none is set — the size the app always used. */
+export const DEFAULT_SEARCH_LIMIT = 25;
+/** GitHub's own ceiling for `first:` on a connection. */
+export const MAX_SEARCH_LIMIT = 100;
+
+/**
+ * Coerces a host's `searchLimit` into a whole number within 1–100. Missing or
+ * garbage falls back to the default rather than failing the save, and an
+ * out-of-range number is clamped, since GitHub rejects `first:` above 100.
+ */
+export function validateSearchLimit(raw: unknown): number {
+  const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() ? Number(raw) : NaN;
+  if (!Number.isFinite(n)) return DEFAULT_SEARCH_LIMIT;
+  return Math.min(MAX_SEARCH_LIMIT, Math.max(1, Math.round(n)));
 }
 
 /**
@@ -289,6 +311,8 @@ export function toHostConfigs(settings: Settings): HostConfig[] {
     label: h.label,
     graphqlUrl: h.graphqlUrl,
     repos: h.repos,
+    allRepos: h.allRepos === true,
+    searchLimit: validateSearchLimit(h.searchLimit),
     token: resolveGhToken(h.graphqlUrl),
   }));
 }

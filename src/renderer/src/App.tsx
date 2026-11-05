@@ -802,7 +802,7 @@ export function App() {
   const emptyMessage = useMemo(() => {
     switch (emptyStateKind(filterState, allPrs.length)) {
       case "no-prs":
-        return "No open pull requests where you're involved in the added repositories.";
+        return "No open pull requests where you're involved on the configured hosts.";
       case "all-hidden": {
         // One number, not an "N drafts · M ignored" split: the categories overlap,
         // so the two would double-count an ignored draft.

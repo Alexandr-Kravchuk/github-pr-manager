@@ -48,6 +48,10 @@ export interface HostConfig {
   token: string;
   /** Repositories in "owner/name" form. */
   repos: string[];
+  /** See {@link SettingsHost.allRepos}. */
+  allRepos?: boolean;
+  /** See {@link SettingsHost.searchLimit}. */
+  searchLimit?: number;
 }
 
 /**
@@ -59,6 +63,18 @@ export interface SettingsHost {
   label: string;
   graphqlUrl: string;
   repos: string[];
+  /**
+   * Search every repository on the host instead of only `repos`: the searches
+   * are all scoped to you (`author:@me`, `review-requested:@me`, …), so without
+   * the `repo:` filter they find your PRs wherever they are. Opt-in so an
+   * existing host keeps its narrower scope. Absent = false.
+   */
+  allRepos?: boolean;
+  /**
+   * How many PRs each search returns (GitHub's `first:`, 1–100). Absent = 25.
+   * Each search is capped separately, so the dashboard can show more than this.
+   */
+  searchLimit?: number;
 }
 
 /**

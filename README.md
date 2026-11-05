@@ -144,6 +144,8 @@ On first launch the dashboard is empty — open **Settings (⚙)** and add a hos
 | `label`      | Name shown in the UI (host badge + host filter). |
 | `graphqlUrl` | github.com → `https://api.github.com/graphql`; Enterprise Cloud → `https://api.<tenant>.ghe.com/graphql`; Enterprise Server → `https://<host>/api/graphql`. |
 | repos        | Repositories in `owner/name` form, one per line. |
+| All repositories | Search the whole host instead of the list: every open PR you opened, are asked to review (you or one of your teams) or have reviewed, wherever it is. Off by default; the list is kept but ignored while it is on. |
+| PRs per search | How many PRs each search returns (1–100, default 25). Each search — yours, review requests, each team, reviewed — is capped separately, so raise it if PRs seem to be missing. |
 
 The Settings screen also shows whether `gh` is installed and signed in for each
 host, with the exact `gh auth login` command if not.
