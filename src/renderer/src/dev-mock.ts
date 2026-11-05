@@ -306,6 +306,9 @@ const FIXTURES: Record<string, PullRequest[]> = {
   ],
 };
 
+// PROTOTYPE (agent UI): every state the agent prototype maps a run to. `?buddy=agent`.
+FIXTURES.agent = [...FIXTURES.showcase, ...FIXTURES.review];
+
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
 
 const snapshot: DashboardResponse = {

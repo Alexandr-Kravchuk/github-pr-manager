@@ -24,6 +24,9 @@ import {
   type SettingsSectionId,
   type SettingsTabId,
 } from "../../../shared/settings-search";
+// PROTOTYPE (agent UI): the Agent tab.
+import { AgentSettings, agentSectionHits } from "../prototype/agent/AgentSettings";
+import { useAgentVariant } from "../prototype/agent/variant-store";
 import { cn } from "../format";
 
 /** localStorage key of the last open Settings tab. */
@@ -97,6 +100,10 @@ function parseRepos(reposText: string): string[] {
 }
 
 export function SettingsScreen({ onClose }: { onClose: () => void }) {
+  // PROTOTYPE (agent UI): an "Agent" tab while a `?variant=` prototype is on. Dev only.
+  const agentVariant = useAgentVariant();
+  const agentProto = import.meta.env.DEV && agentVariant !== null;
+  const [agentTab, setAgentTab] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState<SettingsTabId>(() => {
     try {
@@ -866,6 +873,12 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const searching = query.trim().length > 0;
   const hits = searchSettings(query);
   const hitTabs = new Set(hits.map((h) => h.tab));
+  const agentHits = agentProto ? agentSectionHits(query) : [];
+  const editPrompts = () => {
+    setQuery("");
+    setAgentTab(false);
+    selectTab("integrations");
+  };
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6">
@@ -909,14 +922,15 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               key={t.id}
               type="button"
               role="tab"
-              aria-selected={!searching && tab === t.id}
+              aria-selected={!searching && !agentTab && tab === t.id}
               onClick={() => {
                 setQuery("");
+                setAgentTab(false);
                 selectTab(t.id);
               }}
               className={cn(
                 "rounded px-3 py-1 text-sm transition-colors",
-                !searching && tab === t.id
+                !searching && !agentTab && tab === t.id
                   ? "bg-elevated font-medium text-fg"
                   : "text-fg-muted hover:text-fg-secondary",
                 // While searching, a tab that holds a hit says so.
@@ -926,6 +940,24 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               {t.label}
             </button>
           ))}
+          {agentProto && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={!searching && agentTab}
+              onClick={() => {
+                setQuery("");
+                setAgentTab(true);
+              }}
+              className={cn(
+                "rounded px-3 py-1 text-sm transition-colors",
+                !searching && agentTab ? "bg-elevated font-medium text-fg" : "text-fg-muted hover:text-fg-secondary",
+                searching && agentHits.length > 0 && "text-sky-700 dark:text-sky-300",
+              )}
+            >
+              Agent
+            </button>
+          )}
         </div>
         <input
           type="search"
@@ -941,18 +973,23 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       </div>
 
       {searching ? (
-        hits.length === 0 ? (
+        hits.length === 0 && agentHits.length === 0 ? (
           <p className="py-8 text-center text-sm text-fg-subtle">No settings match &ldquo;{query.trim()}&rdquo;.</p>
         ) : (
-          hits.map((s) => (
-            <div key={s.id}>
-              <div className="mb-1 text-[11px] uppercase tracking-wide text-fg-faint">
-                {SETTINGS_TABS.find((t) => t.id === s.tab)?.label} › {s.title}
+          <>
+            {hits.map((s) => (
+              <div key={s.id}>
+                <div className="mb-1 text-[11px] uppercase tracking-wide text-fg-faint">
+                  {SETTINGS_TABS.find((t) => t.id === s.tab)?.label} › {s.title}
+                </div>
+                {sectionContent[s.id]}
               </div>
-              {sectionContent[s.id]}
-            </div>
-          ))
+            ))}
+            {agentHits.length > 0 && <AgentSettings only={agentHits} onEditPrompts={editPrompts} />}
+          </>
         )
+      ) : agentProto && agentTab ? (
+        <AgentSettings onEditPrompts={editPrompts} />
       ) : (
         sectionsOfTab(tab).map((s) => <div key={s.id}>{sectionContent[s.id]}</div>)
       )}

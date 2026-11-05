@@ -15,9 +15,12 @@ import { VIEW_MODES, VIEW_MODE_TITLES, type ViewMode } from "../../../shared/vie
 export function ViewSwitch({
   value,
   onChange,
+  extra,
 }: {
   value: ViewMode;
   onChange: (mode: ViewMode) => void;
+  /** PROTOTYPE (agent UI, variant E): a fourth "Board" segment. */
+  extra?: { active: boolean; onClick: () => void };
 }) {
   return (
     <div
@@ -26,7 +29,7 @@ export function ViewSwitch({
       className="inline-flex items-center gap-0.5 rounded-lg border border-line-strong bg-elevated p-0.5"
     >
       {VIEW_MODES.map((mode) => {
-        const active = value === mode;
+        const active = value === mode && !extra?.active;
         return (
           <button
             key={mode}
@@ -46,7 +49,33 @@ export function ViewSwitch({
           </button>
         );
       })}
+      {extra && (
+        <button
+          type="button"
+          onClick={extra.onClick}
+          title="Board — the agent's work by state"
+          aria-label="Board — the agent's work by state"
+          aria-pressed={extra.active}
+          className={cn(
+            "inline-flex items-center justify-center rounded-md px-2.5 py-1 transition-colors",
+            extra.active ? "bg-surface text-fg shadow-sm" : "text-fg-muted hover:bg-surface hover:text-fg-secondary",
+          )}
+        >
+          <BoardIcon />
+        </button>
+      )}
     </div>
+  );
+}
+
+/** Three columns of falling height — a kanban board. */
+function BoardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden>
+      <rect x="3" y="3" width="5" height="18" rx="1.5" />
+      <rect x="9.5" y="3" width="5" height="13" rx="1.5" />
+      <rect x="16" y="3" width="5" height="8" rx="1.5" />
+    </svg>
   );
 }
 

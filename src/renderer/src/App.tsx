@@ -6,6 +6,9 @@ import { PrTable } from "./components/PrTable";
 import { PrTile } from "./components/PrTile";
 import { SettingsScreen } from "./components/Settings";
 import { ViewSwitch } from "./components/ViewSwitch";
+// PROTOTYPE (agent UI): `?variant=A…E` swaps the list for an agent layout. Dev only.
+import { AgentPrototype } from "./prototype/agent/AgentPrototype";
+import { useAgentVariant } from "./prototype/agent/variant-store";
 import { cn, relativeTime } from "./format";
 import { playNotifySound } from "./notify-sound";
 import { shouldAllowForcedRefresh, shouldRefreshOnKey } from "../../shared/hotkeys";
@@ -288,6 +291,11 @@ export function App() {
   // Display variant + the Cozy table's column sort. Not filters: they change
   // how the same rows are drawn, so `clearFilters` leaves them alone.
   const [viewMode, setViewMode] = useState<ViewMode>(boot.viewMode);
+  // PROTOTYPE (agent UI): the variant on screen, and variant E's Board segment.
+  const agentVariantRaw = useAgentVariant();
+  const agentVariant = import.meta.env.DEV ? agentVariantRaw : null;
+  const [boardView, setBoardView] = useState(false);
+  const boardOn = agentVariant === "E" && boardView;
   const [tableSort, setTableSort] = useState<TableSort>(boot.tableSort);
   const [tableColumnWidths, setTableColumnWidths] = useState<ColumnWidths>(boot.tableColumnWidths);
   const onTableSort = useCallback((key: TableColumnKey) => {
@@ -878,12 +886,21 @@ export function App() {
                 {stats.returned > 0 && ` · ${stats.returned} back to you`}
               </p>
             </div>
+            {/* PROTOTYPE (agent UI): the agent's live chip is portalled here. */}
+            {agentVariant && <div id="agent-presence-slot" className="min-w-0" />}
           </div>
           <div className="flex items-center gap-2 text-xs text-fg-muted">
             {/* The display-variant switch sits with Refresh: it is a view control,
                 not a filter, and alone in the header's middle gap it read as
                 floating. */}
-            <ViewSwitch value={viewMode} onChange={setViewMode} />
+            <ViewSwitch
+              value={viewMode}
+              onChange={(m) => {
+                setBoardView(false);
+                setViewMode(m);
+              }}
+              extra={agentVariant === "E" ? { active: boardOn, onClick: () => setBoardView(true) } : undefined}
+            />
             {/* One pill per host, and with two or more hosts the pills ARE the
                 host filter (the "All hosts" dropdown they replaced repeated the
                 same two names one row lower). The budget number and fetch time
@@ -1024,7 +1041,7 @@ export function App() {
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value as SortKey)}
-                disabled={!usesListSort(viewMode)}
+                disabled={!usesListSort(viewMode) || boardOn}
                 title={
                   usesListSort(viewMode)
                     ? "Sort order"
@@ -1043,7 +1060,7 @@ export function App() {
               <select
                 value={groupBy}
                 onChange={(e) => setGroupBy(e.target.value as GroupMode)}
-                disabled={!supportsGrouping(viewMode)}
+                disabled={!supportsGrouping(viewMode) || boardOn}
                 title={
                   supportsGrouping(viewMode) ? "Grouping" : "Cozy is one flat table — no grouping"
                 }
@@ -1284,7 +1301,23 @@ export function App() {
       <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
       <ClaudeSessionsContext.Provider value={claudeSessions}>
       <AuthorFilterContext.Provider value={authorFilter}>
-      {viewMode === "cozy" ? (
+      {agentVariant && data ? (
+        <AgentPrototype
+          prs={sorted}
+          boardView={boardOn}
+          renderList={(list) => (
+            <PrList
+              prs={list}
+              mode={viewMode === "cozy" ? "roomy" : viewMode}
+              jiraBaseUrl={jiraStatus?.baseUrl ?? null}
+              trackComments={trackComments}
+              onOpen={openPr}
+              onMarkSeen={(p) => postSeen([p])}
+              onToggleIgnore={toggleIgnore}
+            />
+          )}
+        />
+      ) : viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable
             prs={tableRows}
