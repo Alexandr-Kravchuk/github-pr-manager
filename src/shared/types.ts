@@ -2,6 +2,7 @@
  * Domain types for the pull-request dashboard.
  * Raw GraphQL responses are mapped into these types in `github.ts`.
  */
+import type { CloseStaleOptions, CloseStaleResult, JiraTaskInfo } from "./stale";
 
 /** Normalized check (CI) state on top of GitHub's various terms. */
 export type CheckState =
@@ -213,6 +214,11 @@ export interface Settings {
   jira?: JiraSettings;
   /** Claude session launcher (off by default). */
   claude: ClaudeSettings;
+  /**
+   * Days a PR stays open before it is marked stale and, when it is yours, can
+   * be closed together with its Jira task. 0 switches it off. See `shared/stale.ts`.
+   */
+  staleAfterDays: number;
 }
 
 /** Jira setup state for the UI, from the main process. */
@@ -448,6 +454,12 @@ export interface PullRequest {
    * a plain "Comment" review does not clear it.
    */
   hasNoReviews: boolean;
+  /**
+   * true when the PR has been open at least `staleAfterDays` (the setting) —
+   * the "Stale" chip and, on your own PR, the close action. Set by the poller,
+   * not by `github.ts`, because the threshold is a setting.
+   */
+  isStale: boolean;
 
   /** Number of unresolved review threads — "comments to fix". */
   unresolvedThreads: number;
@@ -711,6 +723,14 @@ export interface PrManagerApi {
   onClaudeSessions(listener: (sessions: ClaudeSessionInfo[]) => void): () => void;
   /** Copy text (e.g. a PR URL) to the system clipboard. */
   copyText(text: string): Promise<void>;
+  /**
+   * The Jira task of a stale PR of yours and the transitions Jira offers on it,
+   * for the close dialog. Only the PR id crosses over; the issue key is read
+   * from main's own snapshot.
+   */
+  getStaleJiraTask(prId: string): Promise<{ ok: true; task: JiraTaskInfo } | { ok: false; error: string }>;
+  /** Close a stale PR of yours and apply the chosen action to its Jira task. */
+  closeStalePr(prId: string, options: CloseStaleOptions): Promise<CloseStaleResult>;
   /** Returns release info if a new version was installed since last ack, or null. */
   getWhatsNew(): Promise<{ version: string; url: string } | null>;
   /** Acknowledges the current version (hides "What's new"). */

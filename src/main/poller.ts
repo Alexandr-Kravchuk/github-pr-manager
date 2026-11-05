@@ -53,6 +53,7 @@ import { JIRA_ERROR_DETAIL_SEP } from "../shared/jira";
 import { applyIgnored } from "../shared/ignored";
 import { DEFAULT_POLL_INTERVAL_MS, probeNotifications } from "../shared/notifications";
 import type { NotifState } from "../shared/notifications";
+import { isStalePr } from "../shared/stale";
 import { applyActivity } from "../shared/state";
 import type {
   DashboardResponse,
@@ -148,6 +149,11 @@ const BUDGET_RESERVE_RATIO = 0.1;
 const RESET_MARGIN_MS = 5_000;
 /** Stretch the base interval only after this many consecutive unchanged ticks. */
 const IDLE_BACKOFF_AFTER = 2;
+/**
+ * How long a PR closed from the app stays off the dashboard even while the
+ * search still returns it — GitHub's index usually catches up within a minute.
+ */
+const CLOSED_PR_HIDE_MS = 10 * 60 * 1000;
 /** Cap on the no-change backoff multiplier. */
 const IDLE_BACKOFF_MAX_FACTOR = 16;
 
@@ -205,6 +211,9 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
     p.hasUnaddressedComments,
     p.hasUnaddressedReviewFeedback,
     p.isBehindBase,
+    // Flips on the clock alone — a PR nobody touches crosses the threshold with
+    // no other field moving, and its badge and close action must still appear.
+    p.isStale,
     // Also read by the notifier (notify.ts) — it detects the reviewer-added
     // transition (`isReviewer && !wasReviewer` -> review_requested) from roles.
     // Being added as an additional reviewer to an already-tracked PR may not
@@ -475,6 +484,8 @@ export class Poller {
   private unchangedStreak = 0;
   /** Per-host last result + next-due time, keyed by graphqlUrl. */
   private readonly hostSlots = new Map<string, HostSlot>();
+  /** PRs closed from the app, by id → epoch ms until which they stay hidden. */
+  private readonly closedIds = new Map<string, number>();
   // Serializes ticks so a manual refresh can't interleave with a timer tick.
   private inFlight: Promise<void> | null = null;
   private readonly firstReady: Promise<void>;
@@ -530,6 +541,21 @@ export class Poller {
 
   getSnapshot(): DashboardResponse | null {
     return this.currentSnapshot;
+  }
+
+  /**
+   * Drops a PR the app itself just closed, at once and for the next few
+   * minutes. GitHub's search index lags a close: the `is:open` searches keep
+   * returning the PR for a while, so a refresh right after the close would put
+   * its card straight back and the close would look like it did nothing.
+   */
+  forgetClosed(id: string, now = Date.now()): void {
+    this.closedIds.set(id, now + CLOSED_PR_HIDE_MS);
+    for (const slot of this.hostSlots.values()) slot.prs = slot.prs.filter((p) => p.id !== id);
+    const snap = this.currentSnapshot;
+    if (!snap || !snap.pullRequests.some((p) => p.id === id)) return;
+    this.currentSnapshot = { ...snap, pullRequests: snap.pullRequests.filter((p) => p.id !== id) };
+    this.options.onSnapshot(this.currentSnapshot);
   }
 
   getConfigError(): string | null {
@@ -766,11 +792,18 @@ export class Poller {
     const allPrs: PullRequest[] = [];
     const errors: HostError[] = [];
     const rateLimits: RateLimitInfo[] = [];
+    const nowMs = Date.now();
+    for (const [id, until] of this.closedIds) if (until <= nowMs) this.closedIds.delete(id);
     for (const slot of this.hostSlots.values()) {
-      allPrs.push(...slot.prs);
+      allPrs.push(...slot.prs.filter((p) => !this.closedIds.has(p.id)));
       if (slot.error) errors.push(slot.error);
       if (slot.rateLimit) rateLimits.push({ ...slot.rateLimit, fetchedAt: slot.fetchedAt });
     }
+
+    // Stale is measured against the clock, not the fetch, so a carried-over
+    // slot (a host that failed this tick) still crosses the threshold on time.
+    const staleNow = Date.now();
+    for (const pr of allPrs) pr.isStale = isStalePr(pr, settings.staleAfterDays, staleNow);
 
     try {
       await applyActivity(allPrs, this.options.statePath, {

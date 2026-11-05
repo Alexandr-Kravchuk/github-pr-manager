@@ -1,4 +1,5 @@
 import { CLAUDE_LAUNCH_KINDS, type ClaudeLaunchKind } from "../shared/claude-launch";
+import type { CloseStaleOptions } from "../shared/stale";
 import type { SeenInput, ThemePreference } from "../shared/types";
 
 // Validators for values that cross the IPC boundary from the renderer. The
@@ -118,4 +119,43 @@ export function validateClaudeSessionId(value: unknown): string {
     throw new Error("focusClaudeSession: expected a session id.");
   }
   return value;
+}
+
+/**
+ * Validates the stale-PR close request. Only the choices cross over: the PR,
+ * its host and its Jira key are read from main's own snapshot. Transition and
+ * resolution ids are Jira's numeric ids, so they cannot reshape a REST path.
+ */
+export function validateCloseStaleOptions(value: unknown): CloseStaleOptions {
+  if (typeof value !== "object" || value === null) throw new Error("closeStalePr: expected options.");
+  const obj = value as Record<string, unknown>;
+  const comment = typeof obj.comment === "string" ? obj.comment : "";
+  if (comment.length > 10_000) throw new Error("closeStalePr: comment too long.");
+  const jira = (typeof obj.jira === "object" && obj.jira !== null ? obj.jira : {}) as Record<string, unknown>;
+  const numericId = (v: unknown, what: string): string => {
+    if (typeof v !== "string" || !/^\d{1,12}$/.test(v)) throw new Error(`closeStalePr: invalid ${what}.`);
+    return v;
+  };
+  switch (jira.action) {
+    case undefined:
+    case "keep":
+      return { comment, jira: { action: "keep" } };
+    case "todo":
+    case "wontDo":
+      return {
+        comment,
+        jira: {
+          action: jira.action,
+          transitionId: numericId(jira.transitionId, "transition"),
+          resolutionId:
+            jira.resolutionId === null || jira.resolutionId === undefined
+              ? null
+              : numericId(jira.resolutionId, "resolution"),
+        },
+      };
+    case "delete":
+      return { comment, jira: { action: "delete", deleteSubtasks: jira.deleteSubtasks === true } };
+    default:
+      throw new Error("closeStalePr: unknown Jira action.");
+  }
 }
