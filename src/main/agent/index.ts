@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
-import { isBigPr, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
+import { driveReasons, isBigPr, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, gitBashPath, summarizePlan } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { AGENT_CLOSED, todayKey } from "../../shared/agent-view";
@@ -27,7 +27,8 @@ import type {
 import { chooseMergeMethod, mergeArgs } from "./merge";
 import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
 import { ghError, prepareRunFolder, publishPlan, readPlan, runFolderRoots, runGh, type GhRunner, type RunFolder } from "./publish";
-import { hookCommand, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
+import { collectDrive, pushArgs } from "./drive";
+import { hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { openStore, type AgentItemRecord, type AgentStore } from "./store";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
 
@@ -97,11 +98,60 @@ const localDay = todayKey;
 
 /** The kind of session a scenario runs as — what the guard and the tool list go by. */
 export function runKindOf(scenario: AgentScenario): AgentRunKind {
-  return scenario === "brief" ? "brief" : scenario === "afterMerge" ? "afterMerge" : "review";
+  switch (scenario) {
+    case "brief":
+    case "afterMerge":
+    case "rereview":
+    case "drive":
+      return scenario;
+    default:
+      return "review";
+  }
+}
+
+const REASON_TEXT: Record<string, string> = { ci: "failing CI", conflicts: "conflicts", comments: "review comments" };
+
+/** "failing CI and review comments" */
+export function describeReasons(reasons: readonly string[]): string {
+  const words = reasons.map((r) => REASON_TEXT[r] ?? r);
+  return words.length > 1 ? `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}` : (words[0] ?? "");
+}
+
+function queuedHeadline(job: Pick<AgentJob, "scenario" | "key" | "reasons">): string {
+  switch (job.scenario) {
+    case "brief":
+      return "Queued: a brief (too big to review on its own)";
+    case "rereview":
+      return job.key.includes("|asked@") ? "Queued: re-review — you were asked again" : "Queued: re-review — the author answered";
+    case "drive":
+      return `Queued: drive — ${describeReasons(job.reasons ?? [])}`;
+    default:
+      return "Queued: review";
+  }
+}
+
+function workingHeadline(scenario: AgentScenario): string {
+  switch (scenario) {
+    case "brief":
+      return "Writing a brief";
+    case "afterMerge":
+      return "Checking Jira (dry run)";
+    case "rereview":
+      return "Re-reviewing";
+    case "drive":
+      return "Driving to green";
+    default:
+      return "Reviewing";
+  }
 }
 
 /** The rules every agent session gets on top of its prompt. */
-export function agentRules(scenario: AgentScenario, mode: "shadow" | "on", folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null = null): string {
+export function agentRules(
+  scenario: AgentScenario,
+  mode: "shadow" | "on",
+  folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null = null,
+  pr: { repo: string; number: number } | null = null,
+): string {
   const plan =
     "You run unattended as the user's PR agent. First write your plan as a task list with TaskCreate — one short task per step — and keep it current with TaskUpdate as you go, so the user can follow along. (A skill that runs as a Workflow shows its own phases; then no task list is needed.)";
   const never =
@@ -114,15 +164,38 @@ export function agentRules(scenario: AgentScenario, mode: "shadow" | "on", folde
   if (scenario === "afterMerge") {
     return `${plan} This is a dry run: change nothing in Jira or anywhere else — read only, with twg and gh. ${jira} End with the changes you would make and the exact question to ask before making them, as your final message. ${never}`;
   }
+  const later = mode === "shadow" ? " once the user approves it" : " right after this session";
+  if (scenario === "drive") {
+    // Forward slashes: the session passes these paths through Git Bash on Windows.
+    const w = folder ? gitBashPath(folder.wrapperPath) : null;
+    const out = folder?.outDir.replace(/\\/g, "/");
+    const target = pr ? `${pr.repo} ${pr.number}` : "<owner/repo> <number>";
+    return (
+      `${plan} You work on the user's own PR${pr ? ` (${pr.repo}#${pr.number})` : ""}, in a detached checkout of its head. ` +
+      `Commit each fix with git (add, commit) and follow the repository's own conventions — read its CLAUDE.md and AGENTS.md first, since this session doesn't load them on its own — and end every commit message with the trailer "Co-Authored-By: Claude <noreply@anthropic.com>". ` +
+      `Never push and never rewrite history (no rebase, no amend of a commit that was already there): the app pushes your commits to the PR's branch as a fast-forward${later}, after checking them. ` +
+      `Resolve a conflict by merging the base branch in (git fetch, then git merge), never by rebasing; CI runs once the app pushes, so don't wait for it. ` +
+      (w ? `To answer a reviewer in a thread, write the reply to a file under ${out}/ and run \`${w} reply ${target} <comment-id> <file>\`; the app posts it after the push. ` : "") +
+      `Leave .git, .github, .claude, .husky, .npmrc and git attributes alone. End with what you changed and why. ${never}`
+    );
+  }
   if (folder) {
     // Forward slashes: the session passes these paths through Git Bash on Windows.
     const out = folder.outDir.replace(/\\/g, "/");
-    const later = mode === "shadow" ? " once the user approves it" : " right after this session";
+    const w = gitBashPath(folder.wrapperPath);
+    const target = pr ? `${pr.repo} ${pr.number}` : "<owner/repo> <number>";
+    const threads =
+      scenario === "rereview"
+        ? `This is a re-review of a PR you reviewed before. After the workflow returns, finish its thread work through the same wrapper — the app checks every call and makes it when it publishes: ` +
+          `each thread its result keeps open with reason "review-not-posted" is one it would have closed — if its verdict was "withdrawn" (the author's argument held), first reply in it with one line acknowledging the point (\`${w} reply ${target} <replyTo> <file>\`), then resolve it (\`${w} resolve <thread-id>\`); otherwise just resolve it. ` +
+          `Where the author disagreed with a finding (rather than saying it is fixed) and the review keeps it as "still applies", don't argue with your colleague: run \`${w} escalate ${target} <replyTo> <file>\` with one line on what the disagreement is about — the app holds back any reply to that thread and asks the user. `
+        : "";
     return (
       `${plan} Publishing goes through the app: run the review with dryRun: false and publishCommand: "${gitBashPath(folder.wrapperPath)}". ` +
       `That wrapper is the app's own — it records each write for the user and posts nothing; the app publishes what it recorded${later}. ` +
       `Write every file the wrapper takes (the review JSON, a comment JSON, a reply's text) under ${out}/ and pass that absolute path — nothing else is writable — and never call gh api for a write. ` +
-      `${jira} End with a short summary of what you prepared. ${never}`
+      threads +
+      `${jira} End with a short summary of what you prepared${scenario === "rereview" ? ", resolved and escalated" : ""}. ${never}`
     );
   }
   return `${plan} This is a dry run: post NOTHING to GitHub; if your skill has a dry-run mode (dryRun: true), use it. ${jira} End with exactly what you would post — the summary, every inline comment with its file and line, and whether you would approve — as your final message. ${never}`;
@@ -131,6 +204,8 @@ export function agentRules(scenario: AgentScenario, mode: "shadow" | "on", folde
 function promptFor(scenario: AgentScenario, claude: ClaudeSettings): string {
   if (scenario === "brief") return claude.agentPrompts.triage || DEFAULT_AGENT_PROMPTS.triage;
   if (scenario === "afterMerge") return claude.agentPrompts.afterMerge || DEFAULT_AGENT_PROMPTS.afterMerge;
+  if (scenario === "rereview") return claude.agentPrompts.rereview || DEFAULT_AGENT_PROMPTS.rereview;
+  if (scenario === "drive") return claude.prompts.drive || DEFAULT_CLAUDE_PROMPTS.drive;
   return claude.prompts.review || DEFAULT_CLAUDE_PROMPTS.review;
 }
 
@@ -204,7 +279,7 @@ export function createAgent(deps: AgentDeps): Agent {
   /** The PR as the dashboard last saw it (merged ones drop out of the snapshot; their after-merge run still needs a name). */
   const snapshotPr = (prId: string) => deps.getSnapshot()?.pullRequests.find((p) => p.id === prId) ?? null;
 
-  function newItem(job: Pick<AgentJob, "key" | "prId" | "prNumber" | "repo" | "url" | "scenario" | "mode">, pr: PullRequest, headline: string): AgentItemRecord {
+  function newItem(job: Pick<AgentJob, "key" | "prId" | "prNumber" | "repo" | "url" | "scenario" | "mode" | "reasons">, pr: PullRequest, headline: string): AgentItemRecord {
     const item: AgentItemRecord = {
       runId: randomUUID(),
       key: job.key,
@@ -219,6 +294,7 @@ export function createAgent(deps: AgentDeps): Agent {
       state: "queued",
       headline,
       queuedAt: stamp(),
+      ...(job.reasons ? { reasons: job.reasons } : {}),
     };
     store.data.items.push(item);
     store.log({ at: stamp(), prNumber: job.prNumber, repo: job.repo, scenario: job.scenario, runId: item.runId, event: "queued", headOid: pr.headOid });
@@ -233,15 +309,33 @@ export function createAgent(deps: AgentDeps): Agent {
     }
     const own = new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!));
     const sessions = deps.getSessions().filter((x) => !own.has(x.id));
-    const plan = planJobs(snapshot.pullRequests, s, { hasOwnSession: (pr) => sessionsForPr(pr, sessions).length > 0 });
+    let dirty = false;
+    // Drive attempts start over once CI is green, or once someone else pushed
+    // (the head is no longer the one the agent pushed).
+    for (const pr of snapshot.pullRequests) {
+      const d = store.data.drive[pr.id];
+      if (!d) continue;
+      const green = driveReasons(pr, s).length === 0;
+      const someoneElse = d.agentHead !== undefined && pr.headOid !== null && pr.headOid !== d.agentHead;
+      if (green || someoneElse) {
+        delete store.data.drive[pr.id];
+        dirty = true;
+      }
+    }
+    const plan = planJobs(snapshot.pullRequests, s, {
+      hasOwnSession: (pr) => sessionsForPr(pr, sessions).length > 0,
+      driveExhausted: (pr) => {
+        const d = store.data.drive[pr.id];
+        return d && d.attempts >= s.scenarios.driveCi.maxAttempts ? `Yours — the agent tried ${d.attempts} time${d.attempts === 1 ? "" : "s"}; over to you` : null;
+      },
+    });
     idle = Object.fromEntries(plan.idle);
     const byId = new Map(snapshot.pullRequests.map((p) => [p.id, p]));
     const wanted = new Set(plan.jobs.map((j) => j.key));
-    let dirty = false;
     for (const job of plan.jobs) {
       if (store.data.ledger[job.key]) continue;
       if (store.data.items.some((i) => i.key === job.key && (i.state === "queued" || i.state === "working"))) continue;
-      newItem(job, byId.get(job.prId)!, job.scenario === "brief" ? "Queued: a brief (too big to review on its own)" : "Queued: review");
+      newItem(job, byId.get(job.prId)!, queuedHeadline(job));
       dirty = true;
     }
     // A queued job the PR no longer wants (you reviewed it, it went away) leaves
@@ -320,7 +414,7 @@ export function createAgent(deps: AgentDeps): Agent {
     store.data.runsToday += 1;
     item.state = "working";
     item.startedAt = stamp();
-    item.headline = item.scenario === "brief" ? "Writing a brief" : item.scenario === "afterMerge" ? "Checking Jira (dry run)" : "Reviewing";
+    item.headline = item.reasons?.length ? `Driving — ${describeReasons(item.reasons)}` : workingHeadline(item.scenario);
     item.checkout = checkout ?? undefined;
     void store.save();
     changed();
@@ -340,9 +434,18 @@ export function createAgent(deps: AgentDeps): Agent {
 
     // A review's publish step goes through the app's wrapper; without a usable
     // folder for it the review runs as a plain dry run (text only).
+    // A drive answers reviewers through the wrapper too — only that.
+    const subs = kind === "drive" ? (["reply"] as const) : undefined;
     const folder =
-      kind === "review" && deps.captureScript
-        ? prepareRunFolder(runFolderRoots(checkout ? worktreeBase(s.worktreeDir, checkout) : null), item.runId, { repo: item.repo, number: item.prNumber }, deps.execPath, deps.captureScript)
+      (kind === "review" || kind === "rereview" || kind === "drive") && deps.captureScript
+        ? prepareRunFolder(
+            runFolderRoots(checkout ? worktreeBase(s.worktreeDir, checkout) : null),
+            item.runId,
+            { repo: item.repo, number: item.prNumber },
+            deps.execPath,
+            deps.captureScript,
+            subs ? [...subs] : undefined,
+          )
         : null;
     if (folder) item.runFolder = folder.runDir;
 
@@ -352,14 +455,20 @@ export function createAgent(deps: AgentDeps): Agent {
     const settingsFile = path.join(runDir, "settings.json");
     const guardFile = path.join(runDir, "guard.json");
     // A skill's Workflow may run its script from the plugins this run mounted — never one from the PR.
-    writeGuardFile(guardFile, { ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}), workflowDirs: pluginDirs });
+    writeGuardFile(guardFile, {
+      ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),
+      ...(subs ? { subs: [...subs] } : {}),
+      // A drive changes files in its worktree only.
+      ...(kind === "drive" ? { workDir: dir } : {}),
+      workflowDirs: pluginDirs,
+    });
     writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url, guardFile));
     const sessionId = randomUUID();
     item.sessionId = sessionId;
     store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "started", headOid: pr?.headOid ?? keyHead(item.key) ?? undefined, sessionId });
 
     // The wrapper's own rule, and Write — which the guard holds to the payload folder.
-    const allowedTools = [...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : [])];
+    const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : [])])];
     // Read-only runs may read the plugins' folders (a skill's Workflow reads its script from there); a run that edits never gets them.
     const addDirs = [...(folder ? [folder.outDir] : []), ...pluginDirs];
 
@@ -370,7 +479,7 @@ export function createAgent(deps: AgentDeps): Agent {
         sessionId,
         kind,
         prompt: mine.prompt,
-        appendSystemPrompt: agentRules(item.scenario, item.mode, folder),
+        appendSystemPrompt: agentRules(item.scenario, item.mode, folder, { repo: item.repo, number: item.prNumber }),
         allowedTools,
         pluginDirs,
         addDirs,
@@ -378,6 +487,8 @@ export function createAgent(deps: AgentDeps): Agent {
         effort: s.effort,
         settingsFile,
         timeoutMs: s.limits.maxMinutes * 60_000,
+        // No push from anywhere in a drive session: the app pushes after checking the commits.
+        ...(kind === "drive" ? { env: NO_PUSH_ENV } : {}),
       },
       (progress) => {
         if (progress.activity && progress.activity !== entry.progress?.activity) {
@@ -402,6 +513,7 @@ export function createAgent(deps: AgentDeps): Agent {
     const result = outcome.progress.result;
     item.finishedAt = stamp();
     let publishNow = false;
+    let pushNow = false;
     if (entry.takeOver) {
       item.state = "needsYou";
       item.headline = "You took it over in your terminal";
@@ -428,6 +540,28 @@ export function createAgent(deps: AgentDeps): Agent {
         item.headline = "Brief ready";
       } else if (item.scenario === "afterMerge") {
         item.headline = "Jira dry run ready — apply it in a session";
+      } else if (item.scenario === "drive") {
+        const base = keyHead(item.key) ?? pr?.headOid ?? "";
+        const read = await collectDrive(git, dir, base, item.reasons ?? []).catch((e: Error) => ({ error: e.message }));
+        if ("error" in read) {
+          fail("Couldn't read the run's commits", read.error);
+        } else if (read.drive.commits.length === 0) {
+          item.drive = read.drive;
+          item.headline = "No commits — see what it found";
+        } else if (!read.fastForward) {
+          fail("The run rewrote the branch's history — nothing to push", "The app pushes fast-forwards only; run it again.");
+        } else {
+          item.drive = read.drive;
+          if (steps.length > 0) item.plan = summarizePlan(steps);
+          const n = read.drive.commits.length;
+          const last = read.drive.commits[n - 1].subject;
+          if (!s.permissions.pushOwnBranch) {
+            item.headline = `Prepared ${n} commit${n === 1 ? "" : "s"} — pushing is off in Settings › Agent`;
+          } else {
+            item.headline = `Would push ${n} commit${n === 1 ? "" : "s"}: ${last}`;
+            pushNow = item.mode === "on";
+          }
+        }
       } else if (steps.length > 0) {
         item.plan = summarizePlan(steps);
         item.headline = `Would post: ${describePlan(item.plan)}`;
@@ -451,6 +585,9 @@ export function createAgent(deps: AgentDeps): Agent {
     if (publishNow) {
       // On: the app posts what the review prepared, with the same checks as your Publish.
       await publishItem(item, all, false);
+    } else if (pushNow) {
+      // On: the app pushes the drive's commits, with the same checks as your Push.
+      await pushItem(item, all);
     } else if (item.state === "needsYou") {
       announce(item, "needsYou");
     }
@@ -519,7 +656,21 @@ export function createAgent(deps: AgentDeps): Agent {
       all.agent.scenarios.review.holdApproveOnChangeRequest && pr.reviewers.some((r) => r.reviewState === "changes_requested" && r.login.toLowerCase() !== me);
     item.headline = "Publishing…";
     changed();
-    const out = await publishPlan(item.runFolder, item.url, { repo: item.repo, number: item.prNumber, signature: all.agent.policy.signature, holdApprove }, gh);
+    const rr = item.scenario === "rereview" ? all.agent.scenarios.rereview : null;
+    const out = await publishPlan(
+      item.runFolder,
+      item.url,
+      {
+        repo: item.repo,
+        number: item.prNumber,
+        signature: all.agent.policy.signature,
+        holdApprove,
+        ...(rr ? { allowResolve: rr.resolve, allowApprove: rr.approve } : {}),
+      },
+      // A review answers and resolves only in threads you opened.
+      { viewer, mine: true },
+      gh,
+    );
     if (!out.ok) {
       store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "publish-failed", detail: out.error });
       return refuse(`stopped after ${out.posted} of ${out.total}: ${out.error}`);
@@ -546,6 +697,86 @@ export function createAgent(deps: AgentDeps): Agent {
    * refuse it if a push lands in between. Then the Jira dry run, if there is a
    * prompt for it.
    */
+  /**
+   * Pushes a drive's commits to your PR's branch — on your Push, or in On
+   * right after the run. Read again first: the branch must still be at the
+   * head the run started from (else someone pushed meanwhile), and the
+   * commits must sit on top of it, since `git push` without --force sends a
+   * fast-forward only. Then the replies the run prepared, if any.
+   */
+  async function pushItem(item: AgentItemRecord, all: Settings): Promise<AgentActionResult> {
+    const refuse = (error: string): AgentActionResult => {
+      item.state = "needsYou";
+      item.headline = `Not pushed — ${error}`;
+      void store.save();
+      changed();
+      announce(item, "failed");
+      return { ok: false, error };
+    };
+    if (item.pushed) return { ok: false, error: "It is pushed already." };
+    if (!item.drive || item.drive.commits.length === 0) return { ok: false, error: "There is nothing to push." };
+    if (!all.agent.permissions.pushOwnBranch) return { ok: false, error: "Pushing is off in Settings › Agent › Permissions." };
+    if (!item.worktree || !item.checkout || !fs.existsSync(item.worktree)) return refuse("the run's checkout is gone — run it again");
+    const read = await fresh(item, snapshotPr(item.prId)?.roles ?? ["author"]);
+    if (!read.ok) return refuse(read.error);
+    const { pr, state, viewer } = read.fresh;
+    if (state !== "OPEN") return refuse(`the PR was ${state.toLowerCase()} since`);
+    if (pr.isCrossRepository) return refuse("its branch is in a fork");
+    if (pr.headOid !== item.drive.base) return refuse("someone pushed to the branch since — run it again on the new head");
+    // What is in the checkout now — "Continue in session" may have added commits.
+    const now = await collectDrive(git, item.worktree, item.drive.base, item.drive.reasons).catch((e: Error) => ({ error: e.message }));
+    if ("error" in now) return refuse(`couldn't read the commits: ${now.error}`);
+    if (!now.fastForward) return refuse("the commits rewrite the branch's history — the app pushes fast-forwards only");
+    item.drive = now.drive;
+    const remote = remoteFor(item.checkout, pr);
+    if (!remote) return refuse(`no remote of ${item.checkout} points at ${pr.repo}`);
+    item.headline = "Pushing…";
+    changed();
+    let head: string;
+    try {
+      head = (await git(["rev-parse", "HEAD"], item.worktree)).trim();
+      await git(pushArgs(remote, pr.headRefName), item.worktree);
+    } catch (e) {
+      return refuse(`git refused the push: ${(e as Error).message}`);
+    }
+    const n = now.drive.commits.length;
+    item.pushed = true;
+    item.finishedAt = stamp();
+    const d = store.data.drive[item.prId] ?? { attempts: 0 };
+    store.data.drive[item.prId] = { attempts: d.attempts + 1, agentHead: head };
+    store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
+    store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: "drive", runId: item.runId, event: "pushed", headOid: head, sessionId: item.sessionId, detail: `${n} commit(s)` });
+    let headline = `Pushed ${n} commit${n === 1 ? "" : "s"}`;
+    // The run's answers to reviewers go out once the code they talk about is on the branch.
+    if (item.runFolder && item.plan && item.plan.replies.length > 0) {
+      const out = await publishPlan(
+        item.runFolder,
+        item.url,
+        { repo: item.repo, number: item.prNumber, signature: all.agent.policy.signature, holdApprove: false },
+        // Your own PR: answering reviewers in their threads is the point; it resolves nothing.
+        { viewer, mine: false },
+        gh,
+      );
+      if (!out.ok) {
+        item.state = "needsYou";
+        item.headline = `${headline}; the replies stopped after ${out.posted} of ${out.total}: ${out.error}`;
+        void store.save();
+        changed();
+        announce(item, "failed");
+        return { ok: true };
+      }
+      headline += `, answered ${out.total} thread${out.total === 1 ? "" : "s"}`;
+    }
+    item.state = "done";
+    item.headline = headline;
+    await dropWorktree(item);
+    dropRunFolder(item);
+    void store.save();
+    changed();
+    announce(item, "finished");
+    return { ok: true };
+  }
+
   async function mergeItem(item: AgentItemRecord, all: Settings, picked?: MergeMethod): Promise<AgentActionResult> {
     const s = all.agent;
     const head = keyHead(item.key);
@@ -633,17 +864,26 @@ export function createAgent(deps: AgentDeps): Agent {
   }
 
   /** Puts a PR in the queue on your say-so; its key is its own, so the ledger of the automatic one doesn't stop it. */
-  function enqueueAsked(pr: PullRequest, s: AgentSettings, scenario: AgentScenario): AgentActionResult {
+  function enqueueAsked(pr: PullRequest, s: AgentSettings, scenario: AgentScenario, reasons?: string[]): AgentActionResult {
     if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
       return { ok: false, error: "The agent is already on this PR." };
     }
     const key = `${pr.id}|${scenario}|${pr.headOid ?? "-"}|asked`;
     delete store.data.ledger[key];
-    newItem(
-      { key, prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario, mode: scenario === "brief" ? "on" : s.scenarios.review.mode === "on" ? "on" : "shadow" },
-      pr,
-      `Queued: ${scenario === "brief" ? "a brief" : "review"} (asked by you)`,
-    );
+    // Asked by you: in the scenario's own mode, and never more than Shadow when that is off.
+    const on = (m: string) => (m === "on" ? "on" : "shadow");
+    const mode =
+      scenario === "brief"
+        ? "on"
+        : scenario === "rereview"
+          ? on(s.scenarios.rereview.mode)
+          : scenario === "drive"
+            ? s.scenarios.driveCi.mode === "on" && s.scenarios.driveComments.mode === "on"
+              ? "on"
+              : "shadow"
+            : on(s.scenarios.review.mode);
+    const what = { brief: "a brief", rereview: "re-review", drive: `drive — ${describeReasons(reasons ?? [])}` }[scenario as string] ?? "review";
+    newItem({ key, prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario, mode, reasons }, pr, `Queued: ${what} (asked by you)`);
     void store.save();
     changed();
     tick();
@@ -657,9 +897,14 @@ export function createAgent(deps: AgentDeps): Agent {
     if (action.type === "enqueue") {
       const pr = snapshot?.pullRequests.find((p) => p.id === action.prId);
       if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
-      if (!pr.roles.includes("reviewer") && !pr.roles.includes("reviewed")) {
-        return { ok: false, error: "On your own PRs the agent can't help yet — that comes with driving PRs to green." };
+      if (pr.roles.includes("author")) {
+        if (pr.isCrossRepository) return { ok: false, error: "Its branch is in a fork — the agent pushes only to branches of the repository itself." };
+        const reasons = driveReasons(pr, all.agent);
+        if (reasons.length === 0) return { ok: false, error: "Nothing to drive: CI isn't red, there are no conflicts and no review comments waiting." };
+        return enqueueAsked(pr, all.agent, "drive", reasons);
       }
+      if (!pr.roles.includes("reviewer") && !pr.roles.includes("reviewed")) return { ok: false, error: "The agent works on PRs you review or your own." };
+      if (pr.viewerHasReviewed) return enqueueAsked(pr, all.agent, "rereview");
       const brief = isBigPr(pr, all.agent);
       return enqueueAsked(pr, all.agent, brief ? "brief" : "review");
     }
@@ -712,8 +957,13 @@ export function createAgent(deps: AgentDeps): Agent {
       }
       case "publish": {
         if (r) return { ok: false, error: "It is still running." };
-        if (item.state !== "needsYou" || item.scenario !== "review") return { ok: false, error: "Only a prepared review can be published." };
+        if (item.state !== "needsYou" || (item.scenario !== "review" && item.scenario !== "rereview")) return { ok: false, error: "Only a prepared review can be published." };
         return publishItem(item, all, true);
+      }
+      case "push": {
+        if (r) return { ok: false, error: "It is still running." };
+        if (item.state !== "needsYou" || item.scenario !== "drive") return { ok: false, error: "Only a drive's commits can be pushed." };
+        return pushItem(item, all);
       }
       case "merge": {
         if (item.scenario !== "merge" || item.state !== "needsYou") return { ok: false, error: "There is nothing to merge here." };
@@ -732,11 +982,15 @@ export function createAgent(deps: AgentDeps): Agent {
       }
       case "retry": {
         if (r || item.state === "queued") return { ok: false, error: "It is already running." };
+        if (item.scenario === "merge") return { ok: false, error: "A merge offer isn't a run — it comes back on its own once the PR is ready." };
         const pr = snapshot?.pullRequests.find((p) => p.id === item.prId);
         if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+        // A drive goes again for what the PR needs now, not what it needed then.
+        const reasons = item.scenario === "drive" ? driveReasons(pr, all.agent) : undefined;
+        if (reasons && reasons.length === 0) return { ok: false, error: "Nothing to drive any more: CI isn't red, there are no conflicts and no review comments waiting." };
         // The old result goes only once the new run is in the queue: a refusal
         // (the agent is already on the PR) leaves it where it was.
-        const queued = enqueueAsked(pr, all.agent, item.scenario);
+        const queued = enqueueAsked(pr, all.agent, item.scenario, reasons);
         if (queued.ok) await closeAs(item, AGENT_CLOSED.rerun);
         return queued;
       }

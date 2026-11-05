@@ -8137,7 +8137,18 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       for (const cmd of ["npm test", "npm run typecheck", "git status", "git add src/x.ts", "git commit -m fix", "git log -3"]) {
         assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: cmd }).allow, true, cmd);
       }
-      assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: "x" }).allow, true);
+      const run = { workDir: "C:/wt", outDir: "C:/T/prd-agent/r/out", wrapperPath: "C:/T/prd-agent/r/bin/pr-review-publish.sh", subs: ["reply"] };
+      assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: "C:\\wt\\src\\x.ts" }, null, run).allow, true, "its own worktree");
+      assert.strictEqual(guard.checkToolUse("drive", "Write", { file_path: "C:/T/prd-agent/r/out/reply.txt" }, null, run).allow, true, "a reply file for its wrapper");
+      assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: "x" }).allow, false, "no guard file, no edits");
+      for (const file of ["C:/elsewhere/a.ts", "C:/wt/.git/hooks/pre-push", "C:/wt/.github/workflows/ci.yml", "C:/wt/.claude/settings.json", "C:/wt/.husky/pre-commit", "C:/wt/.npmrc", "C:/wt/sub/.gitattributes"]) {
+        assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: file }, null, run).allow, false, file);
+      }
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "git rebase origin/main" }).allow, false, "a rebase is never a fast-forward");
+      const w = "/c/T/prd-agent/r/bin/pr-review-publish.sh";
+      assert.strictEqual(guard.checkBash("drive", `${w} reply acme/widgets 12 77 C:/T/prd-agent/r/out/reply.txt`, gpr, run).allow, true);
+      assert.match(guard.checkBash("drive", `${w} resolve PRRT_x`, gpr, run).reason, /may not resolve/);
+      assert.match(guard.checkBash("drive", `${w} review acme/widgets 12 C:/T/prd-agent/r/out/r.json`, gpr, run).reason, /may not review/);
     });
 
     test("agent defaults: reads carry no git rule (its output and exec flags write and run)", () => {
@@ -8220,7 +8231,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         [reviewPr({ requestedOfMe: false }), /team/],
         [reviewPr({ isDraft: true }), /Draft/],
         [reviewPr({ isIgnored: true }), /Ignored/],
-        [reviewPr({ viewerHasReviewed: true }), /already reviewed/],
+        [reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), /nothing new from the author/],
         [reviewPr({ role: "author", isDraft: true }), /Yours — draft/],
       ];
       for (const [pr, why] of cases) {
@@ -8455,7 +8466,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify } = {}) => {
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl } = {}) => {
       const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
       nfsA.mkdirSync(path.join(co, ".git"), { recursive: true });
@@ -8480,10 +8491,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         hookScript: hookJs,
         execPath: process.execPath,
         plugins: () => [],
-        git: async (args) => (gitCalls.push(args), ""),
-        spawner: (args) => {
+        git: async (args, cwd) => (gitCalls.push(args), gitImpl ? gitImpl(args, cwd) : ""),
+        spawner: (args, _cwd, env) => {
           const c = fakeChild();
           c.args = args;
+          c.env = env;
           children.push(c);
           setImmediate(() => script(c));
           return c;
@@ -8689,7 +8701,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
       const mine = agentFixture({ pr: reviewPr({ role: "author" }), script: keepWorking });
       try {
-        assert.match((await mine.agent.act({ type: "enqueue", prId: mine.snapshot.pullRequests[0].id })).error, /own PRs/);
+        assert.match((await mine.agent.act({ type: "enqueue", prId: mine.snapshot.pullRequests[0].id })).error, /Nothing to drive/, "a clean PR of yours has nothing to drive");
       } finally {
         mine.agent.stop();
       }
@@ -9047,25 +9059,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       let failAt = 1;
       const gh = async (args, opts = {}) => {
         // The ownership checks before anything is posted.
-        if (args[1] === "graphql" && opts.input.includes("node(id:$id)")) return { code: 0, stdout: JSON.stringify({ data: { node: { pullRequest: { number: 7, repository: { nameWithOwner: "a/b" } } } } }), stderr: "" };
-        if (/^repos\/a\/b\/pulls\/comments\/\d+$/.test(args[1])) return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://creatio.ghe.com/api/v3/repos/a/b/pulls/7" }), stderr: "" };
+        if (args[1] === "graphql" && opts.input.includes("node(id:$id)")) {
+          return { code: 0, stdout: JSON.stringify({ data: { node: { isResolved: false, pullRequest: { number: 7, repository: { nameWithOwner: "a/b" } }, comments: { nodes: [{ author: { login: "Me" } }] } } } }), stderr: "" };
+        }
+        if (/^repos\/a\/b\/pulls\/comments\/\d+$/.test(args[1])) return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://creatio.ghe.com/api/v3/repos/a/b/pulls/7", user: { login: "me" } }), stderr: "" };
         calls.push({ args, input: JSON.parse(opts.input) });
         return calls.length - 1 === failAt ? { code: 1, stdout: "", stderr: "HTTP 422: line is not part of the diff" } : { code: 0, stdout: "{}", stderr: "" };
       };
       const ctx = { repo: "a/b", number: 7, signature: "sig", holdApprove: false };
       const url = "https://creatio.ghe.com/a/b/pull/7";
-      const first = await publishMod.publishPlan(runDir, url, ctx, gh);
+      const first = await publishMod.publishPlan(runDir, url, ctx, { viewer: "me", mine: true }, gh);
       assert.deepStrictEqual([first.ok, first.posted, first.total], [false, 1, 3]);
       assert.match(first.error, /reply to comment 9: HTTP 422/);
       assert.deepStrictEqual(calls[0].args, ["api", "repos/a/b/pulls/7/reviews", "--method", "POST", "--input", "-", "--hostname", "creatio.ghe.com"]);
       assert.strictEqual(calls[0].input.body, "b\n\nsig");
       failAt = -1;
       calls.length = 0;
-      const second = await publishMod.publishPlan(runDir, url, ctx, gh);
+      const second = await publishMod.publishPlan(runDir, url, ctx, { viewer: "me", mine: true }, gh);
       assert.deepStrictEqual([second.ok, second.posted], [true, 3]);
       assert.deepStrictEqual(calls.map((c) => c.args[1]), ["repos/a/b/pulls/7/comments/9/replies", "graphql"], "the review is not posted twice");
       calls.length = 0;
-      await publishMod.publishPlan(runDir, url, ctx, gh);
+      await publishMod.publishPlan(runDir, url, ctx, { viewer: "me", mine: true }, gh);
       assert.strictEqual(calls.length, 0, "an all-posted plan posts nothing");
       assert.deepStrictEqual(publishMod.ghApiArgs({ endpoint: "graphql" }, "https://github.com/a/b/pull/1"), ["api", "graphql", "--method", "POST", "--input", "-"]);
     });
@@ -9083,11 +9097,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         posted.push(args);
         return { code: 0, stdout: "{}", stderr: "" };
       };
-      const out = await publishMod.publishPlan(runDir, "https://github.com/a/b/pull/7", { repo: "a/b", number: 7, signature: "s", holdApprove: false }, gh);
+      const out = await publishMod.publishPlan(runDir, "https://github.com/a/b/pull/7", { repo: "a/b", number: 7, signature: "s", holdApprove: false }, { viewer: "me", mine: true }, gh);
       assert.deepStrictEqual([out.ok, out.posted], [false, 0]);
       assert.match(out.error, /PRRT_elsewhere is not on a\/b#7/);
       assert.strictEqual(posted.length, 0, "not even the review goes out");
-      const reply = await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 5, body: "x" }], "https://github.com/a/b/pull/7", "a/b", 7, async () => ({ code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/8" }), stderr: "" }));
+      const reply = await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 5, body: "x" }], "https://github.com/a/b/pull/7", "a/b", 7, { viewer: "me", mine: true }, async () => ({ code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/8" }), stderr: "" }));
       assert.match(reply, /comment 5 is not on a\/b#7/);
     });
 
@@ -9351,6 +9365,232 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, sessionId: "s" })), "Publish");
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, published: true, sessionId: "s" })), "Continue in session");
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "merge" })), "Merge");
+    });
+
+    // --- stage 5: re-review (threads, escalations) and drive (commits, the app's push) ---
+    const driveMod = require(path.join(__dirname, "../dist/main/main/agent/drive.js"));
+    const captureMod = require(captureJs);
+
+    test("publish plan: an escalation holds back the reply to its thread and is listed for you; re-review switches drop resolves and approves", () => {
+      assert.deepStrictEqual(pub.parsePublishCall(["escalate", "a/b", "7", "55", "/x/why.txt"]).value, { sub: "escalate", repo: "a/b", number: 7, replyTo: 55, file: "/x/why.txt" });
+      const steps = [
+        { kind: "review", event: "APPROVE", body: "b", comments: [] },
+        { kind: "reply", replyTo: 55, body: "still applies" },
+        { kind: "reply", replyTo: 56, body: "still applies too" },
+        { kind: "escalate", replyTo: 55, body: "design call" },
+        { kind: "resolve", threadId: "PRRT_a" },
+      ];
+      const ctx = { repo: "a/b", number: 7, signature: "s", holdApprove: false };
+      assert.deepStrictEqual(pub.planRequests(steps, ctx).map((r) => r.endpoint), ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/56/replies", "graphql"], "no reply where the thread was handed back");
+      const off = pub.planRequests(steps, { ...ctx, allowResolve: false, allowApprove: false });
+      assert.deepStrictEqual(off.map((r) => r.endpoint), ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/56/replies"]);
+      assert.strictEqual(off[0].body.event, "COMMENT", "approve is off for re-reviews");
+      const sum = pub.summarizePlan(steps);
+      assert.deepStrictEqual(sum.replies.map((r) => r.replyTo), [56]);
+      assert.deepStrictEqual(sum.escalations, [{ replyTo: 55, body: "design call" }]);
+      assert.strictEqual(pub.describePlan(sum), "approve, 1 reply, 1 resolve, 1 dispute for you");
+      assert.deepStrictEqual(pub.readPlanLines(steps.map((x) => JSON.stringify(x)).join("\n")), steps);
+    });
+
+    test("capture: a run's own list of subcommands — a drive only replies", () => {
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-cap-"));
+      const outDir = path.join(runDir, "out");
+      nfsA.mkdirSync(outDir);
+      const run = { repo: "a/b", number: 7, outDir, wrapperPath: "x", subs: ["reply"] };
+      const file = path.join(outDir, "r.txt");
+      nfsA.writeFileSync(file, "fixed in abc123");
+      assert.deepStrictEqual(captureMod.captureCall(run, ["reply", "a/b", "7", "9", file]), { step: { kind: "reply", replyTo: 9, body: "fixed in abc123" } });
+      assert.match(captureMod.captureCall(run, ["resolve", "PRRT_x"]).error, /may not resolve/);
+      assert.match(captureMod.captureCall(run, ["escalate", "a/b", "7", "9", file]).error, /may not escalate/);
+      assert.deepStrictEqual(captureMod.captureCall({ ...run, subs: undefined }, ["escalate", "a/b", "7", "9", file]), { step: { kind: "escalate", replyTo: 9, body: "fixed in abc123" } });
+    });
+
+    await atest("publish: a review answers and resolves only in your threads; your own PR's drive answers reviewers and resolves nothing", async () => {
+      const gh = async (args) => {
+        if (args[1] === "graphql") {
+          return { code: 0, stdout: JSON.stringify({ data: { node: { isResolved: false, pullRequest: { number: 7, repository: { nameWithOwner: "a/b" } }, comments: { nodes: [{ author: { login: "colleague" } }] } } } }), stderr: "" };
+        }
+        return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "colleague" } }), stderr: "" };
+      };
+      const url = "https://github.com/a/b/pull/7";
+      assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /not yours/);
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /colleague's thread/);
+      assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), null, "a drive answers a reviewer in theirs");
+      assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), /doesn't resolve/);
+      assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: null, mine: true }, gh), /login on the host is unknown/);
+    });
+
+    test("mapPr: the author's latest thread answer, a reviewer's latest open-thread comment, and whether the branch is in a fork", () => {
+      const thread = (login, at, isResolved = false) => ({ isResolved, comments: { totalCount: 2, nodes: [{ author: { login }, createdAt: at }] } });
+      const pr = github.mapPr(
+        rawPr({
+          isCrossRepository: true,
+          reviewThreads: {
+            totalCount: 4,
+            nodes: [thread("auth", "2026-07-08T00:00:00Z"), thread("auth", "2026-07-09T00:00:00Z"), thread("rev", "2026-07-10T00:00:00Z"), thread("rev", "2026-07-11T00:00:00Z", true)],
+          },
+        }),
+        "GH",
+        ["reviewed"],
+        "me",
+      );
+      assert.strictEqual(pr.authorRepliedAt, "2026-07-09T00:00:00Z");
+      assert.strictEqual(pr.reviewerRepliedAt, "2026-07-10T00:00:00Z", "a resolved thread asks nothing of the author");
+      assert.strictEqual(pr.isCrossRepository, true);
+      assert.strictEqual(github.mapPr(rawPr(), "GH", ["author"], "me").isCrossRepository, false);
+    });
+
+    test("agent policy: a re-review once the author answers after your review — a push, a thread reply — or asks you again", () => {
+      const at = (h) => `2026-07-0${h}T00:00:00Z`;
+      const rv = (o = {}) => ({ ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), viewerReviewedAt: at(5), viewerReviewedHead: false, lastCommitPushedAt: at(4), authorRepliedAt: null, ...o });
+      assert.strictEqual(policy.authorActivitySince(rv()), null);
+      assert.strictEqual(policy.authorActivitySince(rv({ lastCommitPushedAt: at(6) })), at(6));
+      assert.strictEqual(policy.authorActivitySince(rv({ lastCommitPushedAt: at(6), viewerReviewedHead: true })), null, "your review is on the head: no push since");
+      assert.strictEqual(policy.authorActivitySince(rv({ authorRepliedAt: at(7), lastCommitPushedAt: at(6) })), at(7));
+      assert.strictEqual(policy.authorActivitySince(rv({ viewerReviewedAt: null, authorRepliedAt: at(7) })), null, "after a plain Comment there is nothing to compare with");
+      assert.match(policy.planJobs([rv()], agentOn(), noSessions).idle.get("PR_R"), /nothing new from the author/);
+      const replied = policy.planJobs([rv({ authorRepliedAt: at(7) })], agentOn(), noSessions).jobs;
+      assert.deepStrictEqual(replied.map((j) => [j.scenario, j.kind, j.mode, j.key]), [["rereview", "rereview", "shadow", `PR_R|rereview|aaa111|reply@${at(7)}`]]);
+      const later = policy.planJobs([rv({ authorRepliedAt: at(8) })], agentOn(), noSessions).jobs[0].key;
+      assert.notStrictEqual(later, replied[0].key, "a later reply without a push is new work");
+      const asked = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true })], agentOn(), noSessions).jobs[0];
+      assert.match(asked.key, /\|asked@-$/);
+      assert.match(policy.planJobs([rv({ authorRepliedAt: at(7) })], agentOn({ scenarios: { rereview: { mode: "off" } } }), noSessions).idle.get("PR_R"), /re-reviews are off/);
+    });
+
+    test("agent policy: your PR is driven for red CI, conflicts or review comments — not a draft, not a fork, not past its attempts", () => {
+      const mine = (o = {}) => ({ ...reviewPr({ role: "author" }), ciState: "failure", ...o });
+      assert.deepStrictEqual(policy.driveReasons(mine({ hasConflicts: true, hasUnaddressedComments: true }), agentOn()), ["ci", "conflicts", "comments"]);
+      assert.deepStrictEqual(policy.driveReasons(mine(), agentOn({ scenarios: { driveCi: { mode: "off" } } })), []);
+      const job = policy.planJobs([mine()], agentOn(), noSessions).jobs[0];
+      assert.deepStrictEqual([job.scenario, job.kind, job.mode, job.reasons, job.key], ["drive", "drive", "shadow", ["ci"], "PR_R|drive|aaa111|ci"]);
+      const both = policy.planJobs([mine({ hasUnaddressedComments: true, reviewerRepliedAt: "2026-07-09T00:00:00Z" })], agentOn({ scenarios: { driveCi: { mode: "on" } } }), noSessions).jobs[0];
+      assert.strictEqual(both.mode, "shadow", "one Shadow reason keeps the run in Shadow");
+      assert.strictEqual(both.key, "PR_R|drive|aaa111|ci+comments@2026-07-09T00:00:00Z");
+      assert.strictEqual(policy.planJobs([mine()], agentOn({ scenarios: { driveCi: { mode: "on" } } }), noSessions).jobs[0].mode, "on");
+      assert.match(policy.planJobs([mine({ isDraft: true })], agentOn(), noSessions).idle.get("PR_R"), /draft/);
+      assert.match(policy.planJobs([mine({ isCrossRepository: true })], agentOn(), noSessions).idle.get("PR_R"), /fork/);
+      assert.match(policy.planJobs([mine()], agentOn(), { ...noSessions, driveExhausted: () => "Yours — the agent tried 2 times; over to you" }).idle.get("PR_R"), /tried 2 times/);
+      assert.strictEqual(policy.planJobs([mine()], agentOn(), noSessions).merges.length, 0, "a red PR is not offered for merge");
+    });
+
+    await atest("drive: commits on top of the head are read oldest first; a rewritten history is not a fast-forward", async () => {
+      const repo = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-drive-"));
+      const g = (...args) => spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+      g("init", "-q");
+      nfsA.writeFileSync(path.join(repo, "a.txt"), "1\n");
+      g("add", "a.txt");
+      g("commit", "-q", "-m", "base");
+      const base = g("rev-parse", "HEAD").stdout.trim();
+      for (const [n, msg] of [["2", "fix: one"], ["3", "fix: two"]]) {
+        nfsA.writeFileSync(path.join(repo, "a.txt"), `${n}\n`);
+        g("commit", "-q", "-am", msg);
+      }
+      const read = await driveMod.collectDrive(wt.runGit, repo, base, ["ci"]);
+      assert.deepStrictEqual(read.drive.commits.map((c) => c.subject), ["fix: one", "fix: two"]);
+      assert.strictEqual(read.fastForward, true);
+      assert.match(read.drive.stat, /a\.txt/);
+      assert.match(read.drive.patch, /^\+3$/m);
+      g("reset", "-q", "--hard", base);
+      nfsA.writeFileSync(path.join(repo, "a.txt"), "amended\n");
+      g("commit", "-q", "--amend", "-am", "base, amended");
+      assert.strictEqual((await driveMod.collectDrive(wt.runGit, repo, base, [])).fastForward, false, "an amended base is not a fast-forward");
+      g("reset", "-q", "--hard", base);
+      assert.deepStrictEqual((await driveMod.collectDrive(wt.runGit, repo, base, [])).drive.commits, []);
+      await assert.rejects(driveMod.collectDrive(wt.runGit, repo, "HEAD~1", []), /no head commit/);
+    });
+
+    test("drive: the app pushes HEAD to the PR's branch by name — no --force, nothing that reads as an option", () => {
+      assert.deepStrictEqual(driveMod.pushArgs("origin", "feature/x-1"), ["push", "origin", "HEAD:refs/heads/feature/x-1"]);
+      for (const [remote, branch] of [["origin", "--force"], ["origin", "a..b"], ["origin", "x.lock"], ["-u", "main"], ["origin", "a b"]]) {
+        assert.throws(() => driveMod.pushArgs(remote, branch), /isn't a/, `${remote} ${branch}`);
+      }
+      const NO = runner.NO_PUSH_ENV;
+      assert.strictEqual(NO.GIT_CONFIG_COUNT, "3");
+      assert.deepStrictEqual([NO.GIT_CONFIG_VALUE_0, NO.GIT_CONFIG_VALUE_1, NO.GIT_CONFIG_VALUE_2], ["https://", "git@", "ssh://"]);
+    });
+
+    await atest("agent drive: your red PR is driven in a session that can't push; on your Push the app pushes a fast-forward and counts the attempt", async () => {
+      const mine = { ...reviewPr({ role: "author" }), ciState: "failure", headRefName: "feature/x" };
+      let freshHead = "aaa111";
+      const pushes = [];
+      const f = agentFixture({
+        pr: mine,
+        script: succeed("Fixed the failing test."),
+        fetchPr: async () => ({ pr: { ...mine, headOid: freshHead }, state: "OPEN", viewer: "me" }),
+        git: async (args) => {
+          // Newest first, as git log prints it.
+          if (args[0] === "log") return "2222222222222222222222222222222222222222\tfix: the failing test\n1111111111111111111111111111111111111111\ttest: cover it\n";
+          if (args[0] === "diff") return args.includes("--stat") ? " a.ts | 2 +-" : "+fixed";
+          if (args[0] === "rev-parse") return "2222222222222222222222222222222222222222\n";
+          if (args[0] === "push") pushes.push(args);
+          return "";
+        },
+      });
+      // The fixture's head is "aaa111" — too short for a real oid; give the item a real one.
+      f.snapshot.pullRequests[0] = { ...mine, headOid: "a".repeat(40) };
+      freshHead = "a".repeat(40);
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.deepStrictEqual([item.scenario, item.reasons, item.headline], ["drive", ["ci"], "Would push 2 commits: fix: the failing test"]);
+        assert.strictEqual(view.primaryActionLabel(item), "Push");
+        assert.deepStrictEqual(item.drive.commits.map((c) => c.subject), ["fix: the failing test", "test: cover it"].reverse());
+        assert.strictEqual(pushes.length, 0, "Shadow pushes nothing by itself");
+        const c = f.children[0];
+        assert.strictEqual(c.env.GIT_CONFIG_COUNT, "3", "the session's git can't push");
+        const rules = c.args[c.args.indexOf("--append-system-prompt") + 1];
+        assert.match(rules, /Never push and never rewrite history/);
+        assert.match(rules, /Co-Authored-By: Claude/);
+        const guardFile = JSON.parse(nfsA.readFileSync(path.join(path.dirname(c.args[c.args.indexOf("--settings") + 1]), "guard.json"), "utf8"));
+        assert.ok(guardFile.workDir, "the guard knows its worktree");
+        // The fake git made no checkout on disk; the push wants the run's.
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        freshHead = "b".repeat(40);
+        assert.match((await f.agent.act({ type: "push", runId: item.runId })).error, /someone pushed/);
+        assert.strictEqual(pushes.length, 0);
+        freshHead = "a".repeat(40);
+        assert.deepStrictEqual(await f.agent.act({ type: "push", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(pushes, [["push", "origin", "HEAD:refs/heads/feature/x"]]);
+        assert.deepStrictEqual([only(f)[0].state, only(f)[0].pushed, only(f)[0].headline], ["done", true, "Pushed 2 commits"]);
+        const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+        assert.deepStrictEqual(state.drive["PR_R"], { attempts: 1, agentHead: "2222222222222222222222222222222222222222" });
+        assert.strictEqual((await f.agent.act({ type: "push", runId: item.runId })).ok, false, "never twice");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent re-review: a review you gave, answered by the author, is re-reviewed under the re-review guard with the thread rules", async () => {
+      const at = "2026-07-09T00:00:00Z";
+      const rv = { ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), viewerReviewedAt: "2026-07-08T00:00:00Z", viewerReviewedHead: true, authorRepliedAt: at };
+      const f = agentFixture({ pr: rv, script: reviewWithPlan("COMMENT"), captureScript: captureJs });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.scenario, "rereview");
+        assert.match(item.key, /\|reply@2026-07-09T00:00:00Z$/);
+        const args = f.children[0].args;
+        assert.match(nfsA.readFileSync(args[args.indexOf("--settings") + 1], "utf8"), /hook\.js[\s\S]*rereview/);
+        const rules = args[args.indexOf("--append-system-prompt") + 1];
+        assert.match(rules, /review-not-posted/);
+        assert.match(rules, /escalate a\/b 7 <replyTo> <file>/);
+        assert.match(rules, /don't argue with your colleague/);
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(only(f).length, 1, "the same answer is re-reviewed once");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("ipc and view: Push names a run; a drive's first button is Push", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "push", runId: RID }), { type: "push", runId: RID });
+      const drive = { base: "a".repeat(40), reasons: ["ci"], commits: [{ oid: "b".repeat(40), subject: "fix" }], stat: "", patch: "" };
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", drive, sessionId: "s" })), "Push");
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", drive: { ...drive, commits: [] }, sessionId: "s" })), "Continue in session");
     });
 
     test("main.js wiring: the agent's state is pulled and acted on over IPC, and pushed only to a visible window", () => {

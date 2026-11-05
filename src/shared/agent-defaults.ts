@@ -74,6 +74,7 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "Glob",
     "Skill",
     "Agent",
+    "Workflow",
     "ToolSearch",
     "TaskCreate",
     "TaskUpdate",

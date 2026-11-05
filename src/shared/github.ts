@@ -77,6 +77,7 @@ fragment PrFields on PullRequest {
   additions
   deletions
   changedFiles
+  isCrossRepository
   __STACK__
   author { login avatarUrl }
   repository {
@@ -327,6 +328,7 @@ interface RawPr {
   additions?: number;
   deletions?: number;
   changedFiles?: number;
+  isCrossRepository?: boolean;
   author: { login: string; avatarUrl: string } | null;
   repository: {
     nameWithOwner: string;
@@ -588,6 +590,24 @@ export function mapPr(
     return lastCommentLogin !== authorLogin;
   }).length + hiddenThreads;
   const hasUnaddressedComments = unaddressedThreads > 0;
+
+  // When the author last answered in a thread, and when someone else last
+  // wrote in one — from the latest comment of each thread, which the query
+  // already reads. The PR agent keys its re-review and drive runs on these, so
+  // a reply without a push is new work too. Whose thread it is would take the
+  // first comment's author, which doubles the read (measured: 26 → 51 points
+  // for 25 PRs); the review skill sorts out its own threads instead.
+  let authorRepliedAt: string | null = null;
+  let reviewerRepliedAt: string | null = null;
+  for (const t of threads) {
+    const last = t.comments.nodes[t.comments.nodes.length - 1];
+    if (!last?.createdAt) continue;
+    if (authorLogin != null && last.author?.login === authorLogin) {
+      if (authorRepliedAt === null || last.createdAt > authorRepliedAt) authorRepliedAt = last.createdAt;
+    } else if (!t.isResolved && (reviewerRepliedAt === null || last.createdAt > reviewerRepliedAt)) {
+      reviewerRepliedAt = last.createdAt;
+    }
+  }
   const hasUnaddressedReviewFeedback = pr.latestOpinionatedReviews.nodes.some(
     (r) => r.state === "APPROVED" && r.author?.__typename === "User" &&
       r.author.login !== authorLogin && approvalBodyNeedsAttention(r.body) &&
@@ -781,6 +801,9 @@ export function mapPr(
     additions: pr.additions ?? 0,
     deletions: pr.deletions ?? 0,
     changedFiles: pr.changedFiles ?? 0,
+    isCrossRepository: pr.isCrossRepository === true,
+    authorRepliedAt,
+    reviewerRepliedAt,
     mergeMethods: mapMergeMethods(pr.repository),
     // Set by fetchHost when the personal review-request search found it.
     requestedOfMe: false,

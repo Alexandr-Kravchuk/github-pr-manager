@@ -110,6 +110,7 @@ export function primaryActionLabel(item: AgentItem): string | null {
   if (item.state === "error") return "Run again";
   if (item.state !== "needsYou") return null;
   if (item.scenario === "merge") return "Merge";
+  if (item.scenario === "drive" && item.drive && item.drive.commits.length > 0 && !item.pushed) return "Push";
   if (item.plan && !item.published) return "Publish";
   if (item.scenario === "brief" && item.output) return "Review anyway";
   if (item.sessionId) return item.scenario === "afterMerge" ? "Apply in session" : "Continue in session";

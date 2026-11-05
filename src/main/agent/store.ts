@@ -31,10 +31,16 @@ export interface AgentStoreData {
   items: AgentItemRecord[];
   /** Shadow reviews you published exactly as prepared — the Shadow → On hint counts these. */
   acceptedUnchanged: number;
+  /**
+   * Drive attempts per PR id: an attempt is a run that ended in a push. Reset
+   * when CI turns green or someone else pushes (the head is no longer the one
+   * the agent pushed, `agentHead`).
+   */
+  drive: Record<string, { attempts: number; agentHead?: string }>;
 }
 
 export function emptyStore(day: string): AgentStoreData {
-  return { version: 1, ledger: {}, day, runsToday: 0, items: [], acceptedUnchanged: 0 };
+  return { version: 1, ledger: {}, day, runsToday: 0, items: [], acceptedUnchanged: 0, drive: {} };
 }
 
 /** Reads state.json; a missing or broken file starts empty rather than failing the agent. */
@@ -49,6 +55,7 @@ export function readStore(file: string, day: string): AgentStoreData {
       runsToday: typeof raw.runsToday === "number" ? raw.runsToday : 0,
       items: raw.items,
       acceptedUnchanged: typeof raw.acceptedUnchanged === "number" ? raw.acceptedUnchanged : 0,
+      drive: typeof raw.drive === "object" && raw.drive !== null ? raw.drive : {},
     };
   } catch {
     return emptyStore(day);

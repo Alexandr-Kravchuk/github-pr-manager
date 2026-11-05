@@ -13,7 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { isUsableWrapperPath, planRequests, readPlanLines, type PublishContext, type PublishRequest, type PublishStep } from "../../shared/agent-publish";
+import { isUsableWrapperPath, planRequests, postedSteps, readPlanLines, type PublishContext, type PublishRequest, type PublishStep, type PublishSub } from "../../shared/agent-publish";
 import { launcherEnv } from "../../shared/claude-launch";
 import { PLAN_FILE, type CaptureRun } from "./capture";
 
@@ -123,6 +123,7 @@ export function prepareRunFolder(
   pr: { repo: string; number: number },
   execPath: string,
   captureScript: string,
+  subs?: PublishSub[],
 ): RunFolder | null {
   for (const root of roots) {
     const runDir = path.join(root, runId);
@@ -135,7 +136,7 @@ export function prepareRunFolder(
       fs.mkdirSync(outDir, { recursive: true });
       fs.mkdirSync(path.dirname(wrapperPath), { recursive: true });
       fs.writeFileSync(wrapperPath, wrapperScript(execPath, captureScript, runDir), { mode: 0o755 });
-      const run: CaptureRun = { repo: pr.repo, number: pr.number, outDir, wrapperPath };
+      const run: CaptureRun = { repo: pr.repo, number: pr.number, outDir, wrapperPath, ...(subs ? { subs } : {}) };
       fs.writeFileSync(path.join(runDir, "run.json"), JSON.stringify(run, null, 2));
       return { runDir, outDir, wrapperPath };
     } catch {
@@ -166,7 +167,19 @@ function readDone(runDir: string): number {
 
 export type PublishOutcome = { ok: true; posted: number; total: number } | { ok: false; error: string; posted: number; total: number };
 
-const THREAD_PR_QUERY = "query($id:ID!){ node(id:$id){ ... on PullRequestReviewThread { pullRequest { number repository { nameWithOwner } } } } }";
+const THREAD_PR_QUERY =
+  "query($id:ID!){ node(id:$id){ ... on PullRequestReviewThread { isResolved pullRequest { number repository { nameWithOwner } } comments(first:1){ nodes{ author{ login } } } } } }";
+
+/**
+ * Whose threads a plan may touch. A review answers and resolves only threads
+ * YOU opened (`mine`) — never a colleague's; your own PR's drive run answers
+ * reviewers in theirs and resolves nothing.
+ */
+export interface PlanTargets {
+  /** Your login on the PR's host; null when unknown — then nothing that needs it goes out. */
+  viewer: string | null;
+  mine: boolean;
+}
 
 function json(text: string): unknown {
   try {
@@ -182,19 +195,41 @@ function json(text: string): unknown {
  * wrote; on its own it could name a thread on any PR your account can reach.
  * Checked against GitHub before anything is posted.
  */
-export async function checkPlanTargets(steps: readonly PublishStep[], prUrl: string, repo: string, number: number, gh: GhRunner = runGh): Promise<string | null> {
+export async function checkPlanTargets(
+  steps: readonly PublishStep[],
+  prUrl: string,
+  repo: string,
+  number: number,
+  targets: PlanTargets,
+  gh: GhRunner = runGh,
+): Promise<string | null> {
   const here = `${repo}#${number}`.toLowerCase();
+  const me = targets.viewer?.toLowerCase() ?? null;
   for (const s of steps) {
     if (s.kind === "resolve") {
+      if (!targets.mine) return `this run doesn't resolve threads (${s.threadId})`;
+      if (!me) return "couldn't tell whose threads these are — your login on the host is unknown";
       const r = await gh(["api", "graphql", "--input", "-", ...hostFlag(prUrl)], { input: JSON.stringify({ query: THREAD_PR_QUERY, variables: { id: s.threadId } }) });
       if (r.code !== 0) return `couldn't check thread ${s.threadId}: ${ghError(r)}`;
-      const pr = (json(r.stdout) as { data?: { node?: { pullRequest?: { number?: number; repository?: { nameWithOwner?: string } } } } } | null)?.data?.node?.pullRequest;
+      type ThreadNode = {
+        isResolved?: boolean;
+        pullRequest?: { number?: number; repository?: { nameWithOwner?: string } };
+        comments?: { nodes?: Array<{ author?: { login?: string } | null }> };
+      };
+      const t = (json(r.stdout) as { data?: { node?: ThreadNode } } | null)?.data?.node;
+      const pr = t?.pullRequest;
       if (!pr || `${pr.repository?.nameWithOwner ?? ""}#${pr.number}`.toLowerCase() !== here) return `thread ${s.threadId} is not on ${repo}#${number}`;
+      if ((t?.comments?.nodes?.[0]?.author?.login ?? "").toLowerCase() !== me) return `thread ${s.threadId} is not yours — the agent never closes a colleague's thread`;
     } else if (s.kind === "reply") {
       const r = await gh(["api", `repos/${repo}/pulls/comments/${s.replyTo}`, ...hostFlag(prUrl)]);
       if (r.code !== 0) return `couldn't check comment ${s.replyTo}: ${ghError(r)}`;
-      const url = String((json(r.stdout) as { pull_request_url?: unknown } | null)?.pull_request_url ?? "").toLowerCase();
+      const c = json(r.stdout) as { pull_request_url?: unknown; user?: { login?: unknown } } | null;
+      const url = String(c?.pull_request_url ?? "").toLowerCase();
       if (!url.endsWith(`/repos/${repo}/pulls/${number}`.toLowerCase())) return `comment ${s.replyTo} is not on ${repo}#${number}`;
+      if (targets.mine) {
+        if (!me) return "couldn't tell whose threads these are — your login on the host is unknown";
+        if (String(c?.user?.login ?? "").toLowerCase() !== me) return `comment ${s.replyTo} opens a colleague's thread — a review answers only in yours`;
+      }
     }
   }
   return null;
@@ -206,12 +241,13 @@ export async function checkPlanTargets(steps: readonly PublishStep[], prUrl: str
  * first write that didn't land; called on a plan that is all posted, it posts
  * nothing.
  */
-export async function publishPlan(runDir: string, prUrl: string, ctx: PublishContext, gh: GhRunner = runGh): Promise<PublishOutcome> {
+export async function publishPlan(runDir: string, prUrl: string, ctx: PublishContext, targets: PlanTargets, gh: GhRunner = runGh): Promise<PublishOutcome> {
   const steps = readPlan(runDir);
   const requests = planRequests(steps, ctx);
   let done = Math.min(readDone(runDir), requests.length);
-  // Nothing goes out unless every thread and comment the rest of the plan touches is this PR's.
-  const stray = await checkPlanTargets(steps.slice(done), prUrl, ctx.repo, ctx.number, gh);
+  // Nothing goes out unless every thread and comment the rest of the plan
+  // touches is this PR's — and, for a review, yours.
+  const stray = await checkPlanTargets(postedSteps(steps, ctx).slice(done), prUrl, ctx.repo, ctx.number, targets, gh);
   if (stray) return { ok: false, error: stray, posted: done, total: requests.length };
   for (let i = done; i < requests.length; i++) {
     const req = requests[i];

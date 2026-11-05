@@ -18,7 +18,14 @@ const DRAG_TYPE = "application/x-prd-pr";
 const BTN = "inline-flex items-center gap-1 rounded-md border border-line-strong bg-surface px-2.5 py-1 text-xs font-medium text-fg-secondary hover:bg-elevated";
 const BTN_PRIMARY = "inline-flex items-center gap-1 rounded-md border border-sky-600 bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-700";
 
-const SCENARIO_CHIP: Record<AgentItem["scenario"], string> = { review: "Review", brief: "Brief", merge: "Merge", afterMerge: "Jira" };
+const SCENARIO_CHIP: Record<AgentItem["scenario"], string> = {
+  review: "Review",
+  brief: "Brief",
+  rereview: "Re-review",
+  drive: "Drive",
+  merge: "Merge",
+  afterMerge: "Jira",
+};
 
 function shortRepo(repo: string): string {
   return repo.split("/")[1] ?? repo;
@@ -222,7 +229,7 @@ function CardHead({ item, onTitle }: { item: AgentItem; onTitle: () => void }) {
         </span>
         <span className="flex-1" />
         <Chip>{SCENARIO_CHIP[item.scenario]}</Chip>
-        {item.mode === "shadow" && item.scenario === "review" && <Chip>shadow</Chip>}
+        {item.mode === "shadow" && (item.scenario === "review" || item.scenario === "rereview" || item.scenario === "drive") && <Chip>shadow</Chip>}
       </div>
       <button type="button" onClick={onTitle} className="mt-0.5 line-clamp-2 text-left text-sm font-medium text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300">
         {item.title}
@@ -333,6 +340,42 @@ function PlanView({ plan }: { plan: PublishSummary }) {
         </div>
       ))}
       {plan.resolves > 0 && <div className="text-[11px] text-fg-subtle">Resolves {plan.resolves} thread{plan.resolves === 1 ? "" : "s"}.</div>}
+      {(plan.escalations ?? []).length > 0 && (
+        <div className="space-y-1 rounded border border-amber-500/40 bg-amber-500/[0.06] p-1.5">
+          <div className="text-[11px] font-semibold text-amber-700 dark:text-amber-300">Handed back to you — the agent doesn't argue with the author</div>
+          {plan.escalations.map((e, i) => (
+            <div key={i} className="whitespace-pre-wrap">
+              {e.body}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A drive's commits, as the Push button would send them; the patch on demand. */
+function DriveView({ drive }: { drive: NonNullable<AgentItem["drive"]> }) {
+  const [patch, setPatch] = useState(false);
+  return (
+    <div className="mt-1 space-y-1.5 rounded border border-line bg-elevated/40 p-2 text-xs text-fg-secondary">
+      <ul className="space-y-0.5">
+        {drive.commits.map((c) => (
+          <li key={c.oid} className="flex gap-2">
+            <span className="shrink-0 font-mono text-[11px] text-fg-subtle">{c.oid.slice(0, 7)}</span>
+            <span className="min-w-0">{c.subject}</span>
+          </li>
+        ))}
+      </ul>
+      {drive.stat && <pre className="overflow-x-auto whitespace-pre font-mono text-[11px] text-fg-subtle">{drive.stat}</pre>}
+      {drive.patch && (
+        <>
+          <button type="button" onClick={() => setPatch((v) => !v)} aria-expanded={patch} className="text-xs text-sky-700 hover:underline dark:text-sky-300">
+            {patch ? "Hide the diff" : "Show the diff"}
+          </button>
+          {patch && <pre className="max-h-80 overflow-auto whitespace-pre font-mono text-[11px]">{drive.patch}</pre>}
+        </>
+      )}
     </div>
   );
 }
@@ -376,13 +419,20 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
   const primary = primaryActionLabel(item);
   const error = item.state === "error";
   const merge = item.scenario === "merge";
-  const plan = item.plan && !item.published ? item.plan : null;
+  const drive = item.scenario === "drive" && item.drive && item.drive.commits.length > 0 && !item.pushed ? item.drive : null;
+  const plan = item.plan && !item.published && !drive ? item.plan : null;
+  const [pushing, setPushing] = useState(false);
+  const push = async () => {
+    setPushing(true);
+    await run({ type: "push", runId: item.runId });
+    setPushing(false);
+  };
   const publish = async () => {
     setPublishing(true);
     await run({ type: "publish", runId: item.runId });
     setPublishing(false);
   };
-  const showText = !plan && !!item.output;
+  const showText = !plan && !drive && !!item.output;
   return (
     <article className={cn("rounded-md border bg-surface p-2.5 shadow-sm", error ? "border-red-500/60" : merge ? "border-emerald-500/50" : "border-line", item.later && "opacity-60")}>
       <CardHead item={item} onTitle={onTitle} />
@@ -396,6 +446,19 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
           {open && <PlanView plan={plan} />}
         </>
       )}
+      {drive && (
+        <>
+          <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className="mt-1 text-xs text-sky-700 hover:underline dark:text-sky-300">
+            {open ? "Hide" : `See the ${drive.commits.length} commit${drive.commits.length === 1 ? "" : "s"}${item.plan?.replies.length ? ` and ${item.plan.replies.length} repl${item.plan.replies.length === 1 ? "y" : "ies"}` : ""}`}
+          </button>
+          {open && (
+            <>
+              <DriveView drive={drive} />
+              {item.plan && item.plan.replies.length > 0 && <PlanView plan={item.plan} />}
+            </>
+          )}
+        </>
+      )}
       {showText && (
         <>
           <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className="mt-1 text-xs text-sky-700 hover:underline dark:text-sky-300">
@@ -406,6 +469,11 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
       )}
       <div className="mt-2 flex flex-wrap gap-1.5">
         {merge && <MergeButton item={item} run={run} />}
+        {primary === "Push" && (
+          <button type="button" className={BTN_PRIMARY} disabled={pushing} onClick={() => void push()}>
+            {pushing ? "Pushing…" : "Push"}
+          </button>
+        )}
         {primary === "Publish" && (
           <button type="button" className={BTN_PRIMARY} disabled={publishing} onClick={() => void publish()}>
             {publishing ? "Publishing…" : "Publish"}
@@ -445,6 +513,9 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
       </div>
       {plan && item.mode === "shadow" && <div className="mt-1.5 text-[11px] text-fg-faint">Shadow: nothing is on GitHub until you press Publish. It goes out with the agent&apos;s signature.</div>}
       {merge && <div className="mt-1.5 text-[11px] text-fg-faint">Merges only the commit shown here — GitHub refuses it if anyone pushes first.</div>}
+      {drive && item.mode === "shadow" && (
+        <div className="mt-1.5 text-[11px] text-fg-faint">Shadow: nothing is on the branch until you press Push. It goes out as a fast-forward only, and only while nobody else pushed.</div>
+      )}
     </article>
   );
 }

@@ -44,6 +44,9 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     changedFiles: 6,
     mergeMethods: { suggested: "squash", allowed: ["merge", "squash", "rebase"] },
     requestedOfMe: (overrides.roles ?? []).includes("reviewer"),
+    isCrossRepository: false,
+    authorRepliedAt: null,
+    reviewerRepliedAt: null,
     issueKey: null,
     issueSummary: null,
     parentKey: null,
@@ -465,9 +468,48 @@ function mockAgentState(): AgentState {
         comments: [{ path: "src/Schema/SchemaColumn.cs", line: 142, body: "**Major — AC-2.** `Rename()` rebuilds the name from `Caption`, so the `Usr` prefix is lost: renaming `UsrAccount` gives `Account`. Keep the prefix from the old name." }],
         replies: [{ replyTo: 1001, body: "Still applies at the head: the guard on line 88 checks the caption, not the name." }],
         resolves: 0,
+        escalations: [],
       },
     }),
-    item(934, { state: "done", headline: "Handed back: you reviewed it yourself", finishedAt: iso(60 * 60_000) }),
+    item(934, {
+      key: `${byNumber(934)?.id}|rereview|${byNumber(934)?.headOid}|reply@${iso(30 * 60_000)}`,
+      scenario: "rereview",
+      state: "needsYou",
+      headline: "Would post: comment, 1 resolve, 1 dispute for you",
+      finishedAt: iso(8 * 60_000),
+      sessionId: "66666666-6666-4666-8666-666666666666",
+      worktree: "/tmp/agent-clio-934",
+      runFolder: "/tmp/prd-agent/934",
+      output: "Re-review: one thread fixed at the head, one where the author disagrees — handed back to you.",
+      plan: {
+        event: "COMMENT",
+        body: "**Re-review.** The tenant probe now caches per host (thread on TenantProbe.cs:40 — fixed, resolving).",
+        comments: [],
+        replies: [],
+        resolves: 1,
+        escalations: [{ replyTo: 2002, body: "The author says the probe cache is per tenant by design; the finding says a stale entry outlives a tenant switch. A design call — yours." }],
+      },
+    }),
+    item(142, {
+      key: `${byNumber(142)?.id}|drive|${byNumber(142)?.headOid}|ci`,
+      scenario: "drive",
+      state: "needsYou",
+      headline: "Would push 2 commits: fix: back off on 403 with retry-after",
+      reasons: ["ci"],
+      finishedAt: iso(3 * 60_000),
+      sessionId: "77777777-7777-4777-8777-777777777777",
+      worktree: "/tmp/agent-dashboard-142",
+      drive: {
+        base: byNumber(142)?.headOid ?? "0".repeat(40),
+        reasons: ["ci"],
+        commits: [
+          { oid: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", subject: "test: cover a 403 with retry-after" },
+          { oid: "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3", subject: "fix: back off on 403 with retry-after" },
+        ],
+        stat: " src/main/poller.ts        | 12 ++++++------\n tests/poller.test.cjs     | 18 ++++++++++++++++++\n 2 files changed, 24 insertions(+), 6 deletions(-)",
+        patch: "diff --git a/src/main/poller.ts b/src/main/poller.ts\n@@ -561,7 +561,13 @@\n-    const wait = 60_000;\n+    const retryAfter = Number(res.headers.get(\"retry-after\"));\n+    const wait = Number.isFinite(retryAfter) ? retryAfter * 1000 : 60_000;\n",
+      },
+    }),
     item(85, {
       key: `${byNumber(85)?.id}|merge|${byNumber(85)?.headOid}`,
       scenario: "merge",
@@ -615,6 +657,10 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
         if (!it.plan) return { ok: false, error: "Nothing prepared to publish." };
         Object.assign(it, { state: "done", published: true, headline: "Published: request changes, 1 inline comment, 1 reply", finishedAt: at });
         agentState = { ...agentState, acceptedUnchanged: agentState.acceptedUnchanged + 1 };
+        break;
+      case "push":
+        if (!it.drive) return { ok: false, error: "There is nothing to push." };
+        Object.assign(it, { state: "done", pushed: true, headline: `Pushed ${it.drive.commits.length} commits`, finishedAt: at });
         break;
       case "merge":
         Object.assign(it, { state: "done", headline: `Merged (${action.method ?? it.mergeMethod ?? "squash"}), branch deleted`, finishedAt: at });

@@ -39,7 +39,26 @@ export interface RunSpec {
    * working folders.
    */
   addDirs?: string[];
+  /** More environment for the session (a drive run's push block). */
+  env?: Record<string, string>;
 }
+
+/**
+ * Environment that makes every `git push` from a drive session's process tree
+ * fail — whatever runs it (a test script the session edited, say): git
+ * rewrites each remote URL to a scheme it has no helper for. Git's own
+ * `GIT_CONFIG_*` variables, read by every git process. The app pushes the
+ * branch itself, from its own process, after checking the commits.
+ */
+export const NO_PUSH_ENV: Record<string, string> = {
+  GIT_CONFIG_COUNT: "3",
+  GIT_CONFIG_KEY_0: "url.pr-agent-no-push://.pushInsteadOf",
+  GIT_CONFIG_VALUE_0: "https://",
+  GIT_CONFIG_KEY_1: "url.pr-agent-no-push://.pushInsteadOf",
+  GIT_CONFIG_VALUE_1: "git@",
+  GIT_CONFIG_KEY_2: "url.pr-agent-no-push://.pushInsteadOf",
+  GIT_CONFIG_VALUE_2: "ssh://",
+};
 
 /** Built-in tool names for `--tools`, from the `--allowedTools` rules ("Bash(gh pr view *)" → "Bash"). */
 export function builtInTools(allowedTools: readonly string[]): string[] {
@@ -152,6 +171,7 @@ export function startRun(spec: RunSpec, onProgress: (p: RunProgress) => void, sp
     ELECTRON_RUN_AS_NODE: "1",
     GIT_TERMINAL_PROMPT: "0",
     GH_PROMPT_DISABLED: "1",
+    ...spec.env,
   };
   const child = spawner(buildClaudeArgs(spec), spec.cwd, env);
   let progress = initialProgress();

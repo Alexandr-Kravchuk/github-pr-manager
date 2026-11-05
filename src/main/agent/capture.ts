@@ -11,13 +11,15 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { isInsideDir, parseFileComment, parsePublishCall, parseReview, PLAN_FILE_MAX_BYTES, type PublishStep } from "../../shared/agent-publish";
+import { isInsideDir, parseFileComment, parsePublishCall, parseReview, PLAN_FILE_MAX_BYTES, type PublishStep, type PublishSub } from "../../shared/agent-publish";
 
 export interface CaptureRun {
   repo: string;
   number: number;
   outDir: string;
   wrapperPath: string;
+  /** The subcommands this run may use (a drive run only replies); absent = all of them. */
+  subs?: PublishSub[];
 }
 
 export const PLAN_FILE = "plan.jsonl";
@@ -33,6 +35,7 @@ export function captureCall(run: CaptureRun, args: readonly string[]): { step: P
   const parsed = parsePublishCall(args);
   if (!parsed.ok) return { error: parsed.error };
   const call = parsed.value;
+  if (run.subs && !run.subs.includes(call.sub)) return { error: `this run may not ${call.sub}; it may ${run.subs.join(", ")}` };
   if (call.sub === "resolve") return { step: { kind: "resolve", threadId: call.threadId } };
   if (call.repo.toLowerCase() !== run.repo.toLowerCase() || call.number !== run.number) {
     return { error: `this run publishes to ${run.repo}#${run.number} only, got: ${call.repo}#${call.number}` };
@@ -50,9 +53,9 @@ export function captureCall(run: CaptureRun, args: readonly string[]): { step: P
     return { error: `no such file: ${call.file}` };
   }
   const text = fs.readFileSync(real, "utf8");
-  if (call.sub === "reply") {
-    if (!text.length) return { error: "the reply body is empty" };
-    return { step: { kind: "reply", replyTo: call.replyTo, body: text } };
+  if (call.sub === "reply" || call.sub === "escalate") {
+    if (!text.length) return { error: `the ${call.sub === "reply" ? "reply" : "escalation"} body is empty` };
+    return { step: { kind: call.sub, replyTo: call.replyTo, body: text } };
   }
   let json: unknown;
   try {
@@ -68,6 +71,7 @@ export function captureCall(run: CaptureRun, args: readonly string[]): { step: P
 export function captureReply(step: PublishStep): string {
   const note = "Recorded by PR Dashboard for publishing: the app posts it after this session (in Shadow, once you press Publish). Nothing was posted from here.";
   if (step.kind === "resolve") return JSON.stringify({ data: { resolveReviewThread: { thread: { id: step.threadId, isResolved: true } } }, note });
+  if (step.kind === "escalate") return JSON.stringify({ escalated: step.replyTo, note: "Handed back to the user: the app holds any reply to this thread and asks them." });
   return JSON.stringify({ id: 0, state: step.kind === "review" ? "RECORDED" : undefined, note });
 }
 

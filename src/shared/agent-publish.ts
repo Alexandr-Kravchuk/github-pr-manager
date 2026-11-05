@@ -28,7 +28,13 @@ export type PublishStep =
   | { kind: "review"; event: ReviewEvent; body: string; commitId?: string; comments: PlanComment[] }
   | { kind: "comment"; comment: PlanComment; commitId: string }
   | { kind: "reply"; replyTo: number; body: string }
-  | { kind: "resolve"; threadId: string };
+  | { kind: "resolve"; threadId: string }
+  /**
+   * Not a GitHub write: the session hands a thread back to you instead of
+   * answering in it (a re-review never argues with the author on your
+   * behalf). The app drops any reply to that thread and lists it for you.
+   */
+  | { kind: "escalate"; replyTo: number; body: string };
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -110,11 +116,15 @@ export function parseFileComment(raw: unknown): Parsed<Extract<PublishStep, { ki
 /** A call of the wrapper, as its arguments say. */
 export type PublishCall =
   | { sub: "review" | "comment"; repo: string; number: number; file: string }
-  | { sub: "reply"; repo: string; number: number; replyTo: number; file: string }
+  | { sub: "reply" | "escalate"; repo: string; number: number; replyTo: number; file: string }
   | { sub: "resolve"; threadId: string };
 
+/** The wrapper's subcommands: the skill's four, and the app's own `escalate`. A run's guard file names the ones it may use. */
+export const PUBLISH_SUBS = ["review", "comment", "reply", "resolve", "escalate"] as const;
+export type PublishSub = (typeof PUBLISH_SUBS)[number];
+
 const USAGE =
-  "usage: pr-review-publish.sh review|comment <owner/repo> <number> <file.json> | reply <owner/repo> <number> <comment-id> <body.txt> | resolve <thread-id>";
+  "usage: pr-review-publish.sh review|comment <owner/repo> <number> <file.json> | reply|escalate <owner/repo> <number> <comment-id> <body.txt> | resolve <thread-id>";
 
 function checkRepo(v: string): Parsed<string> {
   if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/.test(v)) return fail(`owner/repo must look like owner/name, got: ${v}`);
@@ -138,7 +148,7 @@ export function parsePublishCall(args: readonly string[]): Parsed<PublishCall> {
     if (!n.ok) return n;
     return { ok: true, value: { sub, repo: repo.value, number: n.value, file: rest[2] } };
   }
-  if (sub === "reply") {
+  if (sub === "reply" || sub === "escalate") {
     if (rest.length !== 4) return fail(USAGE);
     const repo = checkRepo(rest[0]);
     if (!repo.ok) return repo;
@@ -211,6 +221,27 @@ export interface PublishContext {
   signature: string;
   /** An approve becomes a plain comment (Settings › Agent › hold approve while another reviewer's change request is open). */
   holdApprove: boolean;
+  /** Re-review: resolve threads (Settings › Agent › re-review: resolve). Absent = yes. */
+  allowResolve?: boolean;
+  /** Re-review: approve once your threads are closed (Settings › Agent › re-review: approve). Absent = yes; off turns an approve into a comment. */
+  allowApprove?: boolean;
+}
+
+/** Comment ids the session handed back to you: replies to them are held back. */
+function escalatedTargets(steps: readonly PublishStep[]): Set<number> {
+  return new Set(steps.flatMap((s) => (s.kind === "escalate" ? [s.replyTo] : [])));
+}
+
+/**
+ * The steps that become GitHub writes, in order: no escalations (they aren't
+ * writes), no reply to a thread that was escalated, no resolve when resolving
+ * is off. `planRequests` and the publish progress both count over this list.
+ */
+export function postedSteps(steps: readonly PublishStep[], ctx: Pick<PublishContext, "allowResolve">): PublishStep[] {
+  const escalated = escalatedTargets(steps);
+  return steps.filter(
+    (s) => s.kind !== "escalate" && !(s.kind === "reply" && escalated.has(s.replyTo)) && !(s.kind === "resolve" && ctx.allowResolve === false),
+  );
 }
 
 export const HELD_APPROVE_NOTE = "_The agent would approve, but another reviewer's change request is still open — approve is held until it is addressed._";
@@ -234,12 +265,13 @@ const RESOLVE_MUTATION = "mutation($id:ID!){ resolveReviewThread(input:{threadId
  */
 export function planRequests(steps: readonly PublishStep[], ctx: PublishContext): PublishRequest[] {
   const base = `repos/${ctx.repo}/pulls/${ctx.number}`;
-  return steps.map((s): PublishRequest => {
+  return postedSteps(steps, ctx).map((s): PublishRequest => {
     switch (s.kind) {
       case "review": {
         const held = ctx.holdApprove && s.event === "APPROVE";
+        const noApprove = ctx.allowApprove === false && s.event === "APPROVE";
         const body: Record<string, unknown> = {
-          event: held ? "COMMENT" : s.event,
+          event: held || noApprove ? "COMMENT" : s.event,
           body: signedBody(held ? `${s.body.trimEnd()}\n\n${HELD_APPROVE_NOTE}` : s.body, ctx.signature),
         };
         if (s.commitId) body.commit_id = s.commitId;
@@ -252,6 +284,9 @@ export function planRequests(steps: readonly PublishStep[], ctx: PublishContext)
         return { label: `reply to comment ${s.replyTo}`, endpoint: `${base}/comments/${s.replyTo}/replies`, body: { body: signedBody(s.body, ctx.signature) } };
       case "resolve":
         return { label: `resolve ${s.threadId}`, endpoint: "graphql", body: { query: RESOLVE_MUTATION, variables: { id: s.threadId } } };
+      case "escalate":
+        // Filtered out by postedSteps; here only for the type checker.
+        throw new Error("an escalation is not a GitHub write");
     }
   });
 }
@@ -263,6 +298,8 @@ export interface PublishSummary {
   comments: Array<{ path: string; line?: number; body: string }>;
   replies: Array<{ replyTo: number; body: string }>;
   resolves: number;
+  /** Threads handed back to you: what the author disagrees about, in a line. */
+  escalations: Array<{ replyTo: number; body: string }>;
   /** The head the review was made against, when it says. */
   commitId?: string;
 }
@@ -270,7 +307,8 @@ export interface PublishSummary {
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
 export function summarizePlan(steps: readonly PublishStep[]): PublishSummary {
-  const out: PublishSummary = { event: null, body: "", comments: [], replies: [], resolves: 0 };
+  const out: PublishSummary = { event: null, body: "", comments: [], replies: [], resolves: 0, escalations: [] };
+  const escalated = escalatedTargets(steps);
   for (const s of steps) {
     if (s.kind === "review") {
       out.event = s.event;
@@ -281,7 +319,9 @@ export function summarizePlan(steps: readonly PublishStep[]): PublishSummary {
       out.comments.push({ path: s.comment.path, line: s.comment.line, body: clip(s.comment.body, 4_000) });
       out.commitId ??= s.commitId;
     } else if (s.kind === "reply") {
-      out.replies.push({ replyTo: s.replyTo, body: clip(s.body, 4_000) });
+      if (!escalated.has(s.replyTo)) out.replies.push({ replyTo: s.replyTo, body: clip(s.body, 4_000) });
+    } else if (s.kind === "escalate") {
+      out.escalations.push({ replyTo: s.replyTo, body: clip(s.body, 1_000) });
     } else {
       out.resolves++;
     }
@@ -298,7 +338,12 @@ export function describePlan(p: PublishSummary): string {
   else if (p.event === "REQUEST_CHANGES") parts.push("request changes");
   else if (p.event === "COMMENT") parts.push("comment");
   const n = (count: number, one: string, many: string) => (count ? `${count} ${count === 1 ? one : many}` : null);
-  for (const part of [n(p.comments.length, "inline comment", "inline comments"), n(p.replies.length, "reply", "replies"), n(p.resolves, "resolve", "resolves")]) {
+  for (const part of [
+    n(p.comments.length, "inline comment", "inline comments"),
+    n(p.replies.length, "reply", "replies"),
+    n(p.resolves, "resolve", "resolves"),
+    n(p.escalations?.length ?? 0, "dispute for you", "disputes for you"),
+  ]) {
     if (part) parts.push(part);
   }
   return parts.length ? parts.join(", ") : "nothing";
@@ -322,6 +367,11 @@ export function readPlanLines(text: string): PublishStep[] {
         const r = raw as { replyTo?: unknown; body?: unknown };
         if (typeof r.replyTo === "number" && Number.isInteger(r.replyTo) && r.replyTo > 0 && typeof r.body === "string" && r.body.length > 0) {
           steps.push({ kind: "reply", replyTo: r.replyTo, body: r.body });
+        }
+      } else if (raw.kind === "escalate") {
+        const r = raw as { replyTo?: unknown; body?: unknown };
+        if (typeof r.replyTo === "number" && Number.isInteger(r.replyTo) && r.replyTo > 0 && typeof r.body === "string" && r.body.length > 0) {
+          steps.push({ kind: "escalate", replyTo: r.replyTo, body: r.body });
         }
       } else if (raw.kind === "resolve") {
         const r = raw as { threadId?: unknown };

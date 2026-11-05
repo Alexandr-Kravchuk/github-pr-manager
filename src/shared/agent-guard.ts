@@ -1,4 +1,4 @@
-import { isInsideDir, parsePublishCall, samePath } from "./agent-publish";
+import { gitBashPath, isInsideDir, parsePublishCall, samePath, type PublishSub } from "./agent-publish";
 import type { AgentRunKind } from "./types";
 
 // The agent's PreToolUse guard: what an agent session may actually run,
@@ -47,6 +47,27 @@ export interface GuardRun {
   outDir?: string;
   /** Plugin folders: a Workflow may run a script from inside one of these, and from nowhere else. */
   workflowDirs?: string[];
+  /** The wrapper subcommands this run may use (a drive run only replies); absent = all. */
+  subs?: PublishSub[];
+  /** A drive run's worktree: the only place its file tools may change. */
+  workDir?: string;
+}
+
+/**
+ * Inside a drive run's worktree, what it still may not change: git's own
+ * folder and hooks, CI workflows, Claude Code and npm settings, git
+ * attributes — each of them runs something or reroutes where it runs.
+ */
+const DRIVE_PROTECTED = [".git", ".github", ".claude", ".husky", ".githooks", ".npmrc", ".gitattributes", ".gitmodules", ".gitconfig"];
+
+/** Whether a drive run may change `file`: inside its worktree, outside the protected names. */
+export function checkDriveWrite(file: string, workDir: string): GuardDecision {
+  if (!isInsideDir(file, workDir)) return deny(`This run changes files in its worktree (${workDir}) only.`);
+  const rel = gitBashPath(file).slice(gitBashPath(workDir).replace(/\/+$/, "").length + 1);
+  const parts = rel.split("/").map((p) => p.toLowerCase());
+  const hit = parts.find((p) => DRIVE_PROTECTED.includes(p));
+  if (hit) return deny(`${hit} runs or reroutes things; agent runs don't change it.`);
+  return { allow: true };
 }
 
 /**
@@ -184,8 +205,8 @@ const GIT_DRIVE = new Set([
   "blame",
   "merge-base",
   "fetch",
-  "rebase",
   "merge",
+  // No `rebase`: the app pushes a fast-forward only, and a rebase never is one.
   "cherry-pick",
   "stash",
   "branch",
@@ -708,10 +729,11 @@ function checkTwg(words: string[]): GuardDecision {
 }
 
 /** A call of this run's publish wrapper: checked the way the wrapper checks it, and held to the PR and the run's folder. */
-function checkWrapper(words: string[], pr: GuardPr | null, outDir: string): GuardDecision {
+function checkWrapper(words: string[], pr: GuardPr | null, outDir: string, subs?: PublishSub[]): GuardDecision {
   const call = parsePublishCall(words.slice(1));
   if (!call.ok) return deny(`PUBLISH-REJECTED: ${call.error}`);
   const c = call.value;
+  if (subs && !subs.includes(c.sub)) return deny(`PUBLISH-REJECTED: this run may not ${c.sub}; it may ${subs.join(", ")}.`);
   if (c.sub !== "resolve") {
     if (pr && (c.repo.toLowerCase() !== pr.repo || c.number !== pr.number)) return deny(`This run publishes to ${pr.repo}#${pr.number} only.`);
     if (!isInsideDir(c.file, outDir)) return deny(`Write the file under ${outDir} and pass its absolute path.`);
@@ -745,7 +767,7 @@ export function checkBash(kind: AgentRunKind, rawCommand: string, pr: GuardPr | 
   if (words.length === 0) return deny("An empty command.");
   // `FOO=1 git push` would slip past a check on the program's name.
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])) return deny("Commands can't start with environment assignments in agent runs.");
-  if (run?.wrapperPath && run.outDir && samePath(words[0], run.wrapperPath)) return checkWrapper(words, pr, run.outDir);
+  if (run?.wrapperPath && run.outDir && samePath(words[0], run.wrapperPath)) return checkWrapper(words, pr, run.outDir, run.subs);
   if (words[0] === "git") return checkGit(kind, words);
   if (words[0] === "gh") return checkGh(words, pr);
   if (words[0] === "twg") return checkTwg(words);
@@ -773,6 +795,13 @@ export function checkToolUse(kind: AgentRunKind, toolName: string, input: unknow
     const outDir = run?.outDir;
     if (outDir && toolName === "Write" && isInsideDir(toolFilePath(input), outDir)) return { allow: true };
     return deny(outDir ? `This run only reads; it writes payload files under ${outDir} and nothing else.` : "This run only reads; it can't change files.");
+  }
+  // A drive run edits its own worktree — and writes reply files for its
+  // wrapper into its payload folder — and nothing else.
+  if (!READ_ONLY.has(kind) && WRITE_TOOLS.has(toolName)) {
+    if (run?.outDir && toolName === "Write" && isInsideDir(toolFilePath(input), run.outDir)) return { allow: true };
+    if (!run?.workDir) return deny("This run has no worktree to change.");
+    return checkDriveWrite(toolFilePath(input), run.workDir);
   }
   if (toolName === "Bash") {
     const command = typeof (input as { command?: unknown } | null)?.command === "string" ? (input as { command: string }).command : "";

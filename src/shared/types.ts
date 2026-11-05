@@ -462,6 +462,12 @@ export interface PullRequest {
    * they refuse is reported as GitHub's answer).
    */
   mergeMethods: { suggested: MergeMethod | null; allowed: MergeMethod[] };
+  /** The head branch lives in a fork: the PR agent never pushes to it. */
+  isCrossRepository: boolean;
+  /** The latest thread comment by the PR's author, when a thread ends with one (any thread). */
+  authorRepliedAt: string | null;
+  /** The latest comment by someone else that ends an unresolved thread. */
+  reviewerRepliedAt: string | null;
   /**
    * A review is asked of you by name (`review-requested:@me`), as opposed to of
    * a team you are in — both give the `reviewer` role. The agent takes team
@@ -775,7 +781,7 @@ export type FocusClaudeSessionResult = { ok: true } | { ok: false; error: string
  * run — a button), or the Jira dry run after you merged one. Re-review and
  * drive land in a later stage.
  */
-export type AgentScenario = "review" | "brief" | "merge" | "afterMerge";
+export type AgentScenario = "review" | "brief" | "rereview" | "drive" | "merge" | "afterMerge";
 
 export type AgentItemState = "queued" | "working" | "needsYou" | "done" | "error";
 
@@ -818,6 +824,27 @@ export interface AgentItem {
   /** A merge offer: the methods the repository allows and the one the button uses. */
   mergeMethods?: { suggested: MergeMethod | null; allowed: MergeMethod[] };
   mergeMethod?: MergeMethod;
+  /**
+   * A drive run's commits on top of the head it started from (`base`), as the
+   * app read them from its worktree — what the Push button would send.
+   */
+  drive?: AgentDriveResult;
+  /** The drive's commits are on the PR's branch. */
+  pushed?: boolean;
+  /** A drive: what it was queued for — "ci", "conflicts", "comments". */
+  reasons?: string[];
+}
+
+export interface AgentDriveResult {
+  /** The PR's head the run started from: a push goes out only while it is still the head. */
+  base: string;
+  /** What it was driven for: "ci", "conflicts", "comments". */
+  reasons: string[];
+  /** Oldest first. */
+  commits: Array<{ oid: string; subject: string }>;
+  /** `git diff --stat`, and the patch itself (cut at 100 kB). */
+  stat: string;
+  patch: string;
 }
 
 /** A run in flight: its plan and live line (see agent-stream.ts), the last few things it did. */
@@ -849,7 +876,7 @@ export interface AgentState {
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
 export type AgentAction =
-  | { type: "skip" | "later" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish"; runId: string }
+  | { type: "skip" | "later" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish" | "push"; runId: string }
   | { type: "hint"; runId: string; text: string }
   | { type: "merge"; runId: string; method?: MergeMethod }
   | { type: "enqueue"; prId: string };
