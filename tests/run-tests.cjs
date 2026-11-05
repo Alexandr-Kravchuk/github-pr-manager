@@ -8145,6 +8145,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: file }, null, run).allow, false, file);
       }
       assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "git rebase origin/main" }).allow, false, "a rebase is never a fast-forward");
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "git fetch origin main" }).allow, false, "the app fetches the base; the session's git has no network");
+      for (const file of ["C:/wt/lefthook.yml", "C:/wt/.pre-commit-config.yaml", "C:/wt/.huskyrc.json"]) {
+        assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: file }, null, run).allow, false, file);
+      }
       const w = "/c/T/prd-agent/r/bin/pr-review-publish.sh";
       assert.strictEqual(guard.checkBash("drive", `${w} reply acme/widgets 12 77 C:/T/prd-agent/r/out/reply.txt`, gpr, run).allow, true);
       assert.match(guard.checkBash("drive", `${w} resolve PRRT_x`, gpr, run).reason, /may not resolve/);
@@ -9416,6 +9420,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /not yours/);
       assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /colleague's thread/);
       assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), null, "a drive answers a reviewer in theirs");
+      const myReplyInTheirs = async () => ({ code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "me" }, in_reply_to_id: 1 }), stderr: "" });
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 4, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, myReplyInTheirs), /not the start of a thread/, "your reply in a colleague's thread is still theirs");
       assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), /doesn't resolve/);
       assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: null, mine: true }, gh), /login on the host is unknown/);
     });
@@ -9489,6 +9495,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const read = await driveMod.collectDrive(wt.runGit, repo, base, ["ci"]);
       assert.deepStrictEqual(read.drive.commits.map((c) => c.subject), ["fix: one", "fix: two"]);
       assert.strictEqual(read.fastForward, true);
+      assert.strictEqual(read.drive.head, g("rev-parse", "HEAD").stdout.trim(), "the commit a Push would send");
       assert.match(read.drive.stat, /a\.txt/);
       assert.match(read.drive.patch, /^\+3$/m);
       g("reset", "-q", "--hard", base);
@@ -9500,30 +9507,68 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       await assert.rejects(driveMod.collectDrive(wt.runGit, repo, "HEAD~1", []), /no head commit/);
     });
 
-    test("drive: the app pushes HEAD to the PR's branch by name — no --force, nothing that reads as an option", () => {
-      assert.deepStrictEqual(driveMod.pushArgs("origin", "feature/x-1"), ["push", "origin", "HEAD:refs/heads/feature/x-1"]);
-      for (const [remote, branch] of [["origin", "--force"], ["origin", "a..b"], ["origin", "x.lock"], ["-u", "main"], ["origin", "a b"]]) {
-        assert.throws(() => driveMod.pushArgs(remote, branch), /isn't a/, `${remote} ${branch}`);
+    test("drive: the app pushes the exact commit you saw, to the URL read before the run — no --force, no hooks", () => {
+      const oid = "c".repeat(40);
+      assert.deepStrictEqual(driveMod.pushArgs("https://github.com/a/b.git", oid, "feature/x-1", "/nohooks"), [
+        "-c", "core.hooksPath=/nohooks", "-c", "core.fsmonitor=false",
+        "push", "--no-verify", "https://github.com/a/b.git", `${oid}:refs/heads/feature/x-1`,
+      ]);
+      for (const [url, o, branch] of [
+        ["https://h/a.git", oid, "--force"],
+        ["https://h/a.git", oid, "a..b"],
+        ["https://h/a.git", oid, "x.lock"],
+        ["https://h/a.git", "HEAD", "main"],
+        ["-u", oid, "main"],
+        ["/local/path", oid, "main"],
+        ["https://h/a.git", oid, "a b"],
+      ]) {
+        assert.throws(() => driveMod.pushArgs(url, o, branch, "/nohooks"), /isn't a/, `${url} ${o} ${branch}`);
       }
+      // The session's git: no network, no credentials.
       const NO = runner.NO_PUSH_ENV;
-      assert.strictEqual(NO.GIT_CONFIG_COUNT, "3");
-      assert.deepStrictEqual([NO.GIT_CONFIG_VALUE_0, NO.GIT_CONFIG_VALUE_1, NO.GIT_CONFIG_VALUE_2], ["https://", "git@", "ssh://"]);
+      const keys = Array.from({ length: Number(NO.GIT_CONFIG_COUNT) }, (_, i) => [NO[`GIT_CONFIG_KEY_${i}`], NO[`GIT_CONFIG_VALUE_${i}`]]);
+      for (const prefix of ["https://", "http://", "git@", "ssh://", "git://"]) {
+        assert.ok(keys.some(([k, v]) => k === "url.pr-agent-no-push://.insteadOf" && v === prefix), prefix);
+      }
+      assert.ok(keys.some(([k, v]) => k === "credential.helper" && v === ""), "the credential helpers are reset");
+      assert.strictEqual(NO.GIT_SSH_COMMAND, "pr-agent-no-ssh");
+      assert.strictEqual(NO.GIT_TERMINAL_PROMPT, "0");
+    });
+
+    test("drive: a fingerprint of what git would run code from — config, hooks, your global config", () => {
+      const common = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-fp-"));
+      nfsA.mkdirSync(path.join(common, "hooks"));
+      nfsA.writeFileSync(path.join(common, "config"), "[core]\n");
+      const a = driveMod.gitFingerprint(common, null);
+      assert.strictEqual(driveMod.gitFingerprint(common, null), a, "stable");
+      nfsA.writeFileSync(path.join(common, "config"), "[core]\n\tfsmonitor = evil\n");
+      const b = driveMod.gitFingerprint(common, null);
+      assert.notStrictEqual(b, a, "a config change shows");
+      nfsA.writeFileSync(path.join(common, "hooks", "pre-push"), "#!/bin/sh\n");
+      assert.notStrictEqual(driveMod.gitFingerprint(common, null), b, "a new hook shows");
     });
 
     await atest("agent drive: your red PR is driven in a session that can't push; on your Push the app pushes a fast-forward and counts the attempt", async () => {
-      const mine = { ...reviewPr({ role: "author" }), ciState: "failure", headRefName: "feature/x" };
+      const mine = { ...reviewPr({ role: "author" }), ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
       let freshHead = "aaa111";
+      let worktreeHead = "2222222222222222222222222222222222222222";
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
       const pushes = [];
       const f = agentFixture({
         pr: mine,
         script: succeed("Fixed the failing test."),
         fetchPr: async () => ({ pr: { ...mine, headOid: freshHead }, state: "OPEN", viewer: "me" }),
-        git: async (args) => {
+        git: async (all) => {
+          let i = 0;
+          while (all[i] === "-c") i += 2;
+          const args = all.slice(i);
           // Newest first, as git log prints it.
           if (args[0] === "log") return "2222222222222222222222222222222222222222\tfix: the failing test\n1111111111111111111111111111111111111111\ttest: cover it\n";
           if (args[0] === "diff") return args.includes("--stat") ? " a.ts | 2 +-" : "+fixed";
-          if (args[0] === "rev-parse") return "2222222222222222222222222222222222222222\n";
-          if (args[0] === "push") pushes.push(args);
+          if (args[0] === "rev-parse") return args.includes("HEAD") ? `${worktreeHead}\n` : `${commonDir}\n`;
+          if (args[0] === "remote") return "https://github.com/a/b.git\n";
+          if (args[0] === "push") pushes.push(all);
           return "";
         },
       });
@@ -9539,9 +9584,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual(item.drive.commits.map((c) => c.subject), ["fix: the failing test", "test: cover it"].reverse());
         assert.strictEqual(pushes.length, 0, "Shadow pushes nothing by itself");
         const c = f.children[0];
-        assert.strictEqual(c.env.GIT_CONFIG_COUNT, "3", "the session's git can't push");
+        assert.strictEqual(c.env.GIT_SSH_COMMAND, "pr-agent-no-ssh", "the session's git has no network and no credentials");
         const rules = c.args[c.args.indexOf("--append-system-prompt") + 1];
         assert.match(rules, /Never push and never rewrite history/);
+        assert.match(rules, /fetched for you as origin\/main/);
+        assert.ok(f.gitCalls.some((a) => a[0] === "fetch" && a.includes("+refs/heads/main:refs/remotes/origin/main")), "the app fetches the base before the session");
+        assert.strictEqual(item.pushTo.url, "https://github.com/a/b.git");
         assert.match(rules, /Co-Authored-By: Claude/);
         const guardFile = JSON.parse(nfsA.readFileSync(path.join(path.dirname(c.args[c.args.indexOf("--settings") + 1]), "guard.json"), "utf8"));
         assert.ok(guardFile.workDir, "the guard knows its worktree");
@@ -9551,8 +9599,22 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match((await f.agent.act({ type: "push", runId: item.runId })).error, /someone pushed/);
         assert.strictEqual(pushes.length, 0);
         freshHead = "a".repeat(40);
+        // Commits you weren't shown: back to you, nothing pushed.
+        worktreeHead = "3333333333333333333333333333333333333333";
+        assert.match((await f.agent.act({ type: "push", runId: item.runId })).error, /commits you haven't seen/);
+        assert.strictEqual(pushes.length, 0);
+        worktreeHead = "2222222222222222222222222222222222222222";
+        only(f)[0].state = "needsYou";
+        only(f)[0].drive.head = worktreeHead;
+        // The repository's git config changed during the run: nothing pushed.
+        nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n\tfsmonitor = evil\n");
+        assert.match((await f.agent.act({ type: "push", runId: item.runId })).error, /git config or hooks changed/);
+        nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+        only(f)[0].state = "needsYou";
         assert.deepStrictEqual(await f.agent.act({ type: "push", runId: item.runId }), { ok: true });
-        assert.deepStrictEqual(pushes, [["push", "origin", "HEAD:refs/heads/feature/x"]]);
+        assert.strictEqual(pushes.length, 1);
+        assert.deepStrictEqual(pushes[0].slice(-4), ["push", "--no-verify", "https://github.com/a/b.git", "2222222222222222222222222222222222222222:refs/heads/feature/x"]);
+        assert.ok(pushes[0].some((a) => a.startsWith("core.hooksPath=")), "no hook runs in the app's push");
         assert.deepStrictEqual([only(f)[0].state, only(f)[0].pushed, only(f)[0].headline], ["done", true, "Pushed 2 commits"]);
         const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
         assert.deepStrictEqual(state.drive["PR_R"], { attempts: 1, agentHead: "2222222222222222222222222222222222222222" });

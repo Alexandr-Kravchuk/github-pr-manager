@@ -833,11 +833,20 @@ export interface AgentItem {
   pushed?: boolean;
   /** A drive: what it was queued for — "ci", "conflicts", "comments". */
   reasons?: string[];
+  /**
+   * A drive: where its push goes and what git looked like before the session
+   * — the remote URL then (not a remote name the session could repoint), and
+   * a fingerprint of the repository's git config and hooks and your global
+   * git config. A push goes out only while the fingerprint still matches.
+   */
+  pushTo?: { url: string; commonDir: string; worktreeGitDir: string | null; fingerprint: string };
 }
 
 export interface AgentDriveResult {
   /** The PR's head the run started from: a push goes out only while it is still the head. */
   base: string;
+  /** The commit the drive ended at — what you were shown, and the one commit a Push sends. */
+  head: string;
   /** What it was driven for: "ci", "conflicts", "comments". */
   reasons: string[];
   /** Oldest first. */

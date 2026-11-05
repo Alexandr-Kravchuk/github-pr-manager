@@ -86,8 +86,9 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "Bash(git log *)",
     "Bash(git add *)",
     "Bash(git commit *)",
-    "Bash(npm test*)",
-    "Bash(npm run *)",
+    // No test commands by default: a test runs your repository's code, and the
+    // session can edit that code. Add them in Settings › Agent › Permissions if
+    // you accept that; CI checks every push either way.
   ],
   afterMerge: ["Read", "Grep", "Glob", "Skill", "ToolSearch", "TaskCreate", "TaskUpdate", "Bash(gh pr view *)", "Bash(gh api *)", "Bash(twg *)"],
 };

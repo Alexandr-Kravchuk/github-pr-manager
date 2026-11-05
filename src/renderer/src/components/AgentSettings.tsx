@@ -360,6 +360,11 @@ function PermissionsSection({ agent, setAgent, inputCls }: SectionProps) {
             ))}
           </div>
           <textarea value={text[kind]} onChange={(e) => setTools(e.target.value)} rows={6} className={cn(inputCls, "font-mono text-xs")} />
+          {kind === "drive" && (
+            <span className="mt-1 block text-xs text-amber-700 dark:text-amber-300">
+              Test commands (npm test, npm run …) are off by default: a test runs your repository&apos;s code, and the session can edit that code. Add them only if you accept that — CI checks every push either way, and nothing reaches the branch until the app has checked the commits.
+            </span>
+          )}
         </Field>
         <Check
           checked={agent.permissions.pushOwnBranch}

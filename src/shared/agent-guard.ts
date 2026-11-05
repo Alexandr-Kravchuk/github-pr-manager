@@ -58,7 +58,27 @@ export interface GuardRun {
  * folder and hooks, CI workflows, Claude Code and npm settings, git
  * attributes — each of them runs something or reroutes where it runs.
  */
-const DRIVE_PROTECTED = [".git", ".github", ".claude", ".husky", ".githooks", ".npmrc", ".gitattributes", ".gitmodules", ".gitconfig"];
+const DRIVE_PROTECTED = [
+  ".git",
+  ".github",
+  ".claude",
+  ".husky",
+  ".githooks",
+  ".npmrc",
+  ".gitattributes",
+  ".gitmodules",
+  ".gitconfig",
+  // Hook managers read the commands they run from these.
+  "lefthook.yml",
+  "lefthook.yaml",
+  ".lefthook.yml",
+  ".lefthook.yaml",
+  "lefthook-local.yml",
+  ".pre-commit-config.yaml",
+  ".huskyrc",
+  ".huskyrc.json",
+  ".huskyrc.js",
+];
 
 /** Whether a drive run may change `file`: inside its worktree, outside the protected names. */
 export function checkDriveWrite(file: string, workDir: string): GuardDecision {
@@ -204,7 +224,7 @@ const GIT_DRIVE = new Set([
   "ls-files",
   "blame",
   "merge-base",
-  "fetch",
+  // No `fetch`: the session's git has no network; the app fetches the base before it starts.
   "merge",
   // No `rebase`: the app pushes a fast-forward only, and a rebase never is one.
   "cherry-pick",

@@ -501,6 +501,7 @@ function mockAgentState(): AgentState {
       worktree: "/tmp/agent-dashboard-142",
       drive: {
         base: byNumber(142)?.headOid ?? "0".repeat(40),
+        head: "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
         reasons: ["ci"],
         commits: [
           { oid: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", subject: "test: cover a 403 with retry-after" },

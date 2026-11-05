@@ -44,20 +44,27 @@ export interface RunSpec {
 }
 
 /**
- * Environment that makes every `git push` from a drive session's process tree
- * fail — whatever runs it (a test script the session edited, say): git
- * rewrites each remote URL to a scheme it has no helper for. Git's own
- * `GIT_CONFIG_*` variables, read by every git process. The app pushes the
- * branch itself, from its own process, after checking the commits.
+ * A drive session's git has no network and no credentials: every remote URL
+ * — fetch and push, `url` and an explicit `pushurl` alike — is rewritten
+ * (`insteadOf`) to a scheme git has no helper for; the credential helpers
+ * are reset, SSH and the askpass programs point nowhere. Git's own
+ * `GIT_CONFIG_*` variables, read by every git process the session starts.
+ * The app fetches the base branch before the session and pushes after it.
+ * Defence in depth, not the boundary: the guard refuses `git push`, and a
+ * drive runs no code of yours unless you add test commands in Settings.
  */
+const NO_NET = ["https://", "http://", "git@", "ssh://", "git://"];
 export const NO_PUSH_ENV: Record<string, string> = {
-  GIT_CONFIG_COUNT: "3",
-  GIT_CONFIG_KEY_0: "url.pr-agent-no-push://.pushInsteadOf",
-  GIT_CONFIG_VALUE_0: "https://",
-  GIT_CONFIG_KEY_1: "url.pr-agent-no-push://.pushInsteadOf",
-  GIT_CONFIG_VALUE_1: "git@",
-  GIT_CONFIG_KEY_2: "url.pr-agent-no-push://.pushInsteadOf",
-  GIT_CONFIG_VALUE_2: "ssh://",
+  GIT_CONFIG_COUNT: String(NO_NET.length + 1),
+  ...Object.fromEntries(NO_NET.flatMap((prefix, i) => [[`GIT_CONFIG_KEY_${i}`, "url.pr-agent-no-push://.insteadOf"], [`GIT_CONFIG_VALUE_${i}`, prefix]])),
+  // An empty value resets the helper list: no stored credential is handed out.
+  [`GIT_CONFIG_KEY_${NO_NET.length}`]: "credential.helper",
+  [`GIT_CONFIG_VALUE_${NO_NET.length}`]: "",
+  GIT_SSH_COMMAND: "pr-agent-no-ssh",
+  GIT_ASKPASS: "pr-agent-no-askpass",
+  SSH_ASKPASS: "pr-agent-no-askpass",
+  GCM_INTERACTIVE: "never",
+  GIT_TERMINAL_PROMPT: "0",
 };
 
 /** Built-in tool names for `--tools`, from the `--allowedTools` rules ("Bash(gh pr view *)" → "Bash"). */

@@ -27,7 +27,7 @@ import type {
 import { chooseMergeMethod, mergeArgs } from "./merge";
 import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
 import { ghError, prepareRunFolder, publishPlan, readPlan, runFolderRoots, runGh, type GhRunner, type RunFolder } from "./publish";
-import { collectDrive, pushArgs } from "./drive";
+import { collectDrive, gitFingerprint, isPlainBranch, noHooksDir, pushArgs, safeGit } from "./drive";
 import { hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { openStore, type AgentItemRecord, type AgentStore } from "./store";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
@@ -150,7 +150,7 @@ export function agentRules(
   scenario: AgentScenario,
   mode: "shadow" | "on",
   folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null = null,
-  pr: { repo: string; number: number } | null = null,
+  pr: { repo: string; number: number; baseRef?: string } | null = null,
 ): string {
   const plan =
     "You run unattended as the user's PR agent. First write your plan as a task list with TaskCreate — one short task per step — and keep it current with TaskUpdate as you go, so the user can follow along. (A skill that runs as a Workflow shows its own phases; then no task list is needed.)";
@@ -174,7 +174,7 @@ export function agentRules(
       `${plan} You work on the user's own PR${pr ? ` (${pr.repo}#${pr.number})` : ""}, in a detached checkout of its head. ` +
       `Commit each fix with git (add, commit) and follow the repository's own conventions — read its CLAUDE.md and AGENTS.md first, since this session doesn't load them on its own — and end every commit message with the trailer "Co-Authored-By: Claude <noreply@anthropic.com>". ` +
       `Never push and never rewrite history (no rebase, no amend of a commit that was already there): the app pushes your commits to the PR's branch as a fast-forward${later}, after checking them. ` +
-      `Resolve a conflict by merging the base branch in (git fetch, then git merge), never by rebasing; CI runs once the app pushes, so don't wait for it. ` +
+      `Resolve a conflict by merging the base branch in — it is fetched for you as ${pr?.baseRef ?? "<remote>/<base>"}; this session's git has no network — never by rebasing. CI runs once the app pushes, so don't wait for it. ` +
       (w ? `To answer a reviewer in a thread, write the reply to a file under ${out}/ and run \`${w} reply ${target} <comment-id> <file>\`; the app posts it after the push. ` : "") +
       `Leave .git, .github, .claude, .husky, .npmrc and git attributes alone. End with what you changed and why. ${never}`
     );
@@ -427,6 +427,23 @@ export function createAgent(deps: AgentDeps): Agent {
         return fail("Could not check out the PR", (e as Error).message);
       }
       item.worktree = dir;
+      if (kind === "drive") {
+        // Before the session: the base branch fetched (the session's git has no
+        // network), and what a push will need — the remote's URL now, and a
+        // fingerprint of what git would run code from.
+        try {
+          if (isPlainBranch(pr.baseRefName)) {
+            await git(["fetch", "--no-tags", remote, `+refs/heads/${pr.baseRefName}:refs/remotes/${remote}/${pr.baseRefName}`], checkout).catch(() => {});
+          }
+          const sg = safeGit(noHooksDir());
+          const url = (await git(["remote", "get-url", "--push", remote], checkout)).trim();
+          const commonDir = path.resolve(dir, (await git([...sg, "rev-parse", "--git-common-dir"], dir)).trim());
+          const worktreeGitDir = path.resolve(dir, (await git([...sg, "rev-parse", "--git-dir"], dir)).trim());
+          item.pushTo = { url, commonDir, worktreeGitDir, fingerprint: gitFingerprint(commonDir, worktreeGitDir) };
+        } catch (e) {
+          return fail("Could not prepare the drive", (e as Error).message);
+        }
+      }
     } else {
       dir = path.join(runDir, "cwd");
       fs.mkdirSync(dir, { recursive: true });
@@ -479,7 +496,11 @@ export function createAgent(deps: AgentDeps): Agent {
         sessionId,
         kind,
         prompt: mine.prompt,
-        appendSystemPrompt: agentRules(item.scenario, item.mode, folder, { repo: item.repo, number: item.prNumber }),
+        appendSystemPrompt: agentRules(item.scenario, item.mode, folder, {
+          repo: item.repo,
+          number: item.prNumber,
+          ...(kind === "drive" && pr && remote ? { baseRef: `${remote}/${pr.baseRefName}` } : {}),
+        }),
         allowedTools,
         pluginDirs,
         addDirs,
@@ -717,29 +738,37 @@ export function createAgent(deps: AgentDeps): Agent {
     if (!item.drive || item.drive.commits.length === 0) return { ok: false, error: "There is nothing to push." };
     if (!all.agent.permissions.pushOwnBranch) return { ok: false, error: "Pushing is off in Settings › Agent › Permissions." };
     if (!item.worktree || !item.checkout || !fs.existsSync(item.worktree)) return refuse("the run's checkout is gone — run it again");
+    if (!item.pushTo) return refuse("the run didn't record where to push — run it again");
+    // What git would run code from must be what it was before the session.
+    if (gitFingerprint(item.pushTo.commonDir, item.pushTo.worktreeGitDir) !== item.pushTo.fingerprint) {
+      return refuse("the repository's git config or hooks changed during the run — nothing pushed; look at them before anything else");
+    }
     const read = await fresh(item, snapshotPr(item.prId)?.roles ?? ["author"]);
     if (!read.ok) return refuse(read.error);
     const { pr, state, viewer } = read.fresh;
     if (state !== "OPEN") return refuse(`the PR was ${state.toLowerCase()} since`);
     if (pr.isCrossRepository) return refuse("its branch is in a fork");
     if (pr.headOid !== item.drive.base) return refuse("someone pushed to the branch since — run it again on the new head");
-    // What is in the checkout now — "Continue in session" may have added commits.
-    const now = await collectDrive(git, item.worktree, item.drive.base, item.drive.reasons).catch((e: Error) => ({ error: e.message }));
+    // What is in the checkout now — "Continue in session" may have added
+    // commits. A Push sends only what you were shown: anything new goes back
+    // on the Board for you to look at first.
+    const hooksDir = noHooksDir();
+    const now = await collectDrive(git, item.worktree, item.drive.base, item.drive.reasons, hooksDir).catch((e: Error) => ({ error: e.message }));
     if ("error" in now) return refuse(`couldn't read the commits: ${now.error}`);
     if (!now.fastForward) return refuse("the commits rewrite the branch's history — the app pushes fast-forwards only");
-    item.drive = now.drive;
-    const remote = remoteFor(item.checkout, pr);
-    if (!remote) return refuse(`no remote of ${item.checkout} points at ${pr.repo}`);
+    if (now.drive.head !== item.drive.head) {
+      item.drive = now.drive;
+      return refuse(`there are commits you haven't seen — look at the ${now.drive.commits.length} commits again, then Push`);
+    }
+    const head = item.drive.head;
     item.headline = "Pushing…";
     changed();
-    let head: string;
     try {
-      head = (await git(["rev-parse", "HEAD"], item.worktree)).trim();
-      await git(pushArgs(remote, pr.headRefName), item.worktree);
+      await git(pushArgs(item.pushTo.url, head, pr.headRefName, hooksDir), item.worktree);
     } catch (e) {
       return refuse(`git refused the push: ${(e as Error).message}`);
     }
-    const n = now.drive.commits.length;
+    const n = item.drive.commits.length;
     item.pushed = true;
     item.finishedAt = stamp();
     const d = store.data.drive[item.prId] ?? { attempts: 0 };

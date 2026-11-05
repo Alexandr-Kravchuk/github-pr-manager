@@ -223,11 +223,13 @@ export async function checkPlanTargets(
     } else if (s.kind === "reply") {
       const r = await gh(["api", `repos/${repo}/pulls/comments/${s.replyTo}`, ...hostFlag(prUrl)]);
       if (r.code !== 0) return `couldn't check comment ${s.replyTo}: ${ghError(r)}`;
-      const c = json(r.stdout) as { pull_request_url?: unknown; user?: { login?: unknown } } | null;
+      const c = json(r.stdout) as { pull_request_url?: unknown; user?: { login?: unknown }; in_reply_to_id?: unknown } | null;
       const url = String(c?.pull_request_url ?? "").toLowerCase();
       if (!url.endsWith(`/repos/${repo}/pulls/${number}`.toLowerCase())) return `comment ${s.replyTo} is not on ${repo}#${number}`;
       if (targets.mine) {
         if (!me) return "couldn't tell whose threads these are — your login on the host is unknown";
+        // The thread's first comment, and yours: a reply of yours in a colleague's thread is still their thread.
+        if (c?.in_reply_to_id != null) return `comment ${s.replyTo} is a reply, not the start of a thread — a review answers only in threads it opened`;
         if (String(c?.user?.login ?? "").toLowerCase() !== me) return `comment ${s.replyTo} opens a colleague's thread — a review answers only in yours`;
       }
     }
