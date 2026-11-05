@@ -99,6 +99,7 @@ for (const mod of [
   "claude-sessions.js",
   "settings-search.js",
   "host-status.js",
+  "stale.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -3562,6 +3563,7 @@ test("activeFilterCount: every narrowing control at once", () =>
         newOnly: true,
         mergeableOnly: true,
         noReviewsOnly: true,
+        staleOnly: true,
       }),
     ),
     2 + prFilter.SOURCE_CHIPS.length,
@@ -7856,6 +7858,252 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(src, /"claude:sessions"[\s\S]{0,120}refreshClaudeSessions\(\)/);
       assert.match(src, /isVisible\(\)\)\s*\{\s*sendToRenderer\("claude-sessions"/);
       assert.match(src, /claudeSessionsOn = settings\.claude\.enabled/);
+    });
+  }
+
+  // --- Stale PRs: closing one with its Jira task -------------------------------
+  {
+    const sfs = require("node:fs");
+    const stale = require(path.join(__dirname, "../dist/main/shared/stale.js"));
+    const staleClose = require(path.join(__dirname, "../dist/main/main/stale-close.js"));
+    const ipcv = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+    const DAY = 864e5;
+    const NOW = Date.parse("2026-11-05T12:00:00Z");
+    const ago = (d) => new Date(NOW - d * DAY).toISOString();
+
+    test("stale: validateStaleAfterDays defaults, clamps and allows 0 (off)", () => {
+      assert.strictEqual(stale.validateStaleAfterDays(undefined), 30);
+      assert.strictEqual(stale.validateStaleAfterDays("garbage"), 30);
+      assert.strictEqual(stale.validateStaleAfterDays(0), 0);
+      assert.strictEqual(stale.validateStaleAfterDays(-5), 0);
+      assert.strictEqual(stale.validateStaleAfterDays(9999), 365);
+      assert.strictEqual(stale.validateStaleAfterDays("45"), 45);
+      assert.strictEqual(stale.validateStaleAfterDays(14.6), 15);
+    });
+
+    test("stale: settings keep staleAfterDays, and an old file without it gets the default", () => {
+      assert.strictEqual(cfg.validateSettings({}).staleAfterDays, 30);
+      assert.strictEqual(cfg.validateSettings({ staleAfterDays: 60 }).staleAfterDays, 60);
+      assert.strictEqual(cfg.defaultSettings().staleAfterDays, 30);
+    });
+
+    test("stale: isStalePr counts whole days from createdAt; 0 is off", () => {
+      assert.strictEqual(stale.isStalePr({ createdAt: ago(30) }, 30, NOW), true);
+      assert.strictEqual(stale.isStalePr({ createdAt: ago(29.9) }, 30, NOW), false);
+      assert.strictEqual(stale.isStalePr({ createdAt: ago(400) }, 0, NOW), false);
+      assert.strictEqual(stale.isStalePr({ createdAt: "nonsense" }, 30, NOW), false);
+    });
+
+    test("stale: the close action is offered on your own stale PRs only", () => {
+      assert.strictEqual(stale.canCloseStale({ isStale: true, roles: ["author"] }), true);
+      assert.strictEqual(stale.canCloseStale({ isStale: true, roles: ["reviewer"] }), false);
+      assert.strictEqual(stale.canCloseStale({ isStale: false, roles: ["author"] }), false);
+    });
+
+    const tr = (id, name, toStatus, toCategory, resolutions = [], resolutionRequired = false) => ({
+      id, name, toStatus, toCategory, resolutions, resolutionRequired,
+    });
+
+    test("stale: suggestTransition picks To Do by category, preferring a To Do name", () => {
+      const list = [
+        tr("1", "Backlog it", "Backlog", "new"),
+        tr("2", "Start", "In Progress", "indeterminate"),
+        tr("3", "Reset", "To Do", "new"),
+      ];
+      assert.strictEqual(stale.suggestTransition(list, "todo").id, "3");
+      assert.strictEqual(stale.suggestTransition([tr("9", "Reset", "Selected", "new")], "todo").id, "9");
+      assert.strictEqual(stale.suggestTransition([tr("2", "Start", "In Progress", "indeterminate")], "todo"), null);
+    });
+
+    test("stale: suggestTransition finds Won't Do by name, status, then a Done with that resolution", () => {
+      assert.strictEqual(
+        stale.suggestTransition([tr("1", "Done", "Done", "done"), tr("2", "Won't Do", "Won't Do", "done")], "wontDo").id,
+        "2",
+      );
+      assert.strictEqual(stale.suggestTransition([tr("4", "Finish", "Declined", "done")], "wontDo").id, "4");
+      assert.strictEqual(stale.suggestTransition([tr("5", "Abort", "Cancelled", "done")], "wontDo").id, "5");
+      const viaResolution = tr("6", "Close", "Closed", "done", [{ id: "10", name: "Done" }, { id: "11", name: "Won't Do" }], true);
+      assert.strictEqual(stale.suggestTransition([tr("1", "Done", "Done", "done"), viaResolution], "wontDo").id, "6");
+      assert.strictEqual(stale.suggestResolution(viaResolution.resolutions).id, "11");
+      assert.strictEqual(stale.suggestTransition([tr("1", "Done", "Done", "done")], "wontDo"), null);
+      assert.strictEqual(stale.suggestTransition([tr("1", "Done", "Done", "done")], "keep"), null);
+    });
+
+    test("stale: validateCloseStaleOptions accepts the four actions and rejects bad ids", () => {
+      assert.deepStrictEqual(ipcv.validateCloseStaleOptions({ comment: "bye" }), { comment: "bye", jira: { action: "keep" } });
+      assert.deepStrictEqual(
+        ipcv.validateCloseStaleOptions({ comment: "", jira: { action: "wontDo", transitionId: "41", resolutionId: "10001" } }),
+        { comment: "", jira: { action: "wontDo", transitionId: "41", resolutionId: "10001" } },
+      );
+      assert.deepStrictEqual(
+        ipcv.validateCloseStaleOptions({ jira: { action: "todo", transitionId: "11" } }).jira,
+        { action: "todo", transitionId: "11", resolutionId: null },
+      );
+      assert.deepStrictEqual(
+        ipcv.validateCloseStaleOptions({ jira: { action: "delete", deleteSubtasks: "yes" } }).jira,
+        { action: "delete", deleteSubtasks: false },
+      );
+      assert.throws(() => ipcv.validateCloseStaleOptions({ jira: { action: "todo", transitionId: "../x" } }), /invalid transition/);
+      assert.throws(() => ipcv.validateCloseStaleOptions({ jira: { action: "nuke" } }), /unknown Jira action/);
+      assert.throws(() => ipcv.validateCloseStaleOptions(null), /expected options/);
+    });
+
+    const HOST = { label: "GitHub", graphqlUrl: "https://api.github.com/graphql", repos: [] };
+    const stalePr = (o = {}) => ({ id: "PR_1", hostLabel: "GitHub", issueKey: "ENG-1", isStale: true, roles: ["author"], ...o });
+    function deps(o = {}) {
+      const calls = [];
+      return {
+        calls,
+        d: {
+          loadSettings: () => ({ hosts: [HOST], jira: { baseUrl: "https://x.atlassian.net", email: "me@x" } }),
+          resolveGhToken: () => "ghtok",
+          getJiraToken: () => "jtok",
+          closePullRequest: async (host, id, comment) => calls.push(["close", host.token, id, comment]),
+          fetchTaskInfo: async () => ({ key: "ENG-1" }),
+          transitionTask: async (_c, _t, key, tid, rid) => calls.push(["transition", key, tid, rid]),
+          deleteTask: async (_c, _t, key, sub) => calls.push(["delete", key, sub]),
+          ...o,
+        },
+      };
+    }
+
+    await atest("staleClose: closes the PR, then transitions the task", async () => {
+      const { calls, d } = deps();
+      const r = await staleClose.closeStale(
+        stalePr(),
+        { comment: "bye", jira: { action: "wontDo", transitionId: "41", resolutionId: "10001" } },
+        d,
+      );
+      assert.deepStrictEqual(calls, [["close", "ghtok", "PR_1", "bye"], ["transition", "ENG-1", "41", "10001"]]);
+      assert.strictEqual(r.ok, true);
+      assert.match(r.jira.message, /Won't Do/);
+    });
+
+    await atest("staleClose: delete passes deleteSubtasks; keep touches no task", async () => {
+      let { calls, d } = deps();
+      await staleClose.closeStale(stalePr(), { comment: "", jira: { action: "delete", deleteSubtasks: true } }, d);
+      assert.deepStrictEqual(calls[1], ["delete", "ENG-1", true]);
+      ({ calls, d } = deps({ getJiraToken: () => null }));
+      const r = await staleClose.closeStale(stalePr({ issueKey: null }), { comment: "", jira: { action: "keep" } }, d);
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.jira, null);
+      assert.strictEqual(calls.length, 1);
+    });
+
+    await atest("staleClose: refuses someone else's or a fresh PR, before any call", async () => {
+      for (const pr of [stalePr({ roles: ["reviewer"] }), stalePr({ isStale: false }), undefined]) {
+        const { calls, d } = deps();
+        const r = await staleClose.closeStale(pr, { comment: "", jira: { action: "keep" } }, d);
+        assert.strictEqual(r.ok, false);
+        assert.strictEqual(r.prClosed, false);
+        assert.strictEqual(calls.length, 0);
+      }
+    });
+
+    await atest("staleClose: a missing Jira token stops before the PR is closed", async () => {
+      const { calls, d } = deps({ getJiraToken: () => null });
+      const r = await staleClose.closeStale(stalePr(), { comment: "", jira: { action: "todo", transitionId: "11", resolutionId: null } }, d);
+      assert.strictEqual(r.prClosed, false);
+      assert.match(r.error, /Jira API token/);
+      assert.strictEqual(calls.length, 0);
+    });
+
+    await atest("staleClose: a failed close leaves the task alone; a failed task reports the closed PR", async () => {
+      let { calls, d } = deps({ closePullRequest: async () => { throw new Error("Resource not accessible"); } });
+      let r = await staleClose.closeStale(stalePr(), { comment: "", jira: { action: "delete", deleteSubtasks: false } }, d);
+      assert.strictEqual(r.prClosed, false);
+      assert.match(r.error, /Couldn't close the PR: Resource not accessible/);
+      assert.strictEqual(calls.length, 0);
+      ({ calls, d } = deps({ deleteTask: async () => { throw new Error("HTTP 403"); } }));
+      r = await staleClose.closeStale(stalePr(), { comment: "", jira: { action: "delete", deleteSubtasks: false } }, d);
+      assert.strictEqual(r.ok, false);
+      assert.strictEqual(r.prClosed, true);
+      assert.match(r.error, /PR was closed, but ENG-1 was not changed: HTTP 403/);
+    });
+
+    await atest("closePullRequest: posts the comment first, then closes; no comment, no addComment", async () => {
+      const real = global.fetch;
+      const bodies = [];
+      global.fetch = async (_url, init) => {
+        bodies.push(JSON.parse(init.body));
+        return { ok: true, status: 200, json: async () => ({ data: {} }), text: async () => "" };
+      };
+      try {
+        await github.closePullRequest({ label: "GH", graphqlUrl: "https://api.github.com/graphql", token: "t" }, "PR_1", " bye ");
+        assert.match(bodies[0].query, /addComment/);
+        assert.strictEqual(bodies[0].variables.body, "bye");
+        assert.match(bodies[1].query, /closePullRequest/);
+        bodies.length = 0;
+        await github.closePullRequest({ label: "GH", graphqlUrl: "https://api.github.com/graphql", token: "t" }, "PR_1", "  ");
+        assert.strictEqual(bodies.length, 1);
+        assert.match(bodies[0].query, /closePullRequest/);
+      } finally {
+        global.fetch = real;
+      }
+    });
+
+    await atest("jira task actions: transitions read with fields, writes fall back past a 401, refusals name the scope", async () => {
+      const real = global.fetch;
+      const CFG = { baseUrl: "https://acme.atlassian.net", email: "me@acme" };
+      const CID = "158d8f10-2fb5-4b9b-9d0f-6a1c3f4b5e6d";
+      const GW = `https://api.atlassian.com/ex/jira/${CID}/rest/api/3`;
+      const SITE = `${CFG.baseUrl}/rest/api/3`;
+      const ok = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => "" });
+      const err = (status) => ({ ok: false, status, json: async () => ({}), text: async () => "nope" });
+      const seen = [];
+      try {
+        jira.clearJiraCaches();
+        global.fetch = async (url, init) => {
+          seen.push(`${init.method ?? "GET"} ${url}`);
+          if (url.endsWith("/_edge/tenant_info")) return ok({ cloudId: CID });
+          if (url.startsWith(GW)) return err(401); // a classic token
+          if (url === `${SITE}/issue/ENG-1?fields=summary,status,subtasks`)
+            return ok({ fields: { summary: "S", status: { name: "In Progress", statusCategory: { key: "indeterminate" } }, subtasks: [{}, {}] } });
+          if (url === `${SITE}/issue/ENG-1/transitions?expand=transitions.fields`)
+            return ok({ transitions: [{ id: "41", name: "Close", to: { name: "Closed", statusCategory: { key: "done" } },
+              fields: { resolution: { required: true, allowedValues: [{ id: "10001", name: "Won't Do" }] } } }] });
+          if (url === `${SITE}/issue/ENG-1/transitions` && init.method === "POST") return { ok: true, status: 204, text: async () => "" };
+          if (url.startsWith(`${SITE}/issue/ENG-1?deleteSubtasks=`)) return err(403);
+          throw new Error("unexpected " + url);
+        };
+        const info = await jira.fetchTaskInfo(CFG, "t", "ENG-1");
+        assert.strictEqual(info.subtaskCount, 2);
+        assert.deepStrictEqual(info.transitions[0], {
+          id: "41", name: "Close", toStatus: "Closed", toCategory: "done",
+          resolutions: [{ id: "10001", name: "Won't Do" }], resolutionRequired: true,
+        });
+        await jira.transitionTask(CFG, "t", "ENG-1", "41", "10001");
+        assert.ok(seen.includes(`POST ${GW}/issue/ENG-1/transitions`), "gateway tried first");
+        assert.ok(seen.includes(`POST ${SITE}/issue/ENG-1/transitions`), "then the site");
+        await assert.rejects(jira.deleteTask(CFG, "t", "ENG-1", true), /read-only[\s\S]*write:jira-work/);
+        assert.ok(seen.some((u) => u.includes("deleteSubtasks=true")));
+        await assert.rejects(jira.transitionTask(CFG, "t", "ENG-1/../x", "1", null), /not an issue key/);
+      } finally {
+        global.fetch = real;
+        jira.clearJiraCaches();
+      }
+    });
+
+    test("stale: the poller hashes isStale, so crossing the threshold re-emits", () => {
+      const base = { pullRequests: [], errors: [], rateLimits: [], fetchedAt: "", version: "x" };
+      const p = { id: "a", updatedAt: "", roles: [], failingChecks: [], pendingChecks: [], checks: [], reviewers: [] };
+      const h1 = poller.hashSnapshot({ ...base, pullRequests: [{ ...p, isStale: false }] });
+      const h2 = poller.hashSnapshot({ ...base, pullRequests: [{ ...p, isStale: true }] });
+      assert.notStrictEqual(h1, h2);
+    });
+
+    test("stale: the Stale chip is a source chip over isStale", () => {
+      const chip = prFilter.SOURCE_CHIPS.find((c) => c.key === "stale");
+      assert.strictEqual(chip.flag, "staleOnly");
+      assert.strictEqual(chip.matches({ isStale: true }), true);
+      assert.strictEqual(chip.matches({ isStale: false }), false);
+    });
+
+    test("main.js wiring: stale close takes only the PR id and validated options", () => {
+      const src = sfs.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /"stale:close"[\s\S]{0,200}validatePrId\)\(raw\)[\s\S]{0,120}validateCloseStaleOptions\)\(rawOptions\)/);
+      assert.match(src, /"stale:jiraTask"[\s\S]{0,300}validatePrId\)\(raw\)/);
+      assert.match(src, /closeStale\)\(snapshotPr\(id\)/);
     });
   }
 

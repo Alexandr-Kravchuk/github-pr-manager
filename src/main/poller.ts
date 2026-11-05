@@ -53,6 +53,7 @@ import { JIRA_ERROR_DETAIL_SEP } from "../shared/jira";
 import { applyIgnored } from "../shared/ignored";
 import { DEFAULT_POLL_INTERVAL_MS, probeNotifications } from "../shared/notifications";
 import type { NotifState } from "../shared/notifications";
+import { isStalePr } from "../shared/stale";
 import { applyActivity } from "../shared/state";
 import type {
   DashboardResponse,
@@ -205,6 +206,9 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
     p.hasUnaddressedComments,
     p.hasUnaddressedReviewFeedback,
     p.isBehindBase,
+    // Flips on the clock alone — a PR nobody touches crosses the threshold with
+    // no other field moving, and its badge and close action must still appear.
+    p.isStale,
     // Also read by the notifier (notify.ts) — it detects the reviewer-added
     // transition (`isReviewer && !wasReviewer` -> review_requested) from roles.
     // Being added as an additional reviewer to an already-tracked PR may not
@@ -771,6 +775,11 @@ export class Poller {
       if (slot.error) errors.push(slot.error);
       if (slot.rateLimit) rateLimits.push({ ...slot.rateLimit, fetchedAt: slot.fetchedAt });
     }
+
+    // Stale is measured against the clock, not the fetch, so a carried-over
+    // slot (a host that failed this tick) still crosses the threshold on time.
+    const staleNow = Date.now();
+    for (const pr of allPrs) pr.isStale = isStalePr(pr, settings.staleAfterDays, staleNow);
 
     try {
       await applyActivity(allPrs, this.options.statePath, {

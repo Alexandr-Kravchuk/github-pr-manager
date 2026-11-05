@@ -22,6 +22,8 @@ const api: PrManagerApi = {
   getClaudeSessions: () => ipcRenderer.invoke("claude:sessions"),
   focusClaudeSession: (sessionId) => ipcRenderer.invoke("claude:focusSession", sessionId),
   copyText: (text) => ipcRenderer.invoke("app:copyText", text),
+  getStaleJiraTask: (prId) => ipcRenderer.invoke("stale:jiraTask", prId),
+  closeStalePr: (prId, options) => ipcRenderer.invoke("stale:close", prId, options),
   onSnapshot: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DashboardResponse) =>
       listener(payload);

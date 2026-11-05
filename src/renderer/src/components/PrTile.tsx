@@ -6,6 +6,7 @@ import type { PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { AuthorButton } from "./AuthorButton";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
+import { StaleCloseButton } from "./StaleCloseDialog";
 import { StackBadge } from "./StackBadge";
 
 /**
@@ -201,6 +202,17 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
           >
             ⚠
           </span>
+        )}
+        {/* Your own stale PR gets the glyph as a button that opens the close
+            dialog; anyone else's just says it is stale. */}
+        {pr.isStale && pr.roles.includes("author") ? (
+          <StaleCloseButton pr={pr} iconOnly />
+        ) : (
+          pr.isStale && (
+            <span title="Open past the stale threshold" className="shrink-0 text-stone-600 dark:text-stone-300">
+              🕸
+            </span>
+          )
         )}
         {pr.unresolvedThreads > 0 && (
           <span

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 
 import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "./claude-launch";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "./notify";
+import { DEFAULT_STALE_AFTER_DAYS, validateStaleAfterDays } from "./stale";
 import type {
   ClaudeSettings,
   GhStatus,
@@ -200,6 +201,7 @@ export function validateSettings(raw: unknown): Settings {
     hosts,
     jira: validateJira(obj.jira),
     claude: validateClaude(obj.claude),
+    staleAfterDays: validateStaleAfterDays(obj.staleAfterDays),
   };
 }
 
@@ -298,6 +300,7 @@ export function defaultSettings(): Settings {
     notifications: defaultNotificationSettings(),
     hosts: [],
     claude: validateClaude(undefined),
+    staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
   };
 }
 

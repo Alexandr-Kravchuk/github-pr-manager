@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
-import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
+import { ConfigError, defaultSettings, getGhStatus, pickAppId, resolveGhToken, toHostConfigs, toPublicConfig } from "../shared/config";
+import { closePullRequest } from "../shared/github";
 import { planPolling } from "../shared/idle-gate";
 import type { PollPlan } from "../shared/idle-gate";
 import { setIgnored } from "../shared/ignored";
@@ -29,10 +30,13 @@ import { loadAppIcon } from "./app-icon";
 import { launchClaude } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
-import { clearJiraCaches } from "../shared/jira";
-import { buildJiraEnricher, getJiraStatus, setJiraToken } from "./jira-store";
+import { clearJiraCaches, deleteTask, fetchTaskInfo, transitionTask } from "../shared/jira";
+import type { CloseStaleResult, JiraTaskInfo } from "../shared/stale";
+import { buildJiraEnricher, getJiraStatus, getJiraToken, setJiraToken } from "./jira-store";
+import { closeStale, staleJiraTask, type StaleCloseDeps } from "./stale-close";
 import {
   validateClipboardText,
+  validateCloseStaleOptions,
   validateExternalUrl,
   validateIgnoredArgs,
   validateJiraToken,
@@ -760,6 +764,41 @@ function registerIpc(): void {
 
   ipcMain.handle("app:copyText", async (_event, text: unknown): Promise<void> => {
     clipboard.writeText(validateClipboardText(text));
+  });
+
+  // Stale-PR close. As with the Claude launcher, only the PR id (and the
+  // dialog's choices) cross over: the host, the PR node id and the Jira key are
+  // read from the snapshot here, and `stale-close.ts` re-checks it is yours.
+  const staleDeps: StaleCloseDeps = {
+    loadSettings,
+    resolveGhToken,
+    getJiraToken,
+    closePullRequest,
+    fetchTaskInfo,
+    transitionTask,
+    deleteTask,
+  };
+  const snapshotPr = (id: string) => poller?.getSnapshot()?.pullRequests.find((p) => p.id === id);
+
+  ipcMain.handle(
+    "stale:jiraTask",
+    async (_event, raw: unknown): Promise<{ ok: true; task: JiraTaskInfo } | { ok: false; error: string }> => {
+      if (isMockMode()) return { ok: false, error: "Jira is not reachable in fixture mode." };
+      return staleJiraTask(snapshotPr(validatePrId(raw)), staleDeps);
+    },
+  );
+
+  ipcMain.handle("stale:close", async (_event, raw: unknown, rawOptions: unknown): Promise<CloseStaleResult> => {
+    const id = validatePrId(raw);
+    const options = validateCloseStaleOptions(rawOptions);
+    if (isMockMode()) {
+      return { ok: false, prClosed: false, jira: null, error: "Closing PRs is disabled in fixture mode." };
+    }
+    const result = await closeStale(snapshotPr(id), options, staleDeps);
+    // A closed PR drops out of the `is:open` searches; poll now so its card
+    // goes away instead of lingering for a full interval.
+    if (result.prClosed) await poller?.refresh();
+    return result;
   });
 }
 

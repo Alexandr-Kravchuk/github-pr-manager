@@ -125,6 +125,7 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     viewerReviewedHead: false,
     myReReviewDue: false,
     hasNoReviews: true,
+    isStale: false,
     unresolvedThreads: 0,
     unaddressedThreads: 0,
     totalComments: 0,
