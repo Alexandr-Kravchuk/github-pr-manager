@@ -820,6 +820,11 @@ export interface AgentItem {
   /** Queued by Resume: the next run continues `sessionId` instead of starting a session. */
   resumeSession?: boolean;
   /**
+   * Your place for it in the queue (dragged, or "Run next"): lower runs first.
+   * Unset, it queues by the time it was queued.
+   */
+  rank?: number;
+  /**
    * What a review prepared to post — captured by the app's publish wrapper,
    * posted by the app (`main/agent/publish.ts`). Absent when it prepared
    * nothing, or ran as a plain dry run.
@@ -908,7 +913,9 @@ export type AgentAction =
   | { type: "resumeAgent" }
   | { type: "hint"; runId: string; text: string }
   | { type: "merge"; runId: string; method?: MergeMethod }
-  | { type: "enqueue"; prId: string };
+  /** `before`: the queued run it goes in front of; null or absent, the end of the queue. */
+  | { type: "enqueue"; prId: string; before?: string | null }
+  | { type: "moveQueued"; runId: string; before: string | null };
 
 export type AgentActionResult = { ok: true } | { ok: false; error: string };
 

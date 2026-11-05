@@ -12,7 +12,8 @@ import type { AgentItem, AgentScenario } from "../../shared/types";
 // a crash mid-write can't leave a half-written ledger — the ledger is what
 // stops the agent from posting the same review twice.
 
-export type LedgerState = "started" | "prepared" | "published" | "failed";
+/** `dismissed`: taken out of the queue by you before it ran — not queued again for that head. */
+export type LedgerState = "started" | "prepared" | "published" | "failed" | "dismissed";
 
 export interface LedgerEntry {
   state: LedgerState;

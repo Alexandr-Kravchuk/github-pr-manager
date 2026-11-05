@@ -133,10 +133,20 @@ export const AGENT_HINT_MAX = 2_000;
  */
 export function validateAgentAction(value: unknown): AgentAction {
   const v = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
-  if (v.type === "enqueue") return { type: "enqueue", prId: validatePrId(v.prId) };
+  // `before` names a queued run (a UUID the agent minted) or nothing: the end of the queue.
+  const before = (): string | null => {
+    if (v.before === undefined || v.before === null) return null;
+    if (typeof v.before !== "string" || !RUN_ID.test(v.before)) throw new Error("agentAction: expected a run id to queue in front of.");
+    return v.before;
+  };
+  if (v.type === "enqueue") {
+    const b = before();
+    return { type: "enqueue", prId: validatePrId(v.prId), ...(b ? { before: b } : {}) };
+  }
   // The whole agent: nothing else rides along.
   if (v.type === "pauseAgent" || v.type === "resumeAgent") return { type: v.type };
   if (typeof v.runId !== "string" || !RUN_ID.test(v.runId)) throw new Error("agentAction: expected a run id.");
+  if (v.type === "moveQueued") return { type: "moveQueued", runId: v.runId, before: before() };
   if (v.type === "hint") {
     if (typeof v.text !== "string" || !v.text.trim() || v.text.length > AGENT_HINT_MAX) {
       throw new Error(`agentAction: a hint is 1–${AGENT_HINT_MAX} characters.`);

@@ -1353,7 +1353,7 @@ export function App() {
       <ClaudeSessionsContext.Provider value={claudeSessions}>
       <AuthorFilterContext.Provider value={authorFilter}>
       {viewMode === "board" ? (
-        <PrBoard prs={filtered} allPrIds={allPrIds} onOpen={openPr} />
+        <PrBoard prs={filtered} onOpen={openPr} />
       ) : viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable

@@ -6,7 +6,7 @@ import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, gitBashPath, summarizePlan } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
-import { AGENT_CLOSED, quietUntil, todayKey } from "../../shared/agent-view";
+import { AGENT_CLOSED, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -32,7 +32,7 @@ import { execFileSync } from "node:child_process";
 import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
-import { openStore, type AgentItemRecord, type AgentStore } from "./store";
+import { openStore, type AgentItemRecord, type AgentStore, type LedgerEntry } from "./store";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
 
 // The PR agent's core in the main process. It reads each dashboard snapshot,
@@ -160,6 +160,15 @@ function workingHeadline(scenario: AgentScenario): string {
 function runningHeadline(item: Pick<AgentItem, "scenario" | "reasons">): string {
   return item.reasons?.length ? `Driving — ${describeReasons(item.reasons)}` : workingHeadline(item.scenario);
 }
+
+/** Why a PR the agent would take shows as Idle: it already did, or you said no, for this head. */
+const LEDGER_IDLE: Record<LedgerEntry["state"], string> = {
+  started: "Running",
+  prepared: "The agent already ran on this head",
+  published: "Done for this head",
+  failed: "Its last run on this head failed — drag it to the queue to try again",
+  dismissed: "You took it out of the queue — drag it back to run it",
+};
 
 /** The first message of a session Resume picks up again. */
 export const RESUME_PROMPT = "The app running you closed while you worked and has started you again. Continue where you stopped and finish the task.";
@@ -406,7 +415,12 @@ export function createAgent(deps: AgentDeps): Agent {
     const byId = new Map(snapshot.pullRequests.map((p) => [p.id, p]));
     const wanted = new Set(plan.jobs.map((j) => j.key));
     for (const job of plan.jobs) {
-      if (store.data.ledger[job.key]) continue;
+      const before = store.data.ledger[job.key];
+      if (before) {
+        // Shown only while the PR has no live item: then it is Idle, and this says why.
+        idle[job.prId] = LEDGER_IDLE[before.state];
+        continue;
+      }
       if (store.data.items.some((i) => i.key === job.key && (i.state === "queued" || i.state === "working"))) continue;
       newItem(job, byId.get(job.prId)!, queuedHeadline(job));
       dirty = true;
@@ -1009,7 +1023,8 @@ export function createAgent(deps: AgentDeps): Agent {
     heldUntil = null;
     const snapshot = deps.getSnapshot();
     const byId = new Map((snapshot?.pullRequests ?? []).map((p) => [p.id, p]));
-    const queued = store.data.items.filter((i) => i.state === "queued").sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
+    // Your order first (dragged, or "Run next"), then the oldest.
+    const queued = queueOrder(store.data.items.filter((i) => i.state === "queued"));
     for (const item of queued) {
       // Counted by state, not by `running`: a run is "working" from its first
       // synchronous step, before its worktree exists and its process starts.
@@ -1032,7 +1047,7 @@ export function createAgent(deps: AgentDeps): Agent {
   }
 
   /** Puts a PR in the queue on your say-so; its key is its own, so the ledger of the automatic one doesn't stop it. */
-  function enqueueAsked(pr: PullRequest, s: AgentSettings, scenario: AgentScenario, reasons?: string[]): AgentActionResult {
+  function enqueueAsked(pr: PullRequest, s: AgentSettings, scenario: AgentScenario, reasons?: string[], before?: string | null): AgentActionResult {
     if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
       return { ok: false, error: "The agent is already on this PR." };
     }
@@ -1051,7 +1066,13 @@ export function createAgent(deps: AgentDeps): Agent {
               : "shadow"
             : on(s.scenarios.review.mode);
     const what = { brief: "a brief", rereview: "re-review", drive: `drive — ${describeReasons(reasons ?? [])}` }[scenario as string] ?? "review";
-    newItem({ key, prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario, mode, reasons }, pr, `Queued: ${what} (asked by you)`);
+    const others = store.data.items.filter((i) => i.state === "queued");
+    const item = newItem({ key, prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario, mode, reasons }, pr, `Queued: ${what} (asked by you)`);
+    // Dropped in front of a queued run: it takes that place.
+    if (before) {
+      const rank = rankBefore(others, before);
+      if (rank !== undefined) item.rank = rank;
+    }
     void store.save();
     changed();
     tick();
@@ -1073,12 +1094,12 @@ export function createAgent(deps: AgentDeps): Agent {
         if (pr.isCrossRepository) return { ok: false, error: "Its branch is in a fork — the agent pushes only to branches of the repository itself." };
         const reasons = driveReasons(pr, all.agent);
         if (reasons.length === 0) return { ok: false, error: "Nothing to drive: CI isn't red, there are no conflicts and no review comments waiting." };
-        return enqueueAsked(pr, all.agent, "drive", reasons);
+        return enqueueAsked(pr, all.agent, "drive", reasons, action.before);
       }
       if (!pr.roles.includes("reviewer") && !pr.roles.includes("reviewed")) return { ok: false, error: "The agent works on PRs you review or your own." };
-      if (pr.viewerHasReviewed) return enqueueAsked(pr, all.agent, "rereview");
+      if (pr.viewerHasReviewed) return enqueueAsked(pr, all.agent, "rereview", undefined, action.before);
       const brief = isBigPr(pr, all.agent);
-      return enqueueAsked(pr, all.agent, brief ? "brief" : "review");
+      return enqueueAsked(pr, all.agent, brief ? "brief" : "review", undefined, action.before);
     }
     const item = findItem(action.runId);
     if (!item) return { ok: false, error: "That run is gone." };
@@ -1158,8 +1179,28 @@ export function createAgent(deps: AgentDeps): Agent {
         if (merging.has(item.runId)) return { ok: false, error: "It is being merged already." };
         return mergeItem(item, all, action.method);
       }
+      case "moveQueued": {
+        if (item.state !== "queued") return { ok: false, error: "Only a queued PR can be moved — this one has started or finished." };
+        if (action.before === item.runId) return { ok: true };
+        const rank = rankBefore(
+          store.data.items.filter((i) => i.state === "queued" && i !== item),
+          action.before,
+        );
+        if (rank === undefined) delete item.rank;
+        else item.rank = rank;
+        void store.save();
+        changed();
+        tick();
+        return { ok: true };
+      }
       case "skip": {
         if (r) return { ok: false, error: "Stop the run first." };
+        // Taken out of the queue before it ran: without a note in the ledger
+        // the next snapshot would queue the same head again.
+        if (item.state === "queued" && !store.data.ledger[item.key]) {
+          store.data.ledger[item.key] = { state: "dismissed", at: stamp(), runId: item.runId };
+          idle[item.prId] = LEDGER_IDLE.dismissed;
+        }
         await closeAs(item, AGENT_CLOSED.dismissed);
         return { ok: true };
       }

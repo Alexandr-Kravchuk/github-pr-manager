@@ -7,6 +7,7 @@
  * `?buddy=sad|curious|sleeping` picks a PR fixture set that drives the header
  * buddy into that mood (default: sleeping).
  */
+import { rankBefore } from "../../shared/agent-view";
 import type {
   AgentAction,
   AgentItem,
@@ -623,7 +624,9 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
   if (action.type === "enqueue") {
     const pr = snapshot.pullRequests.find((p) => p.id === action.prId);
     if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+    const rank = action.before ? rankBefore(items.filter((i) => i.state === "queued"), action.before) : undefined;
     items.push({
+      ...(rank !== undefined ? { rank } : {}),
       runId: crypto.randomUUID(),
       key: `${pr.id}|review|${pr.headOid}|asked`,
       prId: pr.id,
@@ -672,6 +675,12 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
         break;
       case "continue":
         break;
+      case "moveQueued": {
+        const rank = rankBefore(items.filter((i) => i.state === "queued" && i !== it), action.before);
+        if (rank === undefined) delete it.rank;
+        else it.rank = rank;
+        break;
+      }
       case "resumeSession":
         Object.assign(it, { state: "queued", resumeSession: true, headline: "Queued: resume (asked by you)", finishedAt: undefined });
         break;

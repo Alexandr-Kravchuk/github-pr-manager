@@ -58,21 +58,16 @@ export interface BoardColumns {
 }
 
 /**
- * The Board: the dashboard's filtered PRs by what the agent is doing with
- * them. A PR with live work sits in that column; every other PR is Idle with
- * the reason the agent gives. Done today also shows PRs that left the
- * dashboard (merged, closed) — their work was still today's.
+ * The Board: ALL of the agent's work in its columns — whatever the
+ * dashboard's filters show, so the Board, the header chip and the tray count
+ * the same runs and the same decisions — and the filtered PRs it has no live
+ * work on as Idle, with the reason the agent gives. Done today also shows PRs
+ * that left the dashboard (merged, closed): their work was still today's.
  */
-export function boardColumns(prs: readonly PullRequest[], allPrIds: ReadonlySet<string>, state: AgentState, today: string): BoardColumns {
-  const shown = new Set(prs.map((p) => p.id));
+export function boardColumns(prs: readonly PullRequest[], state: AgentState, today: string): BoardColumns {
   const cols: BoardColumns = { idle: [], queued: [], working: [], needsYou: [], done: [] };
   const busy = new Set<string>();
   for (const item of state.items) {
-    // A PR the filters hide stays off the Board; one that left the dashboard
-    // (merged — the search sees open PRs only) still shows its work: the Jira
-    // dry run after a merge is exactly that.
-    const visible = shown.has(item.prId) || !allPrIds.has(item.prId);
-    if (!visible) continue;
     if (item.state === "queued") cols.queued.push(item);
     else if (item.state === "working") cols.working.push(item);
     else if (item.state === "needsYou" || item.state === "error") cols.needsYou.push(item);
@@ -82,9 +77,8 @@ export function boardColumns(prs: readonly PullRequest[], allPrIds: ReadonlySet<
   for (const pr of prs) {
     if (!busy.has(pr.id)) cols.idle.push({ pr, reason: state.idle[pr.id] ?? (state.enabled ? "Nothing for the agent" : "The agent is off") });
   }
-  const byQueued = (a: AgentItem, b: AgentItem) => a.queuedAt.localeCompare(b.queuedAt);
-  cols.queued.sort(byQueued);
-  cols.working.sort(byQueued);
+  cols.queued = queueOrder(cols.queued);
+  cols.working.sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
   cols.needsYou.sort((a, b) => Number(a.later ?? false) - Number(b.later ?? false) || (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
   cols.done.sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""));
   return cols;
@@ -217,4 +211,28 @@ export function agentTakesToast(items: readonly AgentItem[], event: { prId: stri
       rule.scenarios.includes(i.scenario) &&
       (!rule.reason || (i.reasons ?? []).includes(rule.reason)),
   );
+}
+
+/** An item's place in the queue: the rank you gave it, else the time it was queued. Lower runs first. */
+export function queueRank(item: Pick<AgentItem, "rank" | "queuedAt">): number {
+  return item.rank ?? Date.parse(item.queuedAt);
+}
+
+/** The queue in the order it runs — the Board's Queued column and the agent's own tick read the same order. */
+export function queueOrder<T extends Pick<AgentItem, "rank" | "queuedAt">>(items: readonly T[]): T[] {
+  return [...items].sort((a, b) => queueRank(a) - queueRank(b));
+}
+
+/**
+ * The rank that puts an item right in front of `beforeRunId` in `queue` (the
+ * other queued items); null, or a run no longer queued, is the end. Undefined
+ * when the queue is empty — the item's own queued time will do.
+ */
+export function rankBefore(queue: readonly AgentItem[], beforeRunId: string | null): number | undefined {
+  const ordered = queueOrder(queue);
+  const at = beforeRunId === null ? -1 : ordered.findIndex((i) => i.runId === beforeRunId);
+  if (at < 0) return ordered.length > 0 ? queueRank(ordered[ordered.length - 1]) + 1 : undefined;
+  const next = queueRank(ordered[at]);
+  const prev = at > 0 ? queueRank(ordered[at - 1]) : next - 2;
+  return (prev + next) / 2;
 }

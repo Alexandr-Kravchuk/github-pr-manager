@@ -9,12 +9,18 @@ import { cn, relativeTime } from "../format";
 import { AgentContext } from "./agent-context";
 import { AGENT_STATE_DOT } from "./AgentStatus";
 
-// The Board: the dashboard's filtered PRs laid out by what the PR agent is
-// doing with them — Idle → Queued → Working → Needs you → Done today. The same
-// PRs as the other views (every filter applies); the columns are its order, so
-// Sort and Group-by are off while it is on.
+// The Board: what the PR agent is doing — Idle → Queued → Working → Needs you
+// → Done today. The agent's columns hold ALL of its work, whatever the
+// dashboard's filters show, so the Board, the header chip and the tray never
+// disagree; only Idle (the PRs you might hand it) follows the filters. The
+// columns are its order, so Sort and Group-by are off while it is on. The
+// queue's order is yours: drag a queued card, or "Run next"; an idle PR
+// dropped on a queued card takes that place.
 
+/** An idle PR dragged towards the queue. */
 const DRAG_TYPE = "application/x-prd-pr";
+/** A queued run dragged to another place in the queue. */
+const RUN_DRAG = "application/x-prd-run";
 const BTN = "inline-flex items-center gap-1 rounded-md border border-line-strong bg-surface px-2.5 py-1 text-xs font-medium text-fg-secondary hover:bg-elevated";
 const BTN_PRIMARY = "inline-flex items-center gap-1 rounded-md border border-sky-600 bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-700";
 
@@ -31,25 +37,19 @@ function shortRepo(repo: string): string {
   return repo.split("/")[1] ?? repo;
 }
 
-export function PrBoard({
-  prs,
-  allPrIds,
-  onOpen,
-}: {
-  prs: PullRequest[];
-  allPrIds: ReadonlySet<string>;
-  onOpen: (pr: PullRequest) => void;
-}) {
+export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: PullRequest) => void }) {
   const { state, act } = useContext(AgentContext);
   const [idleOpen, setIdleOpen] = useState(false);
   const [dropOn, setDropOn] = useState(false);
+  /** The queued card a drag would land in front of. */
+  const [dropBefore, setDropBefore] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const byId = useMemo(() => new Map(prs.map((p) => [p.id, p])), [prs]);
 
   if (!state) {
     return <div className="rounded-lg border border-line bg-surface/40 p-8 text-center text-sm text-fg-subtle">The PR agent isn&apos;t available here.</div>;
   }
-  const cols = boardColumns(prs, allPrIds, state, todayKey(new Date()));
+  const cols = boardColumns(prs, state, todayKey(new Date()));
   const run = async (action: AgentAction) => {
     const res = await act(action);
     setNotice(res.ok ? null : res.error);
@@ -59,12 +59,22 @@ export function PrBoard({
     if (pr) onOpen(pr);
     else window.api.openExternal(item.url).catch(() => {});
   };
-  const onDrop = (e: DragEvent) => {
+  const accepts = (e: DragEvent) => e.dataTransfer.types.includes(DRAG_TYPE) || e.dataTransfer.types.includes(RUN_DRAG);
+  /** A drop in the queue: in front of `before`, or at the end. */
+  const dropAt = (e: DragEvent, before: string | null) => {
     e.preventDefault();
+    e.stopPropagation();
     setDropOn(false);
+    setDropBefore(null);
+    const runId = e.dataTransfer.getData(RUN_DRAG);
+    if (runId) {
+      if (runId !== before) void run({ type: "moveQueued", runId, before });
+      return;
+    }
     const prId = e.dataTransfer.getData(DRAG_TYPE);
-    if (prId) void run({ type: "enqueue", prId });
+    if (prId) void run({ type: "enqueue", prId, before });
   };
+  const onDrop = (e: DragEvent) => dropAt(e, null);
 
   return (
     <div>
@@ -132,9 +142,10 @@ export function PrBoard({
           className={cn("min-w-[11rem] flex-1 basis-0", dropOn && "border-sky-500 bg-sky-500/10")}
           dropProps={{
             onDragOver: (e) => {
-              if (e.dataTransfer.types.includes(DRAG_TYPE)) {
+              if (accepts(e)) {
                 e.preventDefault();
                 setDropOn(true);
+                setDropBefore(null);
               }
             },
             onDragLeave: () => setDropOn(false),
@@ -144,12 +155,49 @@ export function PrBoard({
           {cols.queued.length === 0 ? (
             <Empty>{state.enabled ? "Drop an idle PR here to hand it to the agent" : "Nothing queued"}</Empty>
           ) : (
-            cols.queued.map((item) => (
-              <ItemCard key={item.runId} item={item} onTitle={() => openItem(item)}>
-                <button type="button" className={BTN} onClick={() => void run({ type: "skip", runId: item.runId })}>
-                  Skip
-                </button>
-              </ItemCard>
+            cols.queued.map((item, index) => (
+              <article
+                key={item.runId}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.setData(RUN_DRAG, item.runId);
+                  e.dataTransfer.effectAllowed = "move";
+                }}
+                onDragOver={(e) => {
+                  if (accepts(e)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDropOn(true);
+                    setDropBefore(item.runId);
+                  }
+                }}
+                onDrop={(e) => dropAt(e, item.runId)}
+                className={cn(
+                  "cursor-grab rounded-md border border-line bg-surface p-2.5 shadow-sm active:cursor-grabbing",
+                  // Where the drop lands: a line above this card.
+                  dropOn && dropBefore === item.runId && "border-t-2 border-t-sky-500",
+                )}
+              >
+                <CardHead item={item} onTitle={() => openItem(item)} />
+                <div className="mt-1 text-xs text-fg-muted">{item.headline}</div>
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  {index === 0 ? (
+                    <span className="text-[11px] font-medium text-sky-700 dark:text-sky-300">Next up</span>
+                  ) : (
+                    <button
+                      type="button"
+                      className={BTN}
+                      title="Put it at the front of the queue"
+                      onClick={() => void run({ type: "moveQueued", runId: item.runId, before: cols.queued[0].runId })}
+                    >
+                      Run next
+                    </button>
+                  )}
+                  <button type="button" className={BTN} title="Take it out of the queue — the agent won't queue it again for this head" onClick={() => void run({ type: "skip", runId: item.runId })}>
+                    Skip
+                  </button>
+                </div>
+              </article>
             ))
           )}
         </Column>
@@ -550,7 +598,8 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
 }
 
 function IdleCard({ pr, reason, onOpen, onQueue }: { pr: PullRequest; reason: string; onOpen: (pr: PullRequest) => void; onQueue?: () => void }) {
-  const canHand = onQueue && (pr.roles.includes("reviewer") || pr.roles.includes("reviewed"));
+  // Yours too: the agent drives your PR when CI, a conflict or comments need it (it says so if nothing does).
+  const canHand = onQueue && (pr.roles.includes("reviewer") || pr.roles.includes("reviewed") || pr.roles.includes("author"));
   return (
     <article
       draggable={Boolean(canHand)}
@@ -558,6 +607,7 @@ function IdleCard({ pr, reason, onOpen, onQueue }: { pr: PullRequest; reason: st
         e.dataTransfer.setData(DRAG_TYPE, pr.id);
         e.dataTransfer.effectAllowed = "move";
       }}
+      title={canHand ? "Drag it to the queue — onto a queued card to run it before that one" : undefined}
       className={cn("rounded-md border border-line bg-surface p-2.5", canHand && "cursor-grab active:cursor-grabbing")}
     >
       <div className="flex items-center gap-1.5 text-[11px] text-fg-subtle">

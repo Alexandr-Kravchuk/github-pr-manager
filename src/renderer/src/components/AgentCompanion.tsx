@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 
 // Node-free (see AGENTS.md).
 import { currentStep, type PlanStep, type RunProgress } from "../../../shared/agent-stream";
-import { SCENARIO_VERB as VERB } from "../../../shared/agent-view";
+import { queueOrder, SCENARIO_VERB as VERB } from "../../../shared/agent-view";
 import type { AgentItem, AgentRunState } from "../../../shared/types";
 import { cn } from "../format";
 import { AgentContext } from "./agent-context";
@@ -230,7 +230,8 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
   const hero = state.running.find((r) => r.runId === focus) ?? state.running[0];
   const heroItem = hero ? state.items.find((i) => i.runId === hero.runId) : undefined;
   const others = state.running.filter((r) => r !== hero);
-  const queued = state.items.filter((i) => i.state === "queued");
+  // The order the agent runs them in — yours where you set it.
+  const queued = queueOrder(state.items.filter((i) => i.state === "queued"));
   const waiting = state.items.filter((i) => (i.state === "needsYou" || i.state === "error") && !i.later).length;
 
   return createPortal(

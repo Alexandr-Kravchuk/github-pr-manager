@@ -8831,12 +8831,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
       assert.strictEqual(view.itemForPr([working], "other", today), null);
     });
-    test("agent view: the Board puts every filtered PR in one column; Done today keeps PRs that left", () => {
+    test("agent view: the Board holds all of the agent's work whatever the filters; Idle follows them; Done today keeps PRs that left", () => {
       const today = view.todayKey(new Date());
       const now = new Date().toISOString();
       const pr = (id) => ({ id });
       const prs = ["P1", "P2", "P3", "P4", "P5", "P6", "P7"].map(pr);
-      const all = new Set([...prs.map((p) => p.id), "P8"]);
       const items = [
         vItem({ prId: "P1", state: "queued", queuedAt: "2026-11-05T10:00:00.000Z" }),
         vItem({ prId: "P2", state: "queued", queuedAt: "2026-11-05T09:00:00.000Z" }),
@@ -8848,13 +8847,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         vItem({ prId: "P8", state: "done", headline: "Filtered out", finishedAt: now }),
         vItem({ prId: "P9", state: "done", headline: "Merged since", finishedAt: now }),
       ];
-      const cols = view.boardColumns(prs, all, { enabled: true, items, running: [], idle: { P7: "Draft" } }, today);
+      const cols = view.boardColumns(prs, { enabled: true, items, running: [], idle: { P7: "Draft" } }, today);
       assert.deepStrictEqual(cols.queued.map((i) => i.prId), ["P2", "P1"], "oldest ask first");
+      const ranked = view.boardColumns(prs, { enabled: true, items: [...items, vItem({ prId: "P10", state: "queued", queuedAt: "2026-11-05T11:00:00.000Z", rank: 0 })], running: [], idle: {} }, today);
+      assert.deepStrictEqual(ranked.queued.map((i) => i.prId), ["P10", "P2", "P1"], "the place you gave it first");
       assert.deepStrictEqual(cols.working.map((i) => i.prId), ["P3"]);
       assert.deepStrictEqual(cols.needsYou.map((i) => i.prId), ["P5", "P4"], "what you put off with Later comes last");
-      assert.deepStrictEqual(cols.done.map((i) => i.prId).sort(), ["P6", "P9"], "a filtered-out PR stays out; a merged one still counts today");
+      assert.deepStrictEqual(cols.done.map((i) => i.prId).sort(), ["P6", "P8", "P9"], "a PR the filters hide still shows its work — the chip and the tray count it too");
       assert.deepStrictEqual(cols.idle.map((x) => [x.pr.id, x.reason]), [["P6", "Nothing for the agent"], ["P7", "Draft"]]);
-      const off = view.boardColumns(prs, all, { enabled: false, items: [], running: [], idle: {} }, today);
+      const off = view.boardColumns(prs, { enabled: false, items: [], running: [], idle: {} }, today);
       assert.strictEqual(off.idle.length, prs.length);
       assert.strictEqual(off.idle[0].reason, "The agent is off");
     });
@@ -9375,7 +9376,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(nfsA.readFileSync(settingsFile, "utf8"), /hook\.js[\s\S]*afterMerge/, "the dry run runs under the read-only guard");
         assert.match(f.children[0].args[f.children[0].args.indexOf("--append-system-prompt") + 1], /change nothing in Jira/);
         assert.ok(notices.includes("needsYou") && notices.includes("finished"));
-        const board = view.boardColumns([], new Set(), f.agent.getState(), view.todayKey(new Date()));
+        const board = view.boardColumns([], f.agent.getState(), view.todayKey(new Date()));
         assert.ok(board.needsYou.some((i) => i.runId === dry.runId), "it shows on the Board though its PR is gone");
       } finally {
         f.agent.stop();
@@ -10083,6 +10084,65 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(f.children.length, 0);
         f.setAgent({ enabled: true });
         await until(() => f.children.length === 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("agent queue: your order first, then the oldest; a place in front of any run, or the end", () => {
+      const q = (id, at, rank) => vItem({ prId: id, runId: `00000000-0000-4000-8000-00000000000${id}`, state: "queued", queuedAt: at, ...(rank !== undefined ? { rank } : {}) });
+      const a = q("1", "2026-11-05T09:00:00.000Z");
+      const b = q("2", "2026-11-05T10:00:00.000Z");
+      const c = q("3", "2026-11-05T11:00:00.000Z");
+      assert.deepStrictEqual(view.queueOrder([c, a, b]).map((i) => i.prId), ["1", "2", "3"]);
+      const front = view.rankBefore([a, b], a.runId);
+      assert.deepStrictEqual(view.queueOrder([a, b, { ...c, rank: front }]).map((i) => i.prId), ["3", "1", "2"], "Run next");
+      const middle = view.rankBefore([a, b], b.runId);
+      assert.deepStrictEqual(view.queueOrder([a, b, { ...c, rank: middle }]).map((i) => i.prId), ["1", "3", "2"]);
+      const end = view.rankBefore([b, c], null);
+      assert.deepStrictEqual(view.queueOrder([b, c, { ...a, rank: end }]).map((i) => i.prId), ["2", "3", "1"]);
+      assert.strictEqual(view.rankBefore([b, c], "00000000-0000-4000-8000-000000000999"), end, "a run no longer queued means the end");
+      assert.strictEqual(view.rankBefore([], null), undefined, "an empty queue: its own time will do");
+    });
+
+    test("ipc: an idle PR can be queued in front of a run, and a queued run moved; nothing else rides along", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      const RID2 = "00000000-0000-4000-8000-000000000002";
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "enqueue", prId: "PR_kw1", before: RID }), { type: "enqueue", prId: "PR_kw1", before: RID });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "enqueue", prId: "PR_kw1", before: null }), { type: "enqueue", prId: "PR_kw1" });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "moveQueued", runId: RID, before: RID2, rank: -1 }), { type: "moveQueued", runId: RID, before: RID2 });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "moveQueued", runId: RID }), { type: "moveQueued", runId: RID, before: null });
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "moveQueued", runId: RID, before: "../x" }));
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "enqueue", prId: "PR_kw1", before: 5 }));
+    });
+
+    await atest("agent queue: Run next and a drop in front of a run decide what starts next; Skip keeps a queued PR out", async () => {
+      const f = agentFixture({ script: keepWorking, agent: { limits: { parallel: 1 } } });
+      try {
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_B", number: 8 }), reviewPr({ id: "PR_C", number: 9 }));
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+        const byPr = (id) => only(f).find((i) => i.prId === id && (i.state === "queued" || i.state === "working"));
+        assert.strictEqual(byPr("PR_R").state, "working");
+        assert.deepStrictEqual(view.queueOrder(only(f).filter((i) => i.state === "queued")).map((i) => i.prId), ["PR_B", "PR_C"]);
+        // Run next: C goes in front of B.
+        assert.deepStrictEqual(await f.agent.act({ type: "moveQueued", runId: byPr("PR_C").runId, before: byPr("PR_B").runId }), { ok: true });
+        assert.deepStrictEqual(view.queueOrder(only(f).filter((i) => i.state === "queued")).map((i) => i.prId), ["PR_C", "PR_B"]);
+        assert.strictEqual(JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).items.find((i) => i.prId === "PR_C").rank !== undefined, true, "your order survives a restart");
+        // Skip B: it stays out, and Idle says why.
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: byPr("PR_B").runId }), { ok: true });
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(byPr("PR_B"), undefined, "a PR you took out of the queue isn't queued again for this head");
+        assert.match(f.agent.getState().idle.PR_B, /took it out of the queue/);
+        // An idle PR dropped in front of C runs before it.
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_D", number: 10, requestedOfMe: false }));
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_D", before: byPr("PR_C").runId }), { ok: true });
+        assert.deepStrictEqual(view.queueOrder(only(f).filter((i) => i.state === "queued")).map((i) => i.prId), ["PR_D", "PR_C"]);
+        // The run ends: the first in your order starts.
+        await f.agent.act({ type: "stop", runId: byPr("PR_R").runId });
+        await until(() => byPr("PR_D")?.state === "working");
+        assert.strictEqual(byPr("PR_C").state, "queued");
+        assert.strictEqual((await f.agent.act({ type: "moveQueued", runId: byPr("PR_D").runId, before: null })).ok, false, "a started run has left the queue");
       } finally {
         f.agent.stop();
       }
