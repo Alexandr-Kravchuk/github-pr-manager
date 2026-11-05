@@ -23,8 +23,12 @@
  * unit-testable without a DOM.
  */
 
-/** The three display variants, in the order the switch renders them. */
-export const VIEW_MODES = ["roomy", "cozy", "compact"] as const;
+/**
+ * The display variants, in the order the switch renders them. `board` lays the
+ * same filtered PRs out by what the PR agent is doing with them (Idle → Queued
+ * → Working → Needs you → Done today).
+ */
+export const VIEW_MODES = ["roomy", "cozy", "compact", "board"] as const;
 
 export type ViewMode = (typeof VIEW_MODES)[number];
 
@@ -41,6 +45,7 @@ export const VIEW_MODE_TITLES: Record<ViewMode, string> = {
   roomy: "Roomy — full cards",
   cozy: "Cozy — sortable table",
   compact: "Compact — small tiles",
+  board: "Board — the agent's work by state",
 };
 
 /** Narrows an unknown (a persisted preference) to a `ViewMode`. */
@@ -56,7 +61,8 @@ export function isViewMode(value: unknown): value is ViewMode {
  * spelled out at each site.
  */
 export function supportsGrouping(mode: ViewMode): boolean {
-  return mode !== "cozy";
+  // The Board's columns are its grouping.
+  return mode !== "cozy" && mode !== "board";
 }
 
 /**
@@ -65,5 +71,6 @@ export function supportsGrouping(mode: ViewMode): boolean {
  * one of them silently losing, is worse than one disabled control that says why.
  */
 export function usesListSort(mode: ViewMode): boolean {
-  return mode !== "cozy";
+  // The Board orders each column itself (oldest first, the agent's queue order).
+  return mode !== "cozy" && mode !== "board";
 }

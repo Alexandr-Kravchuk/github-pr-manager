@@ -141,6 +141,35 @@ async function openTerminal(
 }
 
 /**
+ * Opens a terminal in `dir` continuing an existing Claude Code session —
+ * `claude --resume <id>` — for the PR agent's "Continue in session" and "Take
+ * over". Always a terminal: Claude Desktop's link starts new sessions only.
+ * `sessionId` is a UUID the agent minted, so it needs no quoting beyond the
+ * POSIX helper's.
+ */
+export async function resumeClaudeSession(dir: string, sessionId: string, terminal: ClaudeTerminal): Promise<void> {
+  if (!/^[0-9a-f-]{36}$/i.test(sessionId)) throw new Error("Not a session id.");
+  const term: Exclude<ClaudeTerminal, "desktop"> = terminal === "desktop" ? "auto" : terminal;
+  if (process.platform === "darwin") {
+    const app = term === "auto" ? ((await hasITerm()) ? "iterm" : "terminal") : term;
+    const command = posixLaunchCommand(dir, "").replace(/ ''$/, ` --resume ${sessionId}`);
+    await run("osascript", terminalScript(app, command).flatMap((l) => ["-e", l]));
+    return;
+  }
+  if (process.platform === "win32") {
+    const child = spawn("cmd.exe", ["/c", "start", '""', "/D", `"${dir}"`, "cmd", "/k", "claude", "--resume", sessionId], {
+      detached: true,
+      stdio: "ignore",
+      env: launcherEnv(process.env),
+      windowsVerbatimArguments: true,
+    });
+    child.unref();
+    return;
+  }
+  throw new Error("Opening a Claude session is supported on macOS and Windows only.");
+}
+
+/**
  * Picks the prompt for the PR's state, finds its checkout and opens the
  * terminal — or Claude Desktop, through `openUrl` (Electron's
  * `shell.openExternal`, injected so this module stays Electron-free).

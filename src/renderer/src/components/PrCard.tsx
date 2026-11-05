@@ -1,4 +1,4 @@
-import { useCallback, useContext, useState } from "react";
+import { useCallback, useState } from "react";
 
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
 import { isPassiveReviewed, prSignal, type PrSignal } from "../../../shared/pr-filter";
@@ -10,8 +10,7 @@ import { AuthorButton } from "./AuthorButton";
 import { CheckBadge } from "./CheckBadge";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
-// PROTOTYPE (agent UI): the status line a `?variant=` prototype puts under the card.
-import { AgentSlotContext } from "../prototype/agent/agent-ui";
+import { AgentStatusLine } from "./AgentStatus";
 
 interface Props {
   pr: PullRequest;
@@ -192,7 +191,6 @@ export function PrCard({
   // carries it the prefix is said twice. Dropped only when the badge is actually
   // there — without it the title is the sole place the key appears.
   const displayTitle = jiraUrl ? stripLeadingIssueKey(pr.title, pr.issueKey) : pr.title;
-  const agentSlot = useContext(AgentSlotContext);
   const passingCount = pr.checks.filter((c) => c.state === "success").length;
   const pendingReviewers = pr.reviewers.filter((r) => r.reviewState === "pending");
   const pendingReviewerNames = reviewerListLabel(pendingReviewers);
@@ -505,7 +503,8 @@ export function PrCard({
           </span>
         )}
       </div>
-      {agentSlot?.(pr)}
+      {/* What the PR agent is doing with it; nothing while it has nothing here. */}
+      <AgentStatusLine pr={pr} />
     </div>
   );
 }

@@ -1,14 +1,26 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 
-import { planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
-import type { RunProgress } from "../../shared/agent-stream";
+import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
+import { isBigPr, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
+import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
-import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
-import type { AgentSettings, ClaudeSessionInfo, ClaudeSettings, DashboardResponse, PullRequest, Settings } from "../../shared/types";
+import type {
+  AgentAction,
+  AgentActionResult,
+  AgentSettings,
+  AgentState,
+  ClaudeSessionInfo,
+  ClaudeSettings,
+  DashboardResponse,
+  PullRequest,
+  Settings,
+} from "../../shared/types";
 import { readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
 import { hookCommand, startRun, writeRunSettings, type RunHandle, type Spawner } from "./runner";
+import { AGENT_CLOSED, todayKey } from "../../shared/agent-view";
 import { openStore, type AgentItemRecord, type AgentStore } from "./store";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
 
@@ -17,8 +29,8 @@ import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type 
 // own timer — the poller only reports when something changed, while limits,
 // quiet spells and finished runs move on time alone.
 //
-// Stage 2 runs reviews and briefs, and only prepares them: whatever a run
-// produces waits in "Needs you"; publishing lands in stage 4.
+// Reviews and briefs only prepare for now: whatever a run produces waits in
+// "Needs you"; publishing lands in stage 4.
 
 export interface AgentDeps {
   /** userData/agent — state, log and per-run settings files. */
@@ -31,6 +43,8 @@ export interface AgentDeps {
   hookScript: string;
   /** The binary that runs the hook as Node: the app's own (with ELECTRON_RUN_AS_NODE) or node. */
   execPath: string;
+  /** Opens your terminal on an existing session: `claude --resume <id>` in `dir`. */
+  openResume?: (dir: string, sessionId: string) => Promise<void>;
   plugins?: () => InstalledPlugin[];
   git?: GitRunner;
   spawner?: Spawner;
@@ -40,25 +54,10 @@ export interface AgentDeps {
   tickMs?: number;
 }
 
-export interface AgentRunView {
-  item: AgentItemRecord;
-  progress: RunProgress;
-}
-
-export interface AgentStateView {
-  enabled: boolean;
-  running: AgentRunView[];
-  items: AgentItemRecord[];
-  /** Why each PR on the dashboard is idle, by PR id. */
-  idle: Record<string, string>;
-  runsToday: number;
-  /** Set while Claude's usage limit holds new runs back. */
-  heldUntil: string | null;
-}
-
 export interface Agent {
   onSnapshot(snapshot: DashboardResponse): void;
-  getState(): AgentStateView;
+  getState(): AgentState;
+  act(action: AgentAction): Promise<AgentActionResult>;
   /** Session ids of the agent's own runs — the session detector leaves them out. */
   ownSessionIds(): ReadonlySet<string>;
   /** On: keep polling while the window is hidden (the agent acts on what it sees). */
@@ -66,11 +65,11 @@ export interface Agent {
   stop(): void;
 }
 
-const SCENARIO_KIND = { review: "review", brief: "brief" } as const;
+/** How many recent things a run keeps for the companion's plan-and-log view. */
+const RECENT_MAX = 40;
 
-function localDay(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
+// The same local day the Board's "Done today" uses.
+const localDay = todayKey;
 
 /** The rules every agent session gets on top of its prompt. */
 export function agentRules(scenario: AgentScenario, mode: "shadow" | "on"): string {
@@ -101,12 +100,21 @@ export function hostHeld(snapshot: DashboardResponse | null, hostLabel: string):
   return null;
 }
 
+interface Running {
+  handle: RunHandle;
+  progress: RunProgress;
+  recent: Array<{ at: string; text: string }>;
+  paused: boolean;
+  /** Set by "Take over": once stopped, the session opens in your terminal. */
+  takeOver: boolean;
+}
+
 export function createAgent(deps: AgentDeps): Agent {
   const now = deps.now ?? (() => new Date());
   const git = deps.git ?? runGit;
   const plugins = deps.plugins ?? (() => readInstalledPlugins());
   const store: AgentStore = openStore(deps.dir, localDay(now()));
-  const running = new Map<string, { handle: RunHandle; progress: RunProgress }>();
+  const running = new Map<string, Running>();
   let idle: Record<string, string> = {};
   let heldUntil: number | null = null;
   let timer: NodeJS.Timeout | null = null;
@@ -123,17 +131,20 @@ export function createAgent(deps: AgentDeps): Agent {
   }
   void store.save();
 
-  const settings = (): AgentSettings | null => {
+  const loadAll = (): Settings | null => {
     try {
-      return deps.loadSettings().agent;
+      return deps.loadSettings();
     } catch {
       return null;
     }
   };
+  const settings = (): AgentSettings | null => loadAll()?.agent ?? null;
   const changed = () => deps.onChange?.();
+  const stamp = () => now().toISOString();
+  const findItem = (runId: string) => store.data.items.find((i) => i.runId === runId);
 
-  function enqueue(job: AgentJob, pr: PullRequest): void {
-    store.data.items.push({
+  function newItem(job: Pick<AgentJob, "key" | "prId" | "prNumber" | "repo" | "url" | "scenario" | "mode">, pr: PullRequest, headline: string): AgentItemRecord {
+    const item: AgentItemRecord = {
       runId: randomUUID(),
       key: job.key,
       prId: job.prId,
@@ -145,10 +156,12 @@ export function createAgent(deps: AgentDeps): Agent {
       scenario: job.scenario,
       mode: job.mode,
       state: "queued",
-      headline: job.scenario === "brief" ? "Queued: a brief (too big to review on its own)" : "Queued: review",
-      queuedAt: now().toISOString(),
-    });
-    store.log({ at: now().toISOString(), prNumber: job.prNumber, repo: job.repo, scenario: job.scenario, runId: "", event: "queued", headOid: pr.headOid });
+      headline,
+      queuedAt: stamp(),
+    };
+    store.data.items.push(item);
+    store.log({ at: stamp(), prNumber: job.prNumber, repo: job.repo, scenario: job.scenario, runId: item.runId, event: "queued", headOid: pr.headOid });
+    return item;
   }
 
   function onSnapshot(snapshot: DashboardResponse): void {
@@ -157,7 +170,7 @@ export function createAgent(deps: AgentDeps): Agent {
       idle = Object.fromEntries(snapshot.pullRequests.map((p) => [p.id, "The agent is off"]));
       return;
     }
-    const own = new Set([...store.data.items.filter((i) => i.state === "working").map((i) => i.sessionId ?? "")]);
+    const own = new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!));
     const sessions = deps.getSessions().filter((x) => !own.has(x.id));
     const plan = planJobs(snapshot.pullRequests, s, { hasOwnSession: (pr) => sessionsForPr(pr, sessions).length > 0 });
     idle = Object.fromEntries(plan.idle);
@@ -167,15 +180,16 @@ export function createAgent(deps: AgentDeps): Agent {
     for (const job of plan.jobs) {
       if (store.data.ledger[job.key]) continue;
       if (store.data.items.some((i) => i.key === job.key && (i.state === "queued" || i.state === "working"))) continue;
-      enqueue(job, byId.get(job.prId)!);
+      newItem(job, byId.get(job.prId)!, job.scenario === "brief" ? "Queued: a brief (too big to review on its own)" : "Queued: review");
       dirty = true;
     }
-    // A queued job the PR no longer wants (you reviewed it, it went away) leaves quietly.
+    // A queued job the PR no longer wants (you reviewed it, it went away) leaves
+    // quietly — unless you asked for it yourself.
     for (const item of store.data.items) {
-      if (item.state === "queued" && !wanted.has(item.key)) {
+      if (item.state === "queued" && !wanted.has(item.key) && !item.key.endsWith("|asked")) {
         item.state = "done";
-        item.headline = "No longer needed";
-        item.finishedAt = now().toISOString();
+        item.headline = AGENT_CLOSED.gone;
+        item.finishedAt = stamp();
         dirty = true;
       }
     }
@@ -192,21 +206,31 @@ export function createAgent(deps: AgentDeps): Agent {
       item.state = "error";
       item.headline = headline;
       item.error = error;
-      item.finishedAt = now().toISOString();
+      item.finishedAt = stamp();
       // Recorded even when the run never started, or every tick would queue the
       // same PR again; a new head commit is a new key and gets another try.
       store.data.ledger[item.key] = { state: "failed", at: item.finishedAt, runId: item.runId };
       store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "failed", detail: error ?? headline });
     };
     const checkout = deps.findCheckout(pr, all.claude);
-    if (!checkout) return fail(`No checkout of ${pr.repo} — set its folder in Settings › Claude`);
+    if (!checkout) {
+      fail(`No checkout of ${pr.repo} — set its folder in Settings › Claude`);
+      void store.save();
+      changed();
+      return;
+    }
     const remote = remoteFor(checkout, pr);
-    if (!remote) return fail(`No remote of ${checkout} points at ${pr.repo}`);
+    if (!remote) {
+      fail(`No remote of ${checkout} points at ${pr.repo}`);
+      void store.save();
+      changed();
+      return;
+    }
 
-    store.data.ledger[item.key] = { state: "started", at: now().toISOString(), runId: item.runId };
+    store.data.ledger[item.key] = { state: "started", at: stamp(), runId: item.runId };
     store.data.runsToday += 1;
     item.state = "working";
-    item.startedAt = now().toISOString();
+    item.startedAt = stamp();
     item.headline = item.scenario === "brief" ? "Writing a brief" : "Reviewing";
     item.checkout = checkout;
     void store.save();
@@ -223,14 +247,15 @@ export function createAgent(deps: AgentDeps): Agent {
     }
     item.worktree = dir;
 
-    const kind = SCENARIO_KIND[item.scenario];
+    const kind = item.scenario === "brief" ? "brief" : "review";
     const resolved = resolveSkillRefs(renderAgentPrompt(promptFor(item.scenario, all.claude), "", item.url), plugins());
     const settingsFile = path.join(deps.dir, "runs", item.runId, "settings.json");
     writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url));
     const sessionId = randomUUID();
     item.sessionId = sessionId;
-    store.log({ at: now().toISOString(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "started", headOid: pr.headOid, sessionId });
+    store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "started", headOid: pr.headOid, sessionId });
 
+    const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false };
     const handle = startRun(
       {
         cwd: dir,
@@ -246,8 +271,10 @@ export function createAgent(deps: AgentDeps): Agent {
         timeoutMs: s.limits.maxMinutes * 60_000,
       },
       (progress) => {
-        const entry = running.get(item.runId);
-        if (entry) entry.progress = progress;
+        if (progress.activity && progress.activity !== entry.progress?.activity) {
+          entry.recent = [...entry.recent, { at: stamp(), text: progress.activity }].slice(-RECENT_MAX);
+        }
+        entry.progress = progress;
         if (progress.rateLimit && progress.rateLimit.status !== "allowed" && progress.rateLimit.resetsAt) {
           heldUntil = progress.rateLimit.resetsAt * 1000;
         }
@@ -255,15 +282,26 @@ export function createAgent(deps: AgentDeps): Agent {
       },
       deps.spawner,
     );
-    running.set(item.runId, { handle, progress: handle.progress() });
+    entry.handle = handle;
+    entry.progress = handle.progress();
+    running.set(item.runId, entry);
     void store.save();
     changed();
 
     const outcome = await handle.done;
     running.delete(item.runId);
     const result = outcome.progress.result;
-    item.finishedAt = now().toISOString();
-    if (outcome.stopped) {
+    item.finishedAt = stamp();
+    if (entry.takeOver) {
+      item.state = "needsYou";
+      item.headline = "You took it over in your terminal";
+      store.data.ledger[item.key].state = "failed";
+      if (deps.openResume) {
+        await deps.openResume(dir, sessionId).catch((e) => {
+          item.headline = `Could not open your terminal: ${(e as Error).message}`;
+        });
+      }
+    } else if (outcome.stopped) {
       item.state = "needsYou";
       item.headline = "Stopped by you";
       store.data.ledger[item.key].state = "failed";
@@ -281,24 +319,31 @@ export function createAgent(deps: AgentDeps): Agent {
     }
     store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: item.state, sessionId, detail: item.headline });
     // Only a result you still have to look at keeps its worktree (to continue the session in it).
-    if (item.state !== "needsYou" && item.worktree && item.checkout) {
-      await removeWorktree(git, item.checkout, item.worktree).catch(() => {});
-      item.worktree = undefined;
-    }
+    if (item.state !== "needsYou") await dropWorktree(item);
     void store.save();
     changed();
     tick();
   }
 
+  async function dropWorktree(item: AgentItemRecord): Promise<void> {
+    if (item.worktree && item.checkout) await removeWorktree(git, item.checkout, item.worktree).catch(() => {});
+    item.worktree = undefined;
+  }
+
+  /** Closes an item a newer one replaced; it leaves the Board without a "Done today" card. */
+  async function closeAs(item: AgentItemRecord, headline: string): Promise<void> {
+    item.state = "done";
+    item.headline = headline;
+    item.later = false;
+    item.finishedAt = stamp();
+    await dropWorktree(item);
+    void store.save();
+    changed();
+  }
+
   function tick(): void {
     if (stopped) return;
-    const all = (() => {
-      try {
-        return deps.loadSettings();
-      } catch {
-        return null;
-      }
-    })();
+    const all = loadAll();
     const s = all?.agent;
     if (!all || !s?.enabled) return;
     const day = localDay(now());
@@ -330,6 +375,114 @@ export function createAgent(deps: AgentDeps): Agent {
     }
   }
 
+  /** Puts a PR in the queue on your say-so; its key is its own, so the ledger of the automatic one doesn't stop it. */
+  function enqueueAsked(pr: PullRequest, s: AgentSettings, scenario: AgentScenario): AgentActionResult {
+    if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
+      return { ok: false, error: "The agent is already on this PR." };
+    }
+    const key = `${pr.id}|${scenario}|${pr.headOid ?? "-"}|asked`;
+    delete store.data.ledger[key];
+    newItem(
+      { key, prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario, mode: scenario === "brief" ? "on" : s.scenarios.review.mode === "on" ? "on" : "shadow" },
+      pr,
+      `Queued: ${scenario === "brief" ? "a brief" : "review"} (asked by you)`,
+    );
+    void store.save();
+    changed();
+    tick();
+    return { ok: true };
+  }
+
+  async function act(action: AgentAction): Promise<AgentActionResult> {
+    const all = loadAll();
+    if (!all?.agent.enabled) return { ok: false, error: "The agent is off — switch it on in Settings › Agent." };
+    const snapshot = deps.getSnapshot();
+    if (action.type === "enqueue") {
+      const pr = snapshot?.pullRequests.find((p) => p.id === action.prId);
+      if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+      if (!pr.roles.includes("reviewer") && !pr.roles.includes("reviewed")) {
+        return { ok: false, error: "On your own PRs the agent can't help yet — that comes with driving PRs to green." };
+      }
+      const brief = isBigPr(pr, all.agent);
+      return enqueueAsked(pr, all.agent, brief ? "brief" : "review");
+    }
+    const item = findItem(action.runId);
+    if (!item) return { ok: false, error: "That run is gone." };
+    const r = running.get(item.runId);
+    switch (action.type) {
+      case "hint": {
+        if (!r) return { ok: false, error: "The run is not running." };
+        r.handle.hint(action.text);
+        r.recent = [...r.recent, { at: stamp(), text: `You: ${action.text}` }].slice(-RECENT_MAX);
+        break;
+      }
+      case "pause": {
+        if (!r || r.paused) return { ok: false, error: "Nothing to pause." };
+        r.handle.interrupt();
+        r.paused = true;
+        item.headline = "Paused";
+        break;
+      }
+      case "resume": {
+        if (!r || !r.paused) return { ok: false, error: "Nothing to resume." };
+        r.handle.resume();
+        r.paused = false;
+        item.headline = item.scenario === "brief" ? "Writing a brief" : "Reviewing";
+        break;
+      }
+      case "stop":
+      case "takeOver": {
+        if (!r) return { ok: false, error: "The run is not running." };
+        r.takeOver = action.type === "takeOver";
+        r.handle.stop();
+        break;
+      }
+      case "continue": {
+        if (!item.sessionId || !item.worktree || !fs.existsSync(item.worktree)) {
+          return { ok: false, error: "There is no session left to continue." };
+        }
+        if (!deps.openResume) return { ok: false, error: "Can't open a terminal here." };
+        try {
+          await deps.openResume(item.worktree, item.sessionId);
+        } catch (e) {
+          return { ok: false, error: `Could not open your terminal: ${(e as Error).message}` };
+        }
+        return { ok: true };
+      }
+      case "skip": {
+        if (r) return { ok: false, error: "Stop the run first." };
+        await closeAs(item, AGENT_CLOSED.dismissed);
+        return { ok: true };
+      }
+      case "later": {
+        if (item.state !== "needsYou" && item.state !== "error") return { ok: false, error: "Only a result can wait for later." };
+        item.later = !item.later;
+        break;
+      }
+      case "retry": {
+        if (r || item.state === "queued") return { ok: false, error: "It is already running." };
+        const pr = snapshot?.pullRequests.find((p) => p.id === item.prId);
+        if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+        // The old result goes only once the new run is in the queue: a refusal
+        // (the agent is already on the PR) leaves it where it was.
+        const queued = enqueueAsked(pr, all.agent, item.scenario);
+        if (queued.ok) await closeAs(item, AGENT_CLOSED.rerun);
+        return queued;
+      }
+      case "reviewAnyway": {
+        if (item.scenario !== "brief") return { ok: false, error: "Only a brief can be turned into a review." };
+        const pr = snapshot?.pullRequests.find((p) => p.id === item.prId);
+        if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+        const queued = enqueueAsked(pr, all.agent, "review");
+        if (queued.ok) await closeAs(item, AGENT_CLOSED.reviewed);
+        return queued;
+      }
+    }
+    void store.save();
+    changed();
+    return { ok: true };
+  }
+
   const loop = () => {
     if (stopped) return;
     tick();
@@ -340,17 +493,21 @@ export function createAgent(deps: AgentDeps): Agent {
 
   return {
     onSnapshot,
-    getState: () => ({
-      enabled: settings()?.enabled ?? false,
-      running: [...running.entries()].flatMap(([runId, r]) => {
-        const item = store.data.items.find((i) => i.runId === runId);
-        return item ? [{ item, progress: r.progress }] : [];
-      }),
-      items: store.data.items,
-      idle,
-      runsToday: store.data.runsToday,
-      heldUntil: heldUntil !== null ? new Date(heldUntil).toISOString() : null,
-    }),
+    act,
+    getState: (): AgentState => {
+      const s = settings();
+      return {
+        enabled: s?.enabled ?? false,
+        items: store.data.items,
+        running: [...running.entries()].map(([runId, r]) => ({ runId, progress: r.progress, recent: r.recent, paused: r.paused })),
+        idle,
+        runsToday: store.data.runsToday,
+        perDay: s?.limits.perDay ?? 0,
+        parallel: s?.limits.parallel ?? 0,
+        heldUntil: heldUntil !== null ? new Date(heldUntil).toISOString() : null,
+        headerChip: s?.companion.headerChip ?? true,
+      };
+    },
     ownSessionIds: () => new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!)),
     isActive: () => settings()?.enabled ?? false,
     stop: () => {
@@ -360,3 +517,5 @@ export function createAgent(deps: AgentDeps): Agent {
     },
   };
 }
+
+export { describeToolUse };

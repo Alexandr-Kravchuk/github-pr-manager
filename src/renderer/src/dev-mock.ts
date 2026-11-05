@@ -8,6 +8,9 @@
  * buddy into that mood (default: sleeping).
  */
 import type {
+  AgentAction,
+  AgentItem,
+  AgentState,
   ClaudeSessionInfo,
   DashboardResponse,
   PrManagerApi,
@@ -313,7 +316,7 @@ const FIXTURES: Record<string, PullRequest[]> = {
   ],
 };
 
-// PROTOTYPE (agent UI): every state the agent prototype maps a run to. `?buddy=agent`.
+// The PR agent's Board, chip and statuses: PRs in every state it shows. `?buddy=agent`.
 FIXTURES.agent = [...FIXTURES.showcase, ...FIXTURES.review];
 
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
@@ -400,6 +403,181 @@ const CLAUDE_SESSIONS: ClaudeSessionInfo[] = [
   },
 ];
 
+/**
+ * The agent's state for `?buddy=agent`: two runs with a plan, one queued, a
+ * brief, a failure and a shadow review waiting, a finished one. Actions change
+ * it in memory, so the Board and the companion can be tried in a browser.
+ * Every other fixture set has the agent off, as a fresh install does.
+ */
+function mockAgentState(): AgentState {
+  const prs = snapshot.pullRequests;
+  const byNumber = (n: number) => prs.find((p) => p.number === n);
+  const now = Date.now();
+  const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
+  const runId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const item = (n: number, over: Partial<AgentItem>): AgentItem | null => {
+    const pr = byNumber(n);
+    if (!pr) return null;
+    return {
+      runId: runId(n),
+      key: `${pr.id}|review|${pr.headOid}`,
+      prId: pr.id,
+      prNumber: pr.number,
+      repo: pr.repo,
+      url: pr.url,
+      title: pr.title,
+      hostLabel: pr.hostLabel,
+      scenario: "review",
+      mode: "shadow",
+      state: "queued",
+      headline: "Queued: review",
+      queuedAt: iso(20 * 60_000),
+      ...over,
+    };
+  };
+  const items = [
+    item(911, { state: "working", headline: "Reviewing", startedAt: iso(3 * 60_000), sessionId: "11111111-1111-4111-8111-111111111111" }),
+    item(44, { state: "working", headline: "Reviewing", startedAt: iso(40_000), sessionId: "22222222-2222-4222-8222-222222222222" }),
+    item(88, { state: "queued", headline: "Queued: review" }),
+    item(912, {
+      scenario: "brief",
+      mode: "on",
+      state: "needsYou",
+      headline: "Brief ready",
+      finishedAt: iso(15 * 60_000),
+      sessionId: "33333333-3333-4333-8333-333333333333",
+      worktree: "/tmp/agent-clio-912",
+      output:
+        "Problem: transient network errors fail the whole sync.\nApproach: retry each operation with a bounded budget.\nRisky parts: the retry has no overall time limit.\n\nDecisions for you:\n1. Is an unbounded retry acceptable?\n2. The public contract of sync-schemas changed: agreed?",
+    }),
+    item(118, { state: "error", headline: "No checkout of acme/clio-knowledge: set its folder in Settings > Claude", finishedAt: iso(30 * 60_000) }),
+    item(929, {
+      state: "needsYou",
+      headline: "Review ready: it waits for your OK before posting",
+      finishedAt: iso(5 * 60_000),
+      sessionId: "44444444-4444-4444-8444-444444444444",
+      worktree: "/tmp/agent-clio-929",
+      output: "Summary: the rename keeps the static prefix now.\n\nInline:\n- SchemaColumn.cs:142: the prefix is still dropped on rename (Minor)\n\nWould approve: no, one open finding.",
+    }),
+    item(934, { state: "done", headline: "Handed back: you reviewed it yourself", finishedAt: iso(60 * 60_000) }),
+  ].filter((i): i is AgentItem => i !== null);
+  const run = (n: number, steps: Array<[string, "pending" | "in_progress" | "completed"]>, activity: string) => ({
+    runId: runId(n),
+    progress: {
+      sessionId: null,
+      steps: steps.map(([subject, status], i) => ({ id: String(i + 1), subject, status })),
+      pendingCreates: [],
+      activity,
+      lastText: null,
+      toolCalls: 12,
+      rateLimit: { status: "allowed", resetsAt: null },
+      result: null,
+    },
+    recent: [
+      { at: iso(150_000), text: `$ gh pr view ${n} --json title,body,files` },
+      { at: iso(120_000), text: `$ gh pr diff ${n}` },
+      { at: iso(60_000), text: activity },
+    ],
+    paused: false,
+  });
+  return {
+    enabled: true,
+    items,
+    running: [
+      run(
+        911,
+        [
+          ["Check whether you already reviewed it", "completed"],
+          ["Read the Jira task", "completed"],
+          ["Collect the diff", "completed"],
+          ["Run 5 reviewers in parallel", "in_progress"],
+          ["Decide", "pending"],
+          ["Write up the review", "pending"],
+        ],
+        "Agent: security reviewer",
+      ),
+      run(44, [["Read the PR", "in_progress"], ["Review the dependency bumps", "pending"]], "$ gh pr diff 44"),
+    ].filter((r) => items.some((i) => i.runId === r.runId)),
+    idle: Object.fromEntries(
+      prs.map((p) => [p.id, p.roles.includes("author") ? "Yours: nothing for the agent yet" : p.isDraft ? "Draft: picked up once ready for review" : "Nothing for the agent"]),
+    ),
+    runsToday: 6,
+    perDay: 30,
+    parallel: 2,
+    heldUntil: null,
+    headerChip: true,
+  };
+}
+
+const agentListeners = new Set<(s: AgentState) => void>();
+let agentState: AgentState =
+  mood === "agent"
+    ? mockAgentState()
+    : { enabled: false, items: [], running: [], idle: {}, runsToday: 0, perDay: 30, parallel: 2, heldUntil: null, headerChip: true };
+
+function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error: string } {
+  if (!agentState.enabled) return { ok: false, error: "The agent is off: switch it on in Settings > Agent." };
+  const items = agentState.items.map((i) => ({ ...i }));
+  const at = new Date().toISOString();
+  if (action.type === "enqueue") {
+    const pr = snapshot.pullRequests.find((p) => p.id === action.prId);
+    if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+    items.push({
+      runId: crypto.randomUUID(),
+      key: `${pr.id}|review|${pr.headOid}|asked`,
+      prId: pr.id,
+      prNumber: pr.number,
+      repo: pr.repo,
+      url: pr.url,
+      title: pr.title,
+      hostLabel: pr.hostLabel,
+      scenario: "review",
+      mode: "shadow",
+      state: "queued",
+      headline: "Queued: review (asked by you)",
+      queuedAt: at,
+    });
+  } else {
+    const it = items.find((i) => i.runId === action.runId);
+    if (!it) return { ok: false, error: "That run is gone." };
+    const running = agentState.running.find((r) => r.runId === action.runId);
+    switch (action.type) {
+      case "skip":
+        Object.assign(it, { state: "done", headline: "Dismissed", finishedAt: at, later: false });
+        break;
+      case "later":
+        it.later = !it.later;
+        break;
+      case "retry":
+      case "reviewAnyway":
+        Object.assign(it, { state: "queued", scenario: "review", headline: "Queued: review (asked by you)", queuedAt: at, output: undefined });
+        break;
+      case "pause":
+      case "resume":
+        if (running) running.paused = action.type === "pause";
+        break;
+      case "stop":
+      case "takeOver":
+        agentState.running = agentState.running.filter((r) => r !== running);
+        Object.assign(it, {
+          state: "needsYou",
+          headline: action.type === "stop" ? "Stopped by you" : "You took it over in your terminal",
+          finishedAt: at,
+          worktree: "/tmp/x",
+        });
+        break;
+      case "hint":
+        if (running) running.recent = [...running.recent, { at, text: `You: ${action.text}` }];
+        break;
+      case "continue":
+        break;
+    }
+  }
+  agentState = { ...agentState, items };
+  for (const l of agentListeners) l(agentState);
+  return { ok: true };
+}
+
 const api: PrManagerApi = {
   getDashboard: async () => ({ ok: true, snapshot }),
   refresh: async () => ({ ok: true, snapshot }),
@@ -446,6 +624,14 @@ const api: PrManagerApi = {
   onNotifySound: () => () => {},
   onOpenSettings: () => () => {},
   onRefreshRequest: () => () => {},
+  getAgentState: async () => agentState,
+  agentAction: async (action) => mockAgentAction(action),
+  onAgentState: (listener) => {
+    agentListeners.add(listener);
+    return () => {
+      agentListeners.delete(listener);
+    };
+  },
 };
 
 (window as unknown as { api: PrManagerApi }).api = api;

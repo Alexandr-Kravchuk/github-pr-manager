@@ -3,7 +3,6 @@ import { Fragment, useCallback, useContext, useEffect, useLayoutEffect, useRef, 
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
 import { prSignal, type PrSignal } from "../../../shared/pr-filter";
 import {
-  TABLE_COLUMNS,
   ageDays,
   approvalTally,
   clampColumnWidth,
@@ -14,6 +13,7 @@ import {
   tableMinWidthRem,
   type TableColumnKey,
   type TableSort,
+  visibleColumns,
 } from "../../../shared/pr-table";
 import type { PullRequest, ReviewerState } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
@@ -21,6 +21,8 @@ import { AuthorButton } from "./AuthorButton";
 import { ClaudeButton } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
 import { ClaudeEnabledContext } from "./claude-context";
+import { AgentContext } from "./agent-context";
+import { AgentCell } from "./AgentStatus";
 
 /**
  * The Cozy variant: one flat, sortable table instead of cards.
@@ -101,6 +103,7 @@ const COLUMN_CLASS: Record<TableColumnKey, string> = {
   comments: "overflow-hidden px-2 text-right",
   age: "overflow-hidden px-2 text-right",
   updated: "overflow-hidden px-2 text-right",
+  agent: "overflow-hidden px-2",
   actions: "overflow-hidden px-2 text-right",
 };
 
@@ -260,6 +263,9 @@ export function PrTable({
   );
 
   const claudeEnabled = useContext(ClaudeEnabledContext);
+  // The Agent column is there only while the agent is on.
+  const agentOn = useContext(AgentContext).state?.enabled === true;
+  const columns = visibleColumns(agentOn);
   // A dragged PR column has an exact width, so the window's slack needs the
   // trailing filler column instead.
   const prFixed = columnWidths.pr !== undefined;
@@ -282,11 +288,11 @@ export function PrTable({
       <table
         className="w-full table-fixed border-collapse text-sm"
         style={{
-          minWidth: `${tableMinWidthRem(columnWidths, claudeEnabled)}rem`,
+          minWidth: `${tableMinWidthRem(columnWidths, claudeEnabled, agentOn)}rem`,
         }}
       >
         <colgroup>
-          {TABLE_COLUMNS.map((col) => (
+          {columns.map((col) => (
             <Fragment key={col.key}>
             {/* With every column fixed, the leftover width of a wide window has
                 to land somewhere; an auto-width filler takes all of it, where
@@ -315,7 +321,7 @@ export function PrTable({
             that a scrolled `border-b` leaves behind. */}
         <thead className="sticky top-0 z-[2] bg-canvas shadow-[0_1px_0_0_var(--line-strong)]">
           <tr className="text-left text-xs uppercase tracking-wide text-fg-muted">
-            {TABLE_COLUMNS.map((col) => {
+            {columns.map((col) => {
               const active = col.sortable && sort.key === col.key;
               return (
                 <Fragment key={col.key}>
@@ -404,6 +410,7 @@ export function PrTable({
               key={pr.id}
               pr={pr}
               filler={prFixed}
+              agentOn={agentOn}
               onOpen={onOpen}
               onMarkSeen={onMarkSeen}
               onToggleIgnore={onToggleIgnore}
@@ -420,6 +427,7 @@ export function PrTable({
 function Row({
   pr,
   filler,
+  agentOn,
   onOpen,
   onMarkSeen,
   onToggleIgnore,
@@ -429,6 +437,7 @@ function Row({
   pr: PullRequest;
   /** Render the trailing slack-absorbing cell (only once the PR column is fixed). */
   filler: boolean;
+  agentOn: boolean;
   onOpen: (pr: PullRequest) => void;
   onMarkSeen: (pr: PullRequest) => void;
   onToggleIgnore: (pr: PullRequest) => void;
@@ -583,6 +592,12 @@ function Row({
       <td className={cn("py-1.5 text-xs text-fg-muted", COLUMN_CLASS.updated)}>
         <span title={new Date(pr.updatedAt).toLocaleString()}>{relativeTime(pr.updatedAt)}</span>
       </td>
+
+      {agentOn && (
+        <td className={cn("py-1.5", COLUMN_CLASS.agent)}>
+          <AgentCell pr={pr} />
+        </td>
+      )}
 
       {filler && <td aria-hidden />}
 

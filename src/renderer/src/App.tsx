@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { AgentCompanion } from "./components/AgentCompanion";
+import { AgentContext } from "./components/agent-context";
 import { Buddy, type BuddyMood } from "./components/Buddy";
+import { PrBoard } from "./components/PrBoard";
 import { PrCard } from "./components/PrCard";
 import { PrTable } from "./components/PrTable";
 import { PrTile } from "./components/PrTile";
 import { SettingsScreen } from "./components/Settings";
 import { ViewSwitch } from "./components/ViewSwitch";
-// PROTOTYPE (agent UI): `?variant=A…E` swaps the list for an agent layout. Dev only.
-import { AgentPrototype } from "./prototype/agent/AgentPrototype";
-import { useAgentVariant } from "./prototype/agent/variant-store";
 import { cn, relativeTime } from "./format";
 import { playNotifySound } from "./notify-sound";
 import { shouldAllowForcedRefresh, shouldRefreshOnKey } from "../../shared/hotkeys";
@@ -55,6 +55,8 @@ import {
   type ViewMode,
 } from "../../shared/view-mode";
 import type {
+  AgentAction,
+  AgentState,
   ClaudeSessionInfo,
   DashboardResponse,
   HostError,
@@ -244,6 +246,9 @@ export function App() {
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraStatus | null>(null);
   const [claudeSessions, setClaudeSessions] = useState<ClaudeSessionInfo[]>([]);
+  // The PR agent — null in fixture mode and until the first pull.
+  const [agentState, setAgentState] = useState<AgentState | null>(null);
+  const [companion, setCompanion] = useState<{ open: boolean; focus: string | null }>({ open: false, focus: null });
   const [data, setData] = useState<DashboardResponse | null>(null);
   // Monotonic count of snapshots applied — the live-dot's remount key.
   const [beat, setBeat] = useState(0);
@@ -291,11 +296,6 @@ export function App() {
   // Display variant + the Cozy table's column sort. Not filters: they change
   // how the same rows are drawn, so `clearFilters` leaves them alone.
   const [viewMode, setViewMode] = useState<ViewMode>(boot.viewMode);
-  // PROTOTYPE (agent UI): the variant on screen, and variant E's Board segment.
-  const agentVariantRaw = useAgentVariant();
-  const agentVariant = import.meta.env.DEV ? agentVariantRaw : null;
-  const [boardView, setBoardView] = useState(false);
-  const boardOn = agentVariant === "E" && boardView;
   const [tableSort, setTableSort] = useState<TableSort>(boot.tableSort);
   const [tableColumnWidths, setTableColumnWidths] = useState<ColumnWidths>(boot.tableColumnWidths);
   const onTableSort = useCallback((key: TableColumnKey) => {
@@ -416,6 +416,36 @@ export function App() {
       window.removeEventListener("focus", onWake);
     };
   }, [loadInitial]);
+
+  // The agent's state: pushed while the window is visible, pulled again on
+  // show, like the sessions below.
+  useEffect(() => {
+    const off = window.api.onAgentState(setAgentState);
+    const load = () => {
+      window.api.getAgentState().then(setAgentState).catch(() => {});
+    };
+    const onWake = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    load();
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => {
+      off();
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+    };
+  }, []);
+  const agentAct = useCallback(async (action: AgentAction) => {
+    const res = await window.api.agentAction(action);
+    // The push may lag a moment behind; pull so the click shows at once.
+    window.api.getAgentState().then(setAgentState).catch(() => {});
+    return res;
+  }, []);
+  const agentContext = useMemo(
+    () => ({ state: agentState, act: agentAct, openCompanion: (runId?: string) => setCompanion({ open: true, focus: runId ?? null }) }),
+    [agentState, agentAct],
+  );
 
   // Running Claude sessions: main pushes changes while the window is visible
   // and pushes nothing while it is hidden, so the list is pulled again on show.
@@ -579,6 +609,7 @@ export function App() {
   }, []);
 
   const allPrs = useMemo(() => data?.pullRequests ?? [], [data]);
+  const allPrIds = useMemo(() => new Set(allPrs.map((p) => p.id)), [allPrs]);
 
   // Whether the unread-comment channel exists at all (the `trackComments`
   // setting). Off hides the chip and the header stat, drops a stored `newOnly`,
@@ -886,21 +917,22 @@ export function App() {
                 {stats.returned > 0 && ` · ${stats.returned} back to you`}
               </p>
             </div>
-            {/* PROTOTYPE (agent UI): the agent's live chip is portalled here. */}
-            {agentVariant && <div id="agent-presence-slot" className="min-w-0" />}
+            {/* The PR agent as a companion: what it is doing, in one chip. */}
+            <AgentContext.Provider value={agentContext}>
+              <AgentCompanion
+                open={companion.open}
+                focus={companion.focus}
+                onToggle={() => setCompanion((c) => ({ open: !c.open, focus: null }))}
+                onClose={() => setCompanion({ open: false, focus: null })}
+                onFocus={(runId) => setCompanion({ open: true, focus: runId })}
+              />
+            </AgentContext.Provider>
           </div>
           <div className="flex items-center gap-2 text-xs text-fg-muted">
             {/* The display-variant switch sits with Refresh: it is a view control,
                 not a filter, and alone in the header's middle gap it read as
                 floating. */}
-            <ViewSwitch
-              value={viewMode}
-              onChange={(m) => {
-                setBoardView(false);
-                setViewMode(m);
-              }}
-              extra={agentVariant === "E" ? { active: boardOn, onClick: () => setBoardView(true) } : undefined}
-            />
+            <ViewSwitch value={viewMode} onChange={setViewMode} />
             {/* One pill per host, and with two or more hosts the pills ARE the
                 host filter (the "All hosts" dropdown they replaced repeated the
                 same two names one row lower). The budget number and fetch time
@@ -1041,7 +1073,7 @@ export function App() {
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value as SortKey)}
-                disabled={!usesListSort(viewMode) || boardOn}
+                disabled={!usesListSort(viewMode)}
                 title={
                   usesListSort(viewMode)
                     ? "Sort order"
@@ -1060,7 +1092,7 @@ export function App() {
               <select
                 value={groupBy}
                 onChange={(e) => setGroupBy(e.target.value as GroupMode)}
-                disabled={!supportsGrouping(viewMode) || boardOn}
+                disabled={!supportsGrouping(viewMode)}
                 title={
                   supportsGrouping(viewMode) ? "Grouping" : "Cozy is one flat table — no grouping"
                 }
@@ -1298,25 +1330,12 @@ export function App() {
         <div className="p-8 text-center text-sm text-fg-subtle">Loading…</div>
       )}
 
+      <AgentContext.Provider value={agentContext}>
       <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
       <ClaudeSessionsContext.Provider value={claudeSessions}>
       <AuthorFilterContext.Provider value={authorFilter}>
-      {agentVariant && data ? (
-        <AgentPrototype
-          prs={sorted}
-          boardView={boardOn}
-          renderList={(list) => (
-            <PrList
-              prs={list}
-              mode={viewMode === "cozy" ? "roomy" : viewMode}
-              jiraBaseUrl={jiraStatus?.baseUrl ?? null}
-              trackComments={trackComments}
-              onOpen={openPr}
-              onMarkSeen={(p) => postSeen([p])}
-              onToggleIgnore={toggleIgnore}
-            />
-          )}
-        />
+      {viewMode === "board" ? (
+        <PrBoard prs={filtered} allPrIds={allPrIds} onOpen={openPr} />
       ) : viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable
@@ -1398,6 +1417,7 @@ export function App() {
       </AuthorFilterContext.Provider>
       </ClaudeSessionsContext.Provider>
       </ClaudeEnabledContext.Provider>
+      </AgentContext.Provider>
 
       <div className="pointer-events-none fixed bottom-2 right-3 z-10 flex items-center gap-2 text-[11px]">
         {whatsNew && (

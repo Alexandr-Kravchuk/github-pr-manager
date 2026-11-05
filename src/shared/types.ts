@@ -768,6 +768,72 @@ export interface ClaudeSessionInfo {
 /** Result of `focusClaudeSession`. */
 export type FocusClaudeSessionResult = { ok: true } | { ok: false; error: string };
 
+// --- The PR agent, as main shows it to the renderer -------------------------
+
+/** What the agent does with a PR (more scenarios land in later stages). */
+export type AgentScenario = "review" | "brief";
+
+export type AgentItemState = "queued" | "working" | "needsYou" | "done" | "error";
+
+/** One thing the agent did or is doing on a PR — persisted in userData/agent/state.json. */
+export interface AgentItem {
+  runId: string;
+  key: string;
+  prId: string;
+  prNumber: number;
+  repo: string;
+  url: string;
+  title: string;
+  hostLabel: string;
+  scenario: AgentScenario;
+  mode: "shadow" | "on";
+  state: AgentItemState;
+  /** One line: what it is doing, or why it stopped. */
+  headline: string;
+  queuedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  sessionId?: string;
+  worktree?: string;
+  checkout?: string;
+  /** The review it would post (shadow) or the brief — the session's final message. */
+  output?: string;
+  error?: string;
+  /** Put aside with "Later": still waiting, out of the way. */
+  later?: boolean;
+}
+
+/** A run in flight: its plan and live line (see agent-stream.ts), the last few things it did. */
+export interface AgentRunState {
+  runId: string;
+  progress: import("./agent-stream").RunProgress;
+  recent: Array<{ at: string; text: string }>;
+  paused: boolean;
+}
+
+export interface AgentState {
+  enabled: boolean;
+  items: AgentItem[];
+  running: AgentRunState[];
+  /** Why each PR on the dashboard is idle, by PR id. */
+  idle: Record<string, string>;
+  runsToday: number;
+  perDay: number;
+  parallel: number;
+  /** Set while Claude's usage limit holds new runs back. */
+  heldUntil: string | null;
+  /** The companion settings, so the header shows the chip only when wanted. */
+  headerChip: boolean;
+}
+
+/** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
+export type AgentAction =
+  | { type: "skip" | "later" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver"; runId: string }
+  | { type: "hint"; runId: string; text: string }
+  | { type: "enqueue"; prId: string };
+
+export type AgentActionResult = { ok: true } | { ok: false; error: string };
+
 /** `gh` CLI availability + per-host authentication, for the settings UI. */
 export interface GhStatus {
   /** Whether the `gh` CLI is installed and on PATH. */
@@ -826,6 +892,12 @@ export interface PrManagerApi {
   focusClaudeSession(sessionId: string): Promise<FocusClaudeSessionResult>;
   /** Subscribe to changes in the running sessions. Returns an unsubscribe function. */
   onClaudeSessions(listener: (sessions: ClaudeSessionInfo[]) => void): () => void;
+  /** The PR agent's state, or null when there is no agent (fixture mode). */
+  getAgentState(): Promise<AgentState | null>;
+  /** Act on an agent run or hand a PR to the agent. */
+  agentAction(action: AgentAction): Promise<AgentActionResult>;
+  /** Subscribe to agent state pushes (sent only while the window is visible). */
+  onAgentState(listener: (state: AgentState) => void): () => void;
   /** Copy text (e.g. a PR URL) to the system clipboard. */
   copyText(text: string): Promise<void>;
   /** Returns release info if a new version was installed since last ack, or null. */

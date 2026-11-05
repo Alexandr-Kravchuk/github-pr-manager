@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { AgentScenario } from "../../shared/agent-policy";
+import type { AgentItem, AgentScenario } from "../../shared/types";
 
 // The agent's memory across restarts, in its own files under userData/agent —
 // never in settings.json, whose validation must not be able to trip on it.
@@ -20,32 +20,7 @@ export interface LedgerEntry {
   runId: string;
 }
 
-export type AgentItemState = "queued" | "working" | "needsYou" | "done" | "error";
-
-export interface AgentItemRecord {
-  runId: string;
-  key: string;
-  prId: string;
-  prNumber: number;
-  repo: string;
-  url: string;
-  title: string;
-  hostLabel: string;
-  scenario: AgentScenario;
-  mode: "shadow" | "on";
-  state: AgentItemState;
-  /** One line: what it is doing, or why it stopped. */
-  headline: string;
-  queuedAt: string;
-  startedAt?: string;
-  finishedAt?: string;
-  sessionId?: string;
-  worktree?: string;
-  checkout?: string;
-  /** The review it would post (shadow) or the brief — the session's final message. */
-  output?: string;
-  error?: string;
-}
+export type AgentItemRecord = AgentItem;
 
 export interface AgentStoreData {
   version: 1;

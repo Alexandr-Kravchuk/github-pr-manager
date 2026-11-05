@@ -1,5 +1,5 @@
 import { CLAUDE_LAUNCH_KINDS, type ClaudeLaunchKind } from "../shared/claude-launch";
-import type { SeenInput, ThemePreference } from "../shared/types";
+import type { AgentAction, SeenInput, ThemePreference } from "../shared/types";
 
 // Validators for values that cross the IPC boundary from the renderer. The
 // renderer is trusted, but a compromised/buggy caller must not be able to push
@@ -118,4 +118,30 @@ export function validateClaudeSessionId(value: unknown): string {
     throw new Error("focusClaudeSession: expected a session id.");
   }
   return value;
+}
+
+const RUN_ACTIONS = ["skip", "later", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver"] as const;
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** A hint is a note to the running session, not a document. */
+export const AGENT_HINT_MAX = 2_000;
+
+/**
+ * Validates what the renderer asks of the agent. It names a run (a UUID the
+ * agent minted) or a PR by id, and a hint carries plain text — never a path,
+ * a command or a prompt template: what a run does stays decided in main.
+ */
+export function validateAgentAction(value: unknown): AgentAction {
+  const v = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
+  if (v.type === "enqueue") return { type: "enqueue", prId: validatePrId(v.prId) };
+  if (typeof v.runId !== "string" || !RUN_ID.test(v.runId)) throw new Error("agentAction: expected a run id.");
+  if (v.type === "hint") {
+    if (typeof v.text !== "string" || !v.text.trim() || v.text.length > AGENT_HINT_MAX) {
+      throw new Error(`agentAction: a hint is 1–${AGENT_HINT_MAX} characters.`);
+    }
+    return { type: "hint", runId: v.runId, text: v.text.trim() };
+  }
+  if (typeof v.type === "string" && (RUN_ACTIONS as readonly string[]).includes(v.type)) {
+    return { type: v.type as (typeof RUN_ACTIONS)[number], runId: v.runId };
+  }
+  throw new Error("agentAction: unknown action.");
 }

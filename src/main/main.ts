@@ -14,6 +14,9 @@ import {
 } from "../shared/notify";
 import { markSeen } from "../shared/state";
 import type {
+  AgentAction,
+  AgentActionResult,
+  AgentState,
   ClaudeLaunchResult,
   ClaudeSessionInfo,
   ConfigResult,
@@ -27,7 +30,7 @@ import type {
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
 import { createAgent, type Agent } from "./agent";
-import { findCheckout, launchClaude } from "./claude-launch";
+import { findCheckout, launchClaude, resumeClaudeSession } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
 import { clearJiraCaches } from "../shared/jira";
@@ -37,6 +40,7 @@ import {
   validateExternalUrl,
   validateIgnoredArgs,
   validateJiraToken,
+  validateAgentAction,
   validateClaudeKind,
   validateClaudeSessionId,
   validatePrId,
@@ -64,6 +68,22 @@ let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
 /** The PR agent; null in fixture mode (PRD_MOCK), where it would act on fake PRs. */
 let agent: Agent | null = null;
+let agentPushTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Pushes the agent's state at most every 250 ms — a run reports a step per
+ * tool call — and only to a visible window, like the snapshots; the renderer
+ * pulls `agent:get` again when it is shown.
+ */
+function scheduleAgentPush(): void {
+  if (agentPushTimer) return;
+  agentPushTimer = setTimeout(() => {
+    agentPushTimer = null;
+    if (agent && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+      sendToRenderer("agent-state", agent.getState());
+    }
+  }, 250);
+}
 let systemSuspended = false;
 
 // Signals the first time createWindow() assigns mainWindow. The second-instance
@@ -668,6 +688,20 @@ function registerIpc(): void {
 
   ipcMain.handle("claude:sessions", async (): Promise<ClaudeSessionInfo[]> => refreshClaudeSessions());
 
+  // The PR agent. The renderer names a run or a PR by id and an action from a
+  // fixed list; what a run does, where and with which tools stays in main.
+  ipcMain.handle("agent:get", (): AgentState | null => agent?.getState() ?? null);
+  ipcMain.handle("agent:action", async (_e, raw: unknown): Promise<AgentActionResult> => {
+    if (!agent) return { ok: false, error: "The agent is off in fixture mode." };
+    let action: AgentAction;
+    try {
+      action = validateAgentAction(raw);
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+    return agent.act(action);
+  });
+
   // Only the session id crosses over: what to open for it — the Desktop link or
   // the terminal tab — comes from main's own scan of the registry.
   ipcMain.handle("claude:focusSession", async (_event, raw: unknown): Promise<FocusClaudeSessionResult> => {
@@ -846,6 +880,8 @@ function startApp(): void {
       // Run by Claude Code before each tool call, as Node (ELECTRON_RUN_AS_NODE).
       hookScript: path.join(__dirname, "agent", "hook.js"),
       execPath: process.execPath,
+      openResume: (dir, sessionId) => resumeClaudeSession(dir, sessionId, loadSettings().claude.terminal),
+      onChange: scheduleAgentPush,
     });
   }
 

@@ -100,6 +100,8 @@ for (const mod of [
   "settings-search.js",
   "host-status.js",
   "agent-defaults.js",
+  "agent-stream.js",
+  "agent-view.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -2489,15 +2491,18 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     assert.strictEqual(viewMode.DEFAULT_VIEW_MODE, "roomy");
     assert.strictEqual(viewMode.VIEW_MODES[0], "roomy");
   });
-  test("supportsGrouping / usesListSort: cozy is the only mode that opts out", () => {
-    // Cozy's table is flat and sorts by column, so BOTH header controls hand
-    // over to it. Roomy and Compact are the same list at two sizes and keep them.
+  test("supportsGrouping / usesListSort: cozy and board opt out", () => {
+    // Cozy's table is flat and sorts by column, and the Board lays PRs out by
+    // the agent's state, so BOTH header controls hand over to them. Roomy and
+    // Compact are the same list at two sizes and keep them.
+    assert.deepStrictEqual(viewMode.VIEW_MODES, ["roomy", "cozy", "compact", "board"]);
     assert.deepStrictEqual(
       viewMode.VIEW_MODES.map((m) => [viewMode.supportsGrouping(m), viewMode.usesListSort(m)]),
       [
         [true, true],
         [false, false],
         [true, true],
+        [false, false],
       ],
     );
   });
@@ -2550,28 +2555,40 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
   });
   const rev = (login, reviewState) => ({ login, avatarUrl: "", reviewState });
 
-  test("TABLE_COLUMNS: eleven unique columns, only Reviewers and Actions unsortable", () => {
+  test("TABLE_COLUMNS: twelve unique columns, only Reviewers, Agent and Actions unsortable", () => {
     const keys = prTable.TABLE_COLUMNS.map((c) => c.key);
-    assert.strictEqual(keys.length, 11);
+    assert.strictEqual(keys.length, 12);
     assert.strictEqual(new Set(keys).size, keys.length, "duplicate column key");
     assert.ok(!keys.includes("role"), "the Role column was removed");
     assert.deepStrictEqual(
       prTable.TABLE_COLUMNS.filter((c) => !c.sortable).map((c) => c.key),
-      ["reviewers", "actions"],
+      ["reviewers", "agent", "actions"],
     );
+  });
+
+  test("visibleColumns: the Agent column shows only while the agent is on, just before Actions", () => {
+    const on = prTable.visibleColumns(true).map((c) => c.key);
+    const off = prTable.visibleColumns(false).map((c) => c.key);
+    assert.deepStrictEqual(on, prTable.TABLE_COLUMNS.map((c) => c.key));
+    assert.deepStrictEqual(on.slice(-2), ["agent", "actions"]);
+    assert.deepStrictEqual(off, on.filter((k) => k !== "agent"));
   });
 
   test("TABLE_MIN_WIDTH_REM: every column declares a minimum and the table's floor is their sum", () => {
     // The floor has to be enforced on the table, not on the cells — a
     // fixed-layout table ignores a cell `min-width` — so a column added without
     // a minimum would silently shrink the others instead of widening the table.
+    // The floor is the agent-off table's; the Agent column adds its own share.
     for (const col of prTable.TABLE_COLUMNS) {
       assert.ok(col.minWidthRem > 0, `${col.key} declares no minimum width`);
     }
     assert.strictEqual(
       prTable.TABLE_MIN_WIDTH_REM,
-      prTable.TABLE_COLUMNS.reduce((sum, c) => sum + c.minWidthRem, 0),
+      prTable.visibleColumns(false).reduce((sum, c) => sum + c.minWidthRem, 0),
     );
+    const agentMin = prTable.TABLE_COLUMNS.find((c) => c.key === "agent").minWidthRem;
+    assert.strictEqual(prTable.tableMinWidthRem({}, false, true), prTable.TABLE_MIN_WIDTH_REM + agentMin);
+    assert.strictEqual(prTable.tableMinWidthRem({ agent: 4 }, false, false), prTable.TABLE_MIN_WIDTH_REM, "a hidden column's width is not counted");
   });
 
   test("clampColumnWidth: a dragged width is held inside the bounds", () => {
@@ -8008,7 +8025,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const idleGate = require(path.join(__dirname, "../dist/main/shared/idle-gate.js"));
     const hookJs = path.join(__dirname, "../dist/main/main/agent/hook.js");
 
-    for (const mod of ["agent-guard.js", "agent-policy.js", "agent-stream.js"]) {
+    // Not value-imported by the renderer (yet), but kept Node-free all the same;
+    // the ones it does import are in the list at the top of this file.
+    for (const mod of ["agent-guard.js", "agent-policy.js"]) {
       test(`${mod} compiles free of node: builtin references`, () => {
         const src = nfsA.readFileSync(path.join(__dirname, `../dist/main/shared/${mod}`), "utf8");
         const hits = src.match(/require\(["'](?:node:[^"']+|fs|path|os|crypto|child_process)["']\)|from ["']node:[^"']+["']/g) || [];
@@ -8433,17 +8452,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script } = {}) => {
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume } = {}) => {
       const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
       nfsA.mkdirSync(path.join(co, ".git"), { recursive: true });
       nfsA.writeFileSync(path.join(co, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
-      const pr = reviewPr();
       const snapshot = { pullRequests: [pr], errors: [], rateLimits: [], fetchedAt: "", version: "" };
       const gitCalls = [];
       const children = [];
-      const settings = cfg.validateSettings({ hosts: [], agent: { enabled: true } });
+      const settings = cfg.validateSettings({ hosts: [], agent: { enabled } });
       const agent = agentCore.createAgent({
+        openResume,
         dir: path.join(dir, "agent"),
         loadSettings: () => settings,
         getSnapshot: () => snapshot,
@@ -8525,6 +8544,265 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       } finally {
         f.agent.stop();
       }
+    });
+
+    // --- stage 3: what you can do with a run, and how the dashboard shows it ---
+    const view = require(path.join(__dirname, "../dist/main/shared/agent-view.js"));
+    const succeed = (text) => (c) => {
+      emit(c, { type: "system", subtype: "init", session_id: "s" });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: text });
+      setImmediate(() => c.emit("exit", 0));
+    };
+    // A run that starts and then keeps working until it is told otherwise.
+    const keepWorking = (c) => emit(c, { type: "system", subtype: "init", session_id: "s" });
+    const only = (f) => f.agent.getState().items;
+
+    await atest("agent act: pause, hint and resume reach the running session; Stop keeps the result for you", async () => {
+      const f = agentFixture({ script: keepWorking });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+        const runId = only(f)[0].runId;
+        const c = f.children[0];
+        assert.deepStrictEqual(await f.agent.act({ type: "pause", runId }), { ok: true });
+        await tickOnce();
+        assert.match(c.written, /"subtype":"interrupt"/, "pause is an interrupt on stdin, not a kill");
+        assert.strictEqual(f.agent.getState().running[0].paused, true);
+        assert.strictEqual(only(f)[0].headline, "Paused");
+        assert.strictEqual((await f.agent.act({ type: "pause", runId })).ok, false, "a paused run can't be paused again");
+
+        assert.deepStrictEqual(await f.agent.act({ type: "hint", runId, text: "look at retry.ts first" }), { ok: true });
+        await tickOnce();
+        assert.match(c.written, /A note from the user while you work: look at retry\.ts first/);
+        assert.ok(f.agent.getState().running[0].recent.some((r) => r.text === "You: look at retry.ts first"));
+
+        assert.deepStrictEqual(await f.agent.act({ type: "resume", runId }), { ok: true });
+        assert.strictEqual(f.agent.getState().running[0].paused, false);
+        assert.strictEqual((await f.agent.act({ type: "skip", runId })).ok, false, "a running run is stopped before it is dismissed");
+
+        assert.deepStrictEqual(await f.agent.act({ type: "stop", runId }), { ok: true });
+        await until(() => only(f)[0].state === "needsYou");
+        assert.strictEqual(only(f)[0].headline, "Stopped by you");
+        assert.ok(only(f)[0].worktree, "the worktree stays so the session can be continued");
+        assert.ok(!f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"));
+        assert.strictEqual((await f.agent.act({ type: "hint", runId, text: "x" })).ok, false, "a hint needs a running session");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent act: Take over stops the run and opens its session in your terminal", async () => {
+      const opened = [];
+      const f = agentFixture({ script: keepWorking, openResume: async (dir, sid) => void opened.push([dir, sid]) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+        const item = only(f)[0];
+        assert.deepStrictEqual(await f.agent.act({ type: "takeOver", runId: item.runId }), { ok: true });
+        await until(() => only(f)[0].state === "needsYou");
+        assert.strictEqual(only(f)[0].headline, "You took it over in your terminal");
+        assert.deepStrictEqual(opened, [[only(f)[0].worktree, item.sessionId]]);
+        assert.ok(f.children[0].args.includes(item.sessionId), "it resumes the very session the run used");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent act: Later sets a result aside, Run again replaces it, Dismiss closes it", async () => {
+      const opened = [];
+      const f = agentFixture({ script: succeed("Would post nothing."), openResume: async (dir, sid) => void opened.push([dir, sid]) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const first = only(f)[0];
+        assert.deepStrictEqual(await f.agent.act({ type: "later", runId: first.runId }), { ok: true });
+        assert.strictEqual(only(f)[0].later, true);
+        await f.agent.act({ type: "later", runId: first.runId });
+        assert.strictEqual(only(f)[0].later, false, "Later toggles");
+
+        assert.strictEqual((await f.agent.act({ type: "continue", runId: first.runId })).ok, false, "no worktree on disk, nothing to continue");
+        nfsA.mkdirSync(first.worktree, { recursive: true });
+        assert.deepStrictEqual(await f.agent.act({ type: "continue", runId: first.runId }), { ok: true });
+        assert.deepStrictEqual(opened, [[first.worktree, first.sessionId]]);
+
+        assert.deepStrictEqual(await f.agent.act({ type: "retry", runId: first.runId }), { ok: true });
+        await until(() => only(f).filter((i) => i.state === "needsYou").length === 1 && only(f).length === 2);
+        const [old, again] = only(f);
+        assert.strictEqual(old.state, "done");
+        assert.strictEqual(old.headline, view.AGENT_CLOSED.rerun);
+        assert.match(again.key, /\|asked$/, "your own ask has its own ledger key, so the head's entry doesn't stop it");
+        assert.strictEqual(f.children.length, 2);
+
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: again.runId }), { ok: true });
+        assert.strictEqual(only(f)[1].headline, view.AGENT_CLOSED.dismissed);
+        assert.ok(f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"), "a dismissed result drops its worktree");
+        assert.strictEqual(view.itemForPr(only(f), f.snapshot.pullRequests[0].id, view.todayKey(new Date())), null, "the card shows nothing once it's all closed");
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: "00000000-0000-4000-8000-000000000999" }), { ok: false, error: "That run is gone." });
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent act: Review anyway turns a brief into a review; a review can't be turned again", async () => {
+      const f = agentFixture({ pr: reviewPr({ additions: 1200 }), script: succeed("Problem: … Decisions for you: …") });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const brief = only(f)[0];
+        assert.strictEqual(brief.scenario, "brief");
+        assert.strictEqual(view.primaryActionLabel(brief), "Review anyway");
+        assert.deepStrictEqual(await f.agent.act({ type: "reviewAnyway", runId: brief.runId }), { ok: true });
+        await until(() => only(f).length === 2 && only(f)[1].state === "needsYou");
+        assert.strictEqual(only(f)[0].headline, view.AGENT_CLOSED.reviewed, "the brief leaves Needs you");
+        assert.strictEqual(only(f)[1].scenario, "review");
+        assert.ok(f.children[1].args.includes("--settings"));
+        const settingsFile = f.children[1].args[f.children[1].args.indexOf("--settings") + 1];
+        assert.match(nfsA.readFileSync(settingsFile, "utf8"), /hook\.js[\s\S]*review/, "the review runs under the review guard, not the brief's");
+        assert.strictEqual((await f.agent.act({ type: "reviewAnyway", runId: only(f)[1].runId })).ok, false);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent act: you can queue a PR you review, not your own, not twice, and not with the agent off", async () => {
+      const f = agentFixture({ pr: reviewPr({ requestedOfMe: false }), script: keepWorking });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(only(f).length, 0, "a team request isn't picked up on its own");
+        const prId = f.snapshot.pullRequests[0].id;
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId }), { ok: true });
+        await until(() => f.agent.getState().running.length === 1);
+        assert.strictEqual(only(f)[0].headline, "Reviewing");
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId }), { ok: false, error: "The agent is already on this PR." });
+        assert.strictEqual((await f.agent.act({ type: "enqueue", prId: "PR_GONE" })).ok, false);
+      } finally {
+        f.agent.stop();
+      }
+      const mine = agentFixture({ pr: reviewPr({ role: "author" }), script: keepWorking });
+      try {
+        assert.match((await mine.agent.act({ type: "enqueue", prId: mine.snapshot.pullRequests[0].id })).error, /own PRs/);
+      } finally {
+        mine.agent.stop();
+      }
+      const off = agentFixture({ enabled: false, script: keepWorking });
+      try {
+        assert.match((await off.agent.act({ type: "enqueue", prId: off.snapshot.pullRequests[0].id })).error, /The agent is off/);
+        assert.strictEqual(off.agent.getState().enabled, false);
+      } finally {
+        off.agent.stop();
+      }
+    });
+
+    const ipcAgent = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+    test("ipc: an agent action is a known type on a run id; a hint is trimmed and bounded", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      const v = ipcAgent.validateAgentAction;
+      assert.deepStrictEqual(v({ type: "pause", runId: RID, extra: "dropped" }), { type: "pause", runId: RID });
+      assert.deepStrictEqual(v({ type: "hint", runId: RID, text: "  look at x.ts  " }), { type: "hint", runId: RID, text: "look at x.ts" });
+      assert.deepStrictEqual(v({ type: "enqueue", prId: "PR_kwDOA" }), { type: "enqueue", prId: "PR_kwDOA" });
+      for (const t of ["skip", "later", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver"]) {
+        assert.strictEqual(v({ type: t, runId: RID }).type, t);
+      }
+      for (const bad of [
+        null,
+        "pause",
+        {},
+        { type: "merge", runId: RID },
+        { type: "pause", runId: "../../etc" },
+        { type: "pause" },
+        { type: "hint", runId: RID, text: "   " },
+        { type: "hint", runId: RID, text: "x".repeat(ipcAgent.AGENT_HINT_MAX + 1) },
+        { type: "enqueue", prId: 3 },
+        { type: "enqueue", prId: "" },
+      ]) {
+        assert.throws(() => v(bad), /agentAction|PR id/, JSON.stringify(bad));
+      }
+    });
+
+    const vItem = (o) => ({
+      runId: o.runId ?? `00000000-0000-4000-8000-${String(Math.floor(Math.random() * 1e12)).padStart(12, "0")}`,
+      key: `${o.prId}|review|h`,
+      prNumber: 1,
+      repo: "a/b",
+      url: "https://github.com/a/b/pull/1",
+      title: "t",
+      hostLabel: "GH",
+      scenario: "review",
+      mode: "shadow",
+      headline: o.state,
+      queuedAt: "2026-11-05T08:00:00.000Z",
+      ...o,
+    });
+    test("agent view: todayKey is the local day, and finishedOn compares on it", () => {
+      // Built from local parts, so the answer is the same in every time zone.
+      const lateEvening = new Date(2026, 10, 5, 23, 30);
+      assert.strictEqual(view.todayKey(lateEvening), "2026-11-05");
+      assert.strictEqual(view.finishedOn({ finishedAt: lateEvening.toISOString() }, "2026-11-05"), true);
+      assert.strictEqual(view.finishedOn({ finishedAt: new Date(2026, 10, 4, 23, 59).toISOString() }, "2026-11-05"), false);
+      assert.strictEqual(view.finishedOn({}, "2026-11-05"), false);
+      assert.strictEqual(view.finishedOn({ finishedAt: "not a date" }, "2026-11-05"), false);
+    });
+    test("agent view: a card shows live work before what waits for you; housekeeping and older days never", () => {
+      const today = view.todayKey(new Date());
+      const now = new Date().toISOString();
+      const yesterday = new Date(Date.now() - 2 * 86_400_000).toISOString();
+      const done = vItem({ prId: "P", state: "done", headline: "Reviewed", finishedAt: now });
+      const waiting = vItem({ prId: "P", state: "needsYou", finishedAt: now });
+      const working = vItem({ prId: "P", state: "working" });
+      assert.strictEqual(view.itemForPr([done, waiting, working], "P", today), working);
+      assert.strictEqual(view.itemForPr([done, waiting], "P", today), waiting);
+      assert.strictEqual(view.itemForPr([done], "P", today), done);
+      assert.strictEqual(view.itemForPr([{ ...done, finishedAt: yesterday }], "P", today), null, "yesterday's done is not today's");
+      for (const h of Object.values(view.AGENT_CLOSED)) {
+        assert.strictEqual(view.itemForPr([{ ...done, headline: h }], "P", today), null, h);
+      }
+      assert.strictEqual(view.itemForPr([working], "other", today), null);
+    });
+    test("agent view: the Board puts every filtered PR in one column; Done today keeps PRs that left", () => {
+      const today = view.todayKey(new Date());
+      const now = new Date().toISOString();
+      const pr = (id) => ({ id });
+      const prs = ["P1", "P2", "P3", "P4", "P5", "P6", "P7"].map(pr);
+      const all = new Set([...prs.map((p) => p.id), "P8"]);
+      const items = [
+        vItem({ prId: "P1", state: "queued", queuedAt: "2026-11-05T10:00:00.000Z" }),
+        vItem({ prId: "P2", state: "queued", queuedAt: "2026-11-05T09:00:00.000Z" }),
+        vItem({ prId: "P3", state: "working" }),
+        vItem({ prId: "P4", state: "needsYou", later: true, finishedAt: "2026-11-05T07:00:00.000Z" }),
+        vItem({ prId: "P5", state: "error", finishedAt: "2026-11-05T09:30:00.000Z" }),
+        vItem({ prId: "P6", state: "done", headline: "Reviewed", finishedAt: now }),
+        vItem({ prId: "P7", state: "done", headline: view.AGENT_CLOSED.dismissed, finishedAt: now }),
+        vItem({ prId: "P8", state: "done", headline: "Filtered out", finishedAt: now }),
+        vItem({ prId: "P9", state: "done", headline: "Merged since", finishedAt: now }),
+      ];
+      const cols = view.boardColumns(prs, all, { enabled: true, items, running: [], idle: { P7: "Draft" } }, today);
+      assert.deepStrictEqual(cols.queued.map((i) => i.prId), ["P2", "P1"], "oldest ask first");
+      assert.deepStrictEqual(cols.working.map((i) => i.prId), ["P3"]);
+      assert.deepStrictEqual(cols.needsYou.map((i) => i.prId), ["P5", "P4"], "what you put off with Later comes last");
+      assert.deepStrictEqual(cols.done.map((i) => i.prId).sort(), ["P6", "P9"], "a filtered-out PR stays out; a merged one still counts today");
+      assert.deepStrictEqual(cols.idle.map((x) => [x.pr.id, x.reason]), [["P6", "Nothing for the agent"], ["P7", "Draft"]]);
+      const off = view.boardColumns(prs, all, { enabled: false, items: [], running: [], idle: {} }, today);
+      assert.strictEqual(off.idle.length, prs.length);
+      assert.strictEqual(off.idle[0].reason, "The agent is off");
+    });
+    test("agent view: the first button names what an item asks of you", () => {
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "error" })), "Run again");
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "brief", output: "x" })), "Review anyway");
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", sessionId: "s" })), "Continue in session");
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou" })), null);
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "working", sessionId: "s" })), null);
+    });
+
+    test("main.js wiring: the agent's state is pulled and acted on over IPC, and pushed only to a visible window", () => {
+      const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /ipcMain\.handle\("agent:get", \(\) => agent\?\.getState\(\) \?\? null\)/);
+      assert.match(src, /ipcMain\.handle\("agent:action"[\s\S]{0,300}validateAgentAction\)\(raw\)[\s\S]{0,200}return agent\.act\(action\)/);
+      assert.match(src, /mainWindow\.isVisible\(\)\) \{\s*sendToRenderer\("agent-state", agent\.getState\(\)\)/);
+      assert.match(src, /onChange: scheduleAgentPush/);
+      const preload = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
+      assert.match(preload, /"agent:get"/);
+      assert.match(preload, /"agent:action"/);
+      assert.match(preload, /"agent-state"/);
     });
 
     test("main.js wiring: the agent hears every snapshot, keeps hidden polling alive and stops on quit", () => {

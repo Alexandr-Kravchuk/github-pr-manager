@@ -1,4 +1,6 @@
-import type { AgentRunKind, AgentSettings, PullRequest } from "./types";
+import type { AgentRunKind, AgentScenario, AgentSettings, PullRequest } from "./types";
+
+export type { AgentScenario };
 
 // Which PRs the agent should work on, and how. Decided from the PR's current
 // state rather than from a transition between two snapshots: a transition seen
@@ -6,9 +8,6 @@ import type { AgentRunKind, AgentSettings, PullRequest } from "./types";
 // next tick. The ledger key (`jobKey`) is what keeps one state from being
 // worked twice. Node-free so the Board can say why a PR is idle with the very
 // same rules.
-
-/** What the agent does with a PR. Stage 2 runs `review` and `brief`; the rest land in later stages. */
-export type AgentScenario = "review" | "brief";
 
 export interface AgentJob {
   /** Ledger key: the same key is never run twice. */

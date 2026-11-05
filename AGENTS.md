@@ -80,11 +80,13 @@ Three layers:
   `blockedByStack` and `prSignal` paints such a PR amber, not green; a host
   whose schema has no `stack` field is read again without it and remembered for
   the app run. The stack badge's menu is portalled to <body> because table
-  cells clip with `overflow-hidden`), `view-mode.ts` (the three
+  cells clip with `overflow-hidden`), `view-mode.ts` (the four
   display variants behind the header's Finder-style switch — `roomy` cards,
-  `cozy` table, `compact` tiles — with the guard that validates the persisted
+  `cozy` table, `compact` tiles, `board` (the PR agent's work by state) — with
+  the guard that validates the persisted
   choice and the two predicates App.tsx gates grouping and the sort dropdown on),
-  `pr-table.ts` (the Cozy table's eleven columns and its ordering: a comparator
+  `pr-table.ts` (the Cozy table's twelve columns — the Agent one only while the
+  PR agent is on (`visibleColumns`) — and its ordering: a comparator
   per column, always ascending in terms of what the cell SHOWS, plus what a
   header click does) and `claude-launch.ts` (the opt-in "start Claude on this
   PR" button: which prompt a PR's state picks — blocked → drive, review due →
@@ -114,26 +116,35 @@ Three layers:
   `settings-search.ts` (the Settings screen's tabs, which section sits on which,
   and the keywords its search box matches — every word of the query must hit a
   section's title or keywords; a setting whose label is missing there cannot be
-  found, so extend its keywords when adding one) and `host-status.ts` (the
+  found, so extend its keywords when adding one), `host-status.ts` (the
   colour of a header host pill's dot — red on a failed fetch, amber on a spent
   or low GraphQL budget, green otherwise; the pills replaced the raw budget
   number and, with two or more hosts, the "All hosts" dropdown, since clicking a
-  pill toggles that host's filter). Keep any such
+  pill toggles that host's filter) and the PR agent's three: `agent-defaults.ts`
+  (the Agent tab's defaults and bounds), `agent-stream.ts` (a run's
+  stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list — and
+  current activity) and `agent-view.ts` (which of a PR's agent items its
+  card, Cozy cell and tile show, the Board's columns, and the *local* day
+  "Done today" and the daily run limit count on). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
-  `settings-search.js` and `host-status.js`
+  `settings-search.js`, `host-status.js`, `agent-defaults.js`,
+  `agent-stream.js` and `agent-view.js`
   stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
   It talks to main **exclusively** through `window.api` (the preload bridge):
   no direct network, no Node access (`contextIsolation` on, `nodeIntegration`
-  off). The list renders in one of three display variants, chosen by the
+  off). The list renders in one of four display variants, chosen by the
   Finder-style `ViewSwitch` in the header row next to Refresh and persisted with
   the other view preferences in `localStorage`: `roomy` (`PrCard`, the original
-  full cards and the default), `cozy` (`PrTable`) and `compact` (`PrTile`).
+  full cards and the default), `cozy` (`PrTable`), `compact` (`PrTile`) and
+  `board` (`PrBoard`: the filtered PRs in the PR agent's columns — Idle, Queued,
+  Working, Needs you, Done today — which, like Cozy, turns off Group-by and
+  Sort).
   Roomy and Compact are the same grid at two densities — one `PrList` renders
   both, so their column counts are the only difference and can't drift. Cozy is
   the odd one out and deliberately so: it is one FLAT table sorted by any

@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-import type { ClaudeSessionInfo, DashboardResponse, PrManagerApi, UpdateStatus } from "../shared/types";
+import type { AgentState, ClaudeSessionInfo, DashboardResponse, PrManagerApi, UpdateStatus } from "../shared/types";
 
 const api: PrManagerApi = {
   getDashboard: () => ipcRenderer.invoke("dashboard:get"),
@@ -21,6 +21,15 @@ const api: PrManagerApi = {
   launchClaude: (prId, kind) => ipcRenderer.invoke("claude:launch", prId, kind),
   getClaudeSessions: () => ipcRenderer.invoke("claude:sessions"),
   focusClaudeSession: (sessionId) => ipcRenderer.invoke("claude:focusSession", sessionId),
+  getAgentState: () => ipcRenderer.invoke("agent:get"),
+  agentAction: (action) => ipcRenderer.invoke("agent:action", action),
+  onAgentState: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: AgentState) => listener(state);
+    ipcRenderer.on("agent-state", handler);
+    return () => {
+      ipcRenderer.removeListener("agent-state", handler);
+    };
+  },
   copyText: (text) => ipcRenderer.invoke("app:copyText", text),
   onSnapshot: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DashboardResponse) =>

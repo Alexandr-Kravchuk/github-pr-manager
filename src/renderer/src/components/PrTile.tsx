@@ -7,6 +7,7 @@ import { cn, relativeTime } from "../format";
 import { AuthorButton } from "./AuthorButton";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
+import { AgentGlyph } from "./AgentStatus";
 
 /**
  * The Compact tile: the same information architecture as `PrCard` shrunk to
@@ -234,6 +235,8 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
         </span>
         {/* Icon only: a labelled button took a line of its own and made every
             tile taller. Its colour still says which action a click starts. */}
+        {/* The PR agent's state on this PR, as a dot with its words in the title. */}
+        <AgentGlyph pr={pr} />
         <ClaudeButton pr={pr} trackComments={trackComments} iconOnly className="ml-1" />
       </div>
 
