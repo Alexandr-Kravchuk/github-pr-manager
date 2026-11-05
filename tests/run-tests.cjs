@@ -1334,6 +1334,30 @@ test("validateSettings: toggles honored when present", () => {
   assert.strictEqual(s.closeToTray, false);
   assert.strictEqual(s.trackComments, false);
 });
+test("validateSettings: a host without allRepos/searchLimit keeps the old scope and page", () => {
+  const [h] = cfg.validateSettings({
+    hosts: [{ label: "G", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"] }],
+  }).hosts;
+  assert.strictEqual(h.allRepos, false);
+  assert.strictEqual(h.searchLimit, 25);
+});
+test("validateSettings: allRepos is honored only as a real true", () => {
+  const host = (allRepos) =>
+    cfg.validateSettings({ hosts: [{ graphqlUrl: "https://api.github.com/graphql", repos: [], allRepos }] })
+      .hosts[0].allRepos;
+  assert.strictEqual(host(true), true);
+  assert.strictEqual(host("true"), false);
+});
+test("validateSearchLimit: clamps to 1–100, rounds, and falls back on garbage", () => {
+  assert.strictEqual(cfg.validateSearchLimit(50), 50);
+  assert.strictEqual(cfg.validateSearchLimit("40"), 40);
+  assert.strictEqual(cfg.validateSearchLimit(500), 100);
+  assert.strictEqual(cfg.validateSearchLimit(0), 1);
+  assert.strictEqual(cfg.validateSearchLimit(12.6), 13);
+  assert.strictEqual(cfg.validateSearchLimit(undefined), 25);
+  assert.strictEqual(cfg.validateSearchLimit("abc"), 25);
+  assert.strictEqual(cfg.validateSearchLimit(""), 25);
+});
 test("validateSettings: a non-boolean closeToTray falls back to the default", () => {
   assert.strictEqual(cfg.validateSettings({ closeToTray: "yes", hosts: [] }).closeToTray, true);
 });
@@ -1643,6 +1667,14 @@ test("newestTrackedActivity: null when nothing tracked matches", () =>
 test("newestTrackedActivity: null on empty inputs", () => {
   assert.strictEqual(notif.newestTrackedActivity([], ["acme/widgets"]), null);
   assert.strictEqual(notif.newestTrackedActivity(items, []), null);
+});
+test("newestTrackedActivity: an allRepos host counts any PR notification, never an issue", () => {
+  const mixed = [
+    { updated_at: "2026-07-07T09:00:00Z", repository: { full_name: "x/one" }, subject: { type: "PullRequest" } },
+    { updated_at: "2026-07-07T11:00:00Z", repository: { full_name: "y/two" }, subject: { type: "Issue" } },
+  ];
+  assert.strictEqual(notif.newestTrackedActivity(mixed, "all"), "2026-07-07T09:00:00Z");
+  assert.strictEqual(notif.newestTrackedActivity([mixed[1]], "all"), null);
 });
 
 // --- poller: computeIdleFactor -----------------------------------------------
@@ -4745,7 +4777,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // `teams` is the list of team slugs the viewer belongs to (org `a`, matching
   // the configured `a/b` repo, or `fetchHost` filters them out); `team0` holds
   // the nodes the first team search returns.
-  async function runFetchHost(searches) {
+  async function runFetchHost(searches, hostPatch = {}) {
     const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
     const sent = {};
     global.fetch = async (url, init) => {
@@ -4783,9 +4815,38 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       graphqlUrl,
       repos: ["a/b"],
       token: "t",
+      ...hostPatch,
     });
     return { sent, result };
   }
+
+  await atest("fetchHost: a listed host filters every search by repo, 25 per page", async () => {
+    const { sent } = await runFetchHost({ teams: ["a/t1"] });
+    for (const alias of ["authored", "reviewing", "reviewed", "team0"]) {
+      assert.match(Object.values(sent[alias].variables)[0], / repo:a\/b /);
+      assert.match(sent[alias].query, /first: 25\)/);
+    }
+  });
+
+  await atest("fetchHost: an allRepos host searches without repo: and with every team", async () => {
+    const { sent, result } = await runFetchHost(
+      { teams: ["a/t1", "other/t2"], authored: [rawPr({ id: "PR_a" })] },
+      { allRepos: true, repos: [] },
+    );
+    for (const alias of ["authored", "reviewing", "reviewed", "team0", "team1"]) {
+      assert.ok(!Object.values(sent[alias].variables)[0].includes("repo:"), `${alias} must not filter by repo`);
+    }
+    assert.strictEqual(sent.authored.variables.authoredQuery, "is:open is:pr author:@me");
+    assert.strictEqual(sent.team1.variables.teamQuery1, "is:open is:pr team-review-requested:other/t2");
+    assert.strictEqual(result.pullRequests.length, 1);
+  });
+
+  await atest("fetchHost: searchLimit sets each search's page size", async () => {
+    const { sent } = await runFetchHost({}, { searchLimit: 60 });
+    for (const alias of ["authored", "reviewing", "reviewed"]) {
+      assert.match(sent[alias].query, /first: 60\)/);
+    }
+  });
 
   await atest("fetchHost: reads the NEWEST review threads, with their total count", async () => {
     const { sent } = await runFetchHost({ authored: [rawPr({ id: "PR_a" })] });

@@ -1,3 +1,4 @@
+import { DEFAULT_SEARCH_LIMIT, validateSearchLimit } from "./config";
 import { ISSUE_KEY_PATTERN } from "./issue-key";
 import type {
   CheckItem,
@@ -182,14 +183,15 @@ function prFieldsFragment(withStacks: boolean): string {
  * the poller would read github.com as a cheap host and poll it far more often.
  *
  * Each search is filtered by all of the host's repositories (multiple `repo:`
- * qualifiers act as OR).
+ * qualifiers act as OR) — or by none on an `allRepos` host, where the `@me`
+ * qualifiers alone scope it. `first` is the host's `searchLimit` (default 25).
  */
-function buildQuery(alias: string, varName: string): string {
+function buildQuery(alias: string, varName: string, first = DEFAULT_SEARCH_LIMIT): string {
   return /* GraphQL */ `
 query ($${varName}: String!) {
   rateLimit { limit remaining cost resetAt }
   viewer { login }
-  ${alias}: search(query: $${varName}, type: ISSUE, first: 25) { nodes { ... on PullRequest { id author { login } } } }
+  ${alias}: search(query: $${varName}, type: ISSUE, first: ${first}) { nodes { ... on PullRequest { id author { login } } } }
 }`;
 }
 
@@ -763,8 +765,7 @@ function isSearchPr(node: RawSearchPr | Record<string, never>): node is RawSearc
 }
 
 function buildSearchQuery(repos: string[], qualifier: string): string {
-  const repoFilter = repos.map((r) => `repo:${r}`).join(" ");
-  return `is:open is:pr ${repoFilter} ${qualifier}`;
+  return ["is:open is:pr", ...repos.map((r) => `repo:${r}`), qualifier].join(" ");
 }
 
 /**
@@ -961,23 +962,29 @@ function isJsonBody(text: string): boolean {
  * reviewer) along with rate-limit info. Throws on network/GraphQL failures.
  */
 export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
-  if (host.repos.length === 0) {
+  const allRepos = host.allRepos === true;
+  if (!allRepos && host.repos.length === 0) {
     return {
       pullRequests: [],
       rateLimit: { hostLabel: host.label, remaining: 0, cost: 0, resetAt: "" },
     };
   }
+  // An `allRepos` host searches without `repo:` qualifiers — the `@me` ones
+  // already scope every search to you. Any listed repos are ignored there.
+  const repos = allRepos ? [] : host.repos;
+  const first = validateSearchLimit(host.searchLimit);
 
   // `review-requested:@me` only matches *personal* requests. When a review is
   // asked of a team the user belongs to, the PR is invisible to it — so we also
   // search `team-review-requested:org/team` for each of the user's teams whose
-  // org owns a configured repo. Team discovery is best-effort: a failure here
-  // must not take down the dashboard, so we fall back to no team searches.
+  // org owns a configured repo (every team, on an `allRepos` host). Team
+  // discovery is best-effort: a failure here must not take down the dashboard,
+  // so we fall back to no team searches.
   const repoOrgs = new Set(host.repos.map((r) => r.split("/")[0]));
   let teamSlugs: string[] = [];
   try {
-    teamSlugs = (await fetchViewerTeams(host)).filter((slug) =>
-      repoOrgs.has(slug.split("/")[0]),
+    teamSlugs = (await fetchViewerTeams(host)).filter(
+      (slug) => allRepos || repoOrgs.has(slug.split("/")[0]),
     );
   } catch (e) {
     console.warn(`[github] team discovery failed for "${host.label}": ${(e as Error).message}`);
@@ -999,14 +1006,14 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
     {
       alias: "authored",
       varName: "authoredQuery",
-      query: buildSearchQuery(host.repos, "author:@me"),
+      query: buildSearchQuery(repos, "author:@me"),
       role: "author",
       required: true,
     },
     {
       alias: "reviewing",
       varName: "reviewingQuery",
-      query: buildSearchQuery(host.repos, "review-requested:@me"),
+      query: buildSearchQuery(repos, "review-requested:@me"),
       role: "reviewer",
       required: true,
     },
@@ -1015,7 +1022,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
     ...teamSlugs.map((slug, i) => ({
       alias: `team${i}`,
       varName: `teamQuery${i}`,
-      query: buildSearchQuery(host.repos, `team-review-requested:${slug}`),
+      query: buildSearchQuery(repos, `team-review-requested:${slug}`),
       role: "reviewer" as PrRole,
       required: false,
     })),
@@ -1029,7 +1036,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
       // neither recency-ordered nor stable — measured: it returned an older PR
       // ahead of a newer one — so the window would both hide the PRs you care
       // about and shuffle between polls, flickering cards in and out.
-      query: buildSearchQuery(host.repos, "reviewed-by:@me sort:updated-desc"),
+      query: buildSearchQuery(repos, "reviewed-by:@me sort:updated-desc"),
       role: "reviewed",
       required: true,
     },
@@ -1037,7 +1044,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
 
   const settled = await Promise.allSettled(
     specs.map((spec) =>
-      postSearch(host, buildQuery(spec.alias, spec.varName), { [spec.varName]: spec.query }),
+      postSearch(host, buildQuery(spec.alias, spec.varName, first), { [spec.varName]: spec.query }),
     ),
   );
 
