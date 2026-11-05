@@ -4,6 +4,7 @@ import type {
   CheckItem,
   CheckState,
   HostConfig,
+  MergeMethod,
   PrRole,
   PrStack,
   PrStackEntry,
@@ -73,9 +74,19 @@ fragment PrFields on PullRequest {
   headRefName
   mergeable
   mergeStateStatus
+  additions
+  deletions
+  changedFiles
   __STACK__
   author { login avatarUrl }
-  repository { nameWithOwner defaultBranchRef { name } }
+  repository {
+    nameWithOwner
+    defaultBranchRef { name }
+    viewerDefaultMergeMethod
+    squashMergeAllowed
+    mergeCommitAllowed
+    rebaseMergeAllowed
+  }
   reviewDecision
   reviewRequests(first: 15) {
     totalCount
@@ -273,8 +284,20 @@ interface RawPr {
       nodes: Array<{ position: number; pullRequest: { number: number; title: string; url: string; state: string } | null }>;
     };
   } | null;
+  // Optional so hand-built fixtures stay valid; GitHub always sends them.
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
   author: { login: string; avatarUrl: string } | null;
-  repository: { nameWithOwner: string; defaultBranchRef: { name: string } | null };
+  repository: {
+    nameWithOwner: string;
+    defaultBranchRef: { name: string } | null;
+    // GitHub's PullRequestMergeMethod enum: "MERGE" | "SQUASH" | "REBASE".
+    viewerDefaultMergeMethod?: string | null;
+    squashMergeAllowed?: boolean;
+    mergeCommitAllowed?: boolean;
+    rebaseMergeAllowed?: boolean;
+  };
   reviewDecision: ReviewDecision;
   reviewRequests: {
     totalCount: number;
@@ -715,6 +738,11 @@ export function mapPr(
     updatedAt: pr.updatedAt,
     lastCommitPushedAt,
     headRefName: pr.headRefName,
+    headOid,
+    additions: pr.additions ?? 0,
+    deletions: pr.deletions ?? 0,
+    changedFiles: pr.changedFiles ?? 0,
+    mergeMethods: mapMergeMethods(pr.repository),
     issueKey,
     reviewDecision: pr.reviewDecision,
     roles,
@@ -754,6 +782,26 @@ export function mapPr(
     // Overwritten in ignored.ts from the persistent ignored set:
     isIgnored: false,
   };
+}
+
+const MERGE_METHOD: Record<string, MergeMethod> = { MERGE: "merge", SQUASH: "squash", REBASE: "rebase" };
+
+/**
+ * GitHub's suggestion for this viewer and the methods the repository allows.
+ * A host that sends no flags reads as "all allowed" — a refused merge is then
+ * GitHub's answer, not a guess here.
+ */
+export function mapMergeMethods(repo: RawPr["repository"]): PullRequest["mergeMethods"] {
+  const known = repo.squashMergeAllowed !== undefined || repo.mergeCommitAllowed !== undefined || repo.rebaseMergeAllowed !== undefined;
+  const allowed: MergeMethod[] = known
+    ? [
+        ...(repo.mergeCommitAllowed ? (["merge"] as const) : []),
+        ...(repo.squashMergeAllowed ? (["squash"] as const) : []),
+        ...(repo.rebaseMergeAllowed ? (["rebase"] as const) : []),
+      ]
+    : ["merge", "squash", "rebase"];
+  const suggested = MERGE_METHOD[repo.viewerDefaultMergeMethod ?? ""] ?? null;
+  return { suggested: suggested && allowed.includes(suggested) ? suggested : (allowed[0] ?? null), allowed };
 }
 
 function isRawPr(node: RawPr | Record<string, never> | null): node is RawPr {

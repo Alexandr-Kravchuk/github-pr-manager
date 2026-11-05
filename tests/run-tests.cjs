@@ -99,6 +99,7 @@ for (const mod of [
   "claude-sessions.js",
   "settings-search.js",
   "host-status.js",
+  "agent-defaults.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -1717,6 +1718,54 @@ const rawPr = (overrides = {}) => ({
   reviewThreads: { nodes: [] },
   commits: { nodes: [{ commit: { pushedDate: "2026-07-07T00:00:00Z", committedDate: "2026-07-07T00:00:00Z", statusCheckRollup: null } }] },
   ...overrides,
+});
+
+// --- the PR agent's inputs: head commit, size, merge methods -----------------
+test("mapPr: head oid, size and merge methods reach the PR", () => {
+  const pr = github.mapPr(
+    rawPr({
+      additions: 310,
+      deletions: 95,
+      changedFiles: 12,
+      repository: {
+        nameWithOwner: "a/b",
+        defaultBranchRef: { name: "main" },
+        viewerDefaultMergeMethod: "SQUASH",
+        squashMergeAllowed: true,
+        mergeCommitAllowed: true,
+        rebaseMergeAllowed: false,
+      },
+      commits: { nodes: [{ commit: { oid: "abc123", pushedDate: "2026-07-07T00:00:00Z", committedDate: "2026-07-07T00:00:00Z", statusCheckRollup: null } }] },
+    }),
+    "GH",
+    ["author"],
+    "auth",
+  );
+  assert.strictEqual(pr.headOid, "abc123");
+  assert.deepStrictEqual([pr.additions, pr.deletions, pr.changedFiles], [310, 95, 12]);
+  assert.deepStrictEqual(pr.mergeMethods, { suggested: "squash", allowed: ["merge", "squash"] });
+});
+test("mapPr: a PR without the new fields reads as zero size and no head", () => {
+  const pr = github.mapPr(rawPr(), "GH", ["author"], "auth");
+  assert.strictEqual(pr.headOid, null);
+  assert.deepStrictEqual([pr.additions, pr.deletions, pr.changedFiles], [0, 0, 0]);
+});
+test("mapMergeMethods: a suggestion the repo doesn't allow falls to the first allowed; no flags means all", () => {
+  const repo = (extra) => ({ nameWithOwner: "a/b", defaultBranchRef: null, ...extra });
+  assert.deepStrictEqual(
+    github.mapMergeMethods(repo({ viewerDefaultMergeMethod: "MERGE", squashMergeAllowed: true, mergeCommitAllowed: false, rebaseMergeAllowed: true })),
+    { suggested: "squash", allowed: ["squash", "rebase"] },
+  );
+  assert.deepStrictEqual(github.mapMergeMethods(repo({})), { suggested: "merge", allowed: ["merge", "squash", "rebase"] });
+  assert.deepStrictEqual(
+    github.mapMergeMethods(repo({ squashMergeAllowed: false, mergeCommitAllowed: false, rebaseMergeAllowed: false })),
+    { suggested: null, allowed: [] },
+  );
+});
+test("hashSnapshot: a new head commit alone re-emits", () => {
+  const a = github.mapPr(rawPr(), "GH", ["author"], "auth");
+  const snap = (pr) => ({ pullRequests: [pr], errors: [], rateLimits: [], fetchedAt: "", version: "" });
+  assert.notStrictEqual(poller.hashSnapshot(snap(a)), poller.hashSnapshot(snap({ ...a, headOid: "def456" })));
 });
 // Approval bodies have no resolvable-thread state: only reviewer clearance is
 // authoritative. Conservative unknown prose must never enter the merge queue.
@@ -7428,6 +7477,88 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(ids("token"), ["gh", "jira"]);
       assert.deepStrictEqual(ids("DARK"), ["appearance"]);
       assert.deepStrictEqual(ids("xyzzy"), []);
+    });
+
+    test("settings search: the Agent tab's sections are found by their own words", () => {
+      const ss = require(path.join(__dirname, "../dist/main/shared/settings-search.js"));
+      const ids = (q) => ss.searchSettings(q).map((s) => s.id);
+      assert.deepStrictEqual(ss.sectionsOfTab("agent").map((s) => s.id), [
+        "agent",
+        "agentScenarios",
+        "agentLimits",
+        "agentPermissions",
+        "agentCompanion",
+        "agentNotifications",
+        "agentPolicy",
+      ]);
+      assert.deepStrictEqual(ids("quiet hours"), ["agentLimits"]);
+      assert.deepStrictEqual(ids("worktree"), ["agent"]);
+      assert.deepStrictEqual(ids("squash"), ["agentScenarios"]);
+      assert.deepStrictEqual(ids("tray icon"), ["agentCompanion"]);
+      assert.deepStrictEqual(ids("signature"), ["agentPolicy"]);
+      assert.deepStrictEqual(ids("triage"), ["claude"], "the agent's prompts are edited with the Claude button's");
+      assert.strictEqual(ss.toSettingsTab("agent"), "agent");
+    });
+
+    test("agent settings: off by default, every posting scenario starts in shadow, merge only offers", () => {
+      const ad = require(path.join(__dirname, "../dist/main/shared/agent-defaults.js"));
+      const a = cfg.defaultSettings().agent;
+      assert.strictEqual(a.enabled, false);
+      assert.deepStrictEqual(a, cfg.validateAgent(undefined));
+      assert.deepStrictEqual(a, ad.DEFAULT_AGENT_SETTINGS);
+      for (const k of ["review", "rereview", "driveCi", "driveComments"]) assert.strictEqual(a.scenarios[k].mode, "shadow", k);
+      assert.strictEqual(a.scenarios.merge.mode, "offer");
+      assert.deepStrictEqual([a.scenarios.review.maxLines, a.scenarios.review.maxFiles, a.limits.parallel, a.limits.perDay], [400, 15, 2, 30]);
+      for (const rule of a.permissions.tools.review) assert.ok(!/push|Edit|Write/.test(rule), `review must not write: ${rule}`);
+    });
+
+    test("agent settings: a settings file from before the agent reads as the defaults", () => {
+      const s = cfg.validateSettings({ hosts: [], claude: { enabled: true } });
+      assert.deepStrictEqual(s.agent, cfg.validateAgent(undefined));
+      assert.strictEqual(s.claude.agentPrompts.triage, cfg.validateClaude(undefined).agentPrompts.triage);
+    });
+
+    test("agent settings: numbers are clamped, enums and clock times fall back, repos must be owner/name", () => {
+      const a = cfg.validateAgent({
+        enabled: true,
+        effort: "extreme",
+        repos: ["acme/widgets", "not a repo", " acme/gadgets ", 7],
+        scenarios: {
+          review: { mode: "auto", maxLines: 0, maxFiles: "40" },
+          brief: { mode: "shadow" },
+          merge: { mode: "on", method: "fast-forward" },
+          driveCi: { maxAttempts: 99 },
+        },
+        limits: { parallel: -3, perDay: 1e6, maxMinutes: 2.6, quietHours: { enabled: true, from: "25:00", to: "07:30" } },
+        policy: { signature: "   ", logRetentionDays: 0 },
+      });
+      assert.strictEqual(a.enabled, true);
+      assert.strictEqual(a.effort, "");
+      assert.deepStrictEqual(a.repos, ["acme/widgets", "acme/gadgets"]);
+      assert.strictEqual(a.scenarios.review.mode, "shadow");
+      assert.deepStrictEqual([a.scenarios.review.maxLines, a.scenarios.review.maxFiles], [1, 40]);
+      assert.strictEqual(a.scenarios.brief.mode, "on", "a brief has no shadow mode — it posts nothing either way");
+      assert.strictEqual(a.scenarios.merge.mode, "offer", "there is no mode that merges by itself");
+      assert.strictEqual(a.scenarios.merge.method, "github");
+      assert.strictEqual(a.scenarios.driveCi.maxAttempts, 10);
+      assert.deepStrictEqual([a.limits.parallel, a.limits.perDay, a.limits.maxMinutes], [1, 500, 5]);
+      assert.deepStrictEqual(a.limits.quietHours, { enabled: true, from: "20:00", to: "07:30" });
+      assert.strictEqual(a.policy.signature, cfg.validateAgent(undefined).policy.signature, "the signature can't be blanked out");
+      assert.strictEqual(a.policy.logRetentionDays, 1);
+    });
+
+    test("agent settings: tool rules per run kind — a missing list takes the default, a given one is kept trimmed", () => {
+      const a = cfg.validateAgent({ permissions: { tools: { review: [" Read ", "", 5, "Bash(gh pr view *)"] }, pushOwnBranch: false } });
+      assert.deepStrictEqual(a.permissions.tools.review, ["Read", "Bash(gh pr view *)"]);
+      assert.deepStrictEqual(a.permissions.tools.drive, cfg.validateAgent(undefined).permissions.tools.drive);
+      assert.strictEqual(a.permissions.pushOwnBranch, false);
+    });
+
+    test("claude settings: the agent's prompts default, keep edits, and stay out of the button's kinds", () => {
+      const c = cfg.validateClaude({ agentPrompts: { rereview: "  /my-rereview {url} ", triage: "" } });
+      assert.strictEqual(c.agentPrompts.rereview, "/my-rereview {url}");
+      assert.strictEqual(c.agentPrompts.triage, cfg.validateClaude(undefined).agentPrompts.triage);
+      for (const k of Object.keys(c.agentPrompts)) assert.ok(!cl.CLAUDE_LAUNCH_KINDS.includes(k), `${k} must not be a launch kind`);
     });
 
     test("claude launch: remotes normalize across https, scp and ssh:// forms", () => {

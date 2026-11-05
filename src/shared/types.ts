@@ -144,6 +144,12 @@ export interface ClaudeSettings {
   /** Prompt template per launch kind; `{url}` is the PR URL. */
   prompts: Record<"drive" | "review" | "close" | "explain" | "open", string>;
   /**
+   * Prompts only the PR agent runs (see `AgentSettings`). Kept apart from
+   * `prompts` on purpose: those keys are the Claude button's launch kinds, and a
+   * key there would show up in the button's menu and its IPC allow-list.
+   */
+  agentPrompts: Record<AgentPromptKey, string>;
+  /**
    * Where the session opens. `auto` takes iTerm2 when it is installed, else
    * Terminal (macOS; a `cmd` window on Windows). The system's "default
    * terminal" is not consulted: macOS has no such setting a launcher can ask.
@@ -213,6 +219,95 @@ export interface Settings {
   jira?: JiraSettings;
   /** Claude session launcher (off by default). */
   claude: ClaudeSettings;
+  /** The PR agent (off by default). */
+  agent: AgentSettings;
+}
+
+/** The prompts only the PR agent uses, next to the Claude button's ones. */
+export type AgentPromptKey = "triage" | "rereview" | "afterMerge";
+
+/** Off never runs; shadow does the work and waits for you before posting; on posts and tells you after. */
+export type AgentMode = "off" | "shadow" | "on";
+
+/** The kinds of session the agent starts — each has its own tool set. */
+export type AgentRunKind = "review" | "brief" | "rereview" | "drive" | "afterMerge";
+
+/** A merge method, in `gh pr merge` terms. */
+export type MergeMethod = "merge" | "squash" | "rebase";
+
+/**
+ * The PR agent: it works on your PRs in the background with Claude Code.
+ * Everything that can be tuned is here (see the Agent tab of Settings); the
+ * hard safety rails — merging only on your click, never pushing to anyone
+ * else's branch, never skipping permission checks — are deliberately not.
+ */
+export interface AgentSettings {
+  enabled: boolean;
+  /** Model for agent runs; "" = Claude Code's default. */
+  model: string;
+  /** Effort for agent runs; "" = Claude Code's default. */
+  effort: "" | "low" | "medium" | "high";
+  /** Where each run's git worktree goes; "" = `<checkout>/.claude/worktrees`. */
+  worktreeDir: string;
+  /** Remove a run's worktree once its PR is merged or closed. */
+  removeWorktree: boolean;
+  /** "owner/name" the agent may work in; empty = every repository with a checkout. */
+  repos: string[];
+  scenarios: {
+    /** A review requested of you personally, on a PR within the size limit. */
+    review: {
+      mode: AgentMode;
+      maxLines: number;
+      maxFiles: number;
+      /** Also take requests made of a team you are in (off: they would eat the daily limit). */
+      teamRequests: boolean;
+      /** Also review drafts (off: a draft is picked up once it is marked ready). */
+      drafts: boolean;
+      /** Hold the approve while another reviewer's change request is open. */
+      holdApproveOnChangeRequest: boolean;
+    };
+    /** A review requested of you on a PR over the limit: a brief, never posted. */
+    brief: { mode: "off" | "on" };
+    /** The author replied in your threads. */
+    rereview: { mode: AgentMode; resolve: boolean; approve: boolean };
+    /** Your PR is ready to merge: offer the Merge button (the agent never merges itself). */
+    merge: {
+      mode: "off" | "offer";
+      requireAllReviewers: boolean;
+      requireThreadsResolved: boolean;
+      requireChecksGreen: boolean;
+      /** "github" takes the repository's own suggestion. */
+      method: "github" | MergeMethod;
+      deleteBranch: boolean;
+    };
+    /** Your PR fails CI or has a conflict. */
+    driveCi: { mode: AgentMode; maxAttempts: number };
+    /** Reviewers commented on your PR. */
+    driveComments: { mode: AgentMode };
+  };
+  limits: {
+    parallel: number;
+    perDay: number;
+    /** A run is stopped (and handed to you) after this many minutes. */
+    maxMinutes: number;
+    /** No new run starts between `from` and `to` ("HH:MM", may wrap past midnight). */
+    quietHours: { enabled: boolean; from: string; to: string };
+    /** Suggest switching a scenario from shadow to on after this many results accepted unchanged. */
+    promoteAfter: number;
+  };
+  permissions: {
+    /** `--allowedTools` rules per kind of run. */
+    tools: Record<AgentRunKind, string[]>;
+    /** Allow pushing to the head branch of your own PR (drive). */
+    pushOwnBranch: boolean;
+  };
+  companion: { headerChip: boolean; trayState: boolean };
+  notifications: { needsYou: boolean; failed: boolean; finished: boolean };
+  policy: {
+    /** Appended to everything the agent posts; it cannot be removed, only reworded. */
+    signature: string;
+    logRetentionDays: number;
+  };
 }
 
 /** Jira setup state for the UI, from the main process. */
@@ -351,6 +446,22 @@ export interface PullRequest {
   lastCommitPushedAt: string | null;
   /** Name of the head branch, e.g. "feature/ENG-93374-foo" — used as a fallback issue-key source. */
   headRefName: string;
+  /**
+   * Oid of the head commit, or null when GitHub listed none. The PR agent keys
+   * its ledger on it and merges with `--match-head-commit` against it, so a push
+   * between the offer and the click is refused by GitHub itself.
+   */
+  headOid: string | null;
+  /** Lines added and removed and files touched — the agent's "big PR" limit reads these. */
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  /**
+   * The repository's merge methods: the one GitHub suggests to this viewer and
+   * the ones the repository allows (rulesets are not reflected here — a merge
+   * they refuse is reported as GitHub's answer).
+   */
+  mergeMethods: { suggested: MergeMethod | null; allowed: MergeMethod[] };
   /**
    * Issue-tracker key parsed from the title (falling back to the head branch),
    * e.g. "ENG-93374", or null when none is found. Used to group related PRs.

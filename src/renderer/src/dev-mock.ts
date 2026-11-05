@@ -14,6 +14,7 @@ import type {
   PullRequest,
   Settings,
 } from "../../shared/types";
+import { DEFAULT_AGENT_SETTINGS } from "../../shared/agent-defaults";
 import { DEFAULT_CLAUDE_SETTINGS } from "../../shared/claude-launch";
 
 function pr(overrides: Partial<PullRequest>): PullRequest {
@@ -34,6 +35,11 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     updatedAt: new Date(Date.now() - 36e5).toISOString(),
     lastCommitPushedAt: new Date(Date.now() - 36e5).toISOString(),
     headRefName: "feature/sample",
+    headOid: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    additions: 120,
+    deletions: 30,
+    changedFiles: 6,
+    mergeMethods: { suggested: "squash", allowed: ["merge", "squash", "rebase"] },
     issueKey: null,
     issueSummary: null,
     parentKey: null,
@@ -339,6 +345,7 @@ const settings: Settings = {
   },
   hosts: [{ label: "GitHub", graphqlUrl: "https://api.github.com/graphql", repos: ["acme/widgets"] }],
   claude: { ...DEFAULT_CLAUDE_SETTINGS, enabled: true },
+  agent: structuredClone(DEFAULT_AGENT_SETTINGS),
 };
 
 /** Running Claude sessions, matched to the `?buddy=review` fixtures by their head branch. */

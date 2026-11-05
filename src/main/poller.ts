@@ -165,6 +165,9 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
   const lite = s.pullRequests.map((p) => [
     p.id,
     p.updatedAt,
+    // The PR agent keys its ledger on the head commit; a push moves updatedAt
+    // too, but the agent must not depend on that coincidence.
+    p.headOid,
     // The unread channel's raw input, and nothing renders it — the renderer's
     // only read is the mark-seen payload — so with the setting off (where
     // `applyActivity` holds `hasNewActivity` false) a change in it alone shows

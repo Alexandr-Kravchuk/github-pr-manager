@@ -2,13 +2,14 @@
 // the search box finds it by. Node-free (see AGENTS.md) so the renderer can
 // value-import it and the matching stays unit-tested without a DOM.
 
-export type SettingsTabId = "general" | "notifications" | "hosts" | "integrations";
+export type SettingsTabId = "general" | "notifications" | "hosts" | "integrations" | "agent";
 
 export const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTabId; label: string }> = [
   { id: "general", label: "General" },
   { id: "notifications", label: "Notifications" },
   { id: "hosts", label: "GitHub" },
   { id: "integrations", label: "Integrations" },
+  { id: "agent", label: "Agent" },
 ];
 
 export type SettingsSectionId =
@@ -19,7 +20,14 @@ export type SettingsSectionId =
   | "gh"
   | "hosts"
   | "jira"
-  | "claude";
+  | "claude"
+  | "agent"
+  | "agentScenarios"
+  | "agentLimits"
+  | "agentPermissions"
+  | "agentCompanion"
+  | "agentNotifications"
+  | "agentPolicy";
 
 export interface SettingsSection {
   id: SettingsSectionId;
@@ -126,8 +134,90 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       "review",
       "close",
       "explain",
+      "agent prompts",
+      "triage",
+      "re-review",
+      "after merging",
     ],
   },
+  // The Agent tab. Its words stay clear of the exact searches other sections
+  // own (see the settings-search tests): no "token", "iterm" or "dark", and
+  // "tray" never in a section that also says "close".
+  {
+    id: "agent",
+    tab: "agent",
+    title: "PR agent",
+    keywords: [
+      "agent",
+      "run the pr agent",
+      "background",
+      "model",
+      "effort",
+      "worktree",
+      "folder",
+      "merged or closed",
+      "repositories",
+      "only these",
+      "checkout",
+    ],
+  },
+  {
+    id: "agentScenarios",
+    tab: "agent",
+    title: "What the agent does",
+    keywords: [
+      "scenario",
+      "mode",
+      "shadow",
+      "review",
+      "auto-review",
+      "lines",
+      "files",
+      "team requests",
+      "drafts",
+      "hold approve",
+      "change request",
+      "brief",
+      "big pr",
+      "re-review",
+      "author replied",
+      "resolve",
+      "approve",
+      "merge",
+      "merge button",
+      "method",
+      "squash",
+      "rebase",
+      "delete the branch",
+      "after merging",
+      "jira",
+      "drive",
+      "ci",
+      "conflict",
+      "attempts",
+      "comments",
+    ],
+  },
+  {
+    id: "agentLimits",
+    tab: "agent",
+    title: "Limits",
+    keywords: ["limit", "runs at a time", "parallel", "runs per day", "stop a run", "minutes", "quiet hours", "night", "suggest", "shadow to on"],
+  },
+  {
+    id: "agentPermissions",
+    tab: "agent",
+    title: "Permissions",
+    keywords: ["permissions", "allowed tools", "allowlist", "push", "branch", "safety"],
+  },
+  { id: "agentCompanion", tab: "agent", title: "Companion", keywords: ["companion", "header", "chip", "ring", "tray", "icon"] },
+  {
+    id: "agentNotifications",
+    tab: "agent",
+    title: "Agent notifications",
+    keywords: ["notification", "needs a decision", "run failed", "run finished", "toast"],
+  },
+  { id: "agentPolicy", tab: "agent", title: "Policy", keywords: ["signature", "posted", "log", "journal", "retention", "days"] },
 ];
 
 /**
