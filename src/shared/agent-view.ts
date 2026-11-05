@@ -1,4 +1,5 @@
 import type { NotifyEventKind } from "./notify";
+import type { PlanStep } from "./agent-stream";
 import type { AgentItem, AgentRunState, AgentSettings, AgentState, PullRequest } from "./types";
 
 // How the agent's state reads on the dashboard: which of a PR's items its card
@@ -19,6 +20,10 @@ export const AGENT_CLOSED = {
   dismissed: "Dismissed",
   rerun: "Run again",
   reviewed: "Reviewed instead",
+  /** A newer run on the same PR replaced it (a new head, a new answer from the author). */
+  superseded: "Superseded by a newer run",
+  /** Its PR left the dashboard: merged, closed, or no longer yours to act on. */
+  offDashboard: "Its PR left the dashboard — merged, closed or no longer yours",
 } as const;
 
 const CLOSED_HEADLINES: ReadonlySet<string> = new Set(Object.values(AGENT_CLOSED));
@@ -102,7 +107,8 @@ export function finishedOn(item: Pick<AgentItem, "finishedAt">, today: string): 
 
 /** What a needs-you item asks of you, as the words of its first button. */
 export function primaryActionLabel(item: AgentItem): string | null {
-  if (item.state === "error") return "Run again";
+  // The Jira dry run follows a merge: its PR is gone, so it can't run again — only be put away.
+  if (item.state === "error") return item.scenario === "afterMerge" ? "Done" : "Run again";
   if (item.state !== "needsYou") return null;
   // A drive starts over: its push is checked against what the app read
   // before any session worked in that worktree.
@@ -157,35 +163,93 @@ function localClock(iso: string): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+/** The step a plan is on, as "3/6" — the same in the tray and the popover; "" without a plan. */
+export function stepLabel(steps: readonly Pick<PlanStep, "status">[]): string {
+  if (steps.length === 0) return "";
+  const at = steps.findIndex((s) => s.status === "in_progress");
+  const next = at >= 0 ? at : steps.findIndex((s) => s.status !== "completed");
+  return `${next >= 0 ? next + 1 : steps.length}/${steps.length}`;
+}
+
+/** Why the queue isn't moving, when something holds it. */
+export type QueueBlock = "paused" | "quiet" | "usage" | "daily";
+
+/**
+ * The agent's state in the numbers and words every place shows — the header
+ * chip, the tray, the Board's header and lanes, a card's status line — read
+ * from one function so no two of them can disagree.
+ */
+export interface AgentSummary {
+  running: number;
+  /** Of those, paused (by you, or by pausing the agent). */
+  pausedRuns: number;
+  queued: number;
+  /** Results waiting for you, not put aside with Later. */
+  waiting: number;
+  later: number;
+  /** What holds the queue; null when nothing does. */
+  block: QueueBlock | null;
+  /** That, in words: "Paused", "Quiet hours until 08:00", "Usage limit — waits until 14:05", "Daily limit reached (30)". */
+  blockText: string | null;
+}
+
+export function agentSummary(state: AgentState): AgentSummary {
+  const results = state.items.filter((i) => i.state === "needsYou" || i.state === "error");
+  const block: QueueBlock | null = state.paused
+    ? "paused"
+    : state.quietUntil
+      ? "quiet"
+      : state.heldUntil
+        ? "usage"
+        : state.perDay > 0 && state.runsToday >= state.perDay
+          ? "daily"
+          : null;
+  const blockText =
+    block === "paused"
+      ? "Paused"
+      : block === "quiet"
+        ? `Quiet hours until ${state.quietUntil}`
+        : block === "usage" && state.heldUntil
+          ? `Usage limit — waits until ${localClock(state.heldUntil)}`
+          : block === "daily"
+            ? `Daily limit reached (${state.perDay})`
+            : null;
+  return {
+    running: state.running.length,
+    pausedRuns: state.running.filter((r) => r.paused).length,
+    queued: state.items.filter((i) => i.state === "queued").length,
+    waiting: results.filter((i) => !i.later).length,
+    later: results.filter((i) => i.later).length,
+    block,
+    blockText,
+  };
+}
+
 /**
  * The agent in one line, for the tray's tooltip and menu: what runs (with
- * its plan's progress), else why nothing does, plus what waits for you —
- * "Reviewing #911 · 4/6 · 2 wait for you", "Paused", "Quiet hours until 08:00".
+ * the step its plan is on), else why nothing does, plus what waits for you —
+ * "Reviewing #911 · 4/6 · 2 wait for you", "Paused", "Quiet hours until 08:00 · 3 queued".
  */
 export function agentTrayLine(state: AgentState): string {
-  const waiting = state.items.filter((i) => (i.state === "needsYou" || i.state === "error") && !i.later).length;
-  const queued = state.items.filter((i) => i.state === "queued").length;
+  const sum = agentSummary(state);
   const first = state.running[0];
   const item = first ? state.items.find((i) => i.runId === first.runId) : undefined;
   let line: string;
   if (state.paused) {
     line = "Paused";
   } else if (first && item) {
-    const steps = first.progress.steps;
-    const done = steps.filter((s) => s.status === "completed").length;
-    line = `${SCENARIO_VERB[item.scenario]} #${item.prNumber}${steps.length > 0 ? ` · ${done}/${steps.length}` : ""}${state.running.length > 1 ? ` +${state.running.length - 1}` : ""}`;
-  } else if (state.quietUntil && queued > 0) {
-    line = `Quiet hours until ${state.quietUntil} · ${queued} queued`;
-  } else if (state.quietUntil) {
-    line = `Quiet hours until ${state.quietUntil}`;
-  } else if (state.heldUntil) {
-    line = `Usage limit — waits until ${localClock(state.heldUntil)}`;
-  } else if (queued > 0) {
-    line = `${queued} queued`;
+    const step = stepLabel(first.progress.steps);
+    line = `${SCENARIO_VERB[item.scenario]} #${item.prNumber}${first.paused ? " (paused)" : step ? ` · ${step}` : ""}${sum.running > 1 ? ` +${sum.running - 1}` : ""}`;
+  } else if (sum.blockText && sum.queued > 0) {
+    line = `${sum.blockText} · ${sum.queued} queued`;
+  } else if (sum.blockText && sum.block !== "daily") {
+    line = sum.blockText;
+  } else if (sum.queued > 0) {
+    line = `${sum.queued} queued`;
   } else {
     line = "Idle";
   }
-  return waiting > 0 ? `${line} · ${waiting} wait${waiting === 1 ? "s" : ""} for you` : line;
+  return sum.waiting > 0 ? `${line} · ${sum.waiting} wait${sum.waiting === 1 ? "s" : ""} for you` : line;
 }
 
 /** Which of the agent's runs stands in for each regular toast. */

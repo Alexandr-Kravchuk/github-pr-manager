@@ -9918,7 +9918,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const b = vItem({ prId: "B", state: "working", scenario: "drive" });
       const run = (item, steps) => ({ runId: item.runId, progress: progress(steps), recent: [], paused: false });
       assert.strictEqual(view.agentTrayLine(base), "Idle");
-      assert.strictEqual(view.agentTrayLine({ ...base, items: [a], running: [run(a, ["completed", "completed", "in_progress", "pending"])] }), "Reviewing #911 · 2/4");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: [a], running: [run(a, ["completed", "completed", "in_progress", "pending"])] }), "Reviewing #911 · 3/4", "the step it is on — as the popover shows it");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: [a], running: [{ ...run(a, ["in_progress"]), paused: true }] }), "Reviewing #911 (paused)");
+      assert.strictEqual(view.agentTrayLine({ ...base, runsToday: 30, items: [vItem({ prId: "Q", state: "queued" })] }), "Daily limit reached (30) · 1 queued");
       assert.strictEqual(view.agentTrayLine({ ...base, items: [a, b], running: [run(a, []), run(b, [])] }), "Reviewing #911 +1");
       const waiting = [vItem({ prId: "C", state: "needsYou" }), vItem({ prId: "D", state: "error" }), vItem({ prId: "E", state: "needsYou", later: true })];
       assert.strictEqual(view.agentTrayLine({ ...base, items: waiting }), "Idle · 2 wait for you", "a result put aside with Later doesn't count");
@@ -10364,6 +10366,120 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(agentCore.ghTarget("https://creatio.ghe.com/eng/core/pull/7", "eng/core"), { GH_HOST: "creatio.ghe.com", GH_REPO: "creatio.ghe.com/eng/core" });
       assert.deepStrictEqual(agentCore.ghTarget("not a url", "eng/core"), {});
       assert.deepStrictEqual(agentCore.ghTarget("https://h/x/y/pull/1", "x/y; rm -rf"), {}, "only a plain owner/name");
+    });
+
+    // --- steps 4–6 of the test plan: an item's life, one summary, one way to a card ---
+    const reconcile = require(path.join(__dirname, "../dist/main/shared/agent-reconcile.js"));
+    test("agent reconcile: a PR missing from two snapshots in a row (its host answering) closes its items; a fetch error isn't a merge", () => {
+      const items = [
+        vItem({ prId: "GONE", state: "needsYou" }),
+        vItem({ prId: "GONE", state: "queued" }),
+        vItem({ prId: "GONE", state: "working" }),
+        vItem({ prId: "GONE", state: "needsYou", scenario: "afterMerge" }),
+        vItem({ prId: "GONE", state: "needsYou", scenario: "merge" }),
+        vItem({ prId: "HERE", state: "needsYou" }),
+        vItem({ prId: "DOWN", state: "error", hostLabel: "GHE" }),
+      ];
+      const misses = new Map();
+      const present = new Set(["HERE"]);
+      assert.deepStrictEqual(reconcile.goneItems(items, present, new Set(["GHE"]), misses), [], "one snapshot is not enough");
+      const gone = reconcile.goneItems(items, present, new Set(["GHE"]), misses);
+      assert.deepStrictEqual(gone.map((i) => [i.prId, i.state, i.scenario]), [["GONE", "needsYou", "review"], ["GONE", "queued", "review"]], "not a running one, not the merge offer, not the Jira run after a merge");
+      assert.strictEqual(misses.has("DOWN"), false, "its host failed: not counted");
+      assert.deepStrictEqual(reconcile.goneItems(items, new Set(["HERE", "GONE"]), new Set(), misses), [], "back on the dashboard: the count starts over");
+      assert.strictEqual(misses.has("GONE"), false);
+    });
+
+    test("agent reconcile: a newer run replaces what waits on the same PR in its lane; nothing for you goes to Done", () => {
+      const fresh = vItem({ prId: "P", state: "queued", scenario: "review" });
+      const items = [
+        fresh,
+        vItem({ prId: "P", state: "needsYou", scenario: "review" }),
+        vItem({ prId: "P", state: "error", scenario: "brief" }),
+        vItem({ prId: "P", state: "needsYou", scenario: "drive" }),
+        vItem({ prId: "P", state: "done", scenario: "review" }),
+        vItem({ prId: "Q", state: "needsYou", scenario: "review" }),
+      ];
+      assert.deepStrictEqual(reconcile.supersededBy(items, fresh).map((i) => [i.prId, i.scenario]), [["P", "review"], ["P", "brief"]], "your PR's drive is another lane");
+      const card = (o) => ({ summary: "s", asks: [], findings: [], structured: true, ...o });
+      const r = (o) => vItem({ prId: "P", state: "needsYou", runFolder: "/x", result: card({}), ...o });
+      assert.strictEqual(reconcile.nothingForYou(r({})), true);
+      assert.strictEqual(reconcile.nothingForYou(r({ scenario: "rereview" })), true);
+      assert.strictEqual(reconcile.nothingForYou(r({ plan: { event: "COMMENT" } })), false, "something to publish");
+      assert.strictEqual(reconcile.nothingForYou(r({ result: card({ asks: [{ question: "q", options: [] }] }) })), false, "it asks you");
+      assert.strictEqual(reconcile.nothingForYou(r({ result: card({ findings: [{ severity: "major", text: "t", where: "" }] }) })), false, "a major finding");
+      assert.strictEqual(reconcile.nothingForYou(r({ result: card({ findings: [{ severity: "minor", text: "t", where: "" }] }) })), true);
+      assert.strictEqual(reconcile.nothingForYou(r({ scenario: "drive" })), false, "a drive with no commits: CI is still red");
+      assert.strictEqual(reconcile.nothingForYou(r({ runFolder: undefined })), false, "a plain dry run's text is yours to post");
+      assert.strictEqual(reconcile.nothingForYou(r({ result: undefined })), false);
+    });
+
+    await atest("agent reconcile: a new head supersedes the waiting result; a PR that left the dashboard closes its items", async () => {
+      const f = agentFixture({ script: succeed("Would post: a comment.") });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const old = only(f)[0];
+        // The author pushes: a new head, a new review — the old result goes quietly.
+        f.snapshot.pullRequests = [reviewPr({ headOid: "bbb222" })];
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).find((i) => i.runId === old.runId).state === "done");
+        assert.strictEqual(only(f).find((i) => i.runId === old.runId).headline, view.AGENT_CLOSED.superseded);
+        await until(() => only(f).some((i) => i.runId !== old.runId && i.state === "needsYou"));
+        // The PR is merged elsewhere: two snapshots without it, and its result closes.
+        f.snapshot.pullRequests = [];
+        f.agent.onSnapshot(f.snapshot);
+        assert.ok(only(f).some((i) => i.state === "needsYou"), "one snapshot without it is not enough");
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => !only(f).some((i) => i.state === "needsYou"));
+        assert.ok(only(f).some((i) => i.headline === view.AGENT_CLOSED.offDashboard));
+        const board = view.boardColumns([], f.agent.getState(), view.todayKey(new Date()));
+        assert.deepStrictEqual([board.needsYou.length, board.done.length], [0, 0], "both close quietly: no decision, no Done today card");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent reconcile: a review with nothing to post, ask or worry about goes straight to Done today", async () => {
+      const text = "Checked.\n\n```prd-result\n" + JSON.stringify({ summary: "Nothing to post: your approve stands.", asks: [], findings: [{ severity: "note", text: "fine", where: "" }] }) + "\n```";
+      const notices = [];
+      const f = agentFixture({ script: succeed(text), captureScript: captureJs, notify: (n) => notices.push(n.kind) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "done"));
+        const item = only(f)[0];
+        assert.strictEqual(item.headline, "Review ready — nothing to post");
+        assert.deepStrictEqual(notices, ["finished"], "not a decision for you");
+        const board = view.boardColumns([], f.agent.getState(), view.todayKey(new Date()));
+        assert.ok(board.done.some((i) => i.runId === item.runId));
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("agent summary: one set of numbers and words for the chip, the tray, the Board and the cards", () => {
+      const base = { enabled: true, items: [], running: [], idle: {}, runsToday: 3, perDay: 30, parallel: 2, heldUntil: null, headerChip: true, trayState: true, paused: false, quietUntil: null, acceptedUnchanged: 0, suggestOn: false };
+      const items = [vItem({ prId: "A", state: "queued" }), vItem({ prId: "B", state: "needsYou" }), vItem({ prId: "C", state: "error", later: true }), vItem({ prId: "D", state: "working" })];
+      const running = [{ runId: items[3].runId, progress: { steps: [] }, recent: [], paused: true }];
+      const sum = view.agentSummary({ ...base, items, running });
+      assert.deepStrictEqual(
+        { running: sum.running, pausedRuns: sum.pausedRuns, queued: sum.queued, waiting: sum.waiting, later: sum.later, block: sum.block },
+        { running: 1, pausedRuns: 1, queued: 1, waiting: 1, later: 1, block: null },
+      );
+      assert.deepStrictEqual([view.agentSummary({ ...base, paused: true }).block, view.agentSummary({ ...base, quietUntil: "08:00" }).blockText], ["paused", "Quiet hours until 08:00"]);
+      assert.strictEqual(view.agentSummary({ ...base, runsToday: 30 }).blockText, "Daily limit reached (30)");
+      assert.deepStrictEqual([view.stepLabel([]), view.stepLabel([{ status: "completed" }, { status: "pending" }]), view.stepLabel([{ status: "completed" }])], ["", "2/2", "1/1"]);
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "error", scenario: "afterMerge" })), "Done", "the Jira run after a merge can't run again");
+    });
+
+    test("main.js wiring: a clicked agent notification names its item; the focus flash is a finite animation", () => {
+      const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /sendToRenderer\("agent-show-board", item\.runId\)/);
+      const preload = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
+      assert.match(preload, /"agent-show-board", handler/);
+      assert.match(preload, /listener\(typeof runId === "string" \? runId : undefined\)/);
+      const css = nfsA.readFileSync(path.join(__dirname, "../src/renderer/src/styles.css"), "utf8");
+      assert.match(css, /\.focus-flash \{\s*animation: focus-flash 0\.9s ease-out 3;/);
     });
 
     test("ipc: an idle PR can be queued in front of a run, and a queued run moved; nothing else rides along", () => {

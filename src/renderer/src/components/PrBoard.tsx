@@ -1,7 +1,7 @@
-import { useContext, useMemo, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
+import { useContext, useEffect, useMemo, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
 
 // Node-free (see AGENTS.md): the columns, the day, and the plan's current step.
-import { BOARD_LANES, boardColumns, boardLanes, primaryActionLabel, runFor, todayKey, type BoardLane } from "../../../shared/agent-view";
+import { agentSummary, BOARD_LANES, boardColumns, boardLanes, primaryActionLabel, runFor, todayKey, type BoardLane } from "../../../shared/agent-view";
 import { currentStep, type RunProgress } from "../../../shared/agent-stream";
 import { describePlan, type PublishSummary } from "../../../shared/agent-publish";
 import { resultCard, type FindingSeverity, type RunAsk, type RunFinding } from "../../../shared/agent-result";
@@ -48,8 +48,23 @@ function shortRepo(repo: string): string {
   return repo.split("/")[1] ?? repo;
 }
 
-export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: PullRequest) => void }) {
+export function PrBoard({ prs, onOpen, focus }: { prs: PullRequest[]; onOpen: (pr: PullRequest) => void; focus?: { runId: string | null; n: number } }) {
   const { state, act } = useContext(AgentContext);
+  // Asked to show an item: its card, scrolled to and flashing (a finite animation).
+  useEffect(() => {
+    if (!focus?.runId) return;
+    const t = window.setTimeout(() => {
+      const el = document.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(focus.runId ?? "")}"]`);
+      if (!el) return;
+      // At once, not smoothly: a smooth scroll can be dropped by a render landing mid-way.
+      el.scrollIntoView({ block: "center" });
+      el.classList.remove("focus-flash");
+      void el.offsetWidth;
+      el.classList.add("focus-flash");
+      window.setTimeout(() => el.classList.remove("focus-flash"), 3000);
+    }, 50);
+    return () => window.clearTimeout(t);
+  }, [focus?.n, focus?.runId]);
   const [idleOpen, setIdleOpen] = useState(false);
   /** The lane whose queue a drag is over. */
   const [dropOn, setDropOn] = useState<BoardLane | null>(null);
@@ -62,6 +77,7 @@ export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: Pull
     return <div className="rounded-lg border border-line bg-surface/40 p-8 text-center text-sm text-fg-subtle">The PR agent isn&apos;t available here.</div>;
   }
   const all = boardColumns(prs, state, todayKey(new Date()));
+  const sum = agentSummary(state);
   const lanes = boardLanes(all);
   // The queue is one queue: a card's place in it, whichever lane shows it.
   const place = new Map(all.queued.map((i, n) => [i.runId, n + 1]));
@@ -98,14 +114,17 @@ export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: Pull
         {state.enabled ? (
           <>
             <span>
-              Running {all.working.length} of {state.parallel} · runs today {state.runsToday} of {state.perDay}
+              Running {sum.running} of {state.parallel}
+              {sum.pausedRuns > 0 && ` (${sum.pausedRuns} paused)`} · runs today {state.runsToday} of {state.perDay}
             </span>
-            {state.paused ? (
-              <span className="font-medium text-amber-700 dark:text-amber-300">Paused — nothing starts, and nothing goes out on its own</span>
-            ) : (
-              state.quietUntil && <span>Quiet hours until {state.quietUntil} — only what you ask for starts</span>
+            {sum.block === "paused" && <span className="font-medium text-amber-700 dark:text-amber-300">Paused — nothing starts, and nothing goes out on its own</span>}
+            {sum.block === "quiet" && <span>{sum.blockText} — only what you ask for starts</span>}
+            {sum.block === "usage" && <span className="text-amber-700 dark:text-amber-300">Claude&apos;s {sum.blockText?.toLowerCase()}</span>}
+            {sum.block === "daily" && (
+              <span className="text-amber-700 dark:text-amber-300">
+                {sum.blockText} — {sum.queued > 0 ? `${sum.queued} queued wait` : "new runs wait"} until tomorrow (Settings › Agent › Limits)
+              </span>
             )}
-            {state.heldUntil && <span className="text-amber-700 dark:text-amber-300">Claude&apos;s usage limit — new runs wait until {new Date(state.heldUntil).toLocaleTimeString()}</span>}
             {state.suggestOn && (
               <span className="text-emerald-700 dark:text-emerald-300">
                 You published {state.acceptedUnchanged} reviews exactly as prepared — reviews can go On in Settings › Agent.
@@ -137,7 +156,9 @@ export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: Pull
             <h2 className="mb-2 flex items-baseline gap-2 px-1">
               <span aria-hidden className={cn("inline-block size-2 self-center rounded-full", LANE_DOT[lane])} />
               <span className="text-sm font-semibold text-fg">{LANE_TITLE[lane]}</span>
-              <span className="text-xs tabular-nums text-fg-muted">{busy}</span>
+              <span className="text-xs tabular-nums text-fg-muted" title="Queued, working and waiting for you in this lane">
+                {busy}
+              </span>
               <span className="text-xs text-fg-subtle">— {LANE_HINT[lane]}</span>
             </h2>
             <div className="flex items-start gap-3 overflow-x-auto pb-2">
@@ -184,6 +205,7 @@ export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: Pull
                   cols.queued.map((item) => (
                     <article
                       key={item.runId}
+                      data-run-id={item.runId}
                       draggable
                       onDragStart={(e) => {
                         e.dataTransfer.setData(RUN_DRAG, item.runId);
@@ -244,7 +266,7 @@ export function PrBoard({ prs, onOpen }: { prs: PullRequest[]; onOpen: (pr: Pull
                 )}
               </Column>
 
-              <Column label="Needs you" count={cols.needsYou.filter((i) => !i.later).length} dot="needsYou" className="min-w-[15rem] flex-[1.6] basis-0 border-amber-500/50 bg-amber-500/[0.05]">
+              <Column label="Needs you" count={cols.needsYou.filter((i) => !i.later).length} aside={cols.needsYou.some((i) => i.later) ? <span className="text-[11px] text-fg-subtle" title="Put aside with Later — at the end of the column">+{cols.needsYou.filter((i) => i.later).length} later</span> : undefined} dot="needsYou" className="min-w-[15rem] flex-[1.6] basis-0 border-amber-500/50 bg-amber-500/[0.05]">
                 {cols.needsYou.length === 0 ? (
                   <Empty>Nothing waits for you</Empty>
                 ) : (
@@ -335,7 +357,7 @@ function CardHead({ item, onTitle }: { item: AgentItem; onTitle: () => void }) {
 
 function ItemCard({ item, onTitle, children }: { item: AgentItem; onTitle: () => void; children?: ReactNode }) {
   return (
-    <article className="rounded-md border border-line bg-surface p-2.5 shadow-sm">
+    <article data-run-id={item.runId} className="rounded-md border border-line bg-surface p-2.5 shadow-sm">
       <CardHead item={item} onTitle={onTitle} />
       <div className="mt-1 text-xs text-fg-muted">{item.headline}</div>
       {children && <div className="mt-2 flex flex-wrap items-center gap-1.5">{children}</div>}
@@ -356,11 +378,11 @@ function WorkingCard({
   onTitle: () => void;
   run: (a: AgentAction) => Promise<void>;
 }) {
-  const { openCompanion } = useContext(AgentContext);
+  const { state, openCompanion } = useContext(AgentContext);
   const steps = progress?.steps ?? [];
   const step = progress ? currentStep(progress) : null;
   return (
-    <article className="rounded-md border border-sky-500/40 bg-surface p-2.5 shadow-sm">
+    <article data-run-id={item.runId} className="rounded-md border border-sky-500/40 bg-surface p-2.5 shadow-sm">
       <CardHead item={item} onTitle={onTitle} />
       {steps.length > 0 && (
         <div className="mt-1.5 flex gap-0.5" aria-hidden>
@@ -382,9 +404,12 @@ function WorkingCard({
         </div>
       )}
       <div className="mt-2 flex flex-wrap gap-1.5">
-        <button type="button" className={BTN} onClick={() => openCompanion(item.runId)}>
-          Watch
-        </button>
+        {/* The plan and log live in the popover, which exists only with the header chip. */}
+        {state?.headerChip && (
+          <button type="button" className={BTN} title="The plan, the log, a note to the agent" onClick={() => openCompanion(item.runId)}>
+            Watch
+          </button>
+        )}
         <button type="button" className={BTN} onClick={() => void run({ type: paused ? "resume" : "pause", runId: item.runId })}>
           {paused ? "Resume" : "Pause"}
         </button>
@@ -654,7 +679,7 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
   // The full message, when it says more than the summary above it.
   const report = item.output && item.output.trim() !== card?.summary ? item.output : null;
   return (
-    <article className={cn("rounded-md border bg-surface p-2.5 shadow-sm", error ? "border-red-500/60" : merge ? "border-emerald-500/50" : asks.length > 0 ? "border-amber-500/60" : "border-line", item.later && "opacity-60")}>
+    <article data-run-id={item.runId} className={cn("rounded-md border bg-surface p-2.5 shadow-sm", error ? "border-red-500/60" : merge ? "border-emerald-500/50" : asks.length > 0 ? "border-amber-500/60" : "border-line", item.later && "opacity-60")}>
       <CardHead item={item} onTitle={onTitle} />
       <div className={cn("mt-1 text-xs", error ? "text-red-700 dark:text-red-300" : "text-fg-muted")}>{item.headline}</div>
       {error && item.error && <div className="mt-0.5 line-clamp-3 font-mono text-[11px] text-fg-subtle" title={item.error}>{item.error}</div>}

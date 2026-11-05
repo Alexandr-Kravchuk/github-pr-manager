@@ -281,7 +281,7 @@ function handleAgentNotice({ kind, item }: AgentNotice): void {
       kind === "failed" ? "A PR agent run failed" : kind === "finished" ? "The PR agent finished" : item.scenario === "merge" ? "Ready to merge" : "The PR agent needs you";
     showOsNotification(title, `#${item.prNumber} ${item.title}\n${item.headline}`, !s.notifications.sound, () => {
       focusMainWindow();
-      sendToRenderer("agent-show-board", null);
+      sendToRenderer("agent-show-board", item.runId);
     });
   } catch (e) {
     console.warn(`[agent] notification failed: ${(e as Error).message}`);

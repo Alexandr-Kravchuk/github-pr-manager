@@ -31,7 +31,7 @@ const api: PrManagerApi = {
     };
   },
   onAgentShowBoard: (listener) => {
-    const handler = () => listener();
+    const handler = (_e: unknown, runId: unknown) => listener(typeof runId === "string" ? runId : undefined);
     ipcRenderer.on("agent-show-board", handler);
     return () => {
       ipcRenderer.removeListener("agent-show-board", handler);

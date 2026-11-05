@@ -444,24 +444,52 @@ export function App() {
       window.removeEventListener("focus", onWake);
     };
   }, []);
-  // A clicked agent notification opens the Board: that is where its decision waits.
-  useEffect(() => window.api.onAgentShowBoard(() => setViewMode("board")), []);
+  // One way to an item of the agent's: the Board, its card scrolled to and
+  // flashing. A request that comes while Settings are open (the tray's Show
+  // agent, a clicked notification) waits for them to close: switching the view
+  // out from under an edit was rejected for the shortcuts, for the same reason.
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const [boardFocus, setBoardFocus] = useState<{ runId: string | null; n: number }>({ runId: null, n: 0 });
+  const pendingAgentView = useRef<{ kind: "board"; runId: string | null } | { kind: "companion" } | null>(null);
+  const focusItem = useCallback((runId?: string) => {
+    if (viewRef.current === "settings") {
+      pendingAgentView.current = { kind: "board", runId: runId ?? null };
+      return;
+    }
+    setViewMode("board");
+    setBoardFocus((f) => ({ runId: runId ?? null, n: f.n + 1 }));
+  }, []);
   // The tray's "Show agent": the window was likely hidden, so its state is pulled
   // afresh — and with the header chip off there is no popover, so the Board.
+  const showAgentCompanion = useCallback(() => {
+    window.api
+      .getAgentState()
+      .then((s) => {
+        setAgentState(s);
+        if (s?.enabled && s.headerChip) setCompanion({ open: true, focus: null });
+        else focusItem();
+      })
+      .catch(() => focusItem());
+  }, [focusItem]);
+  // A clicked agent notification opens its card on the Board: that is where its decision waits.
+  useEffect(() => window.api.onAgentShowBoard((runId) => focusItem(runId)), [focusItem]);
   useEffect(
     () =>
       window.api.onAgentOpenCompanion(() => {
-        window.api
-          .getAgentState()
-          .then((s) => {
-            setAgentState(s);
-            if (s?.enabled && s.headerChip) setCompanion({ open: true, focus: null });
-            else setViewMode("board");
-          })
-          .catch(() => setViewMode("board"));
+        if (viewRef.current === "settings") pendingAgentView.current = { kind: "companion" };
+        else showAgentCompanion();
       }),
-    [],
+    [showAgentCompanion],
   );
+  // Settings closed: what the agent asked for meanwhile happens now.
+  useEffect(() => {
+    if (view !== "dashboard" || !pendingAgentView.current) return;
+    const p = pendingAgentView.current;
+    pendingAgentView.current = null;
+    if (p.kind === "companion") showAgentCompanion();
+    else focusItem(p.runId ?? undefined);
+  }, [view, focusItem, showAgentCompanion]);
   const agentAct = useCallback(async (action: AgentAction) => {
     const res = await window.api.agentAction(action);
     // The push may lag a moment behind; pull so the click shows at once.
@@ -473,9 +501,10 @@ export function App() {
       state: agentState,
       act: agentAct,
       openCompanion: (runId?: string) => setCompanion({ open: true, focus: runId ?? null }),
-      showBoard: () => setViewMode("board"),
+      showBoard: () => focusItem(),
+      focusItem,
     }),
-    [agentState, agentAct],
+    [agentState, agentAct, focusItem],
   );
 
   // Running Claude sessions: main pushes changes while the window is visible
@@ -1385,7 +1414,7 @@ export function App() {
       <AuthorFilterContext.Provider value={authorFilter}>
       <StaleCloseContext.Provider value={setClosingPr}>
       {viewMode === "board" ? (
-        <PrBoard prs={filtered} onOpen={openPr} />
+        <PrBoard prs={filtered} onOpen={openPr} focus={boardFocus} />
       ) : viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable

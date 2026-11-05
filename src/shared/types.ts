@@ -1009,7 +1009,8 @@ export interface PrManagerApi {
   /** Subscribe to agent state pushes (sent only while the window is visible). */
   onAgentState(listener: (state: AgentState) => void): () => void;
   /** An agent notification was clicked: show the Board, where its decision waits. */
-  onAgentShowBoard(listener: () => void): () => void;
+  /** A clicked agent notification: the Board, at the item it was about. */
+  onAgentShowBoard(listener: (runId?: string) => void): () => void;
   /** The tray's "Show agent": open the agent's popover (the Board when the header chip is off). */
   onAgentOpenCompanion(listener: () => void): () => void;
   /** Copy text (e.g. a PR URL) to the system clipboard. */

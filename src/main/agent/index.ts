@@ -6,6 +6,7 @@ import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, gitBashPath, readPlanLines, summarizePlan } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
+import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { answerMessage, parseRunResult, RESULT_RULE } from "../../shared/agent-result";
 import { AGENT_CLOSED, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
@@ -333,6 +334,27 @@ export function createAgent(deps: AgentDeps): Agent {
    * is the poller's first snapshot, as before.
    */
   let plannedWith: string | null = JSON.stringify(settings());
+  /** Snapshots in a row each live item's PR has been missing from (`goneItems`). */
+  const missing = new Map<string, number>();
+
+  /**
+   * What no longer needs you closes quietly: the items of a PR that left the
+   * dashboard (its worktree goes too when Settings › Agent says so), and a
+   * newer run's predecessors (`supersede`).
+   */
+  function closeGone(snapshot: DashboardResponse, s: AgentSettings | null): void {
+    const present = new Set(snapshot.pullRequests.map((p) => p.id));
+    const failed = new Set((snapshot.errors ?? []).map((e) => e.hostLabel));
+    for (const item of goneItems(store.data.items, present, failed, missing)) {
+      if (s && !s.removeWorktree) item.worktree = undefined;
+      void closeAs(item, AGENT_CLOSED.offDashboard);
+    }
+  }
+
+  /** A newer run on a PR replaces what waited there in its lane: an older review, an older drive. */
+  function supersede(fresh: AgentItemRecord): void {
+    for (const old of supersededBy(store.data.items, fresh)) void closeAs(old, AGENT_CLOSED.superseded);
+  }
   const announce = (item: AgentItemRecord, kind: AgentNotice["kind"]) => {
     try {
       deps.notify?.({ kind, item: { ...item } });
@@ -424,6 +446,8 @@ export function createAgent(deps: AgentDeps): Agent {
   function onSnapshot(snapshot: DashboardResponse): void {
     const s = settings();
     plannedWith = JSON.stringify(s);
+    // Housekeeping holds whether the agent is on or off.
+    closeGone(snapshot, s);
     if (!s?.enabled) {
       idle = Object.fromEntries(snapshot.pullRequests.map((p) => [p.id, "The agent is off"]));
       stopRunsForOff();
@@ -463,7 +487,7 @@ export function createAgent(deps: AgentDeps): Agent {
         continue;
       }
       if (store.data.items.some((i) => i.key === job.key && (i.state === "queued" || i.state === "working"))) continue;
-      newItem(job, byId.get(job.prId)!, queuedHeadline(job));
+      supersede(newItem(job, byId.get(job.prId)!, queuedHeadline(job)));
       dirty = true;
     }
     // A queued job the PR no longer wants (you reviewed it, it went away) leaves
@@ -774,6 +798,8 @@ export function createAgent(deps: AgentDeps): Agent {
       // `fail` saves, logs and tells; the rest of this function only cleans up.
       fail("The run failed", result?.text || outcome.stderr.trim().split("\n").slice(-3).join(" ") || `exit ${outcome.exitCode}`);
     }
+    // Nothing to post, nothing asked, nothing major found: no decision is left.
+    if ((item.state as AgentItem["state"]) === "needsYou" && nothingForYou(item)) item.state = "done";
     // `fail` changes the state behind TypeScript's back; read it afresh.
     const ended = item.state as AgentItem["state"];
     if (ended !== "error") {
@@ -798,6 +824,8 @@ export function createAgent(deps: AgentDeps): Agent {
       await pushItem(item, all);
     } else if (item.state === "needsYou") {
       announce(item, "needsYou");
+    } else if (item.state === "done") {
+      announce(item, "finished");
     }
     tick();
   }
@@ -1201,6 +1229,7 @@ export function createAgent(deps: AgentDeps): Agent {
       const rank = rankBefore(others, before);
       if (rank !== undefined) item.rank = rank;
     }
+    supersede(item);
     void store.save();
     changed();
     tick();

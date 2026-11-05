@@ -36,51 +36,65 @@ const STATE_TONE: Record<AgentItem["state"], string> = {
   done: "text-emerald-700 dark:text-emerald-300",
 };
 
-/** The PR's item and, while it runs, what it is doing right now. */
-export function useAgentItem(pr: Pick<PullRequest, "id">): { item: AgentItem | null; live: string | null } {
+/** The PR's item and, while it runs, what it is doing right now (and whether that run is paused). */
+export function useAgentItem(pr: Pick<PullRequest, "id">): { item: AgentItem | null; live: string | null; paused: boolean } {
   const { state } = useContext(AgentContext);
-  if (!state?.enabled) return { item: null, live: null };
+  if (!state?.enabled) return { item: null, live: null, paused: false };
   const item = itemForPr(state.items, pr.id, todayKey(new Date()));
-  if (!item) return { item: null, live: null };
+  if (!item) return { item: null, live: null, paused: false };
   const run = item.state === "working" ? runFor(state, item.runId) : null;
   const step = run ? currentStep(run.progress) : null;
   const live = run ? [step?.subject, run.progress.activity].filter(Boolean).join(" · ") || null : null;
-  return { item, live };
+  return { item, live, paused: run?.paused ?? false };
+}
+
+/** A headline without the words its label already says ("Queued: review" under "Queued" → "review"). */
+function withoutLabel(text: string, label: string): string {
+  const lower = text.toLowerCase();
+  const l = label.toLowerCase();
+  if (!lower.startsWith(l)) return text;
+  const rest = text.slice(label.length).replace(/^\s*[:—–-]\s*/, "");
+  return rest || text;
 }
 
 /** The line under a Roomy card. Nothing at all while the agent has nothing on this PR. */
 export function AgentStatusLine({ pr }: { pr: PullRequest }) {
-  const { item, live } = useAgentItem(pr);
-  const { openCompanion, showBoard } = useContext(AgentContext);
+  const { item, live, paused } = useAgentItem(pr);
+  const { state, openCompanion, focusItem } = useContext(AgentContext);
   if (!item) return null;
   // Waiting for you: what it asks, else what it found — the headline only says the state.
   const card = item.state === "needsYou" ? resultCard(item) : null;
   const ask = card?.asks[0];
-  const text = live ?? (ask ? ask.question : card?.summary || item.headline);
-  return (
-    <div className="mt-2 flex items-center gap-2 border-t border-line pt-2 text-xs">
-      <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", AGENT_STATE_DOT[item.state])} />
-      <span className={cn("shrink-0 font-medium", STATE_TONE[item.state])}>
-        {item.state !== "needsYou"
-          ? AGENT_STATE_TEXT[item.state]
-          : ask
-            ? "Asks you"
-            : item.scenario === "merge"
+  const label =
+    item.state === "working"
+      ? paused
+        ? "Paused"
+        : AGENT_STATE_TEXT.working
+      : item.state !== "needsYou"
+        ? AGENT_STATE_TEXT[item.state]
+        : ask
+          ? "Asks you"
+          : item.scenario === "merge"
             ? "Ready to merge"
             : item.scenario === "drive" && item.drive?.commits.length && !item.pushed
               ? "Would push"
               : item.plan && !item.published
                 ? "Would post"
-                : AGENT_STATE_TEXT[item.state]}
-      </span>
+                : AGENT_STATE_TEXT[item.state];
+  const text = live ?? (ask ? ask.question : card?.summary || withoutLabel(item.headline, label));
+  return (
+    <div className="mt-2 flex items-center gap-2 border-t border-line pt-2 text-xs">
+      <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", AGENT_STATE_DOT[item.state])} />
+      <span className={cn("shrink-0 font-medium", paused ? "text-amber-700 dark:text-amber-300" : STATE_TONE[item.state])}>{label}</span>
       <span className="min-w-0 flex-1 truncate text-fg-muted" title={text}>
         {text}
       </span>
       {(item.state === "working" || item.state === "needsYou" || item.state === "error") && (
         <button
           type="button"
-          // A result waits on the Board, where its card is; a run is watched in the popover.
-          onClick={() => (item.state === "working" ? openCompanion(item.runId) : showBoard())}
+          // A result waits on the Board, at its card; a run is watched in the popover —
+          // or on the Board too, when the header chip (and with it the popover) is off.
+          onClick={() => (item.state === "working" && state?.headerChip ? openCompanion(item.runId) : focusItem(item.runId))}
           className="shrink-0 rounded-md border border-line-strong px-2 py-0.5 text-xs text-fg-secondary hover:bg-elevated"
         >
           {item.state === "working" ? "Watch" : "Open"}

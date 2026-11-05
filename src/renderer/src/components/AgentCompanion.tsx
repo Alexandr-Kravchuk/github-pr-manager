@@ -3,7 +3,8 @@ import { createPortal } from "react-dom";
 
 // Node-free (see AGENTS.md).
 import { currentStep, type PlanStep, type RunProgress } from "../../../shared/agent-stream";
-import { queueOrder, SCENARIO_VERB as VERB } from "../../../shared/agent-view";
+import { resultCard } from "../../../shared/agent-result";
+import { agentSummary, queueOrder, SCENARIO_VERB as VERB, stepLabel } from "../../../shared/agent-view";
 import type { AgentItem, AgentRunState } from "../../../shared/types";
 import { cn } from "../format";
 import { AgentContext } from "./agent-context";
@@ -109,8 +110,13 @@ export function AgentCompanion({
 }) {
   const { state } = useContext(AgentContext);
   const ref = useRef<HTMLButtonElement>(null);
-  const [flash, setFlash] = useState<{ n: number; text: string } | null>(null);
+  const [flash, setFlash] = useState<{ n: number; text: string; tone: "ok" | "stop" | "fail" } | null>(null);
   const prevRunning = useRef<string[]>([]);
+  // Its own timer: a state push every 250 ms must not keep re-arming it.
+  const flashTimer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+  }, []);
 
   // A run that just finished flashes its outcome once in the chip.
   useEffect(() => {
@@ -120,13 +126,19 @@ export function AgentCompanion({
     prevRunning.current = ids;
     const ended = gone.map((id) => state.items.find((i) => i.runId === id)).find(Boolean);
     if (!ended) return;
-    setFlash((f) => ({ n: (f?.n ?? 0) + 1, text: `#${ended.prNumber} ${ended.headline}` }));
-    const t = window.setTimeout(() => setFlash(null), 5000);
-    return () => window.clearTimeout(t);
+    const tone = ended.state === "error" ? "fail" : /^(Stopped|Interrupted|You took it over)/.test(ended.headline) ? "stop" : "ok";
+    setFlash((f) => ({ n: (f?.n ?? 0) + 1, text: `#${ended.prNumber} ${ended.headline}`, tone }));
+    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => {
+      flashTimer.current = null;
+      setFlash(null);
+    }, 5000);
   }, [state]);
 
   if (!state?.enabled || !state.headerChip) return null;
-  const waiting = state.items.filter((i) => (i.state === "needsYou" || i.state === "error") && !i.later).length;
+  // The same numbers and words the tray and the Board show.
+  const sum = agentSummary(state);
+  const waiting = sum.waiting;
   const first = state.running[0];
   const firstItem = first ? state.items.find((i) => i.runId === first.runId) : undefined;
   const step = first ? currentStep(first.progress) : null;
@@ -160,8 +172,14 @@ export function AgentCompanion({
             {state.running.length > 1 && <span className="font-normal text-fg-subtle"> +{state.running.length - 1}</span>}
           </span>
           {flash ? (
-            <span key={flash.n} className="live-beat block truncate text-[11px] text-emerald-700 dark:text-emerald-300">
-              ✓ {flash.text}
+            <span
+              key={flash.n}
+              className={cn(
+                "live-beat block truncate text-[11px]",
+                flash.tone === "ok" ? "text-emerald-700 dark:text-emerald-300" : flash.tone === "fail" ? "text-red-700 dark:text-red-300" : "text-fg-muted",
+              )}
+            >
+              {flash.tone === "ok" ? "✓" : flash.tone === "fail" ? "✕" : "■"} {flash.text}
             </span>
           ) : (
             <span className="block truncate text-[11px] text-fg-subtle">
@@ -171,11 +189,15 @@ export function AgentCompanion({
                   : (step?.subject ?? first.progress.activity ?? "Starting…")
                 : state.paused
                   ? "Paused"
-                  : state.quietUntil
-                    ? `Quiet hours until ${state.quietUntil}`
-                    : waiting > 0
-                      ? `${waiting} wait for you`
-                      : "Nothing to do"}
+                  : sum.queued > 0
+                    ? sum.blockText
+                      ? `${sum.blockText} · ${sum.queued} queued`
+                      : `${sum.queued} queued`
+                    : sum.blockText && sum.block !== "daily"
+                      ? sum.blockText
+                      : waiting > 0
+                        ? `${waiting} wait for you`
+                        : "Nothing to do"}
             </span>
           )}
         </span>
@@ -206,7 +228,7 @@ function useAnchor(anchor: RefObject<HTMLElement | null>) {
 }
 
 function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObject<HTMLButtonElement | null>; focus: string | null; onClose: () => void; onFocus: (runId: string) => void }) {
-  const { state, act } = useContext(AgentContext);
+  const { state, act, focusItem } = useContext(AgentContext);
   const [error, setError] = useState<string | null>(null);
   const pos = useAnchor(anchor);
   const box = useRef<HTMLDivElement>(null);
@@ -232,7 +254,16 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
   const others = state.running.filter((r) => r !== hero);
   // The order the agent runs them in — yours where you set it.
   const queued = queueOrder(state.items.filter((i) => i.state === "queued"));
-  const waiting = state.items.filter((i) => (i.state === "needsYou" || i.state === "error") && !i.later).length;
+  const sum = agentSummary(state);
+  const waiting = sum.waiting;
+  // The results that wait for you, oldest first — each one click from its card.
+  const waitingItems = state.items
+    .filter((i) => (i.state === "needsYou" || i.state === "error") && !i.later)
+    .sort((a, b) => (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
+  const go = (runId?: string) => {
+    onClose();
+    focusItem(runId);
+  };
 
   return createPortal(
     <div
@@ -252,13 +283,17 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
           <div className="min-w-0">
             <div className="text-sm font-semibold text-fg">{state.paused ? "Paused" : "Nothing running"}</div>
             <div className="text-xs text-fg-subtle">
-              {state.paused
+              {sum.block === "paused"
                 ? "Nothing starts until you resume it."
-                : state.quietUntil
-                  ? `Quiet hours until ${state.quietUntil} — only what you ask for starts.`
-                  : state.heldUntil
-                    ? `Claude's usage limit — new runs wait until ${new Date(state.heldUntil).toLocaleTimeString()}`
-                    : "It starts on its own when a PR needs it."}
+                : sum.block === "quiet"
+                  ? `${sum.blockText} — only what you ask for starts.`
+                  : sum.block === "usage"
+                    ? `Claude's ${sum.blockText?.toLowerCase()}.`
+                    : sum.block === "daily"
+                      ? `${sum.blockText} — ${sum.queued > 0 ? `${sum.queued} queued wait` : "new runs wait"} until tomorrow.`
+                      : sum.queued > 0
+                        ? "The next one starts in a moment."
+                        : "It starts on its own when a PR needs it."}
             </div>
           </div>
         </div>
@@ -281,13 +316,31 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
       )}
 
       {waiting > 0 && (
-        <div className="flex items-center gap-2 border-t border-line bg-amber-500/[0.06] px-4 py-2 text-xs">
-          <span className="size-1.5 rounded-full bg-amber-500" aria-hidden />
-          <span className="text-fg-secondary">
-            {waiting} decision{waiting > 1 ? "s" : ""} wait for you
-          </span>
-          <span className="flex-1" />
-          <span className="text-fg-subtle">on the Board</span>
+        <div className="border-t border-line bg-amber-500/[0.06] px-3 py-2 text-xs">
+          <div className="flex items-center gap-2 px-1">
+            <span className="size-1.5 rounded-full bg-amber-500" aria-hidden />
+            <span className="text-fg-secondary">
+              {waiting} decision{waiting > 1 ? "s" : ""} wait for you
+            </span>
+            <span className="flex-1" />
+            <button type="button" onClick={() => go(waitingItems[0]?.runId)} className="text-sky-700 hover:underline dark:text-sky-300">
+              Open the Board
+            </button>
+          </div>
+          {waitingItems.slice(0, 3).map((it) => {
+            const card = resultCard(it);
+            return (
+              <button
+                key={it.runId}
+                type="button"
+                onClick={() => go(it.runId)}
+                className="mt-1 flex w-full items-baseline gap-2 rounded-md px-1 py-0.5 text-left hover:bg-amber-500/10"
+              >
+                <span className="shrink-0 font-medium text-fg-secondary">#{it.prNumber}</span>
+                <span className="min-w-0 flex-1 truncate text-fg-subtle">{card?.asks[0]?.question ?? card?.summary ?? it.headline}</span>
+              </button>
+            );
+          })}
         </div>
       )}
 
@@ -349,7 +402,7 @@ function HeroRun({ run, item }: { run: AgentRunState; item: AgentItem }) {
             <Face size={26} tone={run.paused ? "paused" : "working"} />
             {progress.steps.length > 0 && (
               <span className="mt-0.5 text-[10px] font-semibold tabular-nums text-fg-muted">
-                {Math.max(stepIdx + 1, 1)}/{progress.steps.length}
+                {stepLabel(progress.steps)}
               </span>
             )}
           </span>
