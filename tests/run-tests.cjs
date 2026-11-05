@@ -6130,6 +6130,35 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     p.stop();
   });
 
+  // --- poller: a PR closed from the app leaves at once, despite the search lag --
+  await atest("Poller.forgetClosed: drops the card now and keeps a lagging search from bringing it back", async () => {
+    const snapshots = [];
+    const mk = (id) => ({
+      id, hostLabel: "GH", repo: "a/b", number: 1, title: id, updatedAt: "2026-01-01T00:00:00Z",
+      createdAt: "2026-01-01T00:00:00Z", roles: ["author"], failingChecks: [], pendingChecks: [], checks: [], reviewers: [],
+    });
+    const p = new poller.Poller({
+      loadSettings: () => ({ pollIntervalSeconds: 60, hosts: [{ label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"] }], staleAfterDays: 30 }),
+      toHostConfigs: () => [{ label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"], token: "t" }],
+      statePath: path.join(os.tmpdir(), "prd-poller-state-missing.json"),
+      ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),
+      appVersion: "test",
+      onSnapshot: (s) => snapshots.push(s),
+      onConfigError: () => {},
+      // The search still returns the closed PR — GitHub's index lags the close.
+      fetchHostFn: async () => ({ pullRequests: [mk("A"), mk("B")], rateLimit: { hostLabel: "GH", remaining: 5000, cost: 1, resetAt: "" } }),
+    });
+    await p.refresh();
+    assert.deepStrictEqual(p.getSnapshot().pullRequests.map((x) => x.id).sort(), ["A", "B"]);
+    const before = snapshots.length;
+    p.forgetClosed("A");
+    assert.deepStrictEqual(p.getSnapshot().pullRequests.map((x) => x.id), ["B"]);
+    assert.strictEqual(snapshots.length, before + 1, "pushed to the renderer at once");
+    await p.refresh();
+    assert.deepStrictEqual(p.getSnapshot().pullRequests.map((x) => x.id), ["B"], "a lagging search can't bring it back");
+    p.stop();
+  });
+
   // --- poller: fetchedAt is not a per-snapshot identity ----------------------
   // Why the header live-dot keys on a snapshot counter (App.tsx) and not on
   // `snapshot.fetchedAt`: the snapshot carries the *oldest* per-host timestamp

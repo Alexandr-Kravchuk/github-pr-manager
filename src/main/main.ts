@@ -795,9 +795,9 @@ function registerIpc(): void {
       return { ok: false, prClosed: false, jira: null, error: "Closing PRs is disabled in fixture mode." };
     }
     const result = await closeStale(snapshotPr(id), options, staleDeps);
-    // A closed PR drops out of the `is:open` searches; poll now so its card
-    // goes away instead of lingering for a full interval.
-    if (result.prClosed) await poller?.refresh();
+    // Take the card off now: the search index lags the close, so a poll alone
+    // would keep returning the PR for a while (see `forgetClosed`).
+    if (result.prClosed) poller?.forgetClosed(id);
     return result;
   });
 }

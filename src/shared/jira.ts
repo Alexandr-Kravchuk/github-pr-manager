@@ -507,7 +507,11 @@ async function jiraRequest(
       return res;
     } catch (e) {
       debug(`${method} ${bases[i]}${path} -> threw ${(e as Error).message}`);
-      lastError = e;
+      // The timeout surfaces as a bare "This operation was aborted".
+      lastError =
+        (e as Error).name === "AbortError"
+          ? new Error(`Jira didn't answer within ${REQUEST_TIMEOUT_MS / 1000} seconds — try again.`)
+          : e;
     }
   }
   if (last) return last;
