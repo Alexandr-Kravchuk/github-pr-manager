@@ -651,14 +651,30 @@ const TWG_FLAGS: Record<string, "flag" | "value"> = {
   "-h": "flag",
 };
 
+/**
+ * The lower-case values a value flag may take as a separate word. Any other
+ * separate value must not read like a subcommand: were twg to parse the flag
+ * as taking no value, a word like `create` would land in the command path.
+ * Anything at all may go attached (`--jql=…`).
+ */
+const TWG_FLAG_WORDS: Record<string, ReadonlySet<string>> = {
+  "-o": new Set(["json", "yaml", "text", "table", "md", "markdown", "csv"]),
+  "--output": new Set(["json", "yaml", "text", "table", "md", "markdown", "csv"]),
+  "--output-summary": new Set(["none", "auto", "always", "never", "full", "brief"]),
+  "--detail": new Set(["full", "summary", "brief", "minimal", "standard"]),
+  "--format": new Set(["md", "markdown", "html", "adf", "storage", "text", "json", "view", "wiki"]),
+};
+
+const SUBCOMMAND_LIKE = /^[a-z][a-z-]*$/;
+
 function checkTwg(words: string[]): GuardDecision {
   const path: string[] = [];
   let i = 1;
-  for (; i < words.length && /^[a-z][a-z-]*$/.test(words[i]); i++) path.push(words[i]);
+  for (; i < words.length && SUBCOMMAND_LIKE.test(words[i]); i++) path.push(words[i]);
   const cmd = path.join(" ");
-  // `help` only describes commands, whatever it is asked about.
-  if (path[0] === "help") return { allow: true };
-  if (!TWG_READ_PATHS.has(cmd)) {
+  // `help` only describes commands, whatever topic it is given — but its
+  // flags are held to the same list as every read's.
+  if (path[0] !== "help" && !TWG_READ_PATHS.has(cmd)) {
     return deny(`twg ${cmd || "…"} is not one of the reads agent runs may use (${[...TWG_READ_PATHS].slice(0, 4).join(", ")}, …) — the app leaves Jira changes to you.`);
   }
   // After the path: known flags with their values, and positionals that can't
@@ -667,18 +683,26 @@ function checkTwg(words: string[]): GuardDecision {
   for (; i < words.length; i++) {
     const w = words[i];
     if (w.startsWith("-")) {
-      const name = w.startsWith("--") ? w.split("=")[0] : w.slice(0, 2);
+      // A second line of defence, whatever the list says.
+      if (/file|dir|save|write|exec|editor|open|browser|yes|force|apply/i.test(w)) return deny("That twg flag writes or opens something; agent runs only read.");
+      const long = w.startsWith("--");
+      const name = long ? w.split("=")[0] : w;
+      // A short flag is exactly `-o` or `-h`: `-ofile` reads differently in different parsers.
       const kind = TWG_FLAGS[name];
-      if (!kind) return deny(`twg ${name} is not one of the flags agent runs may use.`);
-      const attached = w.startsWith("--") ? w.includes("=") : w.length > 2;
+      if (!kind) return deny(`twg ${name} is not one of the flags agent runs may use${long ? "" : " (short flags go on their own: -o json)"}.`);
+      const attached = long && w.includes("=");
       if (kind === "flag" && attached) return deny(`${name} takes no value.`);
       if (kind === "value" && !attached) {
-        if (words[i + 1] === undefined || words[i + 1].startsWith("-")) return deny(`${name} needs a value that isn't a flag.`);
+        const value = words[i + 1];
+        if (value === undefined || value.startsWith("-")) return deny(`${name} needs a value that isn't a flag.`);
+        if (SUBCOMMAND_LIKE.test(value) && !TWG_FLAG_WORDS[name]?.has(value)) {
+          return deny(`"${value}" after ${name} reads like a subcommand; write it attached (${long ? name : "--output"}=${value}) or quoted with a space.`);
+        }
         i++;
       }
       continue;
     }
-    if (/^[a-z][a-z-]*$/.test(w)) return deny(`"${w}" after twg ${cmd} reads like a subcommand; quote a search phrase or put it in a flag.`);
+    if (SUBCOMMAND_LIKE.test(w)) return deny(`"${w}" after twg ${cmd} reads like a subcommand; quote a search phrase or put it in a flag.`);
   }
   return { allow: true };
 }

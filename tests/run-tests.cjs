@@ -8932,10 +8932,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       no("twg jira workitem transition ENG-1 Done");
       no("twg api /rest/api/3/issue/ENG-1");
       no("twg login");
-      no("twg jira workitem get ENG-1 --output-file /tmp/x", /not one of the flags/);
+      no("twg jira workitem get ENG-1 --output-file /tmp/x", /writes or opens/);
       no("twg jira workitem get -o json comment create ENG-1", /reads like a subcommand/);
       no("twg jira workitem get ENG-1 --bogus", /not one of the flags/);
       no("twg jira workitem get ENG-1 -o", /needs a value/);
+      no("twg help --output-file x", /writes or opens/);
+      no("twg help describe -x", /not one of the flags/);
+      no("twg jira workitem get ENG-1 -ojson", /short flags go on their own/);
+      no("twg jira workitem get ENG-1 --detail create", /reads like a subcommand/);
+      no("twg jira workitem query --fields summary", /reads like a subcommand/);
+      ok("twg jira workitem query --fields=summary --jql='key = ENG-1'");
       no("twg jira workitem comment create ENG-1 --body x");
       no("twg confluence content update 123 --body x");
       no("twg jira workitem get transition ENG-1", /not one of the reads/);
