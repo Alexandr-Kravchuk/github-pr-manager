@@ -143,7 +143,9 @@ On first launch the dashboard is empty — open **Settings (⚙)** and add a hos
 | ------------ | ----------- |
 | `label`      | Name shown in the UI (host badge + host filter). |
 | `graphqlUrl` | github.com → `https://api.github.com/graphql`; Enterprise Cloud → `https://api.<tenant>.ghe.com/graphql`; Enterprise Server → `https://<host>/api/graphql`. |
-| repos        | Repositories in `owner/name` form, one per line. |
+| `scope`      | **All repositories** (default) — your PRs and the reviews asked of you in any repository on the host. **Only listed** — just the repositories in `repos`. |
+| `mutedRepos` | Under **All repositories**: repositories (`owner/name`, one per line) left out of the dashboard. |
+| `repos`      | Under **Only listed**: the repositories to watch, `owner/name`, one per line. Kept under **All repositories**, so switching back restores it. |
 
 The Settings screen also shows whether `gh` is installed and signed in for each
 host, with the exact `gh auth login` command if not.
