@@ -438,6 +438,22 @@ export function App() {
   }, []);
   // A clicked agent notification opens the Board: that is where its decision waits.
   useEffect(() => window.api.onAgentShowBoard(() => setViewMode("board")), []);
+  // The tray's "Show agent": the window was likely hidden, so its state is pulled
+  // afresh — and with the header chip off there is no popover, so the Board.
+  useEffect(
+    () =>
+      window.api.onAgentOpenCompanion(() => {
+        window.api
+          .getAgentState()
+          .then((s) => {
+            setAgentState(s);
+            if (s?.enabled && s.headerChip) setCompanion({ open: true, focus: null });
+            else setViewMode("board");
+          })
+          .catch(() => setViewMode("board"));
+      }),
+    [],
+  );
   const agentAct = useCallback(async (action: AgentAction) => {
     const res = await window.api.agentAction(action);
     // The push may lag a moment behind; pull so the click shows at once.

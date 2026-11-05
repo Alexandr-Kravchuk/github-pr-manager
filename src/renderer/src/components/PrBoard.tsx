@@ -75,6 +75,11 @@ export function PrBoard({
             <span>
               Runs today {state.runsToday} of {state.perDay}
             </span>
+            {state.paused ? (
+              <span className="font-medium text-amber-700 dark:text-amber-300">Paused — nothing starts, and nothing goes out on its own</span>
+            ) : (
+              state.quietUntil && <span>Quiet hours until {state.quietUntil} — only what you ask for starts</span>
+            )}
             {state.heldUntil && <span className="text-amber-700 dark:text-amber-300">Claude&apos;s usage limit — new runs wait until {new Date(state.heldUntil).toLocaleTimeString()}</span>}
             {state.suggestOn && (
               <span className="text-emerald-700 dark:text-emerald-300">
@@ -85,11 +90,18 @@ export function PrBoard({
         ) : (
           <span>Off — switch it on in Settings › Agent.</span>
         )}
-        {notice && (
-          <span className="ml-auto text-red-700 dark:text-red-300" role="alert">
-            {notice}
-          </span>
-        )}
+        <span className="ml-auto flex items-center gap-3">
+          {notice && (
+            <span className="text-red-700 dark:text-red-300" role="alert">
+              {notice}
+            </span>
+          )}
+          {state.enabled && (
+            <button type="button" className={BTN} onClick={() => void run({ type: state.paused ? "resumeAgent" : "pauseAgent" })}>
+              {state.paused ? "Resume agent" : "Pause agent"}
+            </button>
+          )}
+        </span>
       </div>
 
       <div className="flex items-start gap-3 overflow-x-auto pb-2">
@@ -479,6 +491,16 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
             {publishing ? "Publishing…" : "Publish"}
           </button>
         )}
+        {primary === "Resume" && (
+          <button
+            type="button"
+            className={BTN_PRIMARY}
+            title="The same session goes on where it stopped, in the same worktree"
+            onClick={() => void run({ type: "resumeSession", runId: item.runId })}
+          >
+            Resume
+          </button>
+        )}
         {primary === "Run again" && (
           <button type="button" className={BTN_PRIMARY} onClick={() => void run({ type: "retry", runId: item.runId })}>
             Run again
@@ -513,6 +535,13 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
       </div>
       {plan && item.mode === "shadow" && <div className="mt-1.5 text-[11px] text-fg-faint">Shadow: nothing is on GitHub until you press Publish. It goes out with the agent&apos;s signature.</div>}
       {merge && <div className="mt-1.5 text-[11px] text-fg-faint">Merges only the commit shown here — GitHub refuses it if anyone pushes first.</div>}
+      {item.interrupted && (primary === "Resume" || item.scenario === "drive") && (
+        <div className="mt-1.5 text-[11px] text-fg-faint">
+          {item.scenario === "drive"
+            ? "A drive starts over: its push is checked against what the app read before the session."
+            : "Resume picks the session up where it stopped; Run again starts over."}
+        </div>
+      )}
       {drive && item.mode === "shadow" && (
         <div className="mt-1.5 text-[11px] text-fg-faint">Shadow: nothing is on the branch until you press Push. It goes out as a fast-forward only, and only while nobody else pushed.</div>
       )}

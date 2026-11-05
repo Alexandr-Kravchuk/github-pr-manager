@@ -27,7 +27,14 @@ Three layers:
   quit / hide, with a leave-fullscreen-first hide for macOS); the three-way
   close decision is unit-tested in `tests/run-tests.cjs` against a mocked
   Electron, and the wiring registrations are asserted on the compiled `main.js`.
-  Close-to-tray makes hidden-but-alive the app's *normal* idle state, so the
+  While the PR agent is on (and Settings › Agent › Companion keeps its tray
+  state), the tooltip and the menu also carry the agent: its one line
+  (`agentTrayLine`), "Show agent" (the window with the companion popover, or
+  the Board when the header chip is off) and "Pause agent" / "Resume agent".
+  `setAgent` rebuilds the menu only when that line changed — a run reports a
+  step per tool call — and `main.ts` feeds it from the throttled agent push
+  *before* that push's visibility gate, since a hidden window is exactly when
+  the tray is the only place to look. Close-to-tray makes hidden-but-alive the app's *normal* idle state, so the
   "no always-running animation in the renderer" rule below applies with extra
   force — a hidden renderer with an `infinite` animation burns CPU invisibly,
   and snapshot pushes are already gated on window visibility for the same
@@ -125,7 +132,10 @@ Three layers:
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (which of
   a PR's agent items its card, Cozy cell and tile show, the Board's columns,
-  and the *local* day "Done today" and the daily run limit count on) and
+  the *local* day "Done today" and the daily run limit count on, quiet hours
+  (`quietUntil`, a span that may wrap past midnight), the tray's one line, and
+  which regular toasts the agent stands in for — `agentTakesToast`: a trigger
+  it took in On; `main.ts` hands it the snapshot before deciding the toasts) and
   `agent-publish.ts` (what a review prepared to post: a review session never
   posts — its skill's `publishCommand` is a wrapper of the app's that only
   records each write, checked like the skill's own `pr-review-publish.sh`, and

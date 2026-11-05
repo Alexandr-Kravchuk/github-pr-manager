@@ -6,7 +6,7 @@ import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, gitBashPath, summarizePlan } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
-import { AGENT_CLOSED, todayKey } from "../../shared/agent-view";
+import { AGENT_CLOSED, quietUntil, todayKey } from "../../shared/agent-view";
 import { DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -150,6 +150,16 @@ function workingHeadline(scenario: AgentScenario): string {
   }
 }
 
+/** A running item's line: what it drives for, or what its scenario does. */
+function runningHeadline(item: Pick<AgentItem, "scenario" | "reasons">): string {
+  return item.reasons?.length ? `Driving — ${describeReasons(item.reasons)}` : workingHeadline(item.scenario);
+}
+
+/** The first message of a session Resume picks up again. */
+export const RESUME_PROMPT = "The app running you closed while you worked and has started you again. Continue where you stopped and finish the task.";
+/** …and of one with a publish wrapper, whose folder the app makes afresh. */
+export const RESUME_PROMPT_WRAPPER = `${RESUME_PROMPT} Whatever you recorded through the publish wrapper before is gone: if you had recorded your review, replies or resolves already, record them again — once.`;
+
 /** The rules every agent session gets on top of its prompt. */
 export function agentRules(
   scenario: AgentScenario,
@@ -236,6 +246,8 @@ interface Running {
   paused: boolean;
   /** Set by "Take over": once stopped, the session opens in your terminal. */
   takeOver: boolean;
+  /** Paused by pausing the whole agent — resuming the agent resumes it; one you paused yourself stays paused. */
+  byAgentPause: boolean;
 }
 
 export function createAgent(deps: AgentDeps): Agent {
@@ -249,14 +261,10 @@ export function createAgent(deps: AgentDeps): Agent {
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
 
-  // A run that was in flight when the app closed did not finish: say so.
+  // A run that was in flight when the app closed did not finish: say so. It
+  // does not go on by itself — Resume picks the session up again.
   for (const item of store.data.items) {
-    if (item.state === "working") {
-      item.state = "needsYou";
-      item.headline = "Interrupted — the app closed while it ran";
-      item.finishedAt = now().toISOString();
-      if (store.data.ledger[item.key]?.state === "started") store.data.ledger[item.key].state = "failed";
-    }
+    if (item.state === "working") markInterrupted(item, now().toISOString());
   }
   void store.save();
 
@@ -274,6 +282,8 @@ export function createAgent(deps: AgentDeps): Agent {
   const gh = deps.gh ?? runGh;
   /** Merge offers whose click is being carried out — a snapshot in between must not close them. */
   const merging = new Set<string>();
+  /** The quiet-hours end last reported, so entering or leaving them is a change worth a push. */
+  let lastQuiet: string | null = null;
   const announce = (item: AgentItemRecord, kind: AgentNotice["kind"]) => {
     try {
       deps.notify?.({ kind, item: { ...item } });
@@ -281,6 +291,50 @@ export function createAgent(deps: AgentDeps): Agent {
       // A notification is best-effort.
     }
   };
+  /** A run the app's closing cut short: waiting for you, with Resume. */
+  function markInterrupted(item: AgentItemRecord, at: string): void {
+    item.state = "needsYou";
+    item.headline = "Interrupted — the app closed while it ran";
+    item.interrupted = true;
+    item.resumeSession = undefined;
+    item.finishedAt = at;
+    if (store.data.ledger[item.key]?.state === "started") store.data.ledger[item.key].state = "failed";
+  }
+
+  function pauseRun(item: AgentItemRecord, r: Running): void {
+    r.handle.interrupt();
+    r.paused = true;
+    r.byAgentPause = true;
+    item.headline = "Paused";
+  }
+
+  function resumeRun(item: AgentItemRecord, r: Running): void {
+    r.handle.resume();
+    r.paused = false;
+    r.byAgentPause = false;
+    item.headline = runningHeadline(item);
+  }
+
+  /**
+   * Pauses or resumes the agent as a whole — the emergency stop. Paused,
+   * nothing new starts, the runs in flight pause at their next safe point
+   * (their time limit still runs), and a result that would go out on its own
+   * waits for your Publish or Push. Resuming lets go of the runs it paused,
+   * not the ones you paused yourself.
+   */
+  function setPaused(on: boolean): void {
+    store.data.paused = on;
+    for (const [runId, r] of running) {
+      const item = findItem(runId);
+      if (!item) continue;
+      if (on && !r.paused) pauseRun(item, r);
+      else if (!on && r.paused && r.byAgentPause) resumeRun(item, r);
+    }
+    void store.save();
+    changed();
+    if (!on) tick();
+  }
+
   /** The PR as the dashboard last saw it (merged ones drop out of the snapshot; their after-merge run still needs a name). */
   const snapshotPr = (prId: string) => deps.getSnapshot()?.pullRequests.find((p) => p.id === prId) ?? null;
 
@@ -407,7 +461,14 @@ export function createAgent(deps: AgentDeps): Agent {
     // brief; an empty folder for the Jira dry run, which needs no code.
     let checkout: string | null = null;
     let remote: string | null = null;
-    if (item.scenario !== "afterMerge") {
+    // Resume: the same session again, in the folder it worked in.
+    const resume = item.resumeSession === true && item.sessionId ? item.sessionId : null;
+    const resumeDir = resume ? (item.worktree ?? (item.scenario === "afterMerge" ? path.join(runDir, "cwd") : null)) : null;
+    if (resume && (!resumeDir || !fs.existsSync(resumeDir))) {
+      item.resumeSession = undefined;
+      return fail("Can't resume — its folder is gone; run it again");
+    }
+    if (item.scenario !== "afterMerge" && !resume) {
       if (!pr) return;
       checkout = deps.findCheckout(pr, all.claude);
       if (!checkout) return fail(`No checkout of ${pr.repo} — set its folder in Settings › Claude`);
@@ -419,13 +480,18 @@ export function createAgent(deps: AgentDeps): Agent {
     store.data.runsToday += 1;
     item.state = "working";
     item.startedAt = stamp();
-    item.headline = item.reasons?.length ? `Driving — ${describeReasons(item.reasons)}` : workingHeadline(item.scenario);
-    item.checkout = checkout ?? undefined;
+    item.headline = runningHeadline(item);
+    item.resumeSession = undefined;
+    if (!resume) item.checkout = checkout ?? undefined;
     void store.save();
     changed();
 
     let dir: string;
-    if (pr && checkout && remote) {
+    if (resume && resumeDir) {
+      // A drive never resumes (see `act`), so no push needs preparing here.
+      dir = resumeDir;
+      checkout = item.checkout ?? null;
+    } else if (pr && checkout && remote) {
       try {
         dir = await prepareWorktree(git, { checkout, remote, base: worktreeBase(s.worktreeDir, checkout), pr });
       } catch (e) {
@@ -462,6 +528,8 @@ export function createAgent(deps: AgentDeps): Agent {
     // folder for it the review runs as a plain dry run (text only).
     // A drive answers reviewers through the wrapper too — only that.
     const subs = kind === "drive" ? (["reply"] as const) : undefined;
+    // On Resume the folder is made afresh too (the same path — the session
+    // knows it): nothing recorded before the app closed is trusted.
     const folder =
       (kind === "review" || kind === "rereview" || kind === "drive") && deps.captureScript
         ? prepareRunFolder(
@@ -489,22 +557,23 @@ export function createAgent(deps: AgentDeps): Agent {
       workflowDirs: pluginDirs,
     });
     writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url, guardFile));
-    const sessionId = randomUUID();
+    const sessionId = resume ?? randomUUID();
     item.sessionId = sessionId;
-    store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "started", headOid: pr?.headOid ?? keyHead(item.key) ?? undefined, sessionId });
+    store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: resume ? "resumed" : "started", headOid: pr?.headOid ?? keyHead(item.key) ?? undefined, sessionId });
 
     // The wrapper's own rule, and Write — which the guard holds to the payload folder.
     const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : [])])];
     // Read-only runs may read the plugins' folders (a skill's Workflow reads its script from there); a run that edits never gets them.
     const addDirs = [...(folder ? [folder.outDir] : []), ...pluginDirs];
 
-    const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false };
+    const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false, byAgentPause: false };
     const handle = startRun(
       {
         cwd: dir,
         sessionId,
+        ...(resume ? { resume: true } : {}),
         kind,
-        prompt: mine.prompt,
+        prompt: resume ? (folder ? RESUME_PROMPT_WRAPPER : RESUME_PROMPT) : mine.prompt,
         appendSystemPrompt: agentRules(item.scenario, item.mode, folder, {
           repo: item.repo,
           number: item.prNumber,
@@ -535,11 +604,15 @@ export function createAgent(deps: AgentDeps): Agent {
     entry.handle = handle;
     entry.progress = handle.progress();
     running.set(item.runId, entry);
+    // Paused while it was getting ready: it starts paused too.
+    if (store.data.paused) pauseRun(item, entry);
     void store.save();
     changed();
 
     const outcome = await handle.done;
     running.delete(item.runId);
+    // The app is closing: `stop` has marked the item interrupted and saved it.
+    if (stopped) return;
     const result = outcome.progress.result;
     item.finishedAt = stamp();
     let publishNow = false;
@@ -618,6 +691,12 @@ export function createAgent(deps: AgentDeps): Agent {
     if (ended !== "needsYou") await dropWorktree(item);
     void store.save();
     changed();
+    // Paused, nothing goes out on its own: it waits for your Publish or Push.
+    if (store.data.paused && (publishNow || pushNow)) {
+      publishNow = false;
+      pushNow = false;
+      item.headline = `${item.headline} — held: the agent is paused`;
+    }
     if (publishNow) {
       // On: the app posts what the review prepared, with the same checks as your Publish.
       await publishItem(item, all, false);
@@ -893,6 +972,13 @@ export function createAgent(deps: AgentDeps): Agent {
       store.data.runsToday = 0;
       store.prune(s.policy.logRetentionDays, now().getTime());
     }
+    const quiet = quietUntil(now(), s.limits.quietHours);
+    if (quiet !== lastQuiet) {
+      lastQuiet = quiet;
+      changed();
+    }
+    // Paused: nothing starts, whoever asked.
+    if (store.data.paused) return;
     if (heldUntil !== null && now().getTime() < heldUntil) return;
     heldUntil = null;
     const snapshot = deps.getSnapshot();
@@ -906,6 +992,8 @@ export function createAgent(deps: AgentDeps): Agent {
       // A merged PR has left the snapshot; its Jira dry run goes by the item alone.
       const pr = byId.get(item.prId) ?? null;
       if (!pr && item.scenario !== "afterMerge") continue;
+      // Quiet hours hold what the agent found itself; what you asked for (or resumed) runs.
+      if (quiet && !item.key.endsWith("|asked") && !item.resumeSession) continue;
       const held = hostHeld(snapshot, item.hostLabel);
       if (held) {
         item.headline = `Queued — ${held}`;
@@ -948,6 +1036,10 @@ export function createAgent(deps: AgentDeps): Agent {
     const all = loadAll();
     if (!all?.agent.enabled) return { ok: false, error: "The agent is off — switch it on in Settings › Agent." };
     const snapshot = deps.getSnapshot();
+    if (action.type === "pauseAgent" || action.type === "resumeAgent") {
+      setPaused(action.type === "pauseAgent");
+      return { ok: true };
+    }
     if (action.type === "enqueue") {
       const pr = snapshot?.pullRequests.find((p) => p.id === action.prId);
       if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
@@ -974,17 +1066,33 @@ export function createAgent(deps: AgentDeps): Agent {
       }
       case "pause": {
         if (!r || r.paused) return { ok: false, error: "Nothing to pause." };
-        r.handle.interrupt();
-        r.paused = true;
-        item.headline = "Paused";
+        pauseRun(item, r);
+        // Yours: resuming the agent leaves it paused.
+        r.byAgentPause = false;
         break;
       }
       case "resume": {
         if (!r || !r.paused) return { ok: false, error: "Nothing to resume." };
-        r.handle.resume();
-        r.paused = false;
-        item.headline = item.scenario === "brief" ? "Writing a brief" : "Reviewing";
+        resumeRun(item, r);
         break;
+      }
+      case "resumeSession": {
+        if (r || item.state !== "needsYou" || !item.interrupted) return { ok: false, error: "Only a run the app's closing interrupted can be resumed." };
+        if (item.scenario === "drive") return { ok: false, error: "A drive starts over — run it again: its push is checked against what the app read before any session worked in that folder." };
+        if (!item.sessionId) return { ok: false, error: "There is no session to resume — run it again." };
+        if (item.scenario !== "afterMerge" && !snapshotPr(item.prId)) return { ok: false, error: "That PR is not on the dashboard any more." };
+        if (store.data.items.some((i) => i.prId === item.prId && i !== item && (i.state === "queued" || i.state === "working"))) {
+          return { ok: false, error: "The agent is already on this PR." };
+        }
+        // Back in the queue, so the limits and the pause hold for it as for any run.
+        item.state = "queued";
+        item.resumeSession = true;
+        item.headline = "Queued: resume (asked by you)";
+        item.finishedAt = undefined;
+        void store.save();
+        changed();
+        tick();
+        return { ok: true };
       }
       case "stop":
       case "takeOver": {
@@ -1085,6 +1193,9 @@ export function createAgent(deps: AgentDeps): Agent {
         parallel: s?.limits.parallel ?? 0,
         heldUntil: heldUntil !== null ? new Date(heldUntil).toISOString() : null,
         headerChip: s?.companion.headerChip ?? true,
+        trayState: s?.companion.trayState ?? true,
+        paused: store.data.paused,
+        quietUntil: s ? quietUntil(now(), s.limits.quietHours) : null,
         acceptedUnchanged: store.data.acceptedUnchanged,
         suggestOn: s?.scenarios.review.mode === "shadow" && store.data.acceptedUnchanged >= s.limits.promoteAfter,
       };
@@ -1092,8 +1203,16 @@ export function createAgent(deps: AgentDeps): Agent {
     ownSessionIds: () => new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!)),
     isActive: () => settings()?.enabled ?? false,
     stop: () => {
+      if (stopped) return;
       stopped = true;
       if (timer) clearTimeout(timer);
+      // What runs now is interrupted by the app's closing, not stopped by you:
+      // written down before the processes go, since the app won't wait.
+      const at = stamp();
+      for (const item of store.data.items) {
+        if (item.state === "working") markInterrupted(item, at);
+      }
+      store.flush();
       for (const r of running.values()) r.handle.stop();
     },
   };

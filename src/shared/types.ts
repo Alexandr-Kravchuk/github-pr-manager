@@ -812,6 +812,14 @@ export interface AgentItem {
   /** Put aside with "Later": still waiting, out of the way. */
   later?: boolean;
   /**
+   * The app closed while it ran. It does not go on by itself: Resume picks
+   * the same session up again (headless, in the same worktree), Run again
+   * starts over.
+   */
+  interrupted?: boolean;
+  /** Queued by Resume: the next run continues `sessionId` instead of starting a session. */
+  resumeSession?: boolean;
+  /**
    * What a review prepared to post — captured by the app's publish wrapper,
    * posted by the app (`main/agent/publish.ts`). Absent when it prepared
    * nothing, or ran as a plain dry run.
@@ -877,6 +885,15 @@ export interface AgentState {
   heldUntil: string | null;
   /** The companion settings, so the header shows the chip only when wanted. */
   headerChip: boolean;
+  /** …and the tray its status line and Pause item. */
+  trayState: boolean;
+  /**
+   * Paused as a whole (Board, companion, tray): nothing new starts, runs in
+   * flight are paused, and nothing is posted or pushed on its own.
+   */
+  paused: boolean;
+  /** Inside quiet hours: the local clock they end at ("08:00"). Only runs you ask for start meanwhile. */
+  quietUntil: string | null;
   /** Shadow reviews you published exactly as prepared — the count behind the Shadow → On hint. */
   acceptedUnchanged: number;
   /** Reviews are in Shadow and you've published enough of them unchanged to consider On. */
@@ -885,7 +902,10 @@ export interface AgentState {
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
 export type AgentAction =
-  | { type: "skip" | "later" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish" | "push"; runId: string }
+  | { type: "skip" | "later" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish" | "push" | "resumeSession"; runId: string }
+  // The whole agent — two members, so a check for both narrows the rest.
+  | { type: "pauseAgent" }
+  | { type: "resumeAgent" }
   | { type: "hint"; runId: string; text: string }
   | { type: "merge"; runId: string; method?: MergeMethod }
   | { type: "enqueue"; prId: string };
@@ -958,6 +978,8 @@ export interface PrManagerApi {
   onAgentState(listener: (state: AgentState) => void): () => void;
   /** An agent notification was clicked: show the Board, where its decision waits. */
   onAgentShowBoard(listener: () => void): () => void;
+  /** The tray's "Show agent": open the agent's popover (the Board when the header chip is off). */
+  onAgentOpenCompanion(listener: () => void): () => void;
   /** Copy text (e.g. a PR URL) to the system clipboard. */
   copyText(text: string): Promise<void>;
   /** Returns release info if a new version was installed since last ack, or null. */

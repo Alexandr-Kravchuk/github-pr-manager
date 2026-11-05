@@ -37,10 +37,12 @@ export interface AgentStoreData {
    * the agent pushed, `agentHead`).
    */
   drive: Record<string, { attempts: number; agentHead?: string }>;
+  /** Paused as a whole (Board, companion, tray) — it stays paused across a restart. */
+  paused: boolean;
 }
 
 export function emptyStore(day: string): AgentStoreData {
-  return { version: 1, ledger: {}, day, runsToday: 0, items: [], acceptedUnchanged: 0, drive: {} };
+  return { version: 1, ledger: {}, day, runsToday: 0, items: [], acceptedUnchanged: 0, drive: {}, paused: false };
 }
 
 /** Reads state.json; a missing or broken file starts empty rather than failing the agent. */
@@ -60,6 +62,7 @@ export function readStore(file: string, day: string): AgentStoreData {
       }),
       acceptedUnchanged: typeof raw.acceptedUnchanged === "number" ? raw.acceptedUnchanged : 0,
       drive: typeof raw.drive === "object" && raw.drive !== null ? raw.drive : {},
+      paused: raw.paused === true,
     };
   } catch {
     return emptyStore(day);
@@ -106,6 +109,8 @@ export interface AgentStore {
   data: AgentStoreData;
   /** Persists `data` (serialized with any write in flight). */
   save(): Promise<void>;
+  /** Persists `data` now, synchronously — for the app's way out, which doesn't wait for a promise. */
+  flush(): void;
   log(entry: AgentLogEntry): void;
   /** Drops log lines and finished items older than the retention. */
   prune(retentionDays: number, now: number): void;
@@ -116,6 +121,7 @@ export function openStore(dir: string, today: string): AgentStore {
   const logFile = path.join(dir, "log.jsonl");
   const data = readStore(stateFile, today);
   let chain: Promise<void> = Promise.resolve();
+  const serialize = () => JSON.stringify(store.data, (key, value: unknown) => (key === "pushTo" ? undefined : value), 2);
   const store: AgentStore = {
     data,
     save() {
@@ -123,9 +129,16 @@ export function openStore(dir: string, today: string): AgentStore {
       // snapshot it is checked against) lives in memory only: a file on disk
       // is one a session that ran code could have rewritten. After a restart
       // a drive's Push asks for the run again.
-      const text = JSON.stringify(store.data, (key, value: unknown) => (key === "pushTo" ? undefined : value), 2);
+      const text = serialize();
       chain = chain.then(() => writeFileAtomic(stateFile, text)).catch((e) => console.warn(`[agent] could not save state: ${(e as Error).message}`));
       return chain;
+    },
+    flush() {
+      try {
+        writeFileAtomic(stateFile, serialize());
+      } catch (e) {
+        console.warn(`[agent] could not save state: ${(e as Error).message}`);
+      }
     },
     log(entry) {
       try {

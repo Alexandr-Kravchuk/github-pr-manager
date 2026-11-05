@@ -688,9 +688,12 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     destroy() {
       this.destroyed = true;
     }
-    setToolTip() {}
+    setToolTip(text) {
+      this.tooltip = text;
+    }
     setContextMenu(menu) {
       this.menu = menu;
+      this.menus = (this.menus ?? 0) + 1;
     }
     on(event, cb) {
       this.handlers.push([event, cb]);
@@ -713,7 +716,7 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
       Tray: FakeTray,
     },
   };
-  const { createTrayController } = require(trayJs);
+  const { createTrayController, trayTooltip } = require(trayJs);
 
   // The failure paths log through console.error; keep the test output clean.
   const quiet = (fn) => {
@@ -732,11 +735,13 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     trays.length = 0;
     iconEmpty = false;
     trayThrows = false;
-    const calls = { open: 0, quit: 0, hide: 0 };
+    const calls = { open: 0, quit: 0, hide: 0, showAgent: 0, toggleAgent: 0 };
     const controller = createTrayController({
       open: () => calls.open++,
       quit: () => calls.quit++,
       hide: () => calls.hide++,
+      showAgent: () => calls.showAgent++,
+      toggleAgentPause: () => calls.toggleAgent++,
     });
     return { controller, calls };
   };
@@ -788,6 +793,41 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     tray.menu[2].click();
     assert.strictEqual(calls.open, 1);
     assert.strictEqual(calls.quit, 1);
+  });
+
+  test("tray controller: the PR agent's line goes in the tooltip and the menu, with Show agent and Pause/Resume agent", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(true);
+    const [tray] = trays;
+    assert.strictEqual(tray.tooltip, "PR Dashboard");
+    controller.setAgent({ line: "Reviewing #911 · 4/6", paused: false });
+    assert.strictEqual(tray.tooltip, "PR Dashboard\nAgent: Reviewing #911 · 4/6");
+    const labels = tray.menu.map((item) => item.label ?? item.type);
+    assert.deepStrictEqual(labels, ["Open PR Dashboard", "separator", "Agent: Reviewing #911 · 4/6", "Show agent", "Pause agent", "separator", "Quit PR Dashboard"]);
+    assert.strictEqual(tray.menu[2].enabled, false, "the status line is a label, not an action");
+    tray.menu[3].click();
+    tray.menu[4].click();
+    assert.deepStrictEqual([calls.showAgent, calls.toggleAgent, calls.open], [1, 1, 0]);
+    controller.setAgent({ line: "Paused", paused: true });
+    assert.strictEqual(tray.menu[4].label, "Resume agent");
+    // A run reports a step per tool call: the same line rebuilds nothing.
+    const built = tray.menus;
+    controller.setAgent({ line: "Paused", paused: true });
+    assert.strictEqual(tray.menus, built);
+    controller.setAgent(null);
+    assert.deepStrictEqual(tray.menu.map((item) => item.label ?? item.type), ["Open PR Dashboard", "separator", "Quit PR Dashboard"], "agent off: the plain menu");
+    assert.strictEqual(tray.tooltip, "PR Dashboard");
+  });
+
+  test("tray controller: the agent's state set while there is no icon shows on the next one; a long line is cut for Windows", () => {
+    const { controller } = setup();
+    controller.setAgent({ line: "2 queued", paused: false });
+    assert.strictEqual(trays.length, 0, "setting the agent's state creates no icon");
+    controller.setEnabled(true);
+    assert.strictEqual(trays[0].tooltip, "PR Dashboard\nAgent: 2 queued");
+    const long = trayTooltip({ line: "x".repeat(300), paused: false });
+    assert.strictEqual(long.length, 127);
+    assert.ok(long.endsWith("…"));
   });
 
   test("tray controller: Windows/Linux -> both click gestures reopen the dashboard", () => {
@@ -8470,8 +8510,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl } = {}) => {
-      const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home } = {}) => {
+      // `home`: the folder of an earlier fixture — the same app started again.
+      const dir = home ?? nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
       nfsA.mkdirSync(path.join(co, ".git"), { recursive: true });
       nfsA.writeFileSync(path.join(co, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
@@ -8496,9 +8537,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         execPath: process.execPath,
         plugins: () => [],
         git: async (args, cwd) => (gitCalls.push(args), gitImpl ? gitImpl(args, cwd) : ""),
-        spawner: (args, _cwd, env) => {
+        spawner: (args, cwd, env) => {
           const c = fakeChild();
           c.args = args;
+          c.cwd = cwd;
           c.env = env;
           children.push(c);
           setImmediate(() => script(c));
@@ -9791,7 +9833,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("main.js wiring: the agent hears every snapshot, keeps hidden polling alive and stops on quit", () => {
       const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
-      assert.match(src, /handleNotifications\(snapshot\.pullRequests\);\s*agent\?\.onSnapshot\(snapshot\)/);
+      assert.match(src, /agent\?\.onSnapshot\(snapshot\);\s*handleNotifications\(snapshot\.pullRequests\)/, "the agent takes its triggers before the toasts are decided");
       assert.match(src, /agentActive: \(\) => agent\?\.isActive\(\)/);
       assert.match(src, /if \(!\(0, mock_1\.isMockMode\)\(\)\) \{\s*agent = \(0, agent_1\.createAgent\)/);
       assert.match(src, /hookScript: unpackedScript\("hook\.js"\)/);
@@ -9803,6 +9845,217 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(pkg.build.asarUnpack, ["dist/main/main/agent/**", "dist/main/shared/**"], "Claude Code runs the hook and capture scripts as Node — they and what they require must be on disk");
       assert.match(src, /agent\?\.ownSessionIds\(\)/);
       assert.match(src, /markQuitting\(\);\s*agent\?\.stop\(\)/);
+    });
+
+    // --- stage 6: quiet hours, the tray line, toasts, the whole-agent pause, Interrupted + Resume ---
+    test("agent quiet hours: a span may wrap past midnight; its end is when runs start again", () => {
+      const at = (h, m) => new Date(2026, 10, 5, h, m);
+      const night = { enabled: true, from: "20:00", to: "08:00" };
+      assert.strictEqual(view.quietUntil(at(23, 30), night), "08:00");
+      assert.strictEqual(view.quietUntil(at(7, 59), night), "08:00");
+      assert.strictEqual(view.quietUntil(at(20, 0), night), "08:00", "from is inside");
+      assert.strictEqual(view.quietUntil(at(8, 0), night), null, "to is outside");
+      assert.strictEqual(view.quietUntil(at(12, 0), night), null);
+      const lunch = { enabled: true, from: "12:00", to: "13:30" };
+      assert.strictEqual(view.quietUntil(at(12, 45), lunch), "13:30");
+      assert.strictEqual(view.quietUntil(at(13, 30), lunch), null);
+      assert.strictEqual(view.quietUntil(at(23, 30), { ...night, enabled: false }), null);
+      assert.strictEqual(view.quietUntil(at(23, 30), { enabled: true, from: "09:00", to: "09:00" }), null, "an empty span holds nothing");
+      assert.strictEqual(view.quietUntil(at(23, 30), { enabled: true, from: "25:00", to: "08:00" }), null);
+    });
+
+    test("agent tray line: what runs with its plan's progress, else why nothing does, plus what waits for you", () => {
+      const base = { enabled: true, items: [], running: [], idle: {}, runsToday: 0, perDay: 30, parallel: 2, heldUntil: null, headerChip: true, trayState: true, paused: false, quietUntil: null, acceptedUnchanged: 0, suggestOn: false };
+      const progress = (steps) => ({ steps: steps.map((status, i) => ({ id: String(i), subject: "s", status })) });
+      const a = vItem({ prId: "A", state: "working", prNumber: 911 });
+      a.prNumber = 911;
+      const b = vItem({ prId: "B", state: "working", scenario: "drive" });
+      const run = (item, steps) => ({ runId: item.runId, progress: progress(steps), recent: [], paused: false });
+      assert.strictEqual(view.agentTrayLine(base), "Idle");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: [a], running: [run(a, ["completed", "completed", "in_progress", "pending"])] }), "Reviewing #911 · 2/4");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: [a, b], running: [run(a, []), run(b, [])] }), "Reviewing #911 +1");
+      const waiting = [vItem({ prId: "C", state: "needsYou" }), vItem({ prId: "D", state: "error" }), vItem({ prId: "E", state: "needsYou", later: true })];
+      assert.strictEqual(view.agentTrayLine({ ...base, items: waiting }), "Idle · 2 wait for you", "a result put aside with Later doesn't count");
+      assert.strictEqual(view.agentTrayLine({ ...base, paused: true, items: [a], running: [run(a, [])] }), "Paused");
+      const queued = [vItem({ prId: "F", state: "queued" })];
+      assert.strictEqual(view.agentTrayLine({ ...base, quietUntil: "08:00", items: queued }), "Quiet hours until 08:00 · 1 queued");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: queued }), "1 queued");
+      assert.match(view.agentTrayLine({ ...base, heldUntil: new Date(2026, 10, 5, 14, 5).toISOString() }), /^Usage limit — waits until 14:05$/);
+    });
+
+    test("agent toasts: a trigger the agent took in On is left to the agent; Shadow, other PRs and other triggers still toast", () => {
+      const on = (o) => vItem({ mode: "on", state: "queued", ...o });
+      const items = [on({ prId: "R", scenario: "review" }), on({ prId: "D", scenario: "drive", reasons: ["ci"] }), vItem({ prId: "S", scenario: "review", mode: "shadow", state: "working" })];
+      assert.strictEqual(view.agentTakesToast(items, { prId: "R", kind: "review_requested" }), true);
+      assert.strictEqual(view.agentTakesToast(items, { prId: "R", kind: "approved" }), false, "no run stands in for that");
+      assert.strictEqual(view.agentTakesToast(items, { prId: "D", kind: "ci_failed" }), true);
+      assert.strictEqual(view.agentTakesToast(items, { prId: "D", kind: "unanswered_comment" }), false, "a drive for CI doesn't answer comments");
+      assert.strictEqual(view.agentTakesToast(items, { prId: "S", kind: "review_requested" }), false, "Shadow leaves the trigger to you");
+      assert.strictEqual(view.agentTakesToast(items, { prId: "X", kind: "review_requested" }), false);
+      assert.strictEqual(view.agentTakesToast([on({ prId: "R", scenario: "review", state: "done" })], { prId: "R", kind: "review_requested" }), false, "only a run that is on it now");
+      assert.strictEqual(view.agentTakesToast([on({ prId: "B", scenario: "brief" })], { prId: "B", kind: "review_requested" }), true, "a brief stands in too");
+      assert.strictEqual(view.agentTakesToast([on({ prId: "Q", scenario: "rereview" })], { prId: "Q", kind: "returned_to_me" }), true);
+    });
+
+    test("ipc: the whole agent is paused and resumed with nothing riding along; Resume names a run", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "pauseAgent", runId: "../x", path: "/etc" }), { type: "pauseAgent" });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "resumeAgent" }), { type: "resumeAgent" });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "resumeSession", runId: RID }), { type: "resumeSession", runId: RID });
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "resumeSession", runId: "x" }));
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", interrupted: true, sessionId: "s" })), "Resume");
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", interrupted: true, scenario: "drive", sessionId: "s" })), "Run again", "a drive starts over");
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", interrupted: true })), "Run again", "no session to resume");
+    });
+
+    await atest("agent pause: the whole agent holds its queue, pauses the run in flight, and resumes only what it paused", async () => {
+      const f = agentFixture({ script: keepWorking });
+      try {
+        assert.deepStrictEqual(await f.agent.act({ type: "pauseAgent" }), { ok: true });
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.strictEqual(only(f)[0].state, "queued");
+        assert.strictEqual(f.children.length, 0, "nothing starts while paused");
+        assert.strictEqual(f.agent.getState().paused, true);
+        assert.strictEqual(JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).paused, true, "it stays paused across a restart");
+        assert.deepStrictEqual(await f.agent.act({ type: "resumeAgent" }), { ok: true });
+        await until(() => f.agent.getState().running.length === 1);
+        const c = f.children[0];
+        const runId = only(f)[0].runId;
+        await f.agent.act({ type: "pauseAgent" });
+        await tickOnce();
+        assert.match(c.written, /"subtype":"interrupt"/, "the run pauses at its next safe point");
+        assert.strictEqual(f.agent.getState().running[0].paused, true);
+        await f.agent.act({ type: "resumeAgent" });
+        await tickOnce();
+        assert.match(c.written, /Continue where you stopped/);
+        assert.strictEqual(f.agent.getState().running[0].paused, false);
+        assert.strictEqual(only(f)[0].headline, "Reviewing");
+        // One you paused yourself stays paused when the agent resumes.
+        await f.agent.act({ type: "pause", runId });
+        await f.agent.act({ type: "pauseAgent" });
+        await f.agent.act({ type: "resumeAgent" });
+        assert.strictEqual(f.agent.getState().running[0].paused, true);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent pause: an On review that finishes while the agent is paused waits for your Publish", async () => {
+      const posted = [];
+      const f = agentFixture({
+        agent: { scenarios: { review: { mode: "on" } } },
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          c.finish = () => reviewWithPlan("REQUEST_CHANGES")(c);
+        },
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+        gh: async (_args, opts) => (posted.push(JSON.parse(opts.input)), { code: 0, stdout: "{}", stderr: "" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+        await until(() => typeof f.children[0]?.finish === "function");
+        await f.agent.act({ type: "pauseAgent" });
+        f.children[0].finish();
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        assert.strictEqual(posted.length, 0, "paused, nothing goes out on its own");
+        assert.match(only(f)[0].headline, /^Would post: .* — held: the agent is paused$/);
+        assert.strictEqual(view.primaryActionLabel(only(f)[0]), "Publish");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent quiet hours: what the agent found itself waits; what you ask for runs", async () => {
+      const hm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      const night = { enabled: true, from: hm(new Date(Date.now() - 3600e3)), to: hm(new Date(Date.now() + 3600e3)) };
+      const f = agentFixture({ script: keepWorking, agent: { limits: { quietHours: night } } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.strictEqual(only(f)[0].state, "queued");
+        assert.strictEqual(f.children.length, 0);
+        assert.strictEqual(f.agent.getState().quietUntil, night.to);
+        // Yours: asked by you, it runs — the automatic one leaves the queue for it.
+        await f.agent.act({ type: "skip", runId: only(f)[0].runId });
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => f.children.length === 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a run the app's closing cut short is Interrupted; Resume continues the same session in its worktree, never by itself", async () => {
+      const f = agentFixture({ script: keepWorking });
+      f.agent.onSnapshot(f.snapshot);
+      await until(() => f.agent.getState().running.length === 1);
+      const { runId, sessionId, worktree, key } = only(f)[0];
+      f.agent.stop();
+      const saved = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+      const was = saved.items.find((i) => i.runId === runId);
+      assert.deepStrictEqual([was.state, was.interrupted, was.headline], ["needsYou", true, "Interrupted — the app closed while it ran"], "written down before the app goes");
+      assert.strictEqual(saved.ledger[key].state, "failed");
+
+      // The app starts again.
+      nfsA.mkdirSync(worktree, { recursive: true });
+      const g = agentFixture({ home: f.dir, script: keepWorking });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await tickOnce();
+        assert.strictEqual(g.children.length, 0, "no auto-continue");
+        const item = only(g).find((i) => i.runId === runId);
+        assert.strictEqual(view.primaryActionLabel(item), "Resume");
+        assert.deepStrictEqual(await g.agent.act({ type: "resumeSession", runId }), { ok: true });
+        await until(() => g.children.length === 1);
+        const c = g.children[0];
+        assert.strictEqual(c.args[c.args.indexOf("--resume") + 1], sessionId, "the very session it ran");
+        assert.ok(!c.args.includes("--session-id"));
+        assert.strictEqual(c.cwd, worktree, "in the worktree it worked in");
+        assert.ok(!g.gitCalls.some((a) => a[0] === "worktree" && a[1] === "add"), "no new worktree");
+        await tickOnce();
+        assert.match(c.written, /closed while you worked/);
+        assert.strictEqual(only(g).find((i) => i.runId === runId).state, "working");
+        assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"resumed"/);
+        assert.strictEqual((await g.agent.act({ type: "resumeSession", runId })).ok, false, "only an interrupted result can be resumed");
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: an interrupted drive starts over — Resume is refused; a resume whose folder is gone fails plainly", async () => {
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", state: "working", headline: "h", queuedAt: "2026-11-05T00:00:00Z" };
+      const st = agentStore.emptyStore("2026-11-05");
+      st.items = [
+        { ...base, runId: "00000000-0000-4000-8000-0000000000d1", key: "PR_R|drive|aaa111", scenario: "drive", sessionId: "11111111-1111-4111-8111-111111111111", worktree: home },
+        { ...base, runId: "00000000-0000-4000-8000-0000000000d2", key: "PR_R|review|aaa111", scenario: "review", sessionId: "22222222-2222-4222-8222-222222222222", worktree: path.join(home, "gone") },
+      ];
+      agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
+      const g = agentFixture({ home, script: keepWorking });
+      try {
+        assert.ok(only(g).every((i) => i.state === "needsYou" && i.interrupted));
+        assert.match((await g.agent.act({ type: "resumeSession", runId: "00000000-0000-4000-8000-0000000000d1" })).error, /drive starts over/);
+        assert.deepStrictEqual(await g.agent.act({ type: "resumeSession", runId: "00000000-0000-4000-8000-0000000000d2" }), { ok: true });
+        await until(() => only(g).some((i) => i.state === "error"));
+        assert.match(only(g).find((i) => i.state === "error").headline, /folder is gone/);
+        assert.strictEqual(g.children.length, 0);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    test("main.js wiring: the tray shows the agent hidden or not; Show agent opens its popover; toasts the agent took are left out", () => {
+      const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /showAgent: \(\) => showAgent\(\)/);
+      assert.match(src, /toggleAgentPause: \(\) =>[\s\S]{0,200}"resumeAgent" : "pauseAgent"/);
+      assert.match(src, /agentPushTimer = null;\s*(?:\/\/[^\n]*\n\s*)?updateTrayAgent\(\);\s*if \(agent && mainWindow/, "before the visibility gate");
+      assert.match(src, /trayController\.setAgent\(s && s\.enabled && s\.trayState \? \{ line: \(0, agent_view_1\.agentTrayLine\)\(s\), paused: s\.paused \} : null\)/);
+      assert.match(src, /sendToRenderer\("agent-open-companion", null\)/);
+      assert.match(src, /all\.filter\(\(e\) => !\(0, agent_view_1\.agentTakesToast\)\(agentItems, e\)\)/);
+      const preload = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
+      assert.match(preload, /"agent-open-companion"/);
     });
   }
 

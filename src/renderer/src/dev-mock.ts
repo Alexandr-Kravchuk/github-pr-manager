@@ -442,6 +442,15 @@ function mockAgentState(): AgentState {
     item(911, { state: "working", headline: "Reviewing", startedAt: iso(3 * 60_000), sessionId: "11111111-1111-4111-8111-111111111111" }),
     item(44, { state: "working", headline: "Reviewing", startedAt: iso(40_000), sessionId: "22222222-2222-4222-8222-222222222222" }),
     item(88, { state: "queued", headline: "Queued: review" }),
+    // The app closed while it ran: Resume picks the session up again.
+    item(139, {
+      state: "needsYou",
+      headline: "Interrupted — the app closed while it ran",
+      interrupted: true,
+      finishedAt: iso(50 * 60_000),
+      sessionId: "66666666-6666-4666-8666-666666666666",
+      worktree: "/tmp/agent-clio-139",
+    }),
     item(912, {
       scenario: "brief",
       mode: "on",
@@ -587,6 +596,9 @@ function mockAgentState(): AgentState {
     parallel: 2,
     heldUntil: null,
     headerChip: true,
+    trayState: true,
+    paused: false,
+    quietUntil: null,
     acceptedUnchanged: 4,
     suggestOn: false,
   };
@@ -596,12 +608,18 @@ const agentListeners = new Set<(s: AgentState) => void>();
 let agentState: AgentState =
   mood === "agent"
     ? mockAgentState()
-    : { enabled: false, items: [], running: [], idle: {}, runsToday: 0, perDay: 30, parallel: 2, heldUntil: null, headerChip: true, acceptedUnchanged: 0, suggestOn: false };
+    : { enabled: false, items: [], running: [], idle: {}, runsToday: 0, perDay: 30, parallel: 2, heldUntil: null, headerChip: true, trayState: true, paused: false, quietUntil: null, acceptedUnchanged: 0, suggestOn: false };
 
 function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error: string } {
   if (!agentState.enabled) return { ok: false, error: "The agent is off: switch it on in Settings > Agent." };
   const items = agentState.items.map((i) => ({ ...i }));
   const at = new Date().toISOString();
+  if (action.type === "pauseAgent" || action.type === "resumeAgent") {
+    const paused = action.type === "pauseAgent";
+    agentState = { ...agentState, paused, running: agentState.running.map((r) => ({ ...r, paused })) };
+    for (const l of agentListeners) l(agentState);
+    return { ok: true };
+  }
   if (action.type === "enqueue") {
     const pr = snapshot.pullRequests.find((p) => p.id === action.prId);
     if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
@@ -653,6 +671,9 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
         if (running) running.recent = [...running.recent, { at, text: `You: ${action.text}` }];
         break;
       case "continue":
+        break;
+      case "resumeSession":
+        Object.assign(it, { state: "queued", resumeSession: true, headline: "Queued: resume (asked by you)", finishedAt: undefined });
         break;
       case "publish":
         if (!it.plan) return { ok: false, error: "Nothing prepared to publish." };
@@ -729,6 +750,7 @@ const api: PrManagerApi = {
     };
   },
   onAgentShowBoard: () => () => {},
+  onAgentOpenCompanion: () => () => {},
 };
 
 (window as unknown as { api: PrManagerApi }).api = api;

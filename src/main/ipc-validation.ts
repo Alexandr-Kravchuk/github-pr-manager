@@ -120,7 +120,7 @@ export function validateClaudeSessionId(value: unknown): string {
   return value;
 }
 
-const RUN_ACTIONS = ["skip", "later", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver", "publish", "push"] as const;
+const RUN_ACTIONS = ["skip", "later", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver", "publish", "push", "resumeSession"] as const;
 const MERGE_METHODS = ["merge", "squash", "rebase"] as const;
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A hint is a note to the running session, not a document. */
@@ -134,6 +134,8 @@ export const AGENT_HINT_MAX = 2_000;
 export function validateAgentAction(value: unknown): AgentAction {
   const v = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
   if (v.type === "enqueue") return { type: "enqueue", prId: validatePrId(v.prId) };
+  // The whole agent: nothing else rides along.
+  if (v.type === "pauseAgent" || v.type === "resumeAgent") return { type: v.type };
   if (typeof v.runId !== "string" || !RUN_ID.test(v.runId)) throw new Error("agentAction: expected a run id.");
   if (v.type === "hint") {
     if (typeof v.text !== "string" || !v.text.trim() || v.text.length > AGENT_HINT_MAX) {

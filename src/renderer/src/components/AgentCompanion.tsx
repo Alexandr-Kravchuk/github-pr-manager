@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 
 // Node-free (see AGENTS.md).
 import { currentStep, type PlanStep, type RunProgress } from "../../../shared/agent-stream";
+import { SCENARIO_VERB as VERB } from "../../../shared/agent-view";
 import type { AgentItem, AgentRunState } from "../../../shared/types";
 import { cn } from "../format";
 import { AgentContext } from "./agent-context";
@@ -14,15 +15,6 @@ import { AgentContext } from "./agent-context";
 // field to tell the agent something, pause, and a ⋯ menu for the plan and log,
 // taking over and stopping. Nothing animates for long: a new step blinks once
 // (`.live-beat`, a finite animation, re-keyed on the step).
-
-const VERB: Record<AgentItem["scenario"], string> = {
-  review: "Reviewing",
-  brief: "Briefing",
-  rereview: "Re-reviewing",
-  drive: "Driving",
-  merge: "Merging",
-  afterMerge: "Checking Jira for",
-};
 
 function polar(c: number, r: number, deg: number): [number, number] {
   const rad = ((deg - 90) * Math.PI) / 180;
@@ -151,7 +143,7 @@ export function AgentCompanion({
       >
         <span className="relative">
           <StepRing steps={first?.progress.steps ?? []} active={Boolean(first)} paused={first?.paused ?? false} size={30} stroke={3}>
-            <Face size={22} tone={first ? (first.paused ? "paused" : "working") : "idle"} />
+            <Face size={22} tone={first ? (first.paused ? "paused" : "working") : state.paused ? "paused" : "idle"} />
           </StepRing>
           {waiting > 0 && (
             <span
@@ -173,7 +165,17 @@ export function AgentCompanion({
             </span>
           ) : (
             <span className="block truncate text-[11px] text-fg-subtle">
-              {first ? (first.paused ? "Paused" : (step?.subject ?? first.progress.activity ?? "Starting…")) : waiting > 0 ? `${waiting} wait for you` : "Nothing to do"}
+              {first
+                ? first.paused
+                  ? "Paused"
+                  : (step?.subject ?? first.progress.activity ?? "Starting…")
+                : state.paused
+                  ? "Paused"
+                  : state.quietUntil
+                    ? `Quiet hours until ${state.quietUntil}`
+                    : waiting > 0
+                      ? `${waiting} wait for you`
+                      : "Nothing to do"}
             </span>
           )}
         </span>
@@ -204,7 +206,8 @@ function useAnchor(anchor: RefObject<HTMLElement | null>) {
 }
 
 function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObject<HTMLButtonElement | null>; focus: string | null; onClose: () => void; onFocus: (runId: string) => void }) {
-  const { state } = useContext(AgentContext);
+  const { state, act } = useContext(AgentContext);
+  const [error, setError] = useState<string | null>(null);
   const pos = useAnchor(anchor);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -242,13 +245,19 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
         <HeroRun run={hero} item={heroItem} />
       ) : (
         <div className="flex items-center gap-3 px-4 py-4">
-          <StepRing steps={[]} active={false} paused={false} size={56} stroke={4}>
-            <Face size={40} tone="idle" />
+          <StepRing steps={[]} active={false} paused={state.paused} size={56} stroke={4}>
+            <Face size={40} tone={state.paused ? "paused" : "idle"} />
           </StepRing>
           <div className="min-w-0">
-            <div className="text-sm font-semibold text-fg">Nothing running</div>
+            <div className="text-sm font-semibold text-fg">{state.paused ? "Paused" : "Nothing running"}</div>
             <div className="text-xs text-fg-subtle">
-              {state.heldUntil ? `Claude's usage limit — new runs wait until ${new Date(state.heldUntil).toLocaleTimeString()}` : "It starts on its own when a PR needs it."}
+              {state.paused
+                ? "Nothing starts until you resume it."
+                : state.quietUntil
+                  ? `Quiet hours until ${state.quietUntil} — only what you ask for starts.`
+                  : state.heldUntil
+                    ? `Claude's usage limit — new runs wait until ${new Date(state.heldUntil).toLocaleTimeString()}`
+                    : "It starts on its own when a PR needs it."}
             </div>
           </div>
         </div>
@@ -280,6 +289,27 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
           <span className="text-fg-subtle">on the Board</span>
         </div>
       )}
+
+      {/* The emergency stop: everything holds, nothing goes out on its own. */}
+      <div className="flex items-center gap-2 border-t border-line px-4 py-2 text-xs">
+        <span className={cn("min-w-0 flex-1 truncate", error ? "text-red-700 dark:text-red-300" : state.paused ? "text-amber-700 dark:text-amber-300" : "text-fg-subtle")} role={error ? "alert" : undefined}>
+          {error ??
+            (state.paused
+              ? "Paused — nothing starts or goes out"
+              : state.quietUntil
+                ? `Quiet hours until ${state.quietUntil}`
+                : `Runs today ${state.runsToday} of ${state.perDay}`)}
+        </span>
+        <button
+          type="button"
+          onClick={() =>
+            void act({ type: state.paused ? "resumeAgent" : "pauseAgent" }).then((res) => setError(res.ok ? null : res.error))
+          }
+          className="shrink-0 rounded-md border border-line-strong px-2 py-0.5 font-medium text-fg-secondary hover:bg-elevated"
+        >
+          {state.paused ? "Resume agent" : "Pause agent"}
+        </button>
+      </div>
     </div>,
     document.body,
   );

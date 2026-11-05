@@ -1,4 +1,5 @@
-import type { AgentItem, AgentRunState, AgentState, PullRequest } from "./types";
+import type { NotifyEventKind } from "./notify";
+import type { AgentItem, AgentRunState, AgentSettings, AgentState, PullRequest } from "./types";
 
 // How the agent's state reads on the dashboard: which of a PR's items its card
 // shows, and how the Board lays the PRs out. Node-free (the renderer
@@ -109,10 +110,111 @@ export function finishedOn(item: Pick<AgentItem, "finishedAt">, today: string): 
 export function primaryActionLabel(item: AgentItem): string | null {
   if (item.state === "error") return "Run again";
   if (item.state !== "needsYou") return null;
+  // A drive starts over: its push is checked against what the app read
+  // before any session worked in that worktree.
+  if (item.interrupted) return item.scenario === "drive" || !item.sessionId ? "Run again" : "Resume";
   if (item.scenario === "merge") return "Merge";
   if (item.scenario === "drive" && item.drive && item.drive.commits.length > 0 && !item.pushed) return "Push";
   if (item.plan && !item.published) return "Publish";
   if (item.scenario === "brief" && item.output) return "Review anyway";
   if (item.sessionId) return item.scenario === "afterMerge" ? "Apply in session" : "Continue in session";
   return null;
+}
+
+/** What a run of each scenario is doing, as the chip and the tray say it. */
+export const SCENARIO_VERB: Record<AgentItem["scenario"], string> = {
+  review: "Reviewing",
+  brief: "Briefing",
+  rereview: "Re-reviewing",
+  drive: "Driving",
+  merge: "Merging",
+  afterMerge: "Checking Jira for",
+};
+
+/** "HH:MM" → minutes after midnight; null for anything else. */
+function clockMinutes(clock: string): number | null {
+  const m = /^(\d{2}):(\d{2})$/.exec(clock);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  return h < 24 && min < 60 ? h * 60 + min : null;
+}
+
+/**
+ * Inside quiet hours at `now` (local time): the clock they end at, as set
+ * ("08:00"); null outside them. The span may wrap past midnight (20:00–08:00
+ * holds 23:30 and 07:59, not 08:00); `from` equal to `to` is no span at all.
+ */
+export function quietUntil(now: Date, quiet: AgentSettings["limits"]["quietHours"]): string | null {
+  if (!quiet.enabled) return null;
+  const from = clockMinutes(quiet.from);
+  const to = clockMinutes(quiet.to);
+  if (from === null || to === null || from === to) return null;
+  const t = now.getHours() * 60 + now.getMinutes();
+  const inside = from < to ? t >= from && t < to : t >= from || t < to;
+  return inside ? quiet.to : null;
+}
+
+function localClock(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * The agent in one line, for the tray's tooltip and menu: what runs (with
+ * its plan's progress), else why nothing does, plus what waits for you —
+ * "Reviewing #911 · 4/6 · 2 wait for you", "Paused", "Quiet hours until 08:00".
+ */
+export function agentTrayLine(state: AgentState): string {
+  const waiting = state.items.filter((i) => (i.state === "needsYou" || i.state === "error") && !i.later).length;
+  const queued = state.items.filter((i) => i.state === "queued").length;
+  const first = state.running[0];
+  const item = first ? state.items.find((i) => i.runId === first.runId) : undefined;
+  let line: string;
+  if (state.paused) {
+    line = "Paused";
+  } else if (first && item) {
+    const steps = first.progress.steps;
+    const done = steps.filter((s) => s.status === "completed").length;
+    line = `${SCENARIO_VERB[item.scenario]} #${item.prNumber}${steps.length > 0 ? ` · ${done}/${steps.length}` : ""}${state.running.length > 1 ? ` +${state.running.length - 1}` : ""}`;
+  } else if (state.quietUntil && queued > 0) {
+    line = `Quiet hours until ${state.quietUntil} · ${queued} queued`;
+  } else if (state.quietUntil) {
+    line = `Quiet hours until ${state.quietUntil}`;
+  } else if (state.heldUntil) {
+    line = `Usage limit — waits until ${localClock(state.heldUntil)}`;
+  } else if (queued > 0) {
+    line = `${queued} queued`;
+  } else {
+    line = "Idle";
+  }
+  return waiting > 0 ? `${line} · ${waiting} wait${waiting === 1 ? "s" : ""} for you` : line;
+}
+
+/** Which of the agent's runs stands in for each regular toast. */
+const TOAST_SCENARIOS: Partial<Record<NotifyEventKind, { scenarios: ReadonlyArray<AgentItem["scenario"]>; reason?: string }>> = {
+  review_requested: { scenarios: ["review", "brief"] },
+  returned_to_me: { scenarios: ["rereview"] },
+  ci_failed: { scenarios: ["drive"], reason: "ci" },
+  changes_requested: { scenarios: ["drive"], reason: "comments" },
+  unanswered_comment: { scenarios: ["drive"], reason: "comments" },
+};
+
+/**
+ * Whether a regular toast is one the agent already stands in for: it took
+ * the PR for that very trigger in On mode, so its own result — posted, or a
+ * "needs you" — is what you hear about. Shadow runs leave the toast alone:
+ * there the trigger still waits on you.
+ */
+export function agentTakesToast(items: readonly AgentItem[], event: { prId: string; kind: NotifyEventKind }): boolean {
+  const rule = TOAST_SCENARIOS[event.kind];
+  if (!rule) return false;
+  return items.some(
+    (i) =>
+      i.prId === event.prId &&
+      i.mode === "on" &&
+      (i.state === "queued" || i.state === "working") &&
+      rule.scenarios.includes(i.scenario) &&
+      (!rule.reason || (i.reasons ?? []).includes(rule.reason)),
+  );
 }

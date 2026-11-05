@@ -22,6 +22,8 @@ import type { AgentRunKind } from "../../shared/types";
 export interface RunSpec {
   cwd: string;
   sessionId: string;
+  /** Continue `sessionId` (`--resume`) — a run the app's closing interrupted — rather than start it. */
+  resume?: boolean;
   kind: AgentRunKind;
   prompt: string;
   appendSystemPrompt: string;
@@ -85,7 +87,7 @@ export function buildClaudeArgs(spec: RunSpec): string[] {
     "stream-json",
     "--output-format",
     "stream-json",
-    "--session-id",
+    spec.resume ? "--resume" : "--session-id",
     spec.sessionId,
     "--restricted",
     "--strict-mcp-config",

@@ -37,6 +37,13 @@ const api: PrManagerApi = {
       ipcRenderer.removeListener("agent-show-board", handler);
     };
   },
+  onAgentOpenCompanion: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on("agent-open-companion", handler);
+    return () => {
+      ipcRenderer.removeListener("agent-open-companion", handler);
+    };
+  },
   copyText: (text) => ipcRenderer.invoke("app:copyText", text),
   onSnapshot: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DashboardResponse) =>

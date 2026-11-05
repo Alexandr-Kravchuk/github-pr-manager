@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
+import { agentTakesToast, agentTrayLine } from "../shared/agent-view";
 import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
 import { fetchPullRequest } from "../shared/github";
 import { planPolling } from "../shared/idle-gate";
@@ -80,6 +81,8 @@ function scheduleAgentPush(): void {
   if (agentPushTimer) return;
   agentPushTimer = setTimeout(() => {
     agentPushTimer = null;
+    // The tray shows the agent hidden or not — a hidden window is when it matters.
+    updateTrayAgent();
     if (agent && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
       sendToRenderer("agent-state", agent.getState());
     }
@@ -179,7 +182,26 @@ const trayController = createTrayController({
   open: () => focusMainWindow(),
   quit: () => app.quit(),
   hide: () => hideMainWindow(),
+  showAgent: () => showAgent(),
+  toggleAgentPause: () => {
+    if (!agent) return;
+    void agent.act({ type: agent.getState().paused ? "resumeAgent" : "pauseAgent" }).then((res) => {
+      if (!res.ok) console.warn(`[agent] ${res.error}`);
+    });
+  },
 });
+
+/** The tray's "Show agent": the window, with the agent's popover open (the Board when the header chip is off). */
+function showAgent(): void {
+  focusMainWindow();
+  sendToRenderer("agent-open-companion", null);
+}
+
+/** The agent's line in the tray, as Settings › Agent › Companion asks; null while the agent is off. */
+function updateTrayAgent(): void {
+  const s = agent?.getState();
+  trayController.setAgent(s && s.enabled && s.trayState ? { line: agentTrayLine(s), paused: s.paused } : null);
+}
 
 /**
  * Hides the window for close-to-tray. A macOS window in native full-screen
@@ -305,7 +327,13 @@ function handleNotifications(prs: PullRequest[]): void {
   // any delivery failure — so a throwing deliverer degrades to a skipped tick
   // and never replays a backlog. That ordering guarantee is unit-tested on the
   // pure helper; this callback holds only the Electron delivery.
-  prevNotifyPrs = runNotifyCycle(prevNotifyPrs, prs, settings.notifications, (events) => {
+  prevNotifyPrs = runNotifyCycle(prevNotifyPrs, prs, settings.notifications, (all) => {
+    // A trigger the PR agent took in On mode: its own result is what you hear
+    // about, not this toast as well (`agentTakesToast`, unit-tested).
+    const agentState = agent?.getState();
+    const agentItems = agentState?.enabled ? agentState.items : [];
+    const events = all.filter((e) => !agentTakesToast(agentItems, e));
+    if (events.length < all.length) dbg(`the agent stands in for ${all.length - events.length} toast(s)`);
     if (!settings.notifications.enabled) {
       dbg("disabled in Settings — nothing fires (enable it under Notifications)");
       return;
@@ -407,6 +435,8 @@ function applyPreferences(settings: Settings): void {
   // Creates or removes the tray icon; a failure to create one leaves close
   // quitting (the controller says so) rather than hiding an unreachable window.
   trayController.setEnabled(settings.closeToTray);
+  // The agent switched on or off, or its tray line, in the settings just saved.
+  updateTrayAgent();
   applyThemeSource(settings.theme);
   claudeSessionsOn = settings.claude.enabled;
   void refreshClaudeSessions();
@@ -889,8 +919,11 @@ function startApp(): void {
       if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
         sendToRenderer("snapshot", snapshot);
       }
-      handleNotifications(snapshot.pullRequests);
+      // The agent first: a regular toast for a trigger it just took in On is
+      // left out (its own result is what you hear about), and it can only tell
+      // once it has taken it.
       agent?.onSnapshot(snapshot);
+      handleNotifications(snapshot.pullRequests);
     },
     onConfigError: (message) => {
       if (process.env.PRD_DEBUG) console.error("[config-error]", message);
@@ -922,6 +955,7 @@ function startApp(): void {
       notify: handleAgentNotice,
       onChange: scheduleAgentPush,
     });
+    updateTrayAgent();
   }
 
   // Pause polling across sleep; refresh on resume / unlock so the first thing
