@@ -624,16 +624,61 @@ export const TWG_READ_PATHS: ReadonlySet<string> = new Set([
   "capabilities",
 ]);
 
+/**
+ * The twg flags a read may pass, and whether each takes a value. Anything
+ * else is refused: an unknown flag's arity is unknown, and a word taken for
+ * its value could be read by twg as a subcommand instead.
+ */
+const TWG_FLAGS: Record<string, "flag" | "value"> = {
+  "-o": "value",
+  "--output": "value",
+  "--output-summary": "value",
+  "--detail": "value",
+  "--format": "value",
+  "--jql": "value",
+  "--cql": "value",
+  "--query": "value",
+  "--limit": "value",
+  "--max-results": "value",
+  "--fields": "value",
+  "--expand": "value",
+  "--cursor": "value",
+  "--site": "value",
+  "--space": "value",
+  "--type": "value",
+  "--all": "flag",
+  "--help": "flag",
+  "-h": "flag",
+};
+
 function checkTwg(words: string[]): GuardDecision {
   const path: string[] = [];
-  for (let i = 1; i < words.length && /^[a-z][a-z-]*$/.test(words[i]); i++) path.push(words[i]);
+  let i = 1;
+  for (; i < words.length && /^[a-z][a-z-]*$/.test(words[i]); i++) path.push(words[i]);
   const cmd = path.join(" ");
-  const ok = TWG_READ_PATHS.has(cmd) || path[0] === "help";
-  if (!ok) {
+  // `help` only describes commands, whatever it is asked about.
+  if (path[0] === "help") return { allow: true };
+  if (!TWG_READ_PATHS.has(cmd)) {
     return deny(`twg ${cmd || "…"} is not one of the reads agent runs may use (${[...TWG_READ_PATHS].slice(0, 4).join(", ")}, …) — the app leaves Jira changes to you.`);
   }
-  if (words.some((w) => w.startsWith("-") && /file|dir|save|write|exec|editor|open|browser|yes|force|apply/i.test(w))) {
-    return deny("That twg flag writes or opens something; agent runs only read.");
+  // After the path: known flags with their values, and positionals that can't
+  // pass for a subcommand (an issue key, a page id, a quoted phrase) — so no
+  // parser, however it orders flags and words, can find a write in there.
+  for (; i < words.length; i++) {
+    const w = words[i];
+    if (w.startsWith("-")) {
+      const name = w.startsWith("--") ? w.split("=")[0] : w.slice(0, 2);
+      const kind = TWG_FLAGS[name];
+      if (!kind) return deny(`twg ${name} is not one of the flags agent runs may use.`);
+      const attached = w.startsWith("--") ? w.includes("=") : w.length > 2;
+      if (kind === "flag" && attached) return deny(`${name} takes no value.`);
+      if (kind === "value" && !attached) {
+        if (words[i + 1] === undefined || words[i + 1].startsWith("-")) return deny(`${name} needs a value that isn't a flag.`);
+        i++;
+      }
+      continue;
+    }
+    if (/^[a-z][a-z-]*$/.test(w)) return deny(`"${w}" after twg ${cmd} reads like a subcommand; quote a search phrase or put it in a flag.`);
   }
   return { allow: true };
 }
