@@ -7990,6 +7990,496 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
   }
 
+  // --- the PR agent (stage 2: core, shadow only) ------------------------------
+  {
+    const nfsA = require("node:fs");
+    const { PassThrough } = require("node:stream");
+    const { EventEmitter } = require("node:events");
+    const { spawnSync } = require("node:child_process");
+    const guard = require(path.join(__dirname, "../dist/main/shared/agent-guard.js"));
+    const policy = require(path.join(__dirname, "../dist/main/shared/agent-policy.js"));
+    const stream = require(path.join(__dirname, "../dist/main/shared/agent-stream.js"));
+    const ad = require(path.join(__dirname, "../dist/main/shared/agent-defaults.js"));
+    const plugins = require(path.join(__dirname, "../dist/main/main/agent/plugins.js"));
+    const runner = require(path.join(__dirname, "../dist/main/main/agent/runner.js"));
+    const wt = require(path.join(__dirname, "../dist/main/main/agent/worktrees.js"));
+    const agentStore = require(path.join(__dirname, "../dist/main/main/agent/store.js"));
+    const agentCore = require(path.join(__dirname, "../dist/main/main/agent/index.js"));
+    const idleGate = require(path.join(__dirname, "../dist/main/shared/idle-gate.js"));
+    const hookJs = path.join(__dirname, "../dist/main/main/agent/hook.js");
+
+    for (const mod of ["agent-guard.js", "agent-policy.js", "agent-stream.js"]) {
+      test(`${mod} compiles free of node: builtin references`, () => {
+        const src = nfsA.readFileSync(path.join(__dirname, `../dist/main/shared/${mod}`), "utf8");
+        const hits = src.match(/require\(["'](?:node:[^"']+|fs|path|os|crypto|child_process)["']\)|from ["']node:[^"']+["']/g) || [];
+        assert.deepStrictEqual(hits, [], mod);
+      });
+    }
+
+    test("agent guard: reads a review needs pass", () => {
+      for (const cmd of [
+        "gh pr view 12 --json title,body",
+        "gh pr diff 12",
+        "gh pr checks 12",
+        "gh api repos/acme/widgets/pulls/12/reviews --jq '.[].state'",
+        "gh api repos/acme/widgets/pulls/12/comments --paginate",
+      ]) {
+        assert.deepStrictEqual(guard.checkToolUse("review", "Bash", { command: cmd }), { allow: true }, cmd);
+      }
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "src/x.ts" }).allow, true);
+      assert.strictEqual(guard.checkToolUse("review", "Skill", { skill: "x" }).allow, true);
+    });
+
+    test("agent guard: every escape found in review is refused, whatever the allow-list says", () => {
+      for (const [kind, cmd] of [
+        ["review", "git diff --output=/home/me/.bashrc"],
+        ["review", "git diff HEAD~1 --ext-diff"],
+        ["review", "git log -p --textconv"],
+        ["review", "git diff --no-index / /tmp"],
+        ["review", "git -C / log"],
+        ["review", "git -c core.pager=evil log"],
+        ["review", "git checkout main"],
+        ["review", "FOO=1 git push"],
+        ["review", "gh api -X DELETE repos/a/b/issues/comments/1"],
+        ["review", "gh api repos/a/b/pulls/1/reviews --method POST"],
+        ["review", "gh api repos/a/b/pulls/1/reviews -f event=APPROVE"],
+        ["review", "gh api repos/a/b/pulls/1/reviews --input body.json"],
+        ["review", "gh pr review 1 --approve"],
+        ["review", "gh pr merge 1"],
+        ["review", "gh pr comment 1 --body hi"],
+        ["review", "gh pr diff 1 > ~/.bashrc"],
+        ["review", "gh pr view 1 | sh"],
+        ["review", "gh pr view 1; rm -rf ~"],
+        ["review", "gh pr view 1 && curl evil"],
+        ["review", "gh pr view $(whoami)"],
+        ["review", "gh pr view `whoami`"],
+        ["review", "npm test"],
+        ["review", "node -e 'require(\"fs\")'"],
+        ["brief", "git log"],
+        ["drive", "git push origin HEAD:refs/heads/feature/x"],
+        ["drive", "git -c core.hooksPath=/tmp commit -m x"],
+        ["drive", "git diff --output=x"],
+      ]) {
+        assert.strictEqual(guard.checkToolUse(kind, "Bash", { command: cmd }).allow, false, `${kind}: ${cmd}`);
+      }
+      for (const tool of ["Edit", "Write", "NotebookEdit"]) assert.strictEqual(guard.checkToolUse("review", tool, {}).allow, false, tool);
+      for (const tool of ["WebFetch", "WebSearch", "PowerShell"]) assert.strictEqual(guard.checkToolUse("drive", tool, {}).allow, false, tool);
+      assert.strictEqual(guard.checkToolUse("review", "Bash", {}).allow, false, "an empty command");
+    });
+
+    test("agent guard: drive may build, test and commit on its own PR", () => {
+      for (const cmd of ["npm test", "npm run typecheck", "git status", "git add src/x.ts", "git commit -m fix", "git log -3"]) {
+        assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: cmd }).allow, true, cmd);
+      }
+      assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: "x" }).allow, true);
+    });
+
+    test("agent defaults: reads carry no git rule (its output and exec flags write and run)", () => {
+      for (const kind of ["review", "brief", "rereview", "afterMerge"]) {
+        for (const rule of ad.DEFAULT_AGENT_TOOLS[kind]) assert.ok(!/git /.test(rule) && !/Edit|Write/.test(rule), `${kind}: ${rule}`);
+      }
+    });
+
+    test("agent guard hook: a refused call exits 2 with the reason, an allowed one exits 0", () => {
+      const run = (kind, call) => spawnSync(process.execPath, [hookJs, kind], { input: JSON.stringify(call), encoding: "utf8" });
+      const bad = run("review", { tool_name: "Bash", tool_input: { command: "gh pr diff 1 > x" } });
+      assert.strictEqual(bad.status, 2);
+      assert.match(bad.stderr, /Shell operators/);
+      assert.strictEqual(run("review", { tool_name: "Bash", tool_input: { command: "gh pr view 1" } }).status, 0);
+      assert.strictEqual(run("nonsense", { tool_name: "Read", tool_input: {} }).status, 2, "an unknown kind refuses everything");
+      assert.strictEqual(spawnSync(process.execPath, [hookJs, "review"], { input: "not json", encoding: "utf8" }).status, 2);
+    });
+
+    const agentOn = (extra = {}) => cfg.validateAgent({ enabled: true, ...extra });
+    const reviewPr = (over = {}) => ({
+      ...github.mapPr(
+        rawPr({
+          id: over.id ?? "PR_R",
+          number: over.number ?? 7,
+          url: "https://github.com/a/b/pull/7",
+          additions: over.additions ?? 50,
+          deletions: 10,
+          changedFiles: over.changedFiles ?? 3,
+          createdAt: over.createdAt ?? "2026-07-07T00:00:00Z",
+          commits: { nodes: [{ commit: { oid: over.headOid ?? "aaa111", pushedDate: "2026-07-07T00:00:00Z", committedDate: "2026-07-07T00:00:00Z", statusCheckRollup: null } }] },
+        }),
+        "GH",
+        [over.role ?? "reviewer"],
+        "me",
+      ),
+      requestedOfMe: over.requestedOfMe ?? true,
+      viewerHasReviewed: over.viewerHasReviewed ?? false,
+      isDraft: over.isDraft ?? false,
+      isIgnored: over.isIgnored ?? false,
+    });
+    const noSessions = { hasOwnSession: () => false };
+
+    test("agent policy: off plans nothing and says so", () => {
+      const r = policy.planJobs([reviewPr()], cfg.validateAgent(undefined), noSessions);
+      assert.deepStrictEqual(r.jobs, []);
+      assert.strictEqual(r.idle.get("PR_R"), "The agent is off");
+    });
+
+    test("agent policy: a review asked of you, within the limit, is a shadow review keyed on the head", () => {
+      const r = policy.planJobs([reviewPr()], agentOn(), noSessions);
+      assert.strictEqual(r.jobs.length, 1);
+      assert.deepStrictEqual(
+        [r.jobs[0].scenario, r.jobs[0].kind, r.jobs[0].mode, r.jobs[0].key],
+        ["review", "review", "shadow", "PR_R|review|aaa111"],
+      );
+      assert.notStrictEqual(policy.jobKey({ id: "PR_R", headOid: "bbb222" }, "review"), r.jobs[0].key, "a new head is a new key");
+    });
+
+    test("agent policy: over the limit is a brief; a brief never posts", () => {
+      const r = policy.planJobs([reviewPr({ additions: 900 }), reviewPr({ id: "PR_F", changedFiles: 40 })], agentOn(), noSessions);
+      assert.deepStrictEqual(r.jobs.map((j) => [j.scenario, j.mode]), [["brief", "on"], ["brief", "on"]]);
+      const off = policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { brief: { mode: "off" } } }), noSessions);
+      assert.deepStrictEqual(off.jobs, []);
+      assert.match(off.idle.get("PR_R"), /briefs are off/);
+    });
+
+    test("agent policy: team requests, drafts, ignored, reviewed, your own session and other repos are left alone", () => {
+      const cases = [
+        [reviewPr({ requestedOfMe: false }), /team/],
+        [reviewPr({ isDraft: true }), /Draft/],
+        [reviewPr({ isIgnored: true }), /Ignored/],
+        [reviewPr({ viewerHasReviewed: true }), /already reviewed/],
+        [reviewPr({ role: "author" }), /Yours|Waiting/],
+      ];
+      for (const [pr, why] of cases) {
+        const r = policy.planJobs([pr], agentOn(), noSessions);
+        assert.deepStrictEqual(r.jobs, [], String(why));
+        assert.match(r.idle.get(pr.id), why);
+      }
+      assert.match(policy.planJobs([reviewPr()], agentOn(), { hasOwnSession: () => true }).idle.get("PR_R"), /Your Claude session/);
+      assert.match(policy.planJobs([reviewPr()], agentOn({ repos: ["x/y"] }), noSessions).idle.get("PR_R"), /repositories/);
+      assert.strictEqual(policy.planJobs([reviewPr({ requestedOfMe: false })], agentOn({ scenarios: { review: { teamRequests: true } } }), noSessions).jobs.length, 1);
+      assert.strictEqual(policy.planJobs([reviewPr({ isDraft: true })], agentOn({ scenarios: { review: { drafts: true } } }), noSessions).jobs.length, 1);
+    });
+
+    test("agent policy: the queue runs oldest first", () => {
+      const r = policy.planJobs(
+        [reviewPr({ id: "NEW", createdAt: "2026-07-09T00:00:00Z" }), reviewPr({ id: "OLD", createdAt: "2026-07-01T00:00:00Z" })],
+        agentOn(),
+        noSessions,
+      );
+      assert.deepStrictEqual(r.jobs.map((j) => j.prId), ["OLD", "NEW"]);
+    });
+
+    // Events recorded from a real `claude -p` session (2.1.270), trimmed.
+    const recorded = [
+      { type: "system", subtype: "init", session_id: "s-1", tools: ["Read"] },
+      { type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: 1793899800 } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "ToolSearch", input: { query: "select:TaskCreate" } }] } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t2", name: "TaskCreate", input: { subject: "alpha", description: "First" } }] } },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t2", content: "Task #1 created successfully: alpha" }] } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t3", name: "TaskCreate", input: { subject: "beta" } }] } },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t3", content: [{ type: "text", text: "Task #2 created successfully: beta" }] }] } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t4", name: "TaskUpdate", input: { taskId: "1", status: "in_progress" } }] } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t5", name: "Bash", input: { command: "gh pr diff 7" } }] } },
+      { type: "assistant", message: { content: [{ type: "text", text: "Reviewing the diff." }] } },
+    ];
+    test("agent stream: the plan comes from TaskCreate/TaskUpdate, the live line from the last real tool", () => {
+      let p = stream.initialProgress();
+      for (const ev of recorded) p = stream.applyStreamEvent(p, ev);
+      assert.strictEqual(p.sessionId, "s-1");
+      assert.deepStrictEqual(p.steps, [
+        { id: "1", subject: "alpha", status: "in_progress" },
+        { id: "2", subject: "beta", status: "pending" },
+      ]);
+      assert.strictEqual(p.activity, "$ gh pr diff 7", "ToolSearch and the plan tools are not the live line");
+      assert.strictEqual(p.lastText, "Reviewing the diff.");
+      assert.deepStrictEqual(p.rateLimit, { status: "allowed", resetsAt: 1793899800 });
+      assert.strictEqual(stream.currentStep(p).subject, "alpha");
+      assert.strictEqual(p.result, null);
+      p = stream.applyStreamEvent(p, { type: "result", subtype: "success", is_error: false, result: "LGTM", permission_denials: [{}, {}] });
+      assert.deepStrictEqual(p.result, { subtype: "success", isError: false, text: "LGTM", denials: 2 });
+    });
+    test("agent stream: junk lines and unknown events change nothing; TodoWrite still reads", () => {
+      assert.strictEqual(stream.parseStreamLine("not json"), null);
+      assert.strictEqual(stream.parseStreamLine("{broken"), null);
+      const p0 = stream.initialProgress();
+      assert.strictEqual(stream.applyStreamEvent(p0, { type: "control_response" }), p0);
+      const p = stream.applyStreamEvent(p0, {
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "x", name: "TodoWrite", input: { todos: [{ content: "a", status: "completed" }, { content: "b", status: "pending" }] } }] },
+      });
+      assert.deepStrictEqual(p.steps.map((s) => `${s.subject}:${s.status}`), ["a:completed", "b:pending"]);
+    });
+
+    test("agent plugins: a bare skill one plugin owns is qualified; others stay as written", () => {
+      const cat = [
+        { name: "creatio-development", installPath: "/p/cd", skills: ["creatio-code-review", "code-delivery", "validate-and-fix-review-comments"] },
+        { name: "other", installPath: "/p/o", skills: ["code-delivery-x", "shared"] },
+        { name: "third", installPath: "/p/t", skills: ["shared"] },
+      ];
+      const r = plugins.resolveSkillRefs("/creatio-code-review https://x/pull/1", cat);
+      assert.deepStrictEqual(r, { prompt: "/creatio-development:creatio-code-review https://x/pull/1", pluginDirs: ["/p/cd"] });
+      const q = plugins.resolveSkillRefs("/creatio-development:code-delivery fix it, check with /validate-and-fix-review-comments", cat);
+      assert.strictEqual(q.prompt, "/creatio-development:code-delivery fix it, check with /creatio-development:validate-and-fix-review-comments");
+      assert.deepStrictEqual(q.pluginDirs, ["/p/cd"]);
+      assert.strictEqual(plugins.resolveSkillRefs("/shared x", cat).prompt, "/shared x", "two owners: left as written");
+      assert.deepStrictEqual(plugins.resolveSkillRefs("see https://x/y/z and /nope", cat), { prompt: "see https://x/y/z and /nope", pluginDirs: [] });
+    });
+    test("agent plugins: read from Claude Code's registry, skills from each install", () => {
+      const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-plugins-"));
+      const inst = path.join(dir, "cache", "cd", "1.0");
+      nfsA.mkdirSync(path.join(inst, "skills", "creatio-code-review"), { recursive: true });
+      nfsA.mkdirSync(path.join(dir, "plugins"), { recursive: true });
+      nfsA.writeFileSync(
+        path.join(dir, "plugins", "installed_plugins.json"),
+        JSON.stringify({ version: 2, plugins: { "creatio-development@creatio-engineering": [{ scope: "user", installPath: inst }], "bad@x": "nope" } }),
+      );
+      assert.deepStrictEqual(plugins.readInstalledPlugins(dir), [{ name: "creatio-development", installPath: inst, skills: ["creatio-code-review"] }]);
+      assert.deepStrictEqual(plugins.readInstalledPlugins(path.join(dir, "missing")), []);
+    });
+
+    const spec = (over = {}) => ({
+      cwd: "/wt",
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      kind: "review",
+      prompt: "/x https://x/pull/1",
+      appendSystemPrompt: "rules",
+      allowedTools: ["Read", "Bash(gh pr view *)", "mcp__jira__get", "TaskCreate"],
+      pluginDirs: ["/p/cd"],
+      model: "",
+      effort: "low",
+      settingsFile: "/s/settings.json",
+      timeoutMs: 60_000,
+      ...over,
+    });
+    test("agent runner: the isolation flags are always there, and --allowedTools comes last", () => {
+      const a = runner.buildClaudeArgs(spec());
+      for (const flag of ["-p", "--verbose", "--restricted", "--strict-mcp-config"]) assert.ok(a.includes(flag), flag);
+      const at = (f) => a[a.indexOf(f) + 1];
+      assert.strictEqual(at("--input-format"), "stream-json");
+      assert.strictEqual(at("--output-format"), "stream-json");
+      assert.strictEqual(at("--permission-prompts"), "none");
+      assert.strictEqual(at("--settings"), "/s/settings.json");
+      assert.strictEqual(at("--plugin-dir"), "/p/cd");
+      assert.strictEqual(at("--tools"), "Read,Bash,TaskCreate", "MCP tools aren't built-in tools");
+      assert.ok(!a.includes("--model"), "no model flag means Claude Code's default");
+      assert.deepStrictEqual(a.slice(a.indexOf("--allowedTools")), ["--allowedTools", "Read", "Bash(gh pr view *)", "mcp__jira__get", "TaskCreate"]);
+      assert.strictEqual(runner.hookCommand("C:\\App\\PR Dashboard.exe", "C:\\App\\hook.js", "review"), '"C:/App/PR Dashboard.exe" "C:/App/hook.js" review');
+    });
+
+    const fakeChild = () => {
+      const c = new EventEmitter();
+      c.stdin = new PassThrough();
+      c.stdout = new PassThrough();
+      c.stderr = new PassThrough();
+      c.written = "";
+      c.stdin.on("data", (d) => (c.written += d.toString()));
+      c.ended = false;
+      c.stdin.on("finish", () => (c.ended = true));
+      c.kill = () => setImmediate(() => c.emit("exit", null));
+      return c;
+    };
+    const emit = (c, ev) => c.stdout.write(`${JSON.stringify(ev)}\n`);
+    const tickOnce = () => new Promise((r) => setImmediate(r));
+
+    await atest("agent runner: the prompt goes in first, stdin closes after a finished turn, not after an interrupt", async () => {
+      const c = fakeChild();
+      let env = null;
+      const h = runner.startRun(spec(), () => {}, (_a, _cwd, e) => ((env = e), c));
+      await tickOnce();
+      assert.match(c.written, /"type":"user"[\s\S]*https:\/\/x\/pull\/1/);
+      assert.strictEqual(env.ELECTRON_RUN_AS_NODE, "1");
+      assert.ok(!Object.keys(env).some((k) => k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")), "launcherEnv scrubs the parent session");
+      h.interrupt();
+      await tickOnce();
+      assert.match(c.written, /"subtype":"interrupt"/);
+      emit(c, { type: "result", subtype: "error_during_execution", is_error: true });
+      await tickOnce();
+      assert.strictEqual(c.ended, false, "an interrupted turn keeps the session");
+      h.hint("check the migration");
+      await tickOnce();
+      assert.match(c.written, /check the migration/);
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "done" });
+      await tickOnce();
+      assert.strictEqual(c.ended, true);
+      c.emit("exit", 0);
+      const out = await h.done;
+      assert.deepStrictEqual([out.exitCode, out.timedOut, out.progress.result.text], [0, false, "done"]);
+    });
+
+    await atest("agent runner: past its time a run is killed and says so", async () => {
+      const c = fakeChild();
+      const h = runner.startRun(spec({ timeoutMs: 20 }), () => {}, () => c);
+      const out = await h.done;
+      assert.strictEqual(out.timedOut, true);
+    });
+
+    test("agent worktrees: the PR's remote is found by URL; the head is fetched by pull ref and checked out detached", () => {
+      const cfgText = '[core]\n\tbare = false\n[remote "upstream"]\n\turl = git@github.com:a/b.git\n[remote "origin"]\n\turl = https://github.com/me/b.git\n[branch "main"]\n\tremote = origin\n';
+      assert.deepStrictEqual(wt.parseRemotes(cfgText), [
+        { name: "upstream", url: "git@github.com:a/b.git" },
+        { name: "origin", url: "https://github.com/me/b.git" },
+      ]);
+      const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-wt-"));
+      nfsA.mkdirSync(path.join(dir, ".git"));
+      nfsA.writeFileSync(path.join(dir, ".git", "config"), cfgText);
+      assert.strictEqual(wt.remoteFor(dir, { url: "https://github.com/a/b/pull/7", repo: "a/b" }), "upstream");
+      assert.strictEqual(wt.remoteFor(dir, { url: "https://github.com/x/y/pull/7", repo: "x/y" }), null);
+      const target = wt.worktreeDir("/base", { repo: "a/b", number: 7, headOid: "abcdef0123456789" });
+      assert.strictEqual(path.basename(target), "agent-b-7-abcdef0123");
+      assert.deepStrictEqual(wt.prepareCommands("upstream", { number: 7, headOid: "abcdef0123456789" }, target), [
+        ["fetch", "--no-tags", "upstream", "pull/7/head"],
+        ["worktree", "add", "--detach", "--force", target, "abcdef0123456789"],
+      ]);
+      assert.throws(() => wt.prepareCommands("o", { number: 7, headOid: null }, target));
+      assert.strictEqual(wt.worktreeBase("", "/co"), path.join("/co", ".claude", "worktrees"));
+      assert.strictEqual(wt.worktreeBase(" /mine ", "/co"), "/mine");
+    });
+
+    test("agent store: atomic writes, a broken file starts empty, the log keeps only its retention", () => {
+      const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-store-"));
+      const file = path.join(dir, "state.json");
+      nfsA.writeFileSync(file, "{ broken");
+      assert.deepStrictEqual(agentStore.readStore(file, "2026-11-05"), agentStore.emptyStore("2026-11-05"));
+      agentStore.writeFileAtomic(file, JSON.stringify({ ...agentStore.emptyStore("2026-11-05"), runsToday: 3 }));
+      assert.strictEqual(agentStore.readStore(file, "x").runsToday, 3);
+      assert.deepStrictEqual(nfsA.readdirSync(dir), ["state.json"], "no temp file left behind");
+      const old = JSON.stringify({ at: "2026-01-01T00:00:00Z" });
+      const recent = JSON.stringify({ at: "2026-11-04T00:00:00Z" });
+      assert.strictEqual(agentStore.pruneLog(`${old}\n${recent}\nnot json\n`, Date.parse("2026-10-01T00:00:00Z")), `${recent}\n`);
+    });
+
+    test("agent rules: shadow and briefs tell the session to post nothing and to keep a plan", () => {
+      for (const [scenario, mode] of [["review", "shadow"], ["review", "on"], ["brief", "on"]]) {
+        const r = agentCore.agentRules(scenario, mode);
+        assert.match(r, /TaskCreate/);
+        assert.match(r, /[Pp]ost (NOTHING|nothing)/, `${scenario}/${mode}`);
+        assert.match(r, /Never push/);
+      }
+    });
+
+    test("agent: a host whose fetch failed or whose budget is nearly spent is held", () => {
+      const snap = { pullRequests: [], errors: [{ hostLabel: "A", message: "x" }], rateLimits: [{ hostLabel: "B", remaining: 10, limit: 5000, cost: 1, resetAt: "" }, { hostLabel: "C", remaining: 4000, limit: 5000, cost: 1, resetAt: "" }] };
+      assert.strictEqual(agentCore.hostHeld(snap, "A"), "Host unreachable");
+      assert.strictEqual(agentCore.hostHeld(snap, "B"), "Waiting for the GitHub budget");
+      assert.strictEqual(agentCore.hostHeld(snap, "C"), null);
+    });
+
+    test("idle gate: a hidden window keeps polling while the agent is on", () => {
+      const base = { systemSuspended: false, hasWindow: true, windowHidden: true, systemIdleSeconds: () => 0, notificationsActionable: () => false };
+      assert.deepStrictEqual(idleGate.planPolling(base), { mode: "park" });
+      assert.strictEqual(idleGate.planPolling({ ...base, agentActive: () => true }).mode, "run");
+      assert.deepStrictEqual(idleGate.planPolling({ ...base, systemSuspended: true, agentActive: () => true }), { mode: "park" }, "asleep still parks");
+    });
+
+    const until = async (cond, ms = 3000) => {
+      const t0 = Date.now();
+      while (!cond()) {
+        if (Date.now() - t0 > ms) throw new Error("timed out waiting");
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    };
+    const agentFixture = ({ checkout = true, script } = {}) => {
+      const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const co = path.join(dir, "checkout");
+      nfsA.mkdirSync(path.join(co, ".git"), { recursive: true });
+      nfsA.writeFileSync(path.join(co, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
+      const pr = reviewPr();
+      const snapshot = { pullRequests: [pr], errors: [], rateLimits: [], fetchedAt: "", version: "" };
+      const gitCalls = [];
+      const children = [];
+      const settings = cfg.validateSettings({ hosts: [], agent: { enabled: true } });
+      const agent = agentCore.createAgent({
+        dir: path.join(dir, "agent"),
+        loadSettings: () => settings,
+        getSnapshot: () => snapshot,
+        getSessions: () => [],
+        findCheckout: () => (checkout ? co : null),
+        hookScript: hookJs,
+        execPath: process.execPath,
+        plugins: () => [],
+        git: async (args) => (gitCalls.push(args), ""),
+        spawner: (args) => {
+          const c = fakeChild();
+          c.args = args;
+          children.push(c);
+          setImmediate(() => script(c));
+          return c;
+        },
+        tickMs: 1e9,
+      });
+      return { agent, snapshot, gitCalls, children, dir };
+    };
+
+    await atest("agent: a review request becomes a shadow review waiting for you, run once per head", async () => {
+      const f = agentFixture({
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "real-session" });
+          emit(c, { type: "result", subtype: "success", is_error: false, result: "Would post: 1 Minor (x.ts:3). Would approve." });
+          setImmediate(() => c.emit("exit", 0));
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().items.some((i) => i.state === "needsYou"));
+        const item = f.agent.getState().items[0];
+        assert.strictEqual(item.headline, "Review ready — it waits for your OK before posting");
+        assert.match(item.output, /Would approve/);
+        assert.ok(f.gitCalls.some((a) => a[0] === "fetch" && a[3] === "pull/7/head"));
+        assert.ok(f.children[0].args.includes("--restricted"));
+        const settingsFile = f.children[0].args[f.children[0].args.indexOf("--settings") + 1];
+        assert.match(nfsA.readFileSync(settingsFile, "utf8"), /PreToolUse[\s\S]*hook\.js[\s\S]*review/, "the run carries the guard hook");
+        f.agent.onSnapshot(f.snapshot);
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.agent.getState().items.length, 1, "the ledger keeps the same head from running again");
+        assert.strictEqual(f.children.length, 1);
+        const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+        assert.strictEqual(state.ledger["PR_R|review|aaa111"].state, "prepared");
+        assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"started"/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: without a checkout the run fails once and is not retried on the same head", async () => {
+      const f = agentFixture({ checkout: false, script: () => {} });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().items.some((i) => i.state === "error"));
+        assert.match(f.agent.getState().items[0].headline, /No checkout of a\/b/);
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.agent.getState().items.length, 1);
+        assert.strictEqual(f.children.length, 0, "nothing was started");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a run that fails reports it and drops its worktree", async () => {
+      const f = agentFixture({
+        script: (c) => {
+          c.stderr.write("boom\n");
+          emit(c, { type: "result", subtype: "error_max_turns", is_error: true, result: "" });
+          setImmediate(() => c.emit("exit", 1));
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().items.some((i) => i.state === "error"));
+        assert.strictEqual(f.agent.getState().items[0].headline, "The run failed");
+        await until(() => f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"));
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("main.js wiring: the agent hears every snapshot, keeps hidden polling alive and stops on quit", () => {
+      const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /handleNotifications\(snapshot\.pullRequests\);\s*agent\?\.onSnapshot\(snapshot\)/);
+      assert.match(src, /agentActive: \(\) => agent\?\.isActive\(\)/);
+      assert.match(src, /if \(!\(0, mock_1\.isMockMode\)\(\)\) \{\s*agent = \(0, agent_1\.createAgent\)/);
+      assert.match(src, /hookScript: node_path_1\.default\.join\(__dirname, "agent", "hook\.js"\)/);
+      assert.match(src, /agent\?\.ownSessionIds\(\)/);
+      assert.match(src, /markQuitting\(\);\s*agent\?\.stop\(\)/);
+    });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();

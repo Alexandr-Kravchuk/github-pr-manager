@@ -26,7 +26,8 @@ import type {
   Settings,
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
-import { launchClaude } from "./claude-launch";
+import { createAgent, type Agent } from "./agent";
+import { findCheckout, launchClaude } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
 import { clearJiraCaches } from "../shared/jira";
@@ -61,6 +62,8 @@ import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./upd
 
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
+/** The PR agent; null in fixture mode (PRD_MOCK), where it would act on fake PRs. */
+let agent: Agent | null = null;
 let systemSuspended = false;
 
 // Signals the first time createWindow() assigns mainWindow. The second-instance
@@ -125,6 +128,8 @@ function planDashboardPoll(settings: Settings): PollPlan {
     },
     notificationsActionable: () =>
       hasDeliverableNotifications(settings.notifications, Notification.isSupported()),
+    // The agent acts on what the poll sees, tray-hidden or not.
+    agentActive: () => agent?.isActive() ?? false,
   });
 }
 
@@ -371,9 +376,13 @@ let claudeSessionsJson = "[]";
 /** Scans again and pushes the list when it changed. Empty while the integration is off. */
 async function refreshClaudeSessions(): Promise<ClaudeSessionInfo[]> {
   let next: ClaudeSessionInfo[] = [];
-  if (claudeSessionsOn) {
+  // The agent needs the list too — to stay off a PR you're working on.
+  if (claudeSessionsOn || agent?.isActive()) {
     try {
-      next = await claudeSessionScanner.scan();
+      // The agent's own runs are not "your" sessions: left in, the agent would
+      // find itself on the PR and stand down.
+      const own = agent?.ownSessionIds() ?? new Set<string>();
+      next = (await claudeSessionScanner.scan()).filter((s) => !own.has(s.id));
     } catch (e) {
       if (process.env.PRD_DEBUG) console.error("[claude-sessions]", e);
       return claudeSessions;
@@ -815,6 +824,7 @@ function startApp(): void {
         sendToRenderer("snapshot", snapshot);
       }
       handleNotifications(snapshot.pullRequests);
+      agent?.onSnapshot(snapshot);
     },
     onConfigError: (message) => {
       if (process.env.PRD_DEBUG) console.error("[config-error]", message);
@@ -825,6 +835,19 @@ function startApp(): void {
     ...(isMockMode() ? mockPollerOverrides(app.getPath("userData")) : {}),
   });
   poller.start();
+
+  if (!isMockMode()) {
+    agent = createAgent({
+      dir: path.join(app.getPath("userData"), "agent"),
+      loadSettings,
+      getSnapshot: () => poller?.getSnapshot() ?? null,
+      getSessions: () => claudeSessions,
+      findCheckout,
+      // Run by Claude Code before each tool call, as Node (ELECTRON_RUN_AS_NODE).
+      hookScript: path.join(__dirname, "agent", "hook.js"),
+      execPath: process.execPath,
+    });
+  }
 
   // Pause polling across sleep; refresh on resume / unlock so the first thing
   // the user sees on return is current rather than stale.
@@ -890,7 +913,9 @@ function startApp(): void {
   if (startInTray && !trayController.hidesToTray()) focusMainWindow();
 
   setInterval(() => {
-    if (claudeSessionsOn && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+    const visible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+    // While the agent is on it scans hidden too: it must see a session you open on its PR.
+    if ((claudeSessionsOn && visible) || agent?.isActive()) {
       void refreshClaudeSessions();
     }
   }, CLAUDE_SESSIONS_INTERVAL_MS);
@@ -950,7 +975,10 @@ if (isPrimaryInstance) {
   // session-end in createWindow). If a quit is cancelled at any stage, the
   // latch is re-armed when the window is next shown — a state-based reset
   // instead of second-guessing the quit pipeline's event timing.
-  app.on("before-quit", () => trayController.markQuitting());
+  app.on("before-quit", () => {
+    trayController.markQuitting();
+    agent?.stop();
+  });
 
   // electron-updater's quitAndInstall: emitted on Electron's native
   // autoUpdater by Squirrel.Mac (which closes all windows first and only

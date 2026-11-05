@@ -743,6 +743,8 @@ export function mapPr(
     deletions: pr.deletions ?? 0,
     changedFiles: pr.changedFiles ?? 0,
     mergeMethods: mapMergeMethods(pr.repository),
+    // Set by fetchHost when the personal review-request search found it.
+    requestedOfMe: false,
     issueKey,
     reviewDecision: pr.reviewDecision,
     roles,
@@ -1183,18 +1185,22 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
   const isOwnPr = (node: RawSearchPr) =>
     viewerLogin != null && node.author?.login.toLowerCase() === viewerLogin.toLowerCase();
 
-  const addNodes = (nodes: Array<RawSearchPr | Record<string, never>>, role: PrRole) => {
+  // `personal`: the node came from `review-requested:@me`, which — unlike the
+  // team searches — means a review asked of you by name (`requestedOfMe`).
+  const addNodes = (nodes: Array<RawSearchPr | Record<string, never>>, role: PrRole, personal: boolean) => {
     for (const node of nodes) {
       if (!isSearchPr(node)) continue;
       const full = fullById.get(node.id);
       if (!full) continue;
       const effectiveRole: PrRole = role !== "author" && isOwnPr(node) ? "author" : role;
-      const existing = byId.get(node.id);
-      if (existing) {
-        if (!existing.roles.includes(effectiveRole)) existing.roles.push(effectiveRole);
+      let pr = byId.get(node.id);
+      if (pr) {
+        if (!pr.roles.includes(effectiveRole)) pr.roles.push(effectiveRole);
       } else {
-        byId.set(node.id, mapPr(full, host.label, [effectiveRole], viewerLogin));
+        pr = mapPr(full, host.label, [effectiveRole], viewerLogin);
+        byId.set(node.id, pr);
       }
+      if (personal && effectiveRole === "reviewer") pr.requestedOfMe = true;
     }
   };
 
@@ -1206,7 +1212,7 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
   // next to "author"; harmless, and dropping it would need a lookahead.
   for (const spec of specs) {
     const nodes = nodesByAlias.get(spec.alias);
-    if (nodes) addNodes(nodes, spec.role);
+    if (nodes) addNodes(nodes, spec.role, spec.alias === "reviewing");
   }
 
   return {

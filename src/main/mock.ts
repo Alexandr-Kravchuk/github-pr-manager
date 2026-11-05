@@ -116,6 +116,7 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     deletions: 30,
     changedFiles: 6,
     mergeMethods: { suggested: "squash", allowed: ["merge", "squash", "rebase"] },
+    requestedOfMe: (overrides.roles ?? []).includes("reviewer"),
     issueKey: null,
     issueSummary: null,
     parentKey: null,

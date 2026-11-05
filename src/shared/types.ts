@@ -463,6 +463,12 @@ export interface PullRequest {
    */
   mergeMethods: { suggested: MergeMethod | null; allowed: MergeMethod[] };
   /**
+   * A review is asked of you by name (`review-requested:@me`), as opposed to of
+   * a team you are in — both give the `reviewer` role. The agent takes team
+   * requests only when told to, so a busy team can't use up its daily limit.
+   */
+  requestedOfMe: boolean;
+  /**
    * Issue-tracker key parsed from the title (falling back to the head branch),
    * e.g. "ENG-93374", or null when none is found. Used to group related PRs.
    */

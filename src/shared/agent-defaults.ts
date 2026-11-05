@@ -16,8 +16,12 @@ export const DEFAULT_AGENT_PROMPTS: Record<AgentPromptKey, string> = {
 
 /**
  * `--allowedTools` rules per kind of run — a starting point the Agent tab lets
- * you edit. Reviews read only: no code from the PR's repository runs in them.
- * Pushing is never granted here; drive pushes through the agent's own hook.
+ * you edit. These are only the first gate: every Bash call also goes through
+ * the agent's PreToolUse guard (`agent-guard.ts`), which the list here cannot
+ * loosen. Reviews and briefs read only and run no code from the PR's
+ * repository: no `git` at all (its `--output`, `--ext-diff` and `--textconv`
+ * write files or run programs), and `gh api` is held to plain GET by the guard.
+ * Pushing is never granted here; drive pushes through the guard alone.
  */
 export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
   review: [
@@ -32,9 +36,7 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "Bash(gh pr view *)",
     "Bash(gh pr diff *)",
     "Bash(gh pr checks *)",
-    "Bash(git diff *)",
-    "Bash(git log *)",
-    "Bash(git show *)",
+    "Bash(gh api *)",
   ],
   brief: [
     "Read",
@@ -45,8 +47,6 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "TaskUpdate",
     "Bash(gh pr view *)",
     "Bash(gh pr diff *)",
-    "Bash(git diff *)",
-    "Bash(git log *)",
   ],
   rereview: [
     "Read",
@@ -59,9 +59,7 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "TaskUpdate",
     "Bash(gh pr view *)",
     "Bash(gh pr diff *)",
-    "Bash(git diff *)",
-    "Bash(git log *)",
-    "Bash(git show *)",
+    "Bash(gh api *)",
   ],
   drive: [
     "Read",
