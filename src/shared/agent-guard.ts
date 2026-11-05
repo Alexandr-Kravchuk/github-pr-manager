@@ -109,6 +109,10 @@ export function shellWords(command: string): { words: string[] } | { error: stri
     if (";&|<>()".includes(ch)) return { error: "Shell operators (pipes, redirection, chaining) are not allowed in agent runs — run one plain command." };
     if (ch === "$" || ch === "`") return { error: "Expansion ($, backticks) is not allowed in agent runs." };
     if ("*?[]".includes(ch)) return { error: "Unquoted wildcards are not allowed — they would expand to the PR's own file names." };
+    // `{a,b}` is brace expansion (one word becomes several), `~` expands to a
+    // path, `#` starts a comment the shell drops — each makes the argv differ
+    // from what is checked here. Quote them when they are meant literally.
+    if ("{}~#".includes(ch)) return { error: "Unquoted { } ~ # are not allowed — the shell would expand or drop them; quote them." };
     cur += ch;
     inWord = true;
     i++;
@@ -172,8 +176,12 @@ function checkGhApi(args: string[], pr: GuardPr | null): GuardDecision {
       const [name, attached] = a.startsWith("--") ? [a.split("=")[0], a.includes("=")] : [a.slice(0, 2), a.length > 2];
       const kind = GH_API_FLAGS[name];
       if (!kind) return deny("gh api is read-only in agent runs: only --jq, --paginate, --slurp, --cache, --include and --silent.");
-      if (kind === "value" && !attached) i++;
       if (kind === "flag" && attached) return deny("gh api is read-only in agent runs.");
+      if (kind === "value" && !attached) {
+        // A value that looks like a flag is read differently by gh than here.
+        if (args[i + 1] === undefined || args[i + 1].startsWith("-")) return deny(`${name} needs a value that isn't a flag.`);
+        i++;
+      }
       continue;
     }
     if (endpoint !== null) return deny("gh api takes one endpoint in agent runs.");
@@ -181,6 +189,8 @@ function checkGhApi(args: string[], pr: GuardPr | null): GuardDecision {
   }
   if (!endpoint) return deny("gh api needs an endpoint.");
   if (/^\/?graphql$/i.test(endpoint)) return deny("gh api graphql can write; agent runs read REST endpoints only.");
+  // "repos/a/b/../../c/d" would pass the repository check and reach another repository.
+  if (endpoint.split("?")[0].split("/").some((seg) => seg === "." || seg === "..")) return deny("Dot segments are not allowed in gh api paths.");
   // A relative REST path of the run's own repository: no other host (no "://"),
   // no other repository, no {owner} placeholders resolved from a remote.
   if (!/^\/?repos\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*\/?(\?[A-Za-z0-9._=&%-]*)?$/.test(endpoint)) {
@@ -193,17 +203,48 @@ function checkGhApi(args: string[], pr: GuardPr | null): GuardDecision {
   return { allow: true };
 }
 
-/** gh pr flags that take a value, so their value isn't read as the PR argument. */
-const GH_PR_VALUE_FLAGS = new Set(["--repo", "-R", "--json", "--jq", "-q", "--template", "-t"]);
+/**
+ * The gh pr view/diff/checks (and run view) flags an agent run may pass, and
+ * whether each takes a value. Anything else is refused — an allow-list, so a
+ * flag added to gh later can't slip through.
+ */
+const GH_PR_FLAGS: Record<string, "flag" | "value"> = {
+  "--json": "value",
+  "--jq": "value",
+  "-q": "value",
+  "--template": "value",
+  "-t": "value",
+  "--repo": "value",
+  "-R": "value",
+  "--color": "value",
+  "--comments": "flag",
+  "--name-only": "flag",
+  "--patch": "flag",
+  "--required": "flag",
+  "--log": "flag",
+  "--log-failed": "flag",
+};
 
 function checkGhPr(args: string[], pr: GuardPr | null): GuardDecision {
-  if (args.some((w) => w === "--web" || w === "-w" || w.startsWith("--hostname"))) return deny("That gh flag is not needed in agent runs.");
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a.startsWith("-")) {
-      const name = a.split("=")[0];
-      const value = a.includes("=") ? a.slice(a.indexOf("=") + 1) : GH_PR_VALUE_FLAGS.has(name) ? args[++i] : undefined;
-      if ((name === "--repo" || name === "-R") && pr && (value ?? "").toLowerCase() !== pr.repo) {
+      // `--name=value`, `--name value`, `-Rvalue` (attached short) and `-R value`.
+      const long = a.startsWith("--");
+      const name = long ? a.split("=")[0] : a.slice(0, 2);
+      const attached = long ? (a.includes("=") ? a.slice(a.indexOf("=") + 1) : null) : a.length > 2 ? a.slice(2) : null;
+      const kind = GH_PR_FLAGS[name];
+      if (!kind) return deny(`gh ${name} is not one of the flags agent runs may use.`);
+      if (kind === "flag") {
+        if (attached !== null) return deny(`${name} takes no value.`);
+        continue;
+      }
+      let value = attached;
+      if (value === null) {
+        if (args[i + 1] === undefined || args[i + 1].startsWith("-")) return deny(`${name} needs a value that isn't a flag.`);
+        value = args[++i];
+      }
+      if ((name === "--repo" || name === "-R") && pr && value.toLowerCase() !== pr.repo) {
         return deny(`This run reads ${pr.repo} only.`);
       }
       continue;

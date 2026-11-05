@@ -8033,6 +8033,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         "gh api repos/Acme/Widgets/pulls/12/comments --jq '.[] | select(.user.login == \"x\") | .body'",
         "gh api /repos/acme/widgets/pulls/12/comments --paginate",
         "gh api 'repos/acme/widgets/pulls/12/files?per_page=100'",
+        "gh pr view 12 -Racme/widgets --json title",
+        "gh pr view 12 --template '{{.title}}'",
+        "gh pr diff 12 --name-only",
       ]) {
         assert.deepStrictEqual(guard.checkToolUse("review", "Bash", { command: cmd }, gpr), { allow: true }, cmd);
       }
@@ -8086,6 +8089,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ["review", "gh pr view 12 --web"],
         ["review", "gh pr view 12 'unbalanced"],
         ["review", "gh api repos/acme/widgets/pulls/12/files?per_page=100"],
+        // Found by the second review: brace expansion, flag-like values, attached
+        // short flags and dot segments.
+        ["review", "gh api {repos/acme/widgets/pulls/12,-XDELETE}"],
+        ["review", "gh api repos/acme/widgets/pulls/12 --jq -XDELETE"],
+        ["review", "gh pr view 12 -Rother/repo"],
+        ["review", "gh pr view 12 --repo -X"],
+        ["review", "gh pr view 12 --hostname evil.example"],
+        ["review", "gh pr view 12 --some-new-flag"],
+        ["review", "gh api repos/acme/widgets/../../other/repo/pulls"],
+        ["review", "gh pr view 12 ~"],
+        ["review", "gh pr view 12 #--repo other/repo"],
         ["drive", "git diff '--output'=x"],
         ["drive", "git '-c' core.pager=x log"],
         ["drive", "git lg"],
