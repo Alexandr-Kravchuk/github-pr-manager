@@ -27,7 +27,10 @@ import type {
 import { chooseMergeMethod, mergeArgs } from "./merge";
 import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
 import { ghError, prepareRunFolder, publishPlan, readPlan, runFolderRoots, runGh, type GhRunner, type RunFolder } from "./publish";
-import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, withNoHooks, type GitPlace } from "./drive";
+import { execFileSync } from "node:child_process";
+
+import { launcherEnv } from "../../shared/claude-launch";
+import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, type GitPlace } from "./drive";
 import { hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { openStore, type AgentItemRecord, type AgentStore } from "./store";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
@@ -66,6 +69,8 @@ export interface AgentDeps {
   /** One PR read again by id before posting or merging; null when it is gone. */
   fetchPr?: (pr: Pick<PullRequest, "id" | "hostLabel" | "roles">) => Promise<FreshPullRequest | null>;
   gh?: GhRunner;
+  /** `ssh <args>` → its output; a test stands in for ssh. */
+  sshResolve?: (args: string[]) => string;
   /** Your own skills folder (~/.claude/skills) — the ones a prompt names are mounted for the run. */
   userSkillsDir?: string;
   /** Something you may want to hear about; main checks the notification settings. */
@@ -441,7 +446,10 @@ export function createAgent(deps: AgentDeps): Agent {
             path.resolve(dir, (await git([...safeGit(h), "rev-parse", "--git-dir"], dir)).trim()),
           ]);
           const place: GitPlace = { workTree: dir, gitDir: worktreeGitDir };
-          item.pushTo = { url, commonDir, worktreeGitDir, fingerprint: await gitFingerprint(git, place, commonDir, url) };
+          // An SSH remote: your SSH settings resolved now, kept where the session can't write.
+          const sshFile = path.join(runDir, "ssh_config");
+          const ssh = snapshotSsh(url, sshFile, deps.sshResolve ?? ((args) => execFileSync("ssh", args, { encoding: "utf8", timeout: 15_000, env: launcherEnv(process.env), stdio: ["ignore", "pipe", "ignore"] })));
+          item.pushTo = { url, commonDir, worktreeGitDir, fingerprint: await gitFingerprint(git, place, commonDir, url), ...(ssh ? { sshConfig: sshFile } : {}) };
         } catch (e) {
           return fail("Could not prepare the drive", (e as Error).message);
         }
@@ -778,7 +786,7 @@ export function createAgent(deps: AgentDeps): Agent {
       item.headline = "Pushing…";
       changed();
       try {
-        await git(pushArgs(pushTo.url, drive.head, pr.headRefName, hooksDir, place), worktree);
+        await git(pushArgs(pushTo.url, drive.head, pr.headRefName, hooksDir, place, pushTo.sshConfig), worktree);
       } catch (e) {
         return `git refused the push: ${(e as Error).message}`;
       }

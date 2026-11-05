@@ -124,11 +124,14 @@ export function isSshUrl(url: string): boolean {
  * name the session could have repointed), never `--force` — git itself
  * refuses anything but a fast-forward — and with no hook run.
  */
-export function pushArgs(url: string, oid: string, branch: string, hooksDir: string, place?: GitPlace): string[] {
+export function pushArgs(url: string, oid: string, branch: string, hooksDir: string, place?: GitPlace, sshConfig?: string): string[] {
   if (!isPlainBranch(branch)) throw new Error(`"${branch}" isn't a branch name the agent pushes to`);
   if (!/^[0-9a-f]{40}$/.test(oid)) throw new Error(`"${oid}" isn't a commit the agent pushes`);
   if (!/^(https?:\/\/|ssh:\/\/|git@)[^\s]+$/.test(url) || url.startsWith("-")) throw new Error(`"${url}" isn't a remote URL the agent pushes to`);
-  return [...safeGit(hooksDir, place), "push", "--no-verify", url, `${oid}:refs/heads/${branch}`];
+  if (sshConfig !== undefined && /["\\]/.test(sshConfig.replace(/\\/g, "/"))) throw new Error("the SSH snapshot's path can't be quoted for ssh");
+  // An SSH push reads only the app's snapshot of your SSH settings.
+  const ssh = sshConfig !== undefined ? ["-c", `core.sshCommand=ssh -F "${sshConfig.replace(/\\/g, "/")}"`] : [];
+  return [...safeGit(hooksDir, place), ...ssh, "push", "--no-verify", url, `${oid}:refs/heads/${branch}`];
 }
 
 /**
@@ -150,63 +153,41 @@ export async function configFiles(git: GitRunner, place: GitPlace, hooksDir: str
   return parseConfigOrigins(out, place.workTree);
 }
 
+/** Where an SSH remote URL points: `git@host:path` or `ssh://[user@]host[:port]/path`; null for anything else. */
+export function sshTarget(url: string): { host: string; user?: string; port?: string } | null {
+  const scp = /^([^@/\s]+)@([^:/\s]+):[^\s]+$/.exec(url);
+  if (scp && !url.startsWith("ssh://")) return { user: scp[1], host: scp[2] };
+  const u = /^ssh:\/\/(?:([^@/\s]+)@)?([^:/\s]+)(?::(\d+))?\/[^\s]*$/.exec(url);
+  if (!u) return null;
+  return { host: u[2], ...(u[1] ? { user: u[1] } : {}), ...(u[3] ? { port: u[3] } : {}) };
+}
+
+export type SshResolver = (args: string[]) => string;
+
 /**
- * The SSH config files ssh would read for a push: yours and the system's,
- * and every file their `Include` lines name (wildcards too), a few levels
- * deep. Any of them can name a program for ssh to run.
+ * Your SSH settings for a remote, resolved by ssh itself (`ssh -G`) before
+ * the session and kept in a file of the app's — the push then runs
+ * `ssh -F <that file>`, so nothing a session could change in ~/.ssh or the
+ * system's ssh config (an Include, a ProxyCommand, a Match exec) is read for
+ * it. Throws when ssh can't resolve the host.
  */
-export function sshConfigFiles(home = os.homedir()): string[] {
-  const seen = new Set<string>();
-  const sshDir = path.join(home, ".ssh");
-  const system =
-    process.platform === "win32"
-      ? [path.join(process.env.ProgramData ?? "C:\\ProgramData", "ssh", "ssh_config")]
-      : ["/etc/ssh/ssh_config", ...listDir("/etc/ssh/ssh_config.d")];
-  const visit = (file: string, depth: number) => {
-    if (seen.has(file) || depth > 4) return;
-    seen.add(file);
-    let text: string;
-    try {
-      text = fs.readFileSync(file, "utf8");
-    } catch {
-      return;
-    }
-    for (const line of text.split(/\r?\n/)) {
-      const m = /^\s*Include\s+(.+)$/i.exec(line);
-      if (!m) continue;
-      for (const raw of m[1].trim().split(/\s+/)) {
-        const p0 = raw.replace(/^"|"$/g, "").replace(/^~(?=[\\/]|$)/, home);
-        const p = path.normalize(path.isAbsolute(p0) ? p0 : path.join(sshDir, p0));
-        for (const f of expandGlob(p)) visit(f, depth + 1);
-      }
-    }
-  };
-  visit(path.join(sshDir, "config"), 0);
-  for (const f of system) visit(f, 0);
-  return [...seen].sort();
-}
-
-function listDir(dir: string): string[] {
-  try {
-    return fs.readdirSync(dir).map((n) => path.join(dir, n));
-  } catch {
-    return [];
-  }
-}
-
-/** `*` and `?` in the last part of a path, as ssh's Include allows. */
-function expandGlob(p: string): string[] {
-  const base = path.basename(p);
-  if (!/[*?]/.test(base)) return [p];
-  const re = new RegExp(`^${base.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
-  return listDir(path.dirname(p)).filter((f) => re.test(path.basename(f)));
+export function snapshotSsh(url: string, file: string, resolve: SshResolver): boolean {
+  const t = sshTarget(url);
+  if (!t) return false;
+  if (!/^[A-Za-z0-9._-]+$/.test(t.host) || (t.user && !/^[A-Za-z0-9._-]+$/.test(t.user))) throw new Error(`"${url}" isn't an SSH address the agent pushes to`);
+  const out = resolve(["-G", ...(t.port ? ["-p", t.port] : []), ...(t.user ? ["-l", t.user] : []), t.host]);
+  if (!/^host /m.test(out)) throw new Error(`ssh couldn't resolve ${t.host}`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, out);
+  return true;
 }
 
 /**
  * One fingerprint of what git (and ssh) would read for a push: every config
  * file git loads, the repository's hooks, the worktree's links to its git
- * folder (`.git`, `commondir`, `gitdir`), and ~/.ssh/config for an SSH
- * remote. Taken before a drive session and again before its push.
+ * folder (`.git`, `commondir`, `gitdir`). SSH settings aren't in it: an
+ * SSH push reads only the app's own snapshot of them (`snapshotSsh`). Taken
+ * before a drive session and again before its push.
  */
 export async function gitFingerprint(git: GitRunner, place: GitPlace, commonDir: string, url: string): Promise<string> {
   const h = createHash("sha256");
@@ -229,7 +210,6 @@ export async function gitFingerprint(git: GitRunner, place: GitPlace, commonDir:
   add("gitdir", path.join(place.gitDir, "gitdir"));
   add(".git", path.join(place.workTree, ".git"));
   add("global", path.join(os.homedir(), ".gitconfig"));
-  if (isSshUrl(url)) for (const f of sshConfigFiles()) add("ssh", f);
   try {
     const hooks = path.join(commonDir, "hooks");
     for (const name of fs.readdirSync(hooks).sort()) add(`hook:${name}`, path.join(hooks, name));

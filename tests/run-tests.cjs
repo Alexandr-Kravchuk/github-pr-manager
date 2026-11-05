@@ -9570,23 +9570,26 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.notStrictEqual(await fp(), d, "a rewritten .git link shows");
     });
 
-    test("drive: config origins are read NUL-separated, unquoted; SSH config follows Include, wildcards too", () => {
+    test("drive: config origins are read NUL-separated, unquoted; an SSH push reads only a snapshot of your SSH settings", () => {
       const cwd = path.resolve("/w");
       const out = ["file:C:/Program Files/Git/etc/gitconfig", "core.symlinks", "file:.git/config", "core.bare", "command line:", "core.pager", "file:/odd \"name\"\tx", "user.name", ""].join("\0");
       assert.deepStrictEqual(driveMod.parseConfigOrigins(out, cwd), [path.resolve(cwd, ".git/config"), path.resolve(cwd, "/odd \"name\"\tx"), path.resolve(cwd, "C:/Program Files/Git/etc/gitconfig")].sort());
-      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-ssh-"));
-      const ssh = path.join(home, ".ssh");
-      nfsA.mkdirSync(path.join(ssh, "conf.d"), { recursive: true });
-      nfsA.writeFileSync(path.join(ssh, "config"), "Host x\n  Include conf.d/*.conf ~/extra\n");
-      nfsA.writeFileSync(path.join(ssh, "conf.d", "a.conf"), "Include deeper\n");
-      nfsA.writeFileSync(path.join(ssh, "conf.d", "b.txt"), "");
-      nfsA.writeFileSync(path.join(ssh, "deeper"), "");
-      nfsA.writeFileSync(path.join(home, "extra"), "");
-      const files = driveMod.sshConfigFiles(home);
-      for (const want of [path.join(ssh, "config"), path.join(ssh, "conf.d", "a.conf"), path.join(ssh, "deeper"), path.join(home, "extra")]) {
-        assert.ok(files.includes(want), want);
-      }
-      assert.ok(!files.includes(path.join(ssh, "conf.d", "b.txt")), "only what the wildcard matches");
+      // An SSH push reads only the app's snapshot of your SSH settings, resolved by ssh before the session.
+      assert.deepStrictEqual(driveMod.sshTarget("git@github.com:a/b.git"), { user: "git", host: "github.com" });
+      assert.deepStrictEqual(driveMod.sshTarget("ssh://git@h.example:2222/a/b.git"), { host: "h.example", user: "git", port: "2222" });
+      assert.strictEqual(driveMod.sshTarget("https://github.com/a/b.git"), null);
+      const snapDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-sshsnap-"));
+      const asked = [];
+      const snap = path.join(snapDir, "ssh_config");
+      assert.strictEqual(driveMod.snapshotSsh("git@github-work:a/b.git", snap, (args) => (asked.push(args), "host github-work\nhostname github.com\nuser git\n")), true);
+      assert.deepStrictEqual(asked, [["-G", "-l", "git", "github-work"]]);
+      assert.match(nfsA.readFileSync(snap, "utf8"), /^hostname github\.com$/m);
+      assert.strictEqual(driveMod.snapshotSsh("https://github.com/a/b.git", snap, () => ""), false, "nothing to snapshot for HTTPS");
+      assert.throws(() => driveMod.snapshotSsh("git@h:a/b", snap, () => "garbage"), /couldn't resolve/);
+      assert.throws(() => driveMod.snapshotSsh("ssh://-oProxyCommand=x@h/a", snap, () => "host h"), /isn't an SSH address|couldn't resolve/);
+      const withSsh = driveMod.pushArgs("git@github.com:a/b.git", "c".repeat(40), "main", "/h", undefined, "C:\\Users\\Me\\PR Dashboard\\agent\\runs\\r\\ssh_config");
+      assert.ok(withSsh.includes('core.sshCommand=ssh -F "C:/Users/Me/PR Dashboard/agent/runs/r/ssh_config"'), withSsh.join(" "));
+      assert.throws(() => driveMod.pushArgs("git@h:a", "c".repeat(40), "main", "/h", undefined, 'C:/x"y'), /can't be quoted/);
       const sg = driveMod.safeGit("/h");
       for (const c of ["log.showSignature=false", "core.pager=cat", "gpg.program=pr-agent-no-gpg", "core.fsmonitor=false"]) assert.ok(sg.includes(c), c);
     });
