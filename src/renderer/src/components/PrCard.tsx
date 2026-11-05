@@ -11,6 +11,7 @@ import { CheckBadge } from "./CheckBadge";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
 import { AgentStatusLine } from "./AgentStatus";
+import { StaleCloseButton } from "./StaleCloseDialog";
 
 interface Props {
   pr: PullRequest;
@@ -197,7 +198,8 @@ export function PrCard({
   // Age badge: flag PRs that have been waiting a while without an approval — the
   // "don't let reviews rot" cue. Suppressed for drafts and already-approved PRs.
   const ageDays = daysSince(pr.createdAt);
-  const showAge = !pr.isDraft && !pr.hasHumanApproval && ageDays >= 3;
+  // A stale PR says its age in its own, louder pill — one age is enough.
+  const showAge = !pr.isStale && !pr.isDraft && !pr.hasHumanApproval && ageDays >= 3;
   const [copied, setCopied] = useState(false);
   const copyUrl = useCallback(() => {
     window.api
@@ -429,6 +431,16 @@ export function PrCard({
             ⏳ {ageDays}d
           </span>
         )}
+
+        {pr.isStale && (
+          <span
+            title={`Open for ${ageDays} days — past the stale threshold`}
+            className={cn(pill, "border-stone-500/40 bg-stone-500/15 text-stone-700 dark:text-stone-300")}
+          >
+            🕸 Stale · {ageDays}d
+          </span>
+        )}
+        <StaleCloseButton pr={pr} />
 
         {pr.unresolvedThreads > 0 && (
           <span

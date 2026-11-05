@@ -11,6 +11,7 @@ import {
 } from "./agent-defaults";
 import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "./claude-launch";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "./notify";
+import { DEFAULT_STALE_AFTER_DAYS, validateStaleAfterDays } from "./stale";
 import type {
   AgentMode,
   AgentPromptKey,
@@ -214,6 +215,7 @@ export function validateSettings(raw: unknown): Settings {
     jira: validateJira(obj.jira),
     claude: validateClaude(obj.claude),
     agent: validateAgent(obj.agent),
+    staleAfterDays: validateStaleAfterDays(obj.staleAfterDays),
   };
 }
 
@@ -434,6 +436,7 @@ export function defaultSettings(): Settings {
     hosts: [],
     claude: validateClaude(undefined),
     agent: validateAgent(undefined),
+    staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
   };
 }
 

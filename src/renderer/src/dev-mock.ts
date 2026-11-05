@@ -62,6 +62,7 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     viewerReviewedHead: false,
     myReReviewDue: false,
     hasNoReviews: true,
+    isStale: false,
     unresolvedThreads: 0,
     unaddressedThreads: 0,
     totalComments: 0,
@@ -318,6 +319,37 @@ const FIXTURES: Record<string, PullRequest[]> = {
       hasNewActivity: false,
     }),
   ],
+  // `?buddy=stale`: long-open PRs of mine (closable, with and without a Jira
+  // key) next to a teammate's stale PR, which gets the badge but no close action.
+  stale: [
+    pr({
+      title: "ENG-90001: Rework the legacy importer",
+      number: 601,
+      issueKey: "ENG-90001",
+      issueSummary: "Rework the legacy importer",
+      headRefName: "feature/eng-90001-importer",
+      createdAt: new Date(Date.now() - 74 * 864e5).toISOString(),
+      isStale: true,
+      awaitingReview: true,
+    }),
+    pr({
+      title: "Experiment: try a different cache layout",
+      number: 602,
+      createdAt: new Date(Date.now() - 41 * 864e5).toISOString(),
+      isStale: true,
+    }),
+    pr({
+      title: "ENG-90002: Old teammate PR",
+      number: 603,
+      issueKey: "ENG-90002",
+      roles: ["reviewer"],
+      author: { login: "teammate", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4" },
+      createdAt: new Date(Date.now() - 50 * 864e5).toISOString(),
+      isStale: true,
+      awaitingReview: true,
+    }),
+    pr({ title: "Fresh one", number: 604, awaitingReview: true }),
+  ],
 };
 
 // The PR agent's Board, chip and statuses: PRs in every state it shows. `?buddy=agent`.
@@ -354,6 +386,7 @@ const settings: Settings = {
   hosts: [{ label: "GitHub", graphqlUrl: "https://api.github.com/graphql", repos: ["acme/widgets"] }],
   claude: { ...DEFAULT_CLAUDE_SETTINGS, enabled: true },
   agent: structuredClone(DEFAULT_AGENT_SETTINGS),
+  staleAfterDays: 30,
 };
 
 /** Running Claude sessions, matched to the `?buddy=review` fixtures by their head branch. */
@@ -742,6 +775,41 @@ const api: PrManagerApi = {
   focusClaudeSession: async () => ({ ok: false, error: "Not available in mock mode." }),
   onClaudeSessions: () => () => {},
   copyText: async () => {},
+  getStaleJiraTask: async (prId) => {
+    const found = snapshot.pullRequests.find((p) => p.id === prId);
+    if (!found?.issueKey) return { ok: false, error: "No Jira key in this PR's title or branch." };
+    return {
+      ok: true,
+      task: {
+        key: found.issueKey,
+        summary: found.issueSummary,
+        status: "In Progress",
+        statusCategory: "indeterminate",
+        subtaskCount: 2,
+        transitions: [
+          { id: "11", name: "To Do", toStatus: "To Do", toCategory: "new", resolutions: [], resolutionRequired: false },
+          { id: "31", name: "Code review", toStatus: "Code Review", toCategory: "indeterminate", resolutions: [], resolutionRequired: false },
+          {
+            id: "41",
+            name: "Close",
+            toStatus: "Closed",
+            toCategory: "done",
+            resolutions: [
+              { id: "10000", name: "Done" },
+              { id: "10001", name: "Won't Do" },
+              { id: "10002", name: "Duplicate" },
+            ],
+            resolutionRequired: true,
+          },
+        ],
+      },
+    };
+  },
+  closeStalePr: async (_prId, options) => ({
+    ok: true,
+    prClosed: true,
+    jira: options.jira.action === "keep" ? null : { ok: true, message: `Task: ${options.jira.action} (mock).` },
+  }),
   getWhatsNew: async () => null,
   dismissWhatsNew: async () => {},
   onSnapshot: () => () => {},

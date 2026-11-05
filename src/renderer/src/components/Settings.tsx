@@ -20,6 +20,7 @@ import { DEFAULT_NOTIFICATION_SETTINGS as DEFAULT_NOTIFICATIONS } from "../../..
 import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "../../../shared/claude-launch";
 // Node-free too — the Agent tab starts from these before settings load.
 import { DEFAULT_AGENT_PROMPTS, DEFAULT_AGENT_SETTINGS } from "../../../shared/agent-defaults";
+import { DEFAULT_STALE_AFTER_DAYS, MAX_STALE_AFTER_DAYS } from "../../../shared/stale";
 import {
   SETTINGS_TABS,
   searchSettings,
@@ -124,6 +125,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [autoUpdate, setAutoUpdate] = useState(true);
   const [closeToTray, setCloseToTray] = useState(true);
   const [trackComments, setTrackComments] = useState(true);
+  const [staleAfterDays, setStaleAfterDays] = useState(DEFAULT_STALE_AFTER_DAYS);
   const [theme, setTheme] = useState<ThemePreference>("system");
   const [notifications, setNotifications] = useState<NotificationSettings>(DEFAULT_NOTIFICATIONS);
   const [hosts, setHosts] = useState<DraftHost[]>([]);
@@ -163,6 +165,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setAutoUpdate(s.autoUpdate);
         setCloseToTray(s.closeToTray);
         setTrackComments(s.trackComments);
+        setStaleAfterDays(s.staleAfterDays ?? DEFAULT_STALE_AFTER_DAYS);
         setTheme(s.theme);
         setNotifications(s.notifications ?? DEFAULT_NOTIFICATIONS);
         setHosts(
@@ -251,6 +254,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         jira: baseUrl && email ? { baseUrl, email } : undefined,
         claude: { ...claude, repoPaths: folders },
         agent,
+        staleAfterDays,
       };
       const res = await window.api.saveSettings(settings);
       if (!res.ok) {
@@ -394,6 +398,32 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             </span>
           </span>
         </label>
+        <div className="flex items-start justify-between gap-4">
+          <span>
+            <label htmlFor="stale-days" className="block text-sm text-fg-secondary">
+              Stale PRs after
+            </label>
+            <span className="block text-xs text-fg-faint">
+              A PR open this long gets a &ldquo;Stale&rdquo; badge and chip. On your own, a
+              &ldquo;Close…&rdquo; button closes it and can move its Jira task back to To Do, close it
+              as Won&apos;t Do or delete it. 0 turns this off.
+            </span>
+          </span>
+          <span className="flex shrink-0 items-center gap-2 text-xs text-fg-subtle">
+            <input
+              id="stale-days"
+              type="number"
+              min={0}
+              max={MAX_STALE_AFTER_DAYS}
+              value={staleAfterDays}
+              onChange={(e) =>
+                setStaleAfterDays(Math.min(MAX_STALE_AFTER_DAYS, Math.max(0, Math.round(Number(e.target.value) || 0))))
+              }
+              className={cn(inputCls.replace("w-full", "w-20"), "mt-0")}
+            />
+            days
+          </span>
+        </div>
       </section>
     ),
     notifications: (

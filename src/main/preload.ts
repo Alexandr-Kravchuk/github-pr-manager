@@ -45,6 +45,8 @@ const api: PrManagerApi = {
     };
   },
   copyText: (text) => ipcRenderer.invoke("app:copyText", text),
+  getStaleJiraTask: (prId) => ipcRenderer.invoke("stale:jiraTask", prId),
+  closeStalePr: (prId, options) => ipcRenderer.invoke("stale:close", prId, options),
   onSnapshot: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DashboardResponse) =>
       listener(payload);

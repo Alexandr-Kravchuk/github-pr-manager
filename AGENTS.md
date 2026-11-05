@@ -48,9 +48,9 @@ Three layers:
   module that uses them) so the renderer can value-import them: `notify.ts`
   (`DEFAULT_NOTIFICATION_SETTINGS`, the single source of truth for notification
   defaults), `pr-filter.ts` (the whole view-filter layer: the reveal gate, the
-  filter pipeline and the chips' facet counts — the five `SOURCE_CHIPS`
+  filter pipeline and the chips' facet counts — the six `SOURCE_CHIPS`
   (`Needs attention`, `Failing CI`, `New comments`, `Ready to merge`,
-  `No reviews yet`) are OR-ed **sources**, and role / host / author / search /
+  `No reviews yet`, `Stale`) are OR-ed **sources**, and role / host / author / search /
   `Hide my approvals` / the reveal gate narrow whatever union they produced
   (author is an exact login set by clicking an author in any view, through
   `AuthorFilterContext` and `AuthorButton`, transient like search and shown as
@@ -127,7 +127,18 @@ Three layers:
   colour of a header host pill's dot — red on a failed fetch, amber on a spent
   or low GraphQL budget, green otherwise; the pills replaced the raw budget
   number and, with two or more hosts, the "All hosts" dropdown, since clicking a
-  pill toggles that host's filter) and the PR agent's four: `agent-defaults.ts`
+  pill toggles that host's filter), `stale.ts` (long-open PRs: the
+  `staleAfterDays` threshold — counted from `createdAt`, 0 is off — behind the
+  poller's `isStale`, the `Stale` chip and badge, and the close dialog's rules:
+  only your own stale PR offers "Close…", which closes it on GitHub and can move
+  its Jira task back to To Do, close it as Won't Do or delete it. Workflows
+  differ per project, so the dialog lists the transitions Jira offers and
+  `suggestTransition` only preselects one. The close runs in
+  `main/stale-close.ts` with every outside call injected: the renderer sends
+  only the PR id and its choices, the PR is closed first and the task second,
+  and a missing Jira token stops it before anything changes. Jira writes need a
+  token with write scope — the read-only one the Jira section recommends gets a
+  refusal that says so) and the PR agent's four: `agent-defaults.ts`
   (the Agent tab's defaults and bounds), `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (which of
@@ -145,7 +156,7 @@ Three layers:
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
-  `settings-search.js`, `host-status.js`, `agent-defaults.js`, `agent-publish.js`,
+  `settings-search.js`, `host-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
   `agent-stream.js` and `agent-view.js`
   stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing

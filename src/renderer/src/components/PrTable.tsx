@@ -19,6 +19,7 @@ import type { PullRequest, ReviewerState } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { AuthorButton } from "./AuthorButton";
 import { ClaudeButton } from "./ClaudeButton";
+import { StaleCloseButton } from "./StaleCloseDialog";
 import { StackBadge } from "./StackBadge";
 import { ClaudeEnabledContext } from "./claude-context";
 import { AgentContext } from "./agent-context";
@@ -638,6 +639,7 @@ function Row({
           >
             <RowIcon kind={pr.isIgnored ? "eye" : "eye-off"} />
           </button>
+          <StaleCloseButton pr={pr} iconOnly />
           {/* Last, so it sits on the row's right edge where the eye lands. */}
           <ClaudeButton pr={pr} trackComments={trackComments} compact className="ml-1" />
         </span>

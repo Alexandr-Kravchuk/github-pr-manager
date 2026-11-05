@@ -18,6 +18,7 @@
  * winner. A scoped token's recommended scope is just `read:jira-work`.
  */
 import { makeDebug } from "./debug";
+import type { JiraTaskInfo } from "./stale";
 import type { JiraSettings } from "./types";
 
 /** What one issue key resolved to. */
@@ -437,4 +438,174 @@ export async function fetchSubtaskParents(
     debug(`subtask parents failed: ${(e as Error).message}`);
     return new Map();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Task actions for the stale-PR close dialog: read a task's transitions, move
+// it through one, or delete it. Unlike the enricher these run once, on a click,
+// so a failure is surfaced to the user instead of being swallowed.
+// ---------------------------------------------------------------------------
+
+/** Issue keys only — the key is interpolated into the REST path. */
+const ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]*-\d+$/;
+
+function assertIssueKey(key: string): void {
+  if (!ISSUE_KEY_RE.test(key)) throw new Error(`Jira: not an issue key: ${key}`);
+}
+
+/**
+ * Words a refused write in terms of what to fix. The read path works with a
+ * read-only token — the one the settings recommend — so a 401/403 here is far
+ * more often a missing scope than a wrong token.
+ */
+function writeRefusal(status: number, body: string): string {
+  const detail = body ? `${JIRA_ERROR_DETAIL_SEP}${body.slice(0, 200)}` : "";
+  if (status === 401 || status === 403) {
+    return `Jira refused the change (HTTP ${status}). The API token may be read-only: a scoped token needs write:jira-work (and delete:issue:jira to delete a task), and your account needs the permission in that project${detail}`;
+  }
+  return `Jira HTTP ${status}${detail}`;
+}
+
+/**
+ * One request against whichever REST base answers for this token: the pinned
+ * one when the enricher already settled it, else the gateway and then the
+ * site, moving on after a 401/403/404 — a classic token answers 401 on the
+ * gateway, and a scoped token an anonymous 404 on the site. Every candidate
+ * that refused did nothing, so trying the next one cannot apply a change twice.
+ * Never pins a base: that stays the enricher's call, made from a trusted read.
+ */
+async function jiraRequest(
+  config: JiraSettings,
+  token: string,
+  method: "GET" | "POST" | "DELETE",
+  path: string,
+  body?: unknown,
+): Promise<Response> {
+  const { bases } = await apiBasesFor(config);
+  const init: RequestInit = {
+    method,
+    headers: {
+      Authorization: authHeader(config.email, token),
+      Accept: "application/json",
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      "User-Agent": "github-pr-manager",
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: "no-store",
+  };
+  let lastError: unknown = null;
+  let last: Response | null = null;
+  for (let i = 0; i < bases.length; i++) {
+    const isLast = i === bases.length - 1;
+    try {
+      const res = await fetchWithTimeout(`${bases[i]}${path}`, init);
+      debug(`${method} ${bases[i]}${path} -> HTTP ${res.status}`);
+      if (!isLast && (res.status === 401 || res.status === 403 || res.status === 404)) {
+        last = res;
+        continue;
+      }
+      return res;
+    } catch (e) {
+      debug(`${method} ${bases[i]}${path} -> threw ${(e as Error).message}`);
+      // The timeout surfaces as a bare "This operation was aborted".
+      lastError =
+        (e as Error).name === "AbortError"
+          ? new Error(`Jira didn't answer within ${REQUEST_TIMEOUT_MS / 1000} seconds — try again.`)
+          : e;
+    }
+  }
+  if (last) return last;
+  throw lastError instanceof Error ? lastError : new Error("Jira: no reachable API base");
+}
+
+async function expectOk(res: Response): Promise<void> {
+  if (res.ok) return;
+  const text = await res.text().catch(() => "");
+  throw new Error(writeRefusal(res.status, text));
+}
+
+interface RawTransitions {
+  transitions?: Array<{
+    id: string;
+    name: string;
+    to?: { name?: string; statusCategory?: { key?: string } };
+    fields?: Record<
+      string,
+      { required?: boolean; allowedValues?: Array<{ id?: string; name?: string }> }
+    >;
+  }>;
+}
+
+interface RawIssue {
+  fields?: {
+    summary?: string;
+    status?: { name?: string; statusCategory?: { key?: string } };
+    subtasks?: unknown[];
+  };
+}
+
+/** The task's status, subtasks and the transitions Jira offers on it now. */
+export async function fetchTaskInfo(
+  config: JiraSettings,
+  token: string,
+  key: string,
+): Promise<JiraTaskInfo> {
+  assertIssueKey(key);
+  const issueRes = await jiraRequest(config, token, "GET", `/issue/${key}?fields=summary,status,subtasks`);
+  if (issueRes.status === 404) throw new Error(`Jira: ${key} was not found, or this token cannot see it.`);
+  await expectOk(issueRes);
+  const issue = (await issueRes.json()) as RawIssue;
+  const trRes = await jiraRequest(config, token, "GET", `/issue/${key}/transitions?expand=transitions.fields`);
+  await expectOk(trRes);
+  const raw = (await trRes.json()) as RawTransitions;
+  return {
+    key,
+    summary: issue.fields?.summary ?? null,
+    status: issue.fields?.status?.name ?? "",
+    statusCategory: issue.fields?.status?.statusCategory?.key ?? "",
+    subtaskCount: Array.isArray(issue.fields?.subtasks) ? issue.fields.subtasks.length : 0,
+    transitions: (raw.transitions ?? []).map((t) => {
+      const resolution = t.fields?.resolution;
+      return {
+        id: String(t.id),
+        name: t.name,
+        toStatus: t.to?.name ?? t.name,
+        toCategory: t.to?.statusCategory?.key ?? "",
+        resolutions: (resolution?.allowedValues ?? [])
+          .filter((v): v is { id: string; name: string } => typeof v.id === "string" && typeof v.name === "string")
+          .map((v) => ({ id: v.id, name: v.name })),
+        resolutionRequired: resolution?.required === true,
+      };
+    }),
+  };
+}
+
+/** Moves the task through one transition, setting a resolution when given. */
+export async function transitionTask(
+  config: JiraSettings,
+  token: string,
+  key: string,
+  transitionId: string,
+  resolutionId: string | null,
+): Promise<void> {
+  assertIssueKey(key);
+  const body: Record<string, unknown> = { transition: { id: transitionId } };
+  if (resolutionId) body.fields = { resolution: { id: resolutionId } };
+  await expectOk(await jiraRequest(config, token, "POST", `/issue/${key}/transitions`, body));
+  issueCache.delete(key);
+}
+
+/**
+ * Deletes the task for good. Jira refuses to delete a task that has subtasks
+ * unless they go with it, so the caller states that explicitly.
+ */
+export async function deleteTask(
+  config: JiraSettings,
+  token: string,
+  key: string,
+  deleteSubtasks: boolean,
+): Promise<void> {
+  assertIssueKey(key);
+  await expectOk(await jiraRequest(config, token, "DELETE", `/issue/${key}?deleteSubtasks=${deleteSubtasks}`));
+  issueCache.delete(key);
 }

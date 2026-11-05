@@ -35,6 +35,8 @@ import {
 import { groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
 import { hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
 import { AuthorFilterContext } from "./components/author-filter-context";
+import { StaleCloseDialog } from "./components/StaleCloseDialog";
+import { StaleCloseContext } from "./components/stale-close-context";
 import { ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
@@ -170,6 +172,7 @@ interface ViewPrefs {
   newOnly: boolean;
   mergeableOnly: boolean;
   noReviewsOnly: boolean;
+  staleOnly: boolean;
   hideApproved: boolean;
   showDrafts: boolean;
   showIgnored: boolean;
@@ -190,6 +193,7 @@ const DEFAULT_PREFS: ViewPrefs = {
   newOnly: false,
   mergeableOnly: false,
   noReviewsOnly: false,
+  staleOnly: false,
   hideApproved: false,
   showDrafts: false,
   showIgnored: false,
@@ -224,6 +228,7 @@ function loadPrefs(): ViewPrefs {
       newOnly: Boolean(p.newOnly),
       mergeableOnly: Boolean(p.mergeableOnly),
       noReviewsOnly: Boolean(p.noReviewsOnly),
+      staleOnly: Boolean(p.staleOnly),
       hideApproved: Boolean(p.hideApproved),
       showDrafts: Boolean(p.showDrafts),
       showIgnored: Boolean(p.showIgnored),
@@ -290,6 +295,9 @@ export function App() {
   const [newOnly, setNewOnly] = useState(boot.newOnly);
   const [mergeableOnly, setMergeableOnly] = useState(boot.mergeableOnly);
   const [noReviewsOnly, setNoReviewsOnly] = useState(boot.noReviewsOnly);
+  const [staleOnly, setStaleOnly] = useState(boot.staleOnly);
+  // The PR whose stale-close dialog is open, or null.
+  const [closingPr, setClosingPr] = useState<PullRequest | null>(null);
   const [hideApproved, setHideApproved] = useState(boot.hideApproved);
   const [sortBy, setSortBy] = useState<SortKey>(boot.sortBy);
   const [groupBy, setGroupBy] = useState<GroupMode>(boot.groupBy);
@@ -506,6 +514,7 @@ export function App() {
       newOnly,
       mergeableOnly,
       noReviewsOnly,
+      staleOnly,
       hideApproved,
       showDrafts,
       showIgnored,
@@ -523,6 +532,7 @@ export function App() {
     newOnly,
     mergeableOnly,
     noReviewsOnly,
+    staleOnly,
     hideApproved,
     showDrafts,
     showIgnored,
@@ -651,6 +661,7 @@ export function App() {
       newOnly,
       mergeableOnly,
       noReviewsOnly,
+      staleOnly,
       hideApproved,
       showDrafts,
       showIgnored,
@@ -665,6 +676,7 @@ export function App() {
       newOnly,
       mergeableOnly,
       noReviewsOnly,
+      staleOnly,
       hideApproved,
       showDrafts,
       showIgnored,
@@ -710,6 +722,7 @@ export function App() {
       fresh: sourceFacetCount(allPrs, filterState, "fresh"),
       mergeable: sourceFacetCount(allPrs, filterState, "mergeable"),
       noReviews: sourceFacetCount(allPrs, filterState, "noReviews"),
+      stale: sourceFacetCount(allPrs, filterState, "stale"),
       approved: excludeDelta(allPrs, filterState),
       drafts: revealDelta(allPrs, filterState, "drafts"),
       ignored: revealDelta(allPrs, filterState, "ignored"),
@@ -883,6 +896,7 @@ export function App() {
     setNewOnly(false);
     setMergeableOnly(false);
     setNoReviewsOnly(false);
+    setStaleOnly(false);
     setHideApproved(false);
   }, []);
 
@@ -1199,6 +1213,18 @@ export function App() {
               >
                 ◷ No reviews yet
               </FilterChip>
+              {/* Shown while it holds a PR or is on — a 0 badge on a chip most
+                  dashboards never need would only crowd the row. */}
+              {(staleOnly || chipCounts.stale > 0) && (
+                <FilterChip
+                  active={staleOnly}
+                  count={chipCounts.stale}
+                  title="PRs open longer than the stale threshold (Settings → General → Behavior)"
+                  onClick={() => setStaleOnly((v) => !v)}
+                >
+                  🕸 Stale
+                </FilterChip>
+              )}
               <span aria-hidden className="mx-1 h-5 w-px self-center bg-fg-faint" />
               {/* The one chip that REMOVES rows: PRs you approved and that aren't
                   asking for you again. Its count is the rows it hides (or would),
@@ -1352,6 +1378,7 @@ export function App() {
       <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
       <ClaudeSessionsContext.Provider value={claudeSessions}>
       <AuthorFilterContext.Provider value={authorFilter}>
+      <StaleCloseContext.Provider value={setClosingPr}>
       {viewMode === "board" ? (
         <PrBoard prs={filtered} onOpen={openPr} />
       ) : viewMode === "cozy" ? (
@@ -1432,7 +1459,15 @@ export function App() {
           onToggleIgnore={toggleIgnore}
         />
       )}
+      </StaleCloseContext.Provider>
       </AuthorFilterContext.Provider>
+      {closingPr && (
+        <StaleCloseDialog
+          pr={closingPr}
+          jiraConfigured={jiraStatus?.configured ?? false}
+          onDismiss={() => setClosingPr(null)}
+        />
+      )}
       </ClaudeSessionsContext.Provider>
       </ClaudeEnabledContext.Provider>
       </AgentContext.Provider>

@@ -816,6 +816,8 @@ export function mapPr(
     viewerReviewedHead,
     myReReviewDue,
     hasNoReviews,
+    // The threshold is a setting — the poller sets the real value.
+    isStale: false,
     unresolvedThreads,
     unaddressedThreads,
     totalComments,
@@ -1281,4 +1283,30 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
     pullRequests: [...byId.values()],
     rateLimit: { hostLabel: host.label, remaining: remaining ?? 0, cost, resetAt, limit },
   };
+}
+
+/**
+ * Closes a PR, posting `comment` on it first when one is given — so whoever
+ * opens the closed PR later reads why. Two mutations, comment first: a comment
+ * that fails leaves the PR open rather than closed without its explanation.
+ * Throws on any failure; nothing is retried, since a mutation is not a poll.
+ */
+export async function closePullRequest(
+  host: Pick<HostConfig, "label" | "graphqlUrl" | "token">,
+  prId: string,
+  comment: string,
+): Promise<void> {
+  const target = { ...host, repos: [] } as HostConfig;
+  if (comment.trim()) {
+    await postSearch(
+      target,
+      "mutation($id: ID!, $body: String!) { addComment(input: { subjectId: $id, body: $body }) { clientMutationId } }",
+      { id: prId, body: comment.trim() },
+    );
+  }
+  await postSearch(
+    target,
+    "mutation($id: ID!) { closePullRequest(input: { pullRequestId: $id }) { pullRequest { state } } }",
+    { id: prId },
+  );
 }
