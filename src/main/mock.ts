@@ -561,11 +561,11 @@ export function mockPollerOverrides(userDataPath: string): {
         ...defaultSettings(),
         pollIntervalSeconds: 10,
         trackComments,
-        hosts: [{ label: HOST_LABEL, graphqlUrl: "https://mock.invalid/graphql", repos: ["acme/widgets"] }],
+        hosts: [{ label: HOST_LABEL, graphqlUrl: "https://mock.invalid/graphql", scope: "all", repos: [], mutedRepos: [] }],
       };
     },
     toHostConfigs: () => [
-      { label: HOST_LABEL, graphqlUrl: "https://mock.invalid/graphql", token: "mock", repos: ["acme/widgets"] },
+      { label: HOST_LABEL, graphqlUrl: "https://mock.invalid/graphql", token: "mock", scope: "all", repos: [], mutedRepos: [] },
     ],
     fetchHostFn: mockFetchHost,
     probeNotificationsFn: mockProbeNotifications,

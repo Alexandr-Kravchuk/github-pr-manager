@@ -6,6 +6,7 @@ import type {
   JiraStatus,
   NotificationEventToggles,
   NotificationSettings,
+  RepoScope,
   Settings,
   ThemePreference,
 } from "../../../shared/types";
@@ -31,18 +32,30 @@ const TAB_KEY = "prd:settings-tab:v1";
 
 const GITHUB_GRAPHQL = "https://api.github.com/graphql";
 
-// While editing, repos are kept as the raw textarea text (reposText) so typing
-// newlines / partial entries isn't stripped mid-edit. They're parsed into the
-// owner/name list only on save.
+// While editing, both repository lists are kept as the raw textarea text so
+// typing newlines / partial entries isn't stripped mid-edit. They're parsed into
+// owner/name lists only on save. Both are kept whatever the scope, so flipping
+// it back and forth loses neither list.
 interface DraftHost {
   label: string;
   graphqlUrl: string;
+  scope: RepoScope;
   reposText: string;
+  mutedText: string;
 }
 
 function emptyHost(): DraftHost {
-  return { label: "", graphqlUrl: "", reposText: "" };
+  return { label: "", graphqlUrl: "", scope: "all", reposText: "", mutedText: "" };
 }
+
+const SCOPE_OPTIONS: Array<{ value: RepoScope; label: string; title: string }> = [
+  {
+    value: "all",
+    label: "All repositories",
+    title: "Your PRs and the reviews asked of you, in any repository on this host",
+  },
+  { value: "listed", label: "Only listed", title: "Only the repositories you list below" },
+];
 
 /** Derives the gh hostname from a GraphQL URL — renderer-side mirror of the
  *  main-process helper (kept tiny so we don't import the Node module here). */
@@ -117,6 +130,10 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   // Rows of the repository → folder registry, kept as rows while editing so a
   // half-typed entry isn't dropped; turned into `claude.repoPaths` on save.
   const [repoFolders, setRepoFolders] = useState<RepoFolderRow[]>([]);
+  // Repositories of the PRs on the dashboard now — the folder registry's
+  // suggestions. Under the "all" scope no list names them, so without these the
+  // registry would suggest nothing at all.
+  const [dashboardRepos, setDashboardRepos] = useState<string[]>([]);
   const [gh, setGh] = useState<GhStatus | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -154,7 +171,9 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           s.hosts.map((h) => ({
             label: h.label,
             graphqlUrl: h.graphqlUrl,
+            scope: h.scope,
             reposText: h.repos.join("\n"),
+            mutedText: h.mutedRepos.join("\n"),
           })),
         );
         setClaude(s.claude ?? DEFAULT_CLAUDE_SETTINGS);
@@ -166,6 +185,12 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setLoaded(true);
       })
       .catch((e) => setError((e as Error).message));
+    window.api
+      .getDashboard()
+      .then((r) => {
+        if (r.ok) setDashboardRepos([...new Set(r.snapshot.pullRequests.map((p) => p.repo))].sort());
+      })
+      .catch(() => {});
     loadGh();
     loadJira();
   }, [loadGh, loadJira]);
@@ -224,7 +249,9 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         hosts: hosts.map((h) => ({
           label: h.label,
           graphqlUrl: h.graphqlUrl,
+          scope: h.scope,
           repos: parseRepos(h.reposText),
+          mutedRepos: parseRepos(h.mutedText),
         })),
         // Only persist Jira when both fields are present; otherwise leave it off.
         jira: baseUrl && email ? { baseUrl, email } : undefined,
@@ -483,7 +510,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => addHost({ label: "GitHub", graphqlUrl: GITHUB_GRAPHQL, reposText: "" })}
+              onClick={() => addHost({ ...emptyHost(), label: "GitHub", graphqlUrl: GITHUB_GRAPHQL })}
               className="rounded-md border border-line-strong px-2 py-0.5 text-xs text-fg-secondary hover:bg-elevated"
             >
               + GitHub.com
@@ -500,7 +527,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
 
         {hosts.length === 0 && (
           <p className="rounded-lg border border-line bg-surface/40 p-4 text-sm text-fg-subtle">
-            No hosts yet. Add GitHub.com or an Enterprise host, then list the repositories to watch.
+            No hosts yet. Add GitHub.com or an Enterprise host — your PRs and the reviews asked of
+            you show up from every repository on it.
           </p>
         )}
 
@@ -542,17 +570,59 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                 </div>
 
                 <div className="mt-3">
-                  <label className={labelCls}>Repositories (one owner/name per line)</label>
-                  <textarea
-                    value={host.reposText}
-                    onChange={(e) => updateHost(i, { reposText: e.target.value })}
-                    // Grows with the list (a line to spare for the next entry),
-                    // from 8 lines up to 24 — past that it scrolls; the corner
-                    // grip still resizes it by hand.
-                    rows={Math.min(24, Math.max(8, host.reposText.split("\n").length + 1))}
-                    placeholder={"owner/repo-1\nowner/repo-2"}
-                    className={cn(inputCls, "resize-y font-mono text-xs leading-5")}
-                  />
+                  <span className={labelCls}>Repositories</span>
+                  <div
+                    role="radiogroup"
+                    aria-label="Repositories"
+                    className="mt-1 inline-flex rounded-md border border-line-strong p-0.5"
+                  >
+                    {SCOPE_OPTIONS.map((o) => (
+                      <button
+                        key={o.value}
+                        type="button"
+                        role="radio"
+                        aria-checked={host.scope === o.value}
+                        title={o.title}
+                        onClick={() => updateHost(i, { scope: o.value })}
+                        className={cn(
+                          "rounded px-2.5 py-0.5 text-xs",
+                          host.scope === o.value
+                            ? "bg-elevated font-medium text-fg"
+                            : "text-fg-muted hover:text-fg-secondary",
+                        )}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                  {/* One textarea, two lists: what it edits follows the scope,
+                      and the other list is kept untouched for a switch back. */}
+                  {(() => {
+                    const muted = host.scope === "all";
+                    const text = muted ? host.mutedText : host.reposText;
+                    return (
+                      <>
+                        <label className={cn(labelCls, "mt-3")}>
+                          {muted
+                            ? "Muted repositories — left out of the dashboard (one owner/name per line)"
+                            : "Repositories to watch (one owner/name per line)"}
+                        </label>
+                        <textarea
+                          value={text}
+                          onChange={(e) =>
+                            updateHost(i, muted ? { mutedText: e.target.value } : { reposText: e.target.value })
+                          }
+                          // Grows with the list (a line to spare for the next
+                          // entry), from 4 (muted: usually empty) or 8 lines up to
+                          // 24 — past that it scrolls; the corner grip still
+                          // resizes it by hand.
+                          rows={Math.min(24, Math.max(muted ? 4 : 8, text.split("\n").length + 1))}
+                          placeholder={"owner/repo-1\nowner/repo-2"}
+                          className={cn(inputCls, "resize-y font-mono text-xs leading-5")}
+                        />
+                      </>
+                    );
+                  })()}
                 </div>
 
                 {hostname && (
@@ -765,7 +835,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                 projects folder.
               </p>
               <datalist id="claude-repo-options">
-                {[...new Set(hosts.flatMap((h) => parseRepos(h.reposText)))].map((repo) => (
+                {[...new Set([...hosts.flatMap((h) => parseRepos(h.reposText)), ...dashboardRepos])].map((repo) => (
                   <option key={repo} value={repo} />
                 ))}
               </datalist>

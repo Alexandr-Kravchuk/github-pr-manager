@@ -2,7 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
-import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
+import {
+  ConfigError,
+  defaultSettings,
+  getGhStatus,
+  pickAppId,
+  searchCoverageKey,
+  toHostConfigs,
+  toPublicConfig,
+} from "../shared/config";
 import { planPolling } from "../shared/idle-gate";
 import type { PollPlan } from "../shared/idle-gate";
 import { setIgnored } from "../shared/ignored";
@@ -672,12 +680,22 @@ function registerIpc(): void {
   ipcMain.handle("settings:save", async (_event, raw: unknown): Promise<SaveSettingsResult> => {
     try {
       let previousJira: Settings["jira"];
+      let previousCoverage: string | null;
       try {
-        previousJira = loadSettings().jira;
+        const previous = loadSettings();
+        previousJira = previous.jira;
+        previousCoverage = searchCoverageKey(previous);
       } catch {
         previousJira = undefined;
+        previousCoverage = null;
       }
       const saved = persistSettings(raw);
+      // A save that widens what the searches cover (scope switched to "all", a
+      // repository unmuted or listed) brings in PRs that were open all along.
+      // Diffed against the last snapshot, each one a review is asked on reads
+      // as a NEW request and toasts — a burst for nothing that happened. Re-
+      // baselining makes the next snapshot what a launch's first one is.
+      if (searchCoverageKey(saved) !== previousCoverage) prevNotifyPrs = null;
       // The site URL / account identify what the Jira caches describe: the
       // parent cache is keyed by issue key alone, so entries resolved against
       // the old site would otherwise be served for the new one for up to its

@@ -334,7 +334,7 @@ const settings: Settings = {
     sound: false,
     events: { yourTurn: true, ciFailed: true, goodNews: true },
   },
-  hosts: [{ label: "GitHub", graphqlUrl: "https://api.github.com/graphql", repos: ["acme/widgets"] }],
+  hosts: [{ label: "GitHub", graphqlUrl: "https://api.github.com/graphql", scope: "all", repos: [], mutedRepos: [] }],
   claude: { ...DEFAULT_CLAUDE_SETTINGS, enabled: true },
 };
 

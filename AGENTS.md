@@ -227,6 +227,19 @@ Three layers:
   in-progress edit (a half-typed Jira token) was rejected instead.
 - Settings never contain tokens; tokens are resolved per host via `gh` at fetch
   time (`config.ts`).
+- A host's searches cover **every repository** on it by default (`scope:
+  "all"`, minus `mutedRepos`, plus `archived:false`); `scope: "listed"` keeps the
+  old allowlist. A hand-kept list hid every review and PR of the user's that
+  landed in a repository nobody had added, so a settings file without `scope`
+  lands on `all` with its list kept for a switch back. Three consequences to
+  keep: the notifications detector must not count a notification just for its
+  repository under `all` (most of the inbox is `subscribed` churn) — only a PR
+  already on the dashboard or a `review_requested` (`newestTrackedActivity`);
+  a save that changes what the searches cover re-baselines the notifier
+  (`searchCoverageKey`), or every PR it newly brings in toasts as a fresh review
+  request; and team requests are searched per team on Enterprise Server only —
+  on github.com and GHE.com `review-requested:@me` already includes them
+  (measured), so the per-team searches only re-found the same PRs.
 - Window size/position persist in `userData/window-state.json`
   (`main/window-state.ts`), **not** in `settings.json`: `loadSettings()` throws
   `ConfigError` on an unexpected shape and the poller surfaces that, so a stray

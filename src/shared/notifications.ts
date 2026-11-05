@@ -18,7 +18,8 @@
  *
  * "Did a tracked PR move?" is decided by an activity **watermark**, not by the
  * inbox merely changing: we remember the newest notification timestamp seen so
- * far and fire only when a notification on a *tracked* repo is newer than it.
+ * far and fire only when a *tracked* notification is newer than it — one about
+ * a PR on the dashboard, or a new review request (see `newestTrackedActivity`).
  * That way a persistent unread notification, or churn on untracked repos, never
  * re-triggers a hydrate (which would waste GraphQL budget).
  *
@@ -59,7 +60,36 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 /** One notification row, trimmed to the fields we look at. */
 interface RawNotification {
   updated_at?: string;
+  reason?: string;
   repository?: { full_name?: string };
+  subject?: { url?: string | null };
+}
+
+/**
+ * What a host's dashboard covers, as the detector needs it: the host's
+ * repository scope, plus the PRs it is showing right now as `owner/name#N` keys
+ * (lower case — see {@link prActivityKey}).
+ */
+export interface TrackedScope {
+  scope: HostConfig["scope"];
+  repos: string[];
+  mutedRepos: string[];
+  prKeys: ReadonlySet<string>;
+}
+
+/** `owner/name#N` in lower case — how a shown PR and a notification's subject meet. */
+export function prActivityKey(repo: string, number: number): string {
+  return `${repo.toLowerCase()}#${number}`;
+}
+
+/**
+ * The PR a notification is about, as a {@link prActivityKey}, read from its
+ * subject's API URL (`…/repos/{owner}/{name}/pulls/{N}` on every host flavour);
+ * null for an issue, a release, a commit or a check suite.
+ */
+function subjectPrKey(n: RawNotification): string | null {
+  const m = /\/repos\/([^/]+\/[^/]+)\/pulls\/(\d+)$/.exec(n.subject?.url ?? "");
+  return m ? prActivityKey(m[1], Number(m[2])) : null;
 }
 
 /**
@@ -83,19 +113,35 @@ function newestActivity(items: RawNotification[]): string | null {
 }
 
 /**
- * Newest `updated_at` among notifications whose repository is one of `repos`,
- * or null when none. The `/notifications` inbox spans every repo the user
- * watches on the host, so this scopes the signal to what the dashboard shows.
- * Case-insensitive (GitHub owner/name are case-insensitive). Exported for tests.
+ * Newest `updated_at` among the notifications the dashboard would show
+ * something for, or null when none. The `/notifications` inbox spans every
+ * repository the user watches on the host — on one measured GHE account 41 of
+ * 50 entries were `subscribed` churn — so it is scoped to:
+ *
+ *  - a PR on the dashboard right now (`prKeys`), whatever the reason;
+ *  - a review newly asked of you (`review_requested`, team requests included)
+ *    in a repository the host covers — the PR that is not on the dashboard YET;
+ *  - under `listed`, anything in a listed repository, as before `all` existed.
+ *
+ * Under `all` the repository alone is never enough: it would make every
+ * `subscribed` entry force a hydrate. Case-insensitive (GitHub owner/name are).
+ * Exported for tests.
  */
-export function newestTrackedActivity(items: RawNotification[], repos: string[]): string | null {
-  if (items.length === 0 || repos.length === 0) return null;
-  const tracked = new Set(repos.map((r) => r.toLowerCase()));
+export function newestTrackedActivity(items: RawNotification[], tracked: TrackedScope): string | null {
+  if (items.length === 0) return null;
+  const listed = new Set(tracked.repos.map((r) => r.toLowerCase()));
+  const muted = new Set(tracked.mutedRepos.map((r) => r.toLowerCase()));
+  const covers = (repo: string) => (tracked.scope === "listed" ? listed.has(repo) : !muted.has(repo));
   let max: string | null = null;
   for (const n of items) {
-    const full = n.repository?.full_name?.toLowerCase();
     const ts = n.updated_at;
-    if (full !== undefined && ts && tracked.has(full) && (max === null || ts > max)) max = ts;
+    if (!ts || (max !== null && ts <= max)) continue;
+    const repo = n.repository?.full_name?.toLowerCase();
+    const prKey = subjectPrKey(n);
+    const relevant =
+      (prKey !== null && tracked.prKeys.has(prKey)) ||
+      (repo !== undefined && covers(repo) && (tracked.scope === "listed" || n.reason === "review_requested"));
+    if (relevant) max = ts;
   }
   return max;
 }
@@ -104,10 +150,12 @@ export function newestTrackedActivity(items: RawNotification[], repos: string[])
  * Probes a host's notification inbox. On the first probe (`prev.watermark`
  * null) it only records a baseline and reports `changed:false` — the poller's
  * regular first tick already hydrates every host, so there is nothing to force.
+ * `prKeys` are the host's PRs on the dashboard now — see {@link TrackedScope}.
  */
 export async function probeNotifications(
   host: HostConfig,
   prev: NotifState,
+  prKeys: ReadonlySet<string> = new Set(),
 ): Promise<NotifProbe> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${host.token}`,
@@ -150,7 +198,12 @@ export async function probeNotifications(
     return { changed: false, lastModified, watermark: nextWatermark, pollIntervalMs, status: "ok" };
   }
 
-  const newestTracked = newestTrackedActivity(items, host.repos);
+  const newestTracked = newestTrackedActivity(items, {
+    scope: host.scope,
+    repos: host.repos,
+    mutedRepos: host.mutedRepos,
+    prKeys,
+  });
   const changed = newestTracked !== null && newestTracked > prev.watermark;
 
   return { changed, lastModified, watermark: nextWatermark, pollIntervalMs, status: "ok" };

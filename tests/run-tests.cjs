@@ -1379,6 +1379,37 @@ test("validateSettings: valid host normalized", () => {
   // repos without "owner/name" shape are dropped
   assert.deepStrictEqual(s.hosts[0].repos, ["a/b", "c/d"]);
 });
+// A settings file from before the scope existed lands on "all" — the fix for
+// reviews asked in repositories nobody had listed — and keeps its list, so
+// switching to "listed" brings it back as it was.
+test("validateSettings: a host saved before scope existed searches all repositories, list kept", () => {
+  const s = cfg.validateSettings({
+    hosts: [{ label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"] }],
+  });
+  assert.strictEqual(s.hosts[0].scope, "all");
+  assert.deepStrictEqual(s.hosts[0].repos, ["a/b"]);
+  assert.deepStrictEqual(s.hosts[0].mutedRepos, []);
+});
+test("validateSettings: listed scope and muted repositories round-trip; junk scope is all", () => {
+  const s = cfg.validateSettings({
+    hosts: [
+      { label: "A", graphqlUrl: "https://api.github.com/graphql", scope: "listed", repos: ["a/b"] },
+      { label: "B", graphqlUrl: "https://api.github.com/graphql", scope: "nope", mutedRepos: ["x/y", "bad", 3] },
+    ],
+  });
+  assert.strictEqual(s.hosts[0].scope, "listed");
+  assert.strictEqual(s.hosts[1].scope, "all");
+  assert.deepStrictEqual(s.hosts[1].mutedRepos, ["x/y"]);
+});
+test("searchCoverageKey: moves with what the searches cover, not with what they ignore", () => {
+  const base = { label: "GH", graphqlUrl: "https://api.github.com/graphql", scope: "all", repos: ["a/b"], mutedRepos: [] };
+  const key = (h) => cfg.searchCoverageKey({ hosts: [h] });
+  assert.notStrictEqual(key(base), key({ ...base, scope: "listed" }));
+  assert.notStrictEqual(key(base), key({ ...base, mutedRepos: ["x/y"] }));
+  // Under "all" the kept list searches nothing, so editing it changes nothing.
+  assert.strictEqual(key(base), key({ ...base, repos: ["c/d"] }));
+  assert.strictEqual(key(base), key({ ...base, label: "renamed" }));
+});
 test("validateSettings: host missing graphqlUrl throws", () =>
   assert.throws(() => cfg.validateSettings({ hosts: [{ label: "x" }] }), /missing graphqlUrl/));
 test("validateSettings: host with invalid graphqlUrl throws", () =>
@@ -1636,14 +1667,76 @@ const items = [
   { updated_at: "2026-07-07T11:00:00Z", repository: { full_name: "other/repo" } },
   { updated_at: "2026-07-07T09:00:00Z", repository: { full_name: "ACME/Widgets" } },
 ];
-test("newestTrackedActivity: newest updated_at among tracked repos (case-insensitive)", () =>
-  assert.strictEqual(notif.newestTrackedActivity(items, ["acme/widgets"]), "2026-07-07T10:00:00Z"));
-test("newestTrackedActivity: null when nothing tracked matches", () =>
-  assert.strictEqual(notif.newestTrackedActivity(items, ["nobody/here"]), null));
+const listedScope = (repos) => ({ scope: "listed", repos, mutedRepos: [], prKeys: new Set() });
+test("newestTrackedActivity: listed — newest updated_at among listed repos (case-insensitive)", () =>
+  assert.strictEqual(notif.newestTrackedActivity(items, listedScope(["acme/widgets"])), "2026-07-07T10:00:00Z"));
+test("newestTrackedActivity: listed — null when nothing listed matches", () =>
+  assert.strictEqual(notif.newestTrackedActivity(items, listedScope(["nobody/here"])), null));
 test("newestTrackedActivity: null on empty inputs", () => {
-  assert.strictEqual(notif.newestTrackedActivity([], ["acme/widgets"]), null);
-  assert.strictEqual(notif.newestTrackedActivity(items, []), null);
+  assert.strictEqual(notif.newestTrackedActivity([], listedScope(["acme/widgets"])), null);
+  assert.strictEqual(notif.newestTrackedActivity(items, listedScope([])), null);
 });
+
+// Under "all" a repository alone is never enough: most of the inbox is
+// `subscribed` churn from watched repositories, and each entry would force a
+// hydrate. What counts is a PR already on the dashboard, or a new review request.
+const prNotif = (repo, number, reason, updated_at) => ({
+  updated_at,
+  reason,
+  repository: { full_name: repo },
+  subject: { url: `https://api.github.com/repos/${repo}/pulls/${number}` },
+});
+const allScope = (prKeys = [], mutedRepos = []) => ({
+  scope: "all",
+  repos: [],
+  mutedRepos,
+  prKeys: new Set(prKeys),
+});
+test("newestTrackedActivity: all — subscribed churn in any repository is ignored", () =>
+  assert.strictEqual(
+    notif.newestTrackedActivity([prNotif("acme/widgets", 7, "subscribed", "2026-07-07T10:00:00Z")], allScope()),
+    null,
+  ));
+test("newestTrackedActivity: all — a review request in any repository counts", () =>
+  assert.strictEqual(
+    notif.newestTrackedActivity([prNotif("new/repo", 3, "review_requested", "2026-07-07T10:00:00Z")], allScope()),
+    "2026-07-07T10:00:00Z",
+  ));
+test("newestTrackedActivity: all — a review request in a muted repository does not", () =>
+  assert.strictEqual(
+    notif.newestTrackedActivity(
+      [prNotif("Noisy/Repo", 3, "review_requested", "2026-07-07T10:00:00Z")],
+      allScope([], ["noisy/repo"]),
+    ),
+    null,
+  ));
+test("newestTrackedActivity: all — any activity on a PR on the dashboard counts", () =>
+  assert.strictEqual(
+    notif.newestTrackedActivity(
+      [
+        prNotif("Acme/Widgets", 7, "subscribed", "2026-07-07T10:00:00Z"),
+        prNotif("acme/widgets", 8, "subscribed", "2026-07-07T12:00:00Z"),
+      ],
+      allScope([notif.prActivityKey("acme/widgets", 7)]),
+    ),
+    "2026-07-07T10:00:00Z",
+  ));
+test("newestTrackedActivity: Enterprise Server subject URLs carry the PR too", () =>
+  assert.strictEqual(
+    notif.newestTrackedActivity(
+      [{ ...prNotif("o/r", 5, "comment", "2026-07-07T10:00:00Z"), subject: { url: "https://ghe.corp/api/v3/repos/o/r/pulls/5" } }],
+      allScope([notif.prActivityKey("o/r", 5)]),
+    ),
+    "2026-07-07T10:00:00Z",
+  ));
+test("newestTrackedActivity: an issue with the same number is not the PR", () =>
+  assert.strictEqual(
+    notif.newestTrackedActivity(
+      [{ ...prNotif("o/r", 5, "comment", "2026-07-07T10:00:00Z"), subject: { url: "https://api.github.com/repos/o/r/issues/5" } }],
+      allScope([notif.prActivityKey("o/r", 5)]),
+    ),
+    null,
+  ));
 
 // --- poller: computeIdleFactor -----------------------------------------------
 test("computeIdleFactor: no backoff until the streak passes the threshold", () => {
@@ -4744,9 +4837,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // minutes and has no test-visible reset.
   // `teams` is the list of team slugs the viewer belongs to (org `a`, matching
   // the configured `a/b` repo, or `fetchHost` filters them out); `team0` holds
-  // the nodes the first team search returns.
-  async function runFetchHost(searches) {
-    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+  // the nodes the first team search returns. Teams are searched one by one on
+  // Enterprise Server only, so a call that names teams gets a Server URL
+  // (`…/api/graphql`). `host` overrides the host's scope fields.
+  async function runFetchHost(searches, host = {}) {
+    const graphqlUrl = searches.teams
+      ? `https://stub${++hostSeq}.test/api/graphql`
+      : `https://api.stub${++hostSeq}.test/graphql`;
     const sent = {};
     global.fetch = async (url, init) => {
       if (url.includes("/user/teams")) {
@@ -4781,8 +4878,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const result = await github.fetchHost({
       label: "H",
       graphqlUrl,
+      scope: "listed",
       repos: ["a/b"],
+      mutedRepos: [],
       token: "t",
+      ...host,
     });
     return { sent, result };
   }
@@ -4846,7 +4946,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         }),
       };
     };
-    const result = await github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" });
+    const result = await github.fetchHost({ label: "H", graphqlUrl, scope: "listed", repos: ["a/b"], mutedRepos: [], token: "t" });
     assert.deepStrictEqual(reads.sort((a, b) => b - a), [25, 5]);
     assert.strictEqual(result.pullRequests.length, 30);
     // 3 searches at 1 point + 2 reads at 4.
@@ -4887,7 +4987,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         }),
       };
     };
-    const result = await github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" });
+    const result = await github.fetchHost({ label: "H", graphqlUrl, scope: "listed", repos: ["a/b"], mutedRepos: [], token: "t" });
     assert.deepStrictEqual(result.pullRequests.map((p) => p.id), ["PR_kept"]);
   });
 
@@ -4913,7 +5013,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         }),
       };
     };
-    const result = await github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" });
+    const result = await github.fetchHost({ label: "H", graphqlUrl, scope: "listed", repos: ["a/b"], mutedRepos: [], token: "t" });
     assert.deepStrictEqual(result.pullRequests.map((p) => p.id), ["PR_kept"]);
   });
 
@@ -4944,7 +5044,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       };
     };
     await assert.rejects(
-      github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" }),
+      github.fetchHost({ label: "H", graphqlUrl, scope: "listed", repos: ["a/b"], mutedRepos: [], token: "t" }),
       /HTTP 502 Bad Gateway/,
     );
   });
@@ -4986,7 +5086,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         }),
       };
     };
-    const host = { label: "H", graphqlUrl, repos: ["a/b"], token: "t" };
+    const host = { label: "H", graphqlUrl, scope: "listed", repos: ["a/b"], mutedRepos: [], token: "t" };
     const first = await github.fetchHost(host);
     assert.strictEqual(first.pullRequests.length, 1);
     assert.strictEqual(first.pullRequests[0].stack, null);
@@ -5055,7 +5155,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     // search sent means the team branch of `addNodes` never runs at all.
     assert.strictEqual(
       sent.team0.variables.teamQuery0,
-      "is:open is:pr repo:a/b team-review-requested:a/toolkit-contributors",
+      "is:open is:pr repo:a/b team-review-requested:a/toolkit-contributors sort:updated-desc",
     );
     assert.ok(sent.team0.query.includes("team0: search(query: $teamQuery0"));
     assert.strictEqual(result.pullRequests.length, 1);
@@ -5068,6 +5168,80 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       team0: [rawPr({ id: "PR_theirs_team" })],
     });
     assert.deepStrictEqual(result.pullRequests[0].roles, ["reviewer"]);
+  });
+
+  // The "all" scope is the fix for reviews and PRs in repositories nobody had
+  // listed: no allowlist, archived repositories out, muted ones excluded.
+  await atest("fetchHost: the all scope searches every repository but the muted ones", async () => {
+    const { sent } = await runFetchHost({}, { scope: "all", repos: ["a/b"], mutedRepos: ["x/noise", "y/old"] });
+    const scope = "is:open is:pr archived:false -repo:x/noise -repo:y/old";
+    assert.strictEqual(sent.authored.variables.authoredQuery, `${scope} author:@me sort:updated-desc`);
+    assert.strictEqual(sent.reviewing.variables.reviewingQuery, `${scope} review-requested:@me sort:updated-desc`);
+    assert.strictEqual(sent.reviewed.variables.reviewedQuery, `${scope} reviewed-by:@me sort:updated-desc`);
+    for (const alias of ["authored", "reviewing", "reviewed"]) {
+      assert.ok(!sent[alias].variables[`${alias}Query`].includes("repo:a/b"), `${alias}: the list is not an allowlist under all`);
+    }
+  });
+
+  // Without a repository list a CODEOWNERS entry can ask a lot of one reviewer;
+  // what is owed to you must not fall off a 25-row page, while the reviewed set
+  // (the one that only grows) keeps it.
+  await atest("fetchHost: the searches owed to you take a page of 100, reviewed-by keeps 25", async () => {
+    const { sent } = await runFetchHost({});
+    assert.match(sent.authored.query, /authored: search\(query: \$authoredQuery, type: ISSUE, first: 100\)/);
+    assert.match(sent.reviewing.query, /reviewing: search\(query: \$reviewingQuery, type: ISSUE, first: 100\)/);
+    assert.match(sent.reviewed.query, /reviewed: search\(query: \$reviewedQuery, type: ISSUE, first: 25\)/);
+  });
+
+  await atest("fetchHost: the all scope searches a host that lists no repository", async () => {
+    const { sent } = await runFetchHost({}, { scope: "all", repos: [] });
+    assert.ok(sent.authored && sent.reviewing && sent.reviewed);
+  });
+
+  await atest("fetchHost: the listed scope with no repository sends nothing", async () => {
+    let calls = 0;
+    global.fetch = async () => {
+      calls++;
+      throw new Error("must not be called");
+    };
+    const result = await github.fetchHost({
+      label: "H",
+      graphqlUrl: `https://api.stub${++hostSeq}.test/graphql`,
+      scope: "listed",
+      repos: [],
+      mutedRepos: [],
+      token: "t",
+    });
+    assert.strictEqual(calls, 0);
+    assert.deepStrictEqual(result.pullRequests, []);
+  });
+
+  // `review-requested:@me` already matches team requests on github.com and
+  // GHE.com, so asking for the user's teams there only re-found the same PRs.
+  await atest("fetchHost: off Enterprise Server, teams are neither listed nor searched", async () => {
+    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    const urls = [];
+    global.fetch = async (url, init) => {
+      urls.push(url);
+      const body = JSON.parse(init.body);
+      const alias = /\n  (\w+): search\(/.exec(body.query)[1];
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: { rateLimit: { remaining: 4990, cost: 1, resetAt: "" }, viewer: { login: "me" }, [alias]: { nodes: [] } },
+        }),
+      };
+    };
+    await github.fetchHost({ label: "H", graphqlUrl, scope: "all", repos: [], mutedRepos: [], token: "t" });
+    assert.ok(!urls.some((u) => u.includes("/user/teams")), "no team discovery off Server");
+    assert.strictEqual(urls.length, 3, "authored + reviewing + reviewed only");
+  });
+
+  await atest("fetchHost: on Enterprise Server the all scope searches every team the user is in", async () => {
+    const { sent } = await runFetchHost({ teams: ["a/t1", "other/t2"] }, { scope: "all" });
+    assert.ok(sent.team0 && sent.team1, "a team outside the listed repos' orgs is searched too under all");
   });
 
   // The split into one request per search must not change what the poller reads:
@@ -5114,7 +5288,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       };
     };
     await assert.rejects(
-      github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" }),
+      github.fetchHost({ label: "H", graphqlUrl, scope: "listed", repos: ["a/b"], mutedRepos: [], token: "t" }),
       (e) => {
         // An nginx error page carries nothing the status line doesn't, and
         // pasting it made the dashboard's error strip a wall of HTML.
@@ -5138,7 +5312,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     return github.fetchHost({
       label: "H",
       graphqlUrl: `https://api.stub${++hostSeq}.test/graphql`,
+      scope: "listed",
       repos: ["a/b"],
+      mutedRepos: [],
       token: "t",
     });
   };
@@ -5250,7 +5426,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const result = await github.fetchHost({
       label: "H",
       graphqlUrl: `https://api.stub${++hostSeq}.test/graphql`,
+      scope: "listed",
       repos: ["a/b"],
+      mutedRepos: [],
       token: "t",
     });
     assert.strictEqual(result.rateLimit.limit, 5000);
@@ -5263,7 +5441,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
   // response carries the viewer, so the assertion fails unless the login is
   // picked up across responses: without it the role would be "reviewer".
   await atest("fetchHost: the viewer login is taken from whichever response has one", async () => {
-    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    // Enterprise Server: the only host flavour that still sends team searches.
+    const graphqlUrl = `https://stub${++hostSeq}.test/api/graphql`;
     const mine = rawPr({ id: "PR_mine_team", author: { login: "me", avatarUrl: "" } });
     global.fetch = async (url, init) => {
       if (url.includes("/user/teams")) {
@@ -5293,7 +5472,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const result = await github.fetchHost({
       label: "H",
       graphqlUrl,
+      scope: "listed",
       repos: ["a/b"],
+      mutedRepos: [],
       token: "t",
     });
     assert.strictEqual(result.pullRequests.length, 1);
@@ -5326,14 +5507,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         }),
       };
     };
-    const result = await github.fetchHost({ label: "H", graphqlUrl, repos: ["a/b"], token: "t" });
+    const result = await github.fetchHost({ label: "H", graphqlUrl, scope: "listed", repos: ["a/b"], mutedRepos: [], token: "t" });
     assert.strictEqual(result.pullRequests.length, 1);
     assert.deepStrictEqual(result.pullRequests[0].roles, ["author"]);
   });
 
   // A failing TEAM search is best-effort, like team discovery itself.
   await atest("fetchHost: a failing team search leaves the rest of the host intact", async () => {
-    const graphqlUrl = `https://api.stub${++hostSeq}.test/graphql`;
+    // Enterprise Server: the only host flavour that still sends team searches.
+    const graphqlUrl = `https://stub${++hostSeq}.test/api/graphql`;
+    let teamSearchSent = false;
     global.fetch = async (url, init) => {
       if (url.includes("/user/teams")) {
         return {
@@ -5347,6 +5530,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       if (isHydrate(body)) return hydrateResponse(body, [rawPr({ id: "PR_a" })]);
       const alias = /\n  (\w+): search\(/.exec(body.query)[1];
       if (alias === "team0") {
+        teamSearchSent = true;
         return { ok: false, status: 502, statusText: "Bad Gateway", text: async () => "" };
       }
       return {
@@ -5365,9 +5549,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const result = await github.fetchHost({
       label: "H",
       graphqlUrl,
+      scope: "listed",
       repos: ["a/b"],
+      mutedRepos: [],
       token: "t",
     });
+    assert.ok(teamSearchSent, "the team search must actually be sent, or this passes vacuously");
     assert.strictEqual(result.pullRequests.length, 1);
     assert.deepStrictEqual(result.pullRequests[0].roles, ["author"]);
   });
@@ -6108,8 +6295,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         hosts: [],
       }),
       toHostConfigs: () => [
-        { label: "up", graphqlUrl: "https://up.test/graphql", token: "t", repos: ["o/r"] },
-        { label: "down", graphqlUrl: "https://down.test/graphql", token: "t", repos: ["o/r"] },
+        { label: "up", graphqlUrl: "https://up.test/graphql", token: "t", scope: "listed", repos: ["o/r"], mutedRepos: [] },
+        { label: "down", graphqlUrl: "https://down.test/graphql", token: "t", scope: "listed", repos: ["o/r"], mutedRepos: [] },
       ],
       statePath: path.join(os.tmpdir(), "prd-poller-state-missing.json"),
       ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),
@@ -6158,7 +6345,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const p = new poller.Poller({
       loadSettings: () => cfg.defaultSettings(),
       toHostConfigs: () => [
-        { label: "GitHub", graphqlUrl: "https://limited.test/graphql", token: "t", repos: ["o/r"] },
+        { label: "GitHub", graphqlUrl: "https://limited.test/graphql", token: "t", scope: "listed", repos: ["o/r"], mutedRepos: [] },
       ],
       statePath: path.join(os.tmpdir(), "prd-poller-state-missing.json"),
       ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),
@@ -6227,7 +6414,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const p = new poller.Poller({
         loadSettings: () => ({ ...cfg.defaultSettings(), trackComments }),
         toHostConfigs: () => [
-          { label: "up", graphqlUrl: "https://up.test/graphql", token: "t", repos: ["o/r"] },
+          { label: "up", graphqlUrl: "https://up.test/graphql", token: "t", scope: "listed", repos: ["o/r"], mutedRepos: [] },
         ],
         statePath: file,
         ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),

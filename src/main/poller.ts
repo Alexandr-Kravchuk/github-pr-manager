@@ -47,11 +47,11 @@
  */
 
 import { ConfigError } from "../shared/config";
-import { fetchHost, RateLimitedError } from "../shared/github";
+import { fetchHost, hostHasSearchScope, RateLimitedError } from "../shared/github";
 import type { PollPlan } from "../shared/idle-gate";
 import { JIRA_ERROR_DETAIL_SEP } from "../shared/jira";
 import { applyIgnored } from "../shared/ignored";
-import { DEFAULT_POLL_INTERVAL_MS, probeNotifications } from "../shared/notifications";
+import { DEFAULT_POLL_INTERVAL_MS, prActivityKey, probeNotifications } from "../shared/notifications";
 import type { NotifState } from "../shared/notifications";
 import { applyActivity } from "../shared/state";
 import type {
@@ -119,6 +119,12 @@ const PARKED_INTERVAL_MS = 20_000;
  * read by id: github.com 20 points for 9 PRs (nine searches at 1 point, then
  * ~1.2 per PR), a GHE host 7 for 14 PRs — so 10 keeps GHE on the base cadence
  * it had while it cost 1–3, and github.com on the expensive floor.
+ *
+ * Dropping the per-team searches off Enterprise Server (2026-11-05) took those
+ * readings down by one point a team: github.com 10 → 5 for 2 PRs on a
+ * five-team account, GHE 6 → 4. github.com now reaches the floor by its PR
+ * count alone (from ~5 PRs at ~1.2 each), which is the budget question the
+ * floor is for; below it a tick is cheap enough for the base cadence.
  */
 const EXPENSIVE_COST = 10;
 /** Minimum spacing for an expensive host (github.com) with hot PRs. */
@@ -632,12 +638,15 @@ export class Poller {
     if (!force) {
       const probeFn = this.options.probeNotificationsFn ?? probeNotifications;
       const probeHosts = hosts.filter((h) => {
-        if (h.repos.length === 0) return false;
+        if (!hostHasSearchScope(h)) return false;
         const slot = this.hostSlots.get(h.graphqlUrl);
         return !!slot && !slot.notifDisabled && now >= slot.notifNextProbeAt;
       });
       const probes = await Promise.allSettled(
-        probeHosts.map((h) => probeFn(h, this.hostSlots.get(h.graphqlUrl)!.notif)),
+        probeHosts.map((h) => {
+          const slot = this.hostSlots.get(h.graphqlUrl)!;
+          return probeFn(h, slot.notif, new Set(slot.prs.map((p) => prActivityKey(p.repo, p.number))));
+        }),
       );
       probes.forEach((p, i) => {
         const slot = this.hostSlots.get(probeHosts[i].graphqlUrl);
@@ -701,7 +710,7 @@ export class Poller {
       const prev = this.hostSlots.get(host.graphqlUrl);
       if (result.status === "fulfilled") {
         const prs = result.value.pullRequests;
-        const rateLimit = host.repos.length > 0 ? result.value.rateLimit : null;
+        const rateLimit = hostHasSearchScope(host) ? result.value.rateLimit : null;
         this.hostSlots.set(host.graphqlUrl, {
           prs,
           rateLimit,

@@ -153,10 +153,12 @@ function prFieldsFragment(withStacks: boolean): string {
  *                       — without this search it vanishes from the dashboard exactly
  *                       when the author starts addressing your comments, which is
  *                       the case `returnedToMe` exists to catch.
- *  - team0..teamN     — PRs asked of a *team* the user belongs to
- *                       (team-review-requested:org/team). `review-requested:@me`
- *                       does NOT cover team requests, so these are searched
- *                       separately — one per team — and merged by id.
+ *  - team0..teamN     — Enterprise Server only: PRs asked of a *team* the user
+ *                       belongs to (team-review-requested:org/team), one search
+ *                       per team, merged by id. On github.com and GHE.com
+ *                       `review-requested:@me` already covers team requests, so
+ *                       these searches are not sent there — see
+ *                       `searchesTeamsSeparately`.
  *
  * These used to travel as aliases inside a SINGLE request. GitHub runs aliased
  * searches one after another and its GraphQL proxy gives the whole request about
@@ -181,17 +183,22 @@ function prFieldsFragment(withStacks: boolean): string {
  * paid for once per search. `cost` is still summed across every response, or
  * the poller would read github.com as a cheap host and poll it far more often.
  *
- * Each search is filtered by all of the host's repositories (multiple `repo:`
- * qualifiers act as OR).
+ * Each search is narrowed by the host's repository scope — every repository
+ * but the muted ones, or the listed ones only; see `buildSearchQuery`.
  */
-function buildQuery(alias: string, varName: string): string {
+function buildQuery(alias: string, varName: string, first: number): string {
   return /* GraphQL */ `
 query ($${varName}: String!) {
   rateLimit { limit remaining cost resetAt }
   viewer { login }
-  ${alias}: search(query: $${varName}, type: ISSUE, first: 25) { nodes { ... on PullRequest { id author { login } } } }
+  ${alias}: search(query: $${varName}, type: ISSUE, first: ${first}) { nodes { ... on PullRequest { id author { login } } } }
 }`;
 }
+
+/** Page of the searches owed to you — your PRs and the reviews asked of you. See `fetchHost`. */
+const OWED_PAGE = 100;
+/** Page of `reviewed-by:@me`, the set that only grows. See `fetchHost`. */
+const REVIEWED_PAGE = 25;
 
 /**
  * PRs read by id per hydrate request. 25 is the page the full selection used to
@@ -762,9 +769,44 @@ function isSearchPr(node: RawSearchPr | Record<string, never>): node is RawSearc
   return typeof (node as RawSearchPr).id === "string";
 }
 
-function buildSearchQuery(repos: string[], qualifier: string): string {
-  const repoFilter = repos.map((r) => `repo:${r}`).join(" ");
-  return `is:open is:pr ${repoFilter} ${qualifier}`;
+/**
+ * A host's search string for one qualifier, narrowed by its repository scope:
+ * every repository minus the muted ones under `all` (`archived:false` too — an
+ * archived repository's PRs stay open forever and can never be acted on), the
+ * listed ones under `listed` (multiple `repo:` qualifiers act as OR).
+ * Exported for tests.
+ */
+export function buildSearchQuery(
+  host: Pick<HostConfig, "scope" | "repos" | "mutedRepos">,
+  qualifier: string,
+): string {
+  const scopeFilter =
+    host.scope === "listed"
+      ? host.repos.map((r) => `repo:${r}`).join(" ")
+      : ["archived:false", ...host.mutedRepos.map((r) => `-repo:${r}`)].join(" ");
+  return `is:open is:pr ${scopeFilter} ${qualifier}`;
+}
+
+/**
+ * Whether a host has anything to search: under `listed` an empty list means no
+ * repository at all, while `all` needs none. A host with nothing to search is
+ * neither fetched nor probed.
+ */
+export function hostHasSearchScope(host: Pick<HostConfig, "scope" | "repos">): boolean {
+  return host.scope === "all" || host.repos.length > 0;
+}
+
+/**
+ * Whether a host is GitHub Enterprise Server (`…/api/graphql`). Only there are
+ * team requests still searched one team at a time: on github.com and GHE.com
+ * `review-requested:@me` already matches a review asked of a team you are in
+ * (measured 2026-11-05 — it minus `user-review-requested:@me` was exactly the
+ * `team-review-requested:` set on both), so the per-team searches there only
+ * re-found the same PRs. Server releases are not measured, and keeping their
+ * searches costs one point a team, while dropping them could lose a review.
+ */
+function searchesTeamsSeparately(graphqlUrl: string): boolean {
+  return new URL(graphqlUrl).pathname.endsWith("/api/graphql");
 }
 
 /**
@@ -961,26 +1003,28 @@ function isJsonBody(text: string): boolean {
  * reviewer) along with rate-limit info. Throws on network/GraphQL failures.
  */
 export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
-  if (host.repos.length === 0) {
+  if (!hostHasSearchScope(host)) {
     return {
       pullRequests: [],
       rateLimit: { hostLabel: host.label, remaining: 0, cost: 0, resetAt: "" },
     };
   }
 
-  // `review-requested:@me` only matches *personal* requests. When a review is
-  // asked of a team the user belongs to, the PR is invisible to it — so we also
-  // search `team-review-requested:org/team` for each of the user's teams whose
-  // org owns a configured repo. Team discovery is best-effort: a failure here
-  // must not take down the dashboard, so we fall back to no team searches.
-  const repoOrgs = new Set(host.repos.map((r) => r.split("/")[0]));
+  // On Enterprise Server only (see `searchesTeamsSeparately`), a review asked
+  // of a team is searched as `team-review-requested:org/team`, one search per
+  // team the user is in — under `listed`, only the teams of orgs that own a
+  // listed repository. Team discovery is best-effort: a failure here must not
+  // take down the dashboard, so we fall back to no team searches.
   let teamSlugs: string[] = [];
-  try {
-    teamSlugs = (await fetchViewerTeams(host)).filter((slug) =>
-      repoOrgs.has(slug.split("/")[0]),
-    );
-  } catch (e) {
-    console.warn(`[github] team discovery failed for "${host.label}": ${(e as Error).message}`);
+  if (searchesTeamsSeparately(host.graphqlUrl)) {
+    const repoOrgs = new Set(host.repos.map((r) => r.split("/")[0]));
+    try {
+      teamSlugs = (await fetchViewerTeams(host)).filter(
+        (slug) => host.scope === "all" || repoOrgs.has(slug.split("/")[0]),
+      );
+    } catch (e) {
+      console.warn(`[github] team discovery failed for "${host.label}": ${(e as Error).message}`);
+    }
   }
 
   // One search per request, all in flight at once. `required` marks the three
@@ -988,56 +1032,69 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
   // its last good PR list instead of writing a truncated one over it (a short
   // list would read as "these PRs disappeared" and fire notifications). The team
   // searches are best-effort, like team discovery above.
+  //
+  // Every search is sorted by recency: past its page the default "best match"
+  // order is neither recency-ordered nor stable — measured: it returned an older
+  // PR ahead of a newer one — so a cut would both hide the PRs you care about and
+  // shuffle between polls, flickering cards in and out. The searches owed to you
+  // (yours, and reviews asked of you) take a page of `OWED_PAGE`: they clear
+  // themselves (you merge your PR, the request is satisfied), and without a
+  // repository list a CODEOWNERS entry can ask a lot of one reviewer at once —
+  // none of which may silently fall off. An ids-only search costs one point at
+  // any page size, so the wider page is free; the hydrate pays per PR either way.
   interface SearchSpec {
     alias: string;
     varName: string;
     query: string;
     role: PrRole;
     required: boolean;
+    first: number;
   }
   const specs: SearchSpec[] = [
     {
       alias: "authored",
       varName: "authoredQuery",
-      query: buildSearchQuery(host.repos, "author:@me"),
+      query: buildSearchQuery(host, "author:@me sort:updated-desc"),
       role: "author",
       required: true,
+      first: OWED_PAGE,
     },
     {
+      // Matches team requests as well on github.com and GHE.com — see
+      // `searchesTeamsSeparately`.
       alias: "reviewing",
       varName: "reviewingQuery",
-      query: buildSearchQuery(host.repos, "review-requested:@me"),
+      query: buildSearchQuery(host, "review-requested:@me sort:updated-desc"),
       role: "reviewer",
       required: true,
+      first: OWED_PAGE,
     },
     // Team-requested PRs count as a "reviewer" role, same as personal requests —
     // except on your own PRs, where `isOwnPr` turns it back into `author`.
     ...teamSlugs.map((slug, i) => ({
       alias: `team${i}`,
       varName: `teamQuery${i}`,
-      query: buildSearchQuery(host.repos, `team-review-requested:${slug}`),
+      query: buildSearchQuery(host, `team-review-requested:${slug} sort:updated-desc`),
       role: "reviewer" as PrRole,
       required: false,
+      first: OWED_PAGE,
     })),
     {
+      // The one set that only grows: a PR stays matched by `reviewed-by:@me` for
+      // its whole open life, so it keeps the narrow page — the 25 most recently
+      // updated PRs you reviewed.
       alias: "reviewed",
       varName: "reviewedQuery",
-      // Sorted, unlike its siblings, because this is the one set that only grows:
-      // a PR stays matched by `reviewed-by:@me` for its whole open life, while the
-      // other qualifiers clear themselves (you merge your PR, the request is
-      // satisfied). Past the `first: 25` cap the default "best match" order is
-      // neither recency-ordered nor stable — measured: it returned an older PR
-      // ahead of a newer one — so the window would both hide the PRs you care
-      // about and shuffle between polls, flickering cards in and out.
-      query: buildSearchQuery(host.repos, "reviewed-by:@me sort:updated-desc"),
+      query: buildSearchQuery(host, "reviewed-by:@me sort:updated-desc"),
       role: "reviewed",
       required: true,
+      first: REVIEWED_PAGE,
     },
   ];
 
   const settled = await Promise.allSettled(
     specs.map((spec) =>
-      postSearch(host, buildQuery(spec.alias, spec.varName), { [spec.varName]: spec.query }),
+      postSearch(host, buildQuery(spec.alias, spec.varName, spec.first), { [spec.varName]: spec.query }),
     ),
   );
 

@@ -46,9 +46,25 @@ export interface HostConfig {
   graphqlUrl: string;
   /** Resolved access token (sent as `Authorization: Bearer <token>`). */
   token: string;
-  /** Repositories in "owner/name" form. */
+  /** Which repositories the searches cover — see {@link RepoScope}. */
+  scope: RepoScope;
+  /** Repositories in "owner/name" form; the searches' allowlist under `listed` only. */
   repos: string[];
+  /** Repositories ("owner/name") left out of the searches under `all`. */
+  mutedRepos: string[];
 }
+
+/**
+ * Which repositories a host's searches cover.
+ *
+ * - `all` (the default) — every repository on the host, minus `mutedRepos`.
+ *   Your PRs and the reviews asked of you belong to you wherever they live; a
+ *   hand-kept allowlist hid every one of them that landed in a repository nobody
+ *   had added yet, and the user only found out by missing the review.
+ * - `listed` — only `repos`, the behaviour before `all` existed. Kept for whoever
+ *   wants a dashboard narrowed to a few repositories on purpose.
+ */
+export type RepoScope = "all" | "listed";
 
 /**
  * A host as stored in the user's settings file — credential-free. The token is
@@ -58,7 +74,10 @@ export interface HostConfig {
 export interface SettingsHost {
   label: string;
   graphqlUrl: string;
+  scope: RepoScope;
+  /** Kept under `all` too, so switching back to `listed` restores the list. */
   repos: string[];
+  mutedRepos: string[];
 }
 
 /**

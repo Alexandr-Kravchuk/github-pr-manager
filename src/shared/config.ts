@@ -9,9 +9,15 @@ import type {
   JiraSettings,
   NotificationSettings,
   PublicConfig,
+  RepoScope,
   Settings,
   SettingsHost,
 } from "./types";
+
+/** The "owner/name" strings of a raw list; anything else is dropped. */
+function repoList(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.filter((r): r is string => typeof r === "string" && r.includes("/")) : [];
+}
 
 /** Error with a friendly message — the UI surfaces its text. */
 export class ConfigError extends Error {}
@@ -177,10 +183,17 @@ export function validateSettings(raw: unknown): Settings {
     }
     // Validate the URL shape early so a typo surfaces on save, not mid-poll.
     ghHostnameFromUrl(host.graphqlUrl);
-    const repos = Array.isArray(host.repos)
-      ? host.repos.filter((r): r is string => typeof r === "string" && r.includes("/"))
-      : [];
-    return { label, graphqlUrl: host.graphqlUrl.trim(), repos };
+    // A file written before `scope` existed has none, and lands on `all`: the
+    // allowlist is exactly what hid reviews asked of the user in repositories
+    // nobody had added yet. Its list is kept, so `listed` brings it back as it was.
+    const scope: RepoScope = host.scope === "listed" ? "listed" : "all";
+    return {
+      label,
+      graphqlUrl: host.graphqlUrl.trim(),
+      scope,
+      repos: repoList(host.repos),
+      mutedRepos: repoList(host.mutedRepos),
+    };
   });
 
   return {
@@ -288,9 +301,22 @@ export function toHostConfigs(settings: Settings): HostConfig[] {
   return settings.hosts.map((h) => ({
     label: h.label,
     graphqlUrl: h.graphqlUrl,
+    scope: h.scope,
     repos: h.repos,
+    mutedRepos: h.mutedRepos,
     token: resolveGhToken(h.graphqlUrl),
   }));
+}
+
+/**
+ * Everything in `settings` that decides which PRs the searches find, as one
+ * comparable string: two saves with equal keys search the same PRs. Main
+ * re-baselines the notifier when it changes — see `settings:save`.
+ */
+export function searchCoverageKey(settings: Settings): string {
+  return JSON.stringify(
+    settings.hosts.map((h) => [h.graphqlUrl, h.scope, h.scope === "listed" ? h.repos : h.mutedRepos]),
+  );
 }
 
 /** Builds the sanitized (token-free) config for the renderer's filter bar. */
