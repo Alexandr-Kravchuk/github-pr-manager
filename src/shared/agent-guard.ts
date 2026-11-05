@@ -215,49 +215,89 @@ const GH_API_FLAGS: Record<string, "flag" | "value"> = {
 const FIELD_FLAGS = new Set(["-f", "--raw-field", "-F", "--field"]);
 
 /**
- * GraphQL root fields a read may start from. `repository` is held to the PR's
- * own; `node(s)` only to the PR-thread types the review re-reads by id.
- * Anything wider — `search`, `organization`, another repository — could read
- * code the PR's author can't see, for a review comment to repeat it.
+ * GraphQL a review may send: a read of its own PR, field by field. A
+ * reviewed PR's text can talk the session into querying elsewhere and pasting
+ * the answer into a review comment, so the WHOLE selection tree is checked,
+ * not just its roots, against an allow-list of the fields a review needs:
+ *
+ *   - roots: `repository(owner, name)` naming this PR's repository (literal or
+ *     a -F/-f variable), `viewer` / `user` with scalar fields only (who "I"
+ *     am), `rateLimit`;
+ *   - under `repository`: `pullRequest(number)` naming this PR, and a few
+ *     scalars;
+ *   - below that: the fields of a PR, its threads, comments, reviews, commits
+ *     and checks (`GRAPHQL_PR_FIELDS`). None of them reaches another
+ *     repository, organization or user's data — `repository`, `owner`,
+ *     `repositories`, `organization`, `search`, `node(s)`, `object` are not on
+ *     the list anywhere.
+ *
+ * Only `query` operations, no fragments, no directives. The tokenizer is
+ * stricter than GraphQL itself — no block strings (`"""`), no backslash
+ * escapes, no line break in a string, nothing but the characters a query
+ * needs — so what it reads as a string is exactly what GitHub reads as one.
  */
-const GRAPHQL_ROOTS = new Set(["repository", "viewer", "rateLimit", "node", "nodes", "user"]);
-const GRAPHQL_NODE_TYPES = new Set(["PullRequestReviewThread", "PullRequestReviewComment", "PullRequestReview", "PullRequest", "IssueComment"]);
+const GRAPHQL_SCALAR_ROOTS: Record<string, ReadonlySet<string>> = {
+  viewer: new Set(["login", "id", "databaseId", "name", "__typename"]),
+  user: new Set(["login", "id", "databaseId", "name", "__typename"]),
+  rateLimit: new Set(["limit", "remaining", "cost", "resetAt", "used", "nodeCount", "__typename"]),
+};
+const GRAPHQL_REPO_FIELDS = new Set(["pullRequest", "nameWithOwner", "id", "name", "url", "viewerPermission", "__typename"]);
+const GRAPHQL_PR_FIELDS = new Set([
+  // connections
+  "nodes", "edges", "node", "cursor", "totalCount", "pageInfo", "hasNextPage", "hasPreviousPage", "endCursor", "startCursor",
+  // the PR
+  "pullRequest", "id", "databaseId", "number", "title", "body", "bodyText", "url", "state", "isDraft", "createdAt", "updatedAt",
+  "headRefName", "headRefOid", "baseRefName", "baseRefOid", "mergeable", "mergeStateStatus", "reviewDecision",
+  "additions", "deletions", "changedFiles", "files", "path", "changeType", "labels", "name", "__typename",
+  // threads, comments, reviews
+  "reviewThreads", "isResolved", "isOutdated", "isCollapsed", "viewerCanResolve", "viewerCanReply", "resolvedBy",
+  "line", "originalLine", "startLine", "originalStartLine", "diffSide", "startDiffSide", "subjectType",
+  "comments", "replyTo", "author", "login", "viewerDidAuthor", "publishedAt", "lastEditedAt", "submittedAt",
+  "outdated", "position", "originalPosition", "diffHunk", "isMinimized", "minimizedReason",
+  "reviews", "latestReviews", "latestOpinionatedReviews", "reviewRequests", "requestedReviewer",
+  // commits and checks
+  "commits", "commit", "oid", "abbreviatedOid", "committedDate", "pushedDate", "authoredDate", "message", "messageHeadline", "messageBody", "parents",
+  "statusCheckRollup", "contexts", "conclusion", "status", "context", "description", "targetUrl", "detailsUrl",
+]);
 
-type GqlToken = { t: "name" | "string" | "punct" | "var"; v: string };
+type GqlToken = { t: "name" | "string" | "number" | "punct" | "var"; v: string };
 
 function gqlTokens(query: string): GqlToken[] | null {
+  if (query.includes('"""') || query.includes("\\")) return null;
   const out: GqlToken[] = [];
   let i = 0;
   while (i < query.length) {
     const ch = query[i];
-    if (/\s|,/.test(ch)) {
+    const rest = query.slice(i);
+    if (/[\s,]/.test(ch)) {
       i++;
     } else if (ch === "#") {
       while (i < query.length && query[i] !== "\n") i++;
     } else if (ch === '"') {
-      let v = "";
-      i++;
-      while (i < query.length && query[i] !== '"') {
-        if (query[i] === "\\") i++;
-        v += query[i] ?? "";
-        i++;
-      }
-      if (i >= query.length) return null;
-      i++;
+      const end = query.indexOf('"', i + 1);
+      if (end < 0) return null;
+      const v = query.slice(i + 1, end);
+      if (/[\r\n]/.test(v)) return null;
       out.push({ t: "string", v });
+      i = end + 1;
     } else if (ch === "$") {
-      const m = /^\$[A-Za-z_][A-Za-z0-9_]*/.exec(query.slice(i));
+      const m = /^\$[A-Za-z_][A-Za-z0-9_]*/.exec(rest);
       if (!m) return null;
       out.push({ t: "var", v: m[0].slice(1) });
       i += m[0].length;
     } else if (/[A-Za-z_]/.test(ch)) {
-      const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(query.slice(i))!;
+      const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(rest)!;
       out.push({ t: "name", v: m[0] });
       i += m[0].length;
-    } else if (query.startsWith("...", i)) {
+    } else if (/[-0-9]/.test(ch)) {
+      const m = /^-?\d+(\.\d+)?([eE][+-]?\d+)?/.exec(rest);
+      if (!m) return null;
+      out.push({ t: "number", v: m[0] });
+      i += m[0].length;
+    } else if (rest.startsWith("...")) {
       out.push({ t: "punct", v: "..." });
       i += 3;
-    } else if ("{}():!=[]@".includes(ch) || /[0-9-]/.test(ch)) {
+    } else if ("{}():!=[]@".includes(ch)) {
       out.push({ t: "punct", v: ch });
       i++;
     } else {
@@ -267,74 +307,149 @@ function gqlTokens(query: string): GqlToken[] | null {
   return out;
 }
 
-/**
- * Whether a GraphQL document only reads, and only from where a review of this
- * PR needs to: no mutation or subscription, no fragment spread at the root,
- * root fields from `GRAPHQL_ROOTS`, `repository(owner, name)` naming this PR's
- * repository (literally or through a variable passed with -F/-f), and
- * `node(s)` selecting only PR-thread types.
- */
+class GqlRefusal extends Error {}
+
+/** A recursive reader of one document, refusing (by throwing) at the first thing outside the allow-list. */
+function readGraphql(toks: GqlToken[], vars: Record<string, string>, pr: GuardPr | null): void {
+  let i = 0;
+  const no = (reason: string): never => {
+    throw new GqlRefusal(reason);
+  };
+  const peek = () => toks[i];
+  const take = (v?: string) => {
+    const k = toks[i];
+    if (!k || (v !== undefined && k.v !== v)) no("That GraphQL query couldn't be read; agent runs send plain queries.");
+    i++;
+    return k;
+  };
+  const valueOf = (k: GqlToken | undefined) => (k?.t === "var" ? vars[k.v] : k?.v);
+
+  // A value: a scalar, a variable, a list or an input object. Only the top-level scalar is kept.
+  const readValue = (): GqlToken | undefined => {
+    const k = take();
+    if (k.v === "[") {
+      while (peek() && peek().v !== "]") readValue();
+      take("]");
+      return undefined;
+    }
+    if (k.v === "{") {
+      while (peek() && peek().v !== "}") {
+        take();
+        take(":");
+        readValue();
+      }
+      take("}");
+      return undefined;
+    }
+    if (k.t === "punct") no("That GraphQL query couldn't be read; agent runs send plain queries.");
+    return k;
+  };
+  const readArgs = (): Record<string, GqlToken | undefined> => {
+    const args: Record<string, GqlToken | undefined> = {};
+    if (peek()?.v !== "(") return args;
+    take("(");
+    while (peek() && peek().v !== ")") {
+      const name = take();
+      if (name.t !== "name") no("That GraphQL query couldn't be read; agent runs send plain queries.");
+      take(":");
+      args[name.v] = readValue();
+    }
+    take(")");
+    return args;
+  };
+  const noDirective = () => {
+    if (peek()?.v === "@") no("GraphQL directives are not allowed in agent runs.");
+  };
+
+  type Level = "root" | "repository" | "pr" | keyof typeof GRAPHQL_SCALAR_ROOTS;
+  const readSelection = (level: Level): void => {
+    take("{");
+    while (peek() && peek().v !== "}") {
+      if (peek().v === "...") {
+        take("...");
+        if (peek()?.v !== "on") no("GraphQL fragments are not allowed in agent runs; inline the fields.");
+        take("on");
+        if (take().t !== "name") no("That GraphQL query couldn't be read; agent runs send plain queries.");
+        noDirective();
+        readSelection(level);
+        continue;
+      }
+      let field = take();
+      if (field.t !== "name") no("That GraphQL query couldn't be read; agent runs send plain queries.");
+      if (peek()?.v === ":") {
+        take(":");
+        field = take();
+        if (field.t !== "name") no("That GraphQL query couldn't be read; agent runs send plain queries.");
+      }
+      const name = field.v;
+      const args = readArgs();
+      noDirective();
+      let next: Level | null = null;
+      if (level === "root") {
+        if (name === "repository") {
+          const repo = `${valueOf(args.owner) ?? ""}/${valueOf(args.name) ?? ""}`.toLowerCase();
+          if (pr && repo !== pr.repo) no(`This run reads ${pr.repo} only.`);
+          next = "repository";
+        } else if (name in GRAPHQL_SCALAR_ROOTS) {
+          next = name as keyof typeof GRAPHQL_SCALAR_ROOTS;
+        } else {
+          no(`GraphQL reads start from this PR's repository in agent runs, not from ${name}.`);
+        }
+      } else if (level === "repository") {
+        if (!GRAPHQL_REPO_FIELDS.has(name)) no(`GraphQL reads stay inside PR #${pr?.number ?? "?"} in agent runs, not ${name}.`);
+        if (name === "pullRequest" && pr && valueOf(args.number) !== String(pr.number)) no(`This run reads PR #${pr.number} only.`);
+        next = "pr";
+      } else if (level === "pr") {
+        if (!GRAPHQL_PR_FIELDS.has(name)) no(`GraphQL reads stay inside the PR in agent runs; ${name} is not one of the fields a review reads.`);
+        next = "pr";
+      } else {
+        if (!GRAPHQL_SCALAR_ROOTS[level].has(name)) no(`${level} gives only ${[...GRAPHQL_SCALAR_ROOTS[level]].join(", ")} in agent runs.`);
+        if (peek()?.v === "{") no(`${level} gives only scalar fields in agent runs.`);
+      }
+      if (peek()?.v === "{") readSelection(next ?? "pr");
+    }
+    take("}");
+  };
+
+  while (i < toks.length) {
+    // An operation: `{ … }`, or `query [Name] [($v: Type = default, …)] { … }`.
+    if (peek().t === "name") {
+      if (peek().v !== "query") {
+        no(peek().v === "mutation" || peek().v === "subscription" ? "gh api graphql can only read in agent runs — the app posts the result itself." : "GraphQL fragments are not allowed in agent runs; inline the fields.");
+      }
+      take("query");
+      if (peek()?.t === "name") take();
+      if (peek()?.v === "(") {
+        take("(");
+        while (peek() && peek().v !== ")") {
+          if (take().t !== "var") no("That GraphQL query couldn't be read; agent runs send plain queries.");
+          take(":");
+          // The type: Name, [Name], with ! anywhere.
+          while (peek() && (peek().t === "name" || ["[", "]", "!"].includes(peek().v))) take();
+          if (peek()?.v === "=") {
+            take("=");
+            readValue();
+          }
+        }
+        take(")");
+      }
+      noDirective();
+    }
+    readSelection("root");
+  }
+}
+
+/** Whether a GraphQL document only reads, and only from this PR — see `readGraphql`. */
 export function checkGraphqlRead(query: string, vars: Record<string, string>, pr: GuardPr | null): GuardDecision {
   const toks = gqlTokens(query);
-  if (!toks) return deny("That GraphQL query couldn't be read; agent runs send plain queries.");
-  if (toks.some((k) => k.t === "name" && (k.v === "mutation" || k.v === "subscription"))) {
-    return deny("gh api graphql can only read in agent runs — the app posts the result itself.");
+  if (!toks || toks.length === 0) return deny("That GraphQL query couldn't be read; agent runs send plain queries (no block strings or escapes).");
+  try {
+    readGraphql(toks, vars, pr);
+    return { allow: true };
+  } catch (e) {
+    // Anything the reader didn't expect is a refusal too — never a pass.
+    return deny(e instanceof GqlRefusal ? e.message : "That GraphQL query couldn't be read; agent runs send plain queries.");
   }
-  if (toks.some((k) => k.t === "name" && k.v === "fragment")) return deny("GraphQL fragments are not allowed in agent runs; inline the fields.");
-  const value = (k: GqlToken | undefined) => (k?.t === "string" ? k.v : k?.t === "var" ? vars[k.v] : undefined);
-  let depth = 0;
-  let parenDepth = 0;
-  for (let i = 0; i < toks.length; i++) {
-    const k = toks[i];
-    if (k.v === "(") parenDepth++;
-    else if (k.v === ")") parenDepth--;
-    else if (k.v === "{") depth++;
-    else if (k.v === "}") depth--;
-    if (parenDepth > 0 || depth !== 1 || k.v === "{" || k.v === "}") continue;
-    // A root selection: `field`, `alias: field`, possibly with (args) and a selection set.
-    if (k.v === "...") return deny("Fragment spreads at the root are not allowed in agent runs.");
-    if (k.t !== "name") continue;
-    let field = k.v;
-    if (toks[i + 1]?.v === ":" && toks[i + 2]?.t === "name") {
-      field = toks[i + 2].v;
-      i += 2;
-    }
-    if (!GRAPHQL_ROOTS.has(field)) return deny(`GraphQL reads start from this PR's repository in agent runs, not from ${field}.`);
-    // Its arguments, when it has them.
-    const args: Record<string, GqlToken | undefined> = {};
-    let j = i + 1;
-    if (toks[j]?.v === "(") {
-      let d = 0;
-      for (; j < toks.length; j++) {
-        if (toks[j].v === "(") d++;
-        else if (toks[j].v === ")" && --d === 0) break;
-        else if (d === 1 && toks[j].t === "name" && toks[j + 1]?.v === ":") args[toks[j].v] = toks[j + 2];
-      }
-      j++;
-    }
-    if (field === "repository" && pr) {
-      const repo = `${value(args.owner) ?? ""}/${value(args.name) ?? ""}`.toLowerCase();
-      if (repo !== pr.repo) return deny(`This run reads ${pr.repo} only.`);
-    }
-    if ((field === "node" || field === "nodes") && toks[j]?.v === "{") {
-      // Every selection directly inside must be `... on <PR-thread type>`.
-      let d = 0;
-      for (let m = j; m < toks.length; m++) {
-        if (toks[m].v === "{") d++;
-        else if (toks[m].v === "}" && --d === 0) break;
-        else if (d === 1 && toks[m].t === "name") {
-          if (toks[m].v === "on") {
-            if (!GRAPHQL_NODE_TYPES.has(toks[m + 1]?.v ?? "")) return deny("node(s) reads only review threads and comments in agent runs.");
-            m++;
-            continue;
-          }
-          if (toks[m].v === "id" || toks[m].v === "__typename") continue;
-          return deny("node(s) reads only review threads and comments in agent runs; select them with `... on PullRequestReviewThread`.");
-        }
-      }
-    }
-  }
-  return { allow: true };
 }
 
 function checkGhApi(args: string[], pr: GuardPr | null): GuardDecision {
@@ -481,59 +596,42 @@ function checkGh(words: string[], pr: GuardPr | null): GuardDecision {
 
 /**
  * The Atlassian `twg` CLI, for reading the PR's Jira task (the review skill
- * refuses to review without its acceptance criteria) and Confluence pages. Its
- * command path is lower-case words ending in a reading verb —
- * `twg jira workitem get ENG-1 -o json` — so a path naming a write (`update`,
- * `transition`, `create`, …), the raw `api`, or account setup is refused, as is
- * any flag that names a file to write or a program to open.
+ * refuses to review without its acceptance criteria), Confluence pages, and
+ * what the after-merge dry run checks. Its command path is the leading
+ * lower-case words — `twg jira workitem get ENG-1 -o json` → `jira workitem
+ * get` — and that path must be one of the reads below, exactly: a word before
+ * or after a read verb can turn it into a write (`… transition`, `… comment
+ * create`), so a verb alone is never enough. `help` may take any topic.
+ * A flag that names a file to write or a program to open is refused too.
  */
-const TWG_READ_VERBS = new Set([
-  "get",
-  "query",
-  "search",
-  "list",
-  "describe",
-  "bulk-lookup",
-  "types",
-  "status",
-  "overview",
-  "tree",
-  "help",
+export const TWG_READ_PATHS: ReadonlySet<string> = new Set([
+  "jira workitem get",
+  "jira workitem query",
+  "jira workitem changelog query",
+  "jira workitem transitions query",
+  "jira workitem link-types query",
+  "confluence content get",
+  "confluence search query",
+  "rovo search",
+  "context user",
   "whoami",
   "pr-tree",
   "workitem-tree",
   "work-tree",
-  "org-tree",
-  "focus-areas-tree",
   "commits",
-  "collaborators",
-  "deployments",
   "user-search",
   "recently-viewed",
   "capabilities",
-  "inbox",
-  "peers",
-  "manager",
-  "manager-chain",
-  "direct-reports",
-  "jira-links",
-  "content-references",
-  "space-content",
 ]);
-const TWG_NEVER = new Set(["api", "login", "logout", "setup", "upgrade", "uninstall", "consent", "feedback", "env", "cache", "auth", "admin", "completion", "doctor", "install"]);
 
 function checkTwg(words: string[]): GuardDecision {
-  let verb: string | null = null;
-  for (let i = 1; i < words.length; i++) {
-    const w = words[i];
-    if (TWG_NEVER.has(w)) return deny(`twg ${w} is not available to agent runs.`);
-    if (!/^[a-z][a-z-]*$/.test(w)) break;
-    if (TWG_READ_VERBS.has(w)) {
-      verb = w;
-      break;
-    }
+  const path: string[] = [];
+  for (let i = 1; i < words.length && /^[a-z][a-z-]*$/.test(words[i]); i++) path.push(words[i]);
+  const cmd = path.join(" ");
+  const ok = TWG_READ_PATHS.has(cmd) || path[0] === "help";
+  if (!ok) {
+    return deny(`twg ${cmd || "…"} is not one of the reads agent runs may use (${[...TWG_READ_PATHS].slice(0, 4).join(", ")}, …) — the app leaves Jira changes to you.`);
   }
-  if (!verb) return deny("Agent runs may only read with twg (get, search, query, list, …) — the app leaves Jira changes to you.");
   if (words.some((w) => w.startsWith("-") && /file|dir|save|write|exec|editor|open|browser|yes|force|apply/i.test(w))) {
     return deny("That twg flag writes or opens something; agent runs only read.");
   }

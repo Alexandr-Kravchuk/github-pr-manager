@@ -55,7 +55,13 @@ function main(): void {
       process.stderr.write("PR agent guard: unreadable tool call.\n");
       process.exit(2);
     }
-    const decision = checkToolUse(kind, typeof call.tool_name === "string" ? call.tool_name : "", call.tool_input, pr, run);
+    // A guard that throws must block: Claude Code reads any exit but 2 as "carry on".
+    let decision: ReturnType<typeof checkToolUse>;
+    try {
+      decision = checkToolUse(kind, typeof call.tool_name === "string" ? call.tool_name : "", call.tool_input, pr, run);
+    } catch (e) {
+      decision = { allow: false, reason: `the check failed (${(e as Error).message}) — refusing.` };
+    }
     if (!decision.allow) {
       process.stderr.write(`PR agent guard: ${decision.reason}\n`);
       process.exit(2);

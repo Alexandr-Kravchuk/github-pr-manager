@@ -166,6 +166,40 @@ function readDone(runDir: string): number {
 
 export type PublishOutcome = { ok: true; posted: number; total: number } | { ok: false; error: string; posted: number; total: number };
 
+const THREAD_PR_QUERY = "query($id:ID!){ node(id:$id){ ... on PullRequestReviewThread { pullRequest { number repository { nameWithOwner } } } } }";
+
+function json(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether every thread a plan resolves and every comment it replies to is on
+ * this PR — or why not. A thread id or comment id is just a value the session
+ * wrote; on its own it could name a thread on any PR your account can reach.
+ * Checked against GitHub before anything is posted.
+ */
+export async function checkPlanTargets(steps: readonly PublishStep[], prUrl: string, repo: string, number: number, gh: GhRunner = runGh): Promise<string | null> {
+  const here = `${repo}#${number}`.toLowerCase();
+  for (const s of steps) {
+    if (s.kind === "resolve") {
+      const r = await gh(["api", "graphql", "--input", "-", ...hostFlag(prUrl)], { input: JSON.stringify({ query: THREAD_PR_QUERY, variables: { id: s.threadId } }) });
+      if (r.code !== 0) return `couldn't check thread ${s.threadId}: ${ghError(r)}`;
+      const pr = (json(r.stdout) as { data?: { node?: { pullRequest?: { number?: number; repository?: { nameWithOwner?: string } } } } } | null)?.data?.node?.pullRequest;
+      if (!pr || `${pr.repository?.nameWithOwner ?? ""}#${pr.number}`.toLowerCase() !== here) return `thread ${s.threadId} is not on ${repo}#${number}`;
+    } else if (s.kind === "reply") {
+      const r = await gh(["api", `repos/${repo}/pulls/comments/${s.replyTo}`, ...hostFlag(prUrl)]);
+      if (r.code !== 0) return `couldn't check comment ${s.replyTo}: ${ghError(r)}`;
+      const url = String((json(r.stdout) as { pull_request_url?: unknown } | null)?.pull_request_url ?? "").toLowerCase();
+      if (!url.endsWith(`/repos/${repo}/pulls/${number}`.toLowerCase())) return `comment ${s.replyTo} is not on ${repo}#${number}`;
+    }
+  }
+  return null;
+}
+
 /**
  * Posts a run's plan: every write in order, the count of those that landed
  * kept on disk after each one. Called again after a failure, it starts at the
@@ -173,8 +207,12 @@ export type PublishOutcome = { ok: true; posted: number; total: number } | { ok:
  * nothing.
  */
 export async function publishPlan(runDir: string, prUrl: string, ctx: PublishContext, gh: GhRunner = runGh): Promise<PublishOutcome> {
-  const requests = planRequests(readPlan(runDir), ctx);
+  const steps = readPlan(runDir);
+  const requests = planRequests(steps, ctx);
   let done = Math.min(readDone(runDir), requests.length);
+  // Nothing goes out unless every thread and comment the rest of the plan touches is this PR's.
+  const stray = await checkPlanTargets(steps.slice(done), prUrl, ctx.repo, ctx.number, gh);
+  if (stray) return { ok: false, error: stray, posted: done, total: requests.length };
   for (let i = done; i < requests.length; i++) {
     const req = requests[i];
     const r = await gh(ghApiArgs(req, prUrl), { input: JSON.stringify(req.body) });

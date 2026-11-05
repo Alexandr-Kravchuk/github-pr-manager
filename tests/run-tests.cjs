@@ -8887,11 +8887,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       ok("gh api -H 'Accept: application/vnd.github.raw' 'repos/acme/widgets/contents/a.md?ref=abc'");
       ok("gh api graphql --hostname github.com -f query='query($owner:String!,$repo:String!,$number:Int!){ repository(owner:$owner,name:$repo){ pullRequest(number:$number){ reviewThreads(first:100){ nodes{ id isResolved } } } } }' -F owner=Acme -F repo=Widgets -F number=12");
       ok("gh api graphql -f query='{ viewer { login } }'");
-      ok("gh api graphql -f query='query($ids:[ID!]!){ nodes(ids:$ids){ ... on PullRequestReviewThread { id isResolved comments(last:5){ nodes{ createdAt author{ login } } } } } }' -F 'ids[]=PRRT_1'");
+      // The review skill's own thread query, as its Context phase sends it.
+      ok("gh api graphql --hostname github.com -f query='query($owner:String!,$repo:String!,$number:Int!,$cursor:String){ repository(owner:$owner,name:$repo){ pullRequest(number:$number){ reviewThreads(first:100, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes{ id isResolved isOutdated viewerCanResolve path line originalLine head: comments(first:1){ nodes{ databaseId author{login} body createdAt } } tail: comments(last:10){ nodes{ author{login} body createdAt } } } } } } }' -F owner=Acme -F repo=Widgets -F number=12");
+      ok("gh api graphql -f query='query { repository(owner:\"acme\",name:\"widgets\"){ pullRequest(number:12){ reviews(last:5){ nodes{ author{ ... on User { login } } state submittedAt commit{ oid } } } } } rateLimit{ remaining } }'");
       ok("gh auth status --hostname github.com");
       ok("twg jira workitem get ENG-123 -o json --output-summary none");
       ok("twg confluence content get 3895230648 --detail full --format md -o json --output-summary none");
       ok("twg help describe 'jira workitem get'");
+      ok("twg jira workitem query --jql 'key = ENG-1' -o json");
+      ok("twg rovo search --query 'retry budget'");
     });
 
     test("agent guard: what a review must not do with those — write, read elsewhere, see the token, change Jira", () => {
@@ -8904,7 +8908,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       no(`gh api graphql -f query='query{ repository(owner:"evil",name:"secrets"){ id } }'`, /acme\/widgets only/);
       no(`gh api graphql -f query='query($o:String!){ repository(owner:$o,name:"widgets"){ id } }' -F o=evil`, /acme\/widgets only/);
       no(`gh api graphql -f query='{ search(query:"x",type:REPOSITORY,first:5){ nodes{ __typename } } }'`, /not from search/);
-      no("gh api graphql -f query='query($ids:[ID!]!){ nodes(ids:$ids){ ... on Repository { name } } }' -F 'ids[]=R_1'", /review threads/);
+      no("gh api graphql -f query='query($ids:[ID!]!){ nodes(ids:$ids){ ... on PullRequestReviewThread { id } } }' -F 'ids[]=PRRT_1'", /not from nodes/);
+      // Nested selections are walked too: nothing leads out of the PR.
+      no("gh api graphql -f query='{ viewer { repositories(first:5){ nodes{ name } } } }'", /viewer gives only/);
+      no(`gh api graphql -f query='{ user(login:"boss"){ login repositories(privacy:PRIVATE){ nodes{ name } } } }'`, /user gives only/);
+      no("gh api graphql -f query='query($o:String!,$r:String!){ repository(owner:$o,name:$r){ owner { ... on Organization { repositories(first:5){ nodes{ name } } } } } }' -F o=acme -F r=widgets", /not owner/);
+      no("gh api graphql -f query='query($o:String!,$r:String!){ repository(owner:$o,name:$r){ pullRequest(number:13){ title } } }' -F o=acme -F r=widgets", /PR #12 only/);
+      no("gh api graphql -f query='query($o:String!,$r:String!){ repository(owner:$o,name:$r){ pullRequest(number:12){ headRepository{ name } } } }' -F o=acme -F r=widgets", /headRepository is not one of the fields/);
+      no("gh api graphql -f query='{ ... on Query { search(query:\"x\",type:REPOSITORY,first:1){ nodes{ __typename } } } }'", /not from search/);
+      no("gh api graphql -f query='{ viewer @include(if:true) { login } }'", /directives/);
+      no(`gh api graphql -f query='{ viewer { login } } """ " mutation { x } " """'`, /couldn't be read/);
+      no("gh api graphql -f query='{ viewer { name(x:\"a\\\"b\") } }'", /couldn't be read/);
       no("gh api graphql -f query='query{ ...F } fragment F on Query { viewer { login } }'", /fragment/i);
       no("gh api graphql -F query=@q.graphql", /reads a file/);
       no("gh api graphql --input q.json");
@@ -8919,6 +8933,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       no("twg api /rest/api/3/issue/ENG-1");
       no("twg login");
       no("twg jira workitem get ENG-1 --output-file /tmp/x", /writes or opens/);
+      no("twg jira workitem comment create ENG-1 --body x");
+      no("twg confluence content update 123 --body x");
+      no("twg jira workitem get transition ENG-1", /not one of the reads/);
     });
 
     test("agent guard: a review writes only its payload files and calls only its own wrapper", () => {
@@ -9019,7 +9036,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), `${steps.map((x) => JSON.stringify(x)).join("\n")}\n`);
       const calls = [];
       let failAt = 1;
-      const gh = async (args, opts) => {
+      const gh = async (args, opts = {}) => {
+        // The ownership checks before anything is posted.
+        if (args[1] === "graphql" && opts.input.includes("node(id:$id)")) return { code: 0, stdout: JSON.stringify({ data: { node: { pullRequest: { number: 7, repository: { nameWithOwner: "a/b" } } } } }), stderr: "" };
+        if (/^repos\/a\/b\/pulls\/comments\/\d+$/.test(args[1])) return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://creatio.ghe.com/api/v3/repos/a/b/pulls/7" }), stderr: "" };
         calls.push({ args, input: JSON.parse(opts.input) });
         return calls.length - 1 === failAt ? { code: 1, stdout: "", stderr: "HTTP 422: line is not part of the diff" } : { code: 0, stdout: "{}", stderr: "" };
       };
@@ -9039,6 +9059,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       await publishMod.publishPlan(runDir, url, ctx, gh);
       assert.strictEqual(calls.length, 0, "an all-posted plan posts nothing");
       assert.deepStrictEqual(publishMod.ghApiArgs({ endpoint: "graphql" }, "https://github.com/a/b/pull/1"), ["api", "graphql", "--method", "POST", "--input", "-"]);
+    });
+
+    await atest("publish: a thread or comment of another PR stops the whole plan before anything is posted", async () => {
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-pub-"));
+      const steps = [
+        { kind: "review", event: "COMMENT", body: "b", comments: [] },
+        { kind: "resolve", threadId: "PRRT_elsewhere" },
+      ];
+      nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), `${steps.map((x) => JSON.stringify(x)).join("\n")}\n`);
+      const posted = [];
+      const gh = async (args, opts = {}) => {
+        if (args[1] === "graphql" && opts.input.includes("node(id:$id)")) return { code: 0, stdout: JSON.stringify({ data: { node: { pullRequest: { number: 99, repository: { nameWithOwner: "x/secret" } } } } }), stderr: "" };
+        posted.push(args);
+        return { code: 0, stdout: "{}", stderr: "" };
+      };
+      const out = await publishMod.publishPlan(runDir, "https://github.com/a/b/pull/7", { repo: "a/b", number: 7, signature: "s", holdApprove: false }, gh);
+      assert.deepStrictEqual([out.ok, out.posted], [false, 0]);
+      assert.match(out.error, /PRRT_elsewhere is not on a\/b#7/);
+      assert.strictEqual(posted.length, 0, "not even the review goes out");
+      const reply = await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 5, body: "x" }], "https://github.com/a/b/pull/7", "a/b", 7, async () => ({ code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/8" }), stderr: "" }));
+      assert.match(reply, /comment 5 is not on a\/b#7/);
     });
 
     test("merge: the method you pick, else Settings', else GitHub's — only if the repository allows it", () => {
