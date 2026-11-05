@@ -566,7 +566,12 @@ export function createAgent(deps: AgentDeps): Agent {
       } else if (item.scenario === "drive") {
         const base = keyHead(item.key) ?? pr?.headOid ?? "";
         const place = item.pushTo?.worktreeGitDir ? { workTree: dir, gitDir: item.pushTo.worktreeGitDir } : undefined;
-        const read = await withNoHooks((h) => collectDrive(git, dir, base, item.reasons ?? [], h, place)).catch((e: Error) => ({ error: e.message }));
+        // Nothing of the repository's is read before it is known unchanged:
+        // a config the session altered could make even `git log` start a program.
+        const same = place && item.pushTo ? (await gitFingerprint(git, place, item.pushTo.commonDir, item.pushTo.url).catch(() => "")) === item.pushTo.fingerprint : false;
+        const read = !same
+          ? { error: "the repository's git config, hooks or links changed during the run — the app read nothing from it" }
+          : await withNoHooks((h) => collectDrive(git, dir, base, item.reasons ?? [], h, place)).catch((e: Error) => ({ error: e.message }));
         if ("error" in read) {
           fail("Couldn't read the run's commits", read.error);
         } else if (read.drive.commits.length === 0) {

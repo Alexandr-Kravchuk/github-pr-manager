@@ -47,15 +47,22 @@ export function withNoHooks<T>(fn: (hooksDir: string) => Promise<T>): Promise<T>
   return run().finally(() => fs.rmSync(dir, { recursive: true, force: true }));
 }
 
-/** Global git options for an app command in a run's worktree. */
+/**
+ * Global git options for an app command in a run's worktree: the git folder
+ * named outright, and none of the programs a config can make git start for
+ * reading — hooks, fsmonitor, signature checks (gpg), a pager.
+ */
 export function safeGit(hooksDir: string, place?: GitPlace): string[] {
-  return [
-    ...(place ? [`--git-dir=${place.gitDir}`, `--work-tree=${place.workTree}`] : []),
-    "-c",
+  const off = [
     `core.hooksPath=${hooksDir}`,
-    "-c",
     "core.fsmonitor=false",
+    "core.pager=cat",
+    "log.showSignature=false",
+    "gpg.program=pr-agent-no-gpg",
+    "gpg.ssh.program=pr-agent-no-gpg",
+    "gpg.x509.program=pr-agent-no-gpg",
   ];
+  return [...(place ? [`--git-dir=${place.gitDir}`, `--work-tree=${place.workTree}`] : []), ...off.flatMap((c) => ["-c", c])];
 }
 
 /** Plain-text diffs only: no external diff program, no textconv filter, whatever the repository configures. */
@@ -79,7 +86,7 @@ export async function collectDrive(
   const g = (args: string[]) => git([...safeGit(hooksDir, place), ...args], dir);
   const range = `${base}..HEAD`;
   const head = (await g(["rev-parse", "HEAD"])).trim();
-  const log = await g(["log", "--no-color", "--format=%H%x09%s", range]);
+  const log = await g(["log", "--no-color", "--no-show-signature", "--format=%H%x09%s", range]);
   const commits = log
     .split("\n")
     .filter((l) => l.trim())
@@ -124,15 +131,75 @@ export function pushArgs(url: string, oid: string, branch: string, hooksDir: str
   return [...safeGit(hooksDir, place), "push", "--no-verify", url, `${oid}:refs/heads/${branch}`];
 }
 
-/** The config files git loads for this worktree — includes too — from `git config --list --show-origin`. */
-export async function configFiles(git: GitRunner, place: GitPlace, hooksDir: string): Promise<string[]> {
-  const out = await git([...safeGit(hooksDir, place), "config", "--list", "--show-origin", "--name-only"], place.workTree);
+/**
+ * The config files git loads for this worktree — includes too — from
+ * `git config --list --show-origin --name-only -z`: NUL-separated pairs of
+ * origin and key, never quoted, so a path with odd characters reads as it is.
+ */
+export function parseConfigOrigins(out: string, cwd: string): string[] {
+  const parts = out.split("\0");
   const files = new Set<string>();
-  for (const line of out.split("\n")) {
-    const m = /^file:(.+?)\t/.exec(line);
-    if (m) files.add(path.resolve(place.workTree, m[1]));
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    if (parts[i].startsWith("file:")) files.add(path.resolve(cwd, parts[i].slice(5)));
   }
   return [...files].sort();
+}
+
+export async function configFiles(git: GitRunner, place: GitPlace, hooksDir: string): Promise<string[]> {
+  const out = await git([...safeGit(hooksDir, place), "config", "--list", "--show-origin", "--name-only", "-z"], place.workTree);
+  return parseConfigOrigins(out, place.workTree);
+}
+
+/**
+ * The SSH config files ssh would read for a push: yours and the system's,
+ * and every file their `Include` lines name (wildcards too), a few levels
+ * deep. Any of them can name a program for ssh to run.
+ */
+export function sshConfigFiles(home = os.homedir()): string[] {
+  const seen = new Set<string>();
+  const sshDir = path.join(home, ".ssh");
+  const system =
+    process.platform === "win32"
+      ? [path.join(process.env.ProgramData ?? "C:\\ProgramData", "ssh", "ssh_config")]
+      : ["/etc/ssh/ssh_config", ...listDir("/etc/ssh/ssh_config.d")];
+  const visit = (file: string, depth: number) => {
+    if (seen.has(file) || depth > 4) return;
+    seen.add(file);
+    let text: string;
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      return;
+    }
+    for (const line of text.split(/\r?\n/)) {
+      const m = /^\s*Include\s+(.+)$/i.exec(line);
+      if (!m) continue;
+      for (const raw of m[1].trim().split(/\s+/)) {
+        const p0 = raw.replace(/^"|"$/g, "").replace(/^~(?=[\\/]|$)/, home);
+        const p = path.normalize(path.isAbsolute(p0) ? p0 : path.join(sshDir, p0));
+        for (const f of expandGlob(p)) visit(f, depth + 1);
+      }
+    }
+  };
+  visit(path.join(sshDir, "config"), 0);
+  for (const f of system) visit(f, 0);
+  return [...seen].sort();
+}
+
+function listDir(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir).map((n) => path.join(dir, n));
+  } catch {
+    return [];
+  }
+}
+
+/** `*` and `?` in the last part of a path, as ssh's Include allows. */
+function expandGlob(p: string): string[] {
+  const base = path.basename(p);
+  if (!/[*?]/.test(base)) return [p];
+  const re = new RegExp(`^${base.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+  return listDir(path.dirname(p)).filter((f) => re.test(path.basename(f)));
 }
 
 /**
@@ -143,24 +210,26 @@ export async function configFiles(git: GitRunner, place: GitPlace, hooksDir: str
  */
 export async function gitFingerprint(git: GitRunner, place: GitPlace, commonDir: string, url: string): Promise<string> {
   const h = createHash("sha256");
-  const add = (label: string, file: string) => {
+  const add = (label: string, file: string, mustExist = false) => {
     let text = "";
     try {
       text = fs.readFileSync(file, "utf8");
     } catch {
+      // A file git says it loads but that can't be read is not a file to vouch for.
+      if (mustExist) throw new Error(`couldn't read ${file}, which git loads`);
       text = "<none>";
     }
     h.update(`${label}\0${file}\0${text}\0`);
   };
   const files = await withNoHooks((hooksDir) => configFiles(git, place, hooksDir));
-  for (const f of files) add("config", f);
+  for (const f of files) add("config", f, true);
   add("config", path.join(commonDir, "config"));
   add("config.worktree", path.join(place.gitDir, "config.worktree"));
   add("commondir", path.join(place.gitDir, "commondir"));
   add("gitdir", path.join(place.gitDir, "gitdir"));
   add(".git", path.join(place.workTree, ".git"));
   add("global", path.join(os.homedir(), ".gitconfig"));
-  if (isSshUrl(url)) add("ssh", path.join(os.homedir(), ".ssh", "config"));
+  if (isSshUrl(url)) for (const f of sshConfigFiles()) add("ssh", f);
   try {
     const hooks = path.join(commonDir, "hooks");
     for (const name of fs.readdirSync(hooks).sort()) add(`hook:${name}`, path.join(hooks, name));

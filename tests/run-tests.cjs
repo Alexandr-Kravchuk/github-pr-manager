@@ -9509,10 +9509,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("drive: the app pushes the exact commit you saw, to the URL read before the run — no --force, no hooks", () => {
       const oid = "c".repeat(40);
-      assert.deepStrictEqual(driveMod.pushArgs("https://github.com/a/b.git", oid, "feature/x-1", "/nohooks"), [
-        "-c", "core.hooksPath=/nohooks", "-c", "core.fsmonitor=false",
-        "push", "--no-verify", "https://github.com/a/b.git", `${oid}:refs/heads/feature/x-1`,
-      ]);
+      const args = driveMod.pushArgs("https://github.com/a/b.git", oid, "feature/x-1", "/nohooks");
+      assert.deepStrictEqual(args.slice(-4), ["push", "--no-verify", "https://github.com/a/b.git", `${oid}:refs/heads/feature/x-1`]);
+      assert.ok(args.includes("core.hooksPath=/nohooks") && args.includes("core.fsmonitor=false"));
+      assert.ok(!args.includes("--force") && !args.some((a) => a.startsWith("+")), "never a forced update");
       for (const [url, o, branch] of [
         ["https://h/a.git", oid, "--force"],
         ["https://h/a.git", oid, "a..b"],
@@ -9570,6 +9570,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.notStrictEqual(await fp(), d, "a rewritten .git link shows");
     });
 
+    test("drive: config origins are read NUL-separated, unquoted; SSH config follows Include, wildcards too", () => {
+      const cwd = path.resolve("/w");
+      const out = ["file:C:/Program Files/Git/etc/gitconfig", "core.symlinks", "file:.git/config", "core.bare", "command line:", "core.pager", "file:/odd \"name\"\tx", "user.name", ""].join("\0");
+      assert.deepStrictEqual(driveMod.parseConfigOrigins(out, cwd), [path.resolve(cwd, ".git/config"), path.resolve(cwd, "/odd \"name\"\tx"), path.resolve(cwd, "C:/Program Files/Git/etc/gitconfig")].sort());
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-ssh-"));
+      const ssh = path.join(home, ".ssh");
+      nfsA.mkdirSync(path.join(ssh, "conf.d"), { recursive: true });
+      nfsA.writeFileSync(path.join(ssh, "config"), "Host x\n  Include conf.d/*.conf ~/extra\n");
+      nfsA.writeFileSync(path.join(ssh, "conf.d", "a.conf"), "Include deeper\n");
+      nfsA.writeFileSync(path.join(ssh, "conf.d", "b.txt"), "");
+      nfsA.writeFileSync(path.join(ssh, "deeper"), "");
+      nfsA.writeFileSync(path.join(home, "extra"), "");
+      const files = driveMod.sshConfigFiles(home);
+      for (const want of [path.join(ssh, "config"), path.join(ssh, "conf.d", "a.conf"), path.join(ssh, "deeper"), path.join(home, "extra")]) {
+        assert.ok(files.includes(want), want);
+      }
+      assert.ok(!files.includes(path.join(ssh, "conf.d", "b.txt")), "only what the wildcard matches");
+      const sg = driveMod.safeGit("/h");
+      for (const c of ["log.showSignature=false", "core.pager=cat", "gpg.program=pr-agent-no-gpg", "core.fsmonitor=false"]) assert.ok(sg.includes(c), c);
+    });
+
     await atest("drive: each app git operation gets a fresh, empty hooks folder, gone afterwards", async () => {
       let seen = null;
       await driveMod.withNoHooks(async (dir) => {
@@ -9603,7 +9624,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
             else break;
           }
           const args = all.slice(i);
-          if (args[0] === "config") return `file:${commonDir}/config\tcore.bare\n`;
+          if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
           // Newest first, as git log prints it.
           if (args[0] === "log") return "2222222222222222222222222222222222222222\tfix: the failing test\n1111111111111111111111111111111111111111\ttest: cover it\n";
           if (args[0] === "diff") return args.includes("--stat") ? " a.ts | 2 +-" : "+fixed";
@@ -9684,6 +9705,43 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(rules, /don't argue with your colleague/);
         f.agent.onSnapshot(f.snapshot);
         assert.strictEqual(only(f).length, 1, "the same answer is re-reviewed once");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent drive: a session that changed the repository's git config gets nothing read, let alone pushed", async () => {
+      const mine = { ...reviewPr({ role: "author" }), ciState: "failure", headRefName: "feature/x", baseRefName: "main", headOid: "a".repeat(40) };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const reads = [];
+      const f = agentFixture({
+        pr: mine,
+        // The session rewrites the config, then finishes.
+        script: (c) => {
+          nfsA.writeFileSync(path.join(commonDir, "config"), "[log]\n\tshowSignature = true\n[gpg]\n\tprogram = evil\n");
+          succeed("done")(c);
+        },
+        git: async (all) => {
+          let i = 0;
+          for (;;) {
+            if (all[i] === "-c") i += 2;
+            else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+            else break;
+          }
+          const args = all.slice(i);
+          if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+          if (args[0] === "rev-parse") return `${commonDir}\n`;
+          if (args[0] === "remote") return "https://github.com/a/b.git\n";
+          if (args[0] === "log" || args[0] === "diff") reads.push(args[0]);
+          return "";
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "error"));
+        assert.match(only(f)[0].error, /changed during the run — the app read nothing/);
+        assert.deepStrictEqual(reads, [], "not even git log ran");
       } finally {
         f.agent.stop();
       }
