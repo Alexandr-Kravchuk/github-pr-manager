@@ -7,13 +7,18 @@
  * `?buddy=sad|curious|sleeping` picks a PR fixture set that drives the header
  * buddy into that mood (default: sleeping).
  */
+import { rankBefore } from "../../shared/agent-view";
 import type {
+  AgentAction,
+  AgentItem,
+  AgentState,
   ClaudeSessionInfo,
   DashboardResponse,
   PrManagerApi,
   PullRequest,
   Settings,
 } from "../../shared/types";
+import { DEFAULT_AGENT_SETTINGS } from "../../shared/agent-defaults";
 import { DEFAULT_CLAUDE_SETTINGS } from "../../shared/claude-launch";
 
 function pr(overrides: Partial<PullRequest>): PullRequest {
@@ -34,6 +39,15 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     updatedAt: new Date(Date.now() - 36e5).toISOString(),
     lastCommitPushedAt: new Date(Date.now() - 36e5).toISOString(),
     headRefName: "feature/sample",
+    headOid: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    additions: 120,
+    deletions: 30,
+    changedFiles: 6,
+    mergeMethods: { suggested: "squash", allowed: ["merge", "squash", "rebase"] },
+    requestedOfMe: (overrides.roles ?? []).includes("reviewer"),
+    isCrossRepository: false,
+    authorRepliedAt: null,
+    reviewerRepliedAt: null,
     issueKey: null,
     issueSummary: null,
     parentKey: null,
@@ -48,6 +62,7 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     viewerReviewedHead: false,
     myReReviewDue: false,
     hasNoReviews: true,
+    isStale: false,
     unresolvedThreads: 0,
     unaddressedThreads: 0,
     totalComments: 0,
@@ -304,7 +319,41 @@ const FIXTURES: Record<string, PullRequest[]> = {
       hasNewActivity: false,
     }),
   ],
+  // `?buddy=stale`: long-open PRs of mine (closable, with and without a Jira
+  // key) next to a teammate's stale PR, which gets the badge but no close action.
+  stale: [
+    pr({
+      title: "ENG-90001: Rework the legacy importer",
+      number: 601,
+      issueKey: "ENG-90001",
+      issueSummary: "Rework the legacy importer",
+      headRefName: "feature/eng-90001-importer",
+      createdAt: new Date(Date.now() - 74 * 864e5).toISOString(),
+      isStale: true,
+      awaitingReview: true,
+    }),
+    pr({
+      title: "Experiment: try a different cache layout",
+      number: 602,
+      createdAt: new Date(Date.now() - 41 * 864e5).toISOString(),
+      isStale: true,
+    }),
+    pr({
+      title: "ENG-90002: Old teammate PR",
+      number: 603,
+      issueKey: "ENG-90002",
+      roles: ["reviewer"],
+      author: { login: "teammate", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4" },
+      createdAt: new Date(Date.now() - 50 * 864e5).toISOString(),
+      isStale: true,
+      awaitingReview: true,
+    }),
+    pr({ title: "Fresh one", number: 604, awaitingReview: true }),
+  ],
 };
+
+// The PR agent's Board, chip and statuses: PRs in every state it shows. `?buddy=agent`.
+FIXTURES.agent = [...FIXTURES.showcase, ...FIXTURES.review];
 
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
 
@@ -336,6 +385,8 @@ const settings: Settings = {
   },
   hosts: [{ label: "GitHub", graphqlUrl: "https://api.github.com/graphql", repos: ["acme/widgets"] }],
   claude: { ...DEFAULT_CLAUDE_SETTINGS, enabled: true },
+  agent: structuredClone(DEFAULT_AGENT_SETTINGS),
+  staleAfterDays: 30,
 };
 
 /** Running Claude sessions, matched to the `?buddy=review` fixtures by their head branch. */
@@ -389,6 +440,379 @@ const CLAUDE_SESSIONS: ClaudeSessionInfo[] = [
   },
 ];
 
+/**
+ * The agent's state for `?buddy=agent`: two runs with a plan, one queued, a
+ * brief, a failure and a shadow review waiting, a finished one. Actions change
+ * it in memory, so the Board and the companion can be tried in a browser.
+ * Every other fixture set has the agent off, as a fresh install does.
+ */
+function mockAgentState(): AgentState {
+  const prs = snapshot.pullRequests;
+  const byNumber = (n: number) => prs.find((p) => p.number === n);
+  const now = Date.now();
+  const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
+  const runId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const item = (n: number, over: Partial<AgentItem>): AgentItem | null => {
+    const pr = byNumber(n);
+    if (!pr) return null;
+    return {
+      runId: runId(n),
+      key: `${pr.id}|review|${pr.headOid}`,
+      prId: pr.id,
+      prNumber: pr.number,
+      repo: pr.repo,
+      url: pr.url,
+      title: pr.title,
+      hostLabel: pr.hostLabel,
+      scenario: "review",
+      mode: "shadow",
+      state: "queued",
+      headline: "Queued: review",
+      queuedAt: iso(20 * 60_000),
+      ...over,
+    };
+  };
+  const items = [
+    item(911, { state: "working", headline: "Reviewing", startedAt: iso(3 * 60_000), sessionId: "11111111-1111-4111-8111-111111111111" }),
+    item(44, { state: "working", headline: "Reviewing", startedAt: iso(40_000), sessionId: "22222222-2222-4222-8222-222222222222" }),
+    item(88, { state: "queued", headline: "Queued: review" }),
+    // You stopped a run: a note on its card, not a decision.
+    item(139, {
+      scenario: "drive",
+      reasons: ["comments"],
+      state: "done",
+      headline: "Stopped by you",
+      finishedAt: iso(50 * 60_000),
+      sessionId: "66666666-6666-4666-8666-666666666666",
+      worktree: "/tmp/agent-clio-139",
+    }),
+    item(912, {
+      scenario: "brief",
+      mode: "on",
+      state: "needsYou",
+      result: {
+        summary: "Retries every sync operation with a bounded budget; the retry itself has no overall time limit.",
+        asks: [],
+        authorQuestions: ["Is an unbounded total retry time acceptable for sync-schemas?", "The public contract of sync-schemas changed — is it agreed with its consumers?"],
+        findings: [{ severity: "major", text: "No overall time limit on the retry loop", where: "src/sync/retry.ts:41" }],
+        structured: true,
+      },
+      headline: "Brief ready",
+      finishedAt: iso(15 * 60_000),
+      sessionId: "33333333-3333-4333-8333-333333333333",
+      worktree: "/tmp/agent-clio-912",
+      output:
+        "Problem: transient network errors fail the whole sync.\nApproach: retry each operation with a bounded budget.\nRisky parts: the retry has no overall time limit.\n\nDecisions for you:\n1. Is an unbounded retry acceptable?\n2. The public contract of sync-schemas changed: agreed?",
+    }),
+    item(118, { state: "error", headline: "No checkout of acme/clio-knowledge: set its folder in Settings > Claude", finishedAt: iso(30 * 60_000) }),
+    item(929, {
+      state: "needsYou",
+      headline: "Would post: request changes, 1 inline comment, 1 reply",
+      result: {
+        summary: "Renaming an entity still drops the Usr prefix from its schema column (AC-2); the rest of the change is sound.",
+        asks: [],
+        findings: [
+          { severity: "major", text: "Rename() rebuilds the name from Caption, losing the Usr prefix", where: "src/Schema/SchemaColumn.cs:142" },
+          { severity: "minor", text: "The guard checks the caption, not the name", where: "src/Schema/SchemaColumn.cs:88" },
+          { severity: "note", text: "AC-1 and AC-3 are covered by the new tests", where: "" },
+          { severity: "note", text: "No Jira task found for the follow-up refactoring", where: "" },
+        ],
+        authorQuestions: [],
+        structured: true,
+      },
+      finishedAt: iso(5 * 60_000),
+      sessionId: "44444444-4444-4444-8444-444444444444",
+      worktree: "/tmp/agent-clio-929",
+      runFolder: "/tmp/prd-agent/929",
+      output: "Prepared a review: request changes, one inline comment, one reply.",
+      plan: {
+        event: "REQUEST_CHANGES",
+        body: "**Summary.** The rename keeps the static prefix in the designer now, but the schema column still drops it when the entity is renamed (AC-2).\n\n**Requirement coverage.** AC-1 covered, AC-2 missing, AC-3 covered.",
+        comments: [{ path: "src/Schema/SchemaColumn.cs", line: 142, body: "**Major — AC-2.** `Rename()` rebuilds the name from `Caption`, so the `Usr` prefix is lost: renaming `UsrAccount` gives `Account`. Keep the prefix from the old name." }],
+        replies: [{ replyTo: 1001, body: "Still applies at the head: the guard on line 88 checks the caption, not the name." }],
+        resolves: 0,
+        escalations: [],
+      },
+    }),
+    item(934, {
+      key: `${byNumber(934)?.id}|rereview|${byNumber(934)?.headOid}|reply@${iso(30 * 60_000)}`,
+      scenario: "rereview",
+      state: "needsYou",
+      result: {
+        summary: "The author fixed 2 of your 3 threads; on the third they argue the null check belongs to the caller.",
+        asks: [],
+        findings: [{ severity: "major", text: "load() still dereferences a null config", where: "src/config/loader.ts:57" }],
+        authorQuestions: [],
+        structured: true,
+      },
+      headline: "Would post: comment, 1 resolve, 1 dispute for you",
+      finishedAt: iso(8 * 60_000),
+      sessionId: "66666666-6666-4666-8666-666666666666",
+      worktree: "/tmp/agent-clio-934",
+      runFolder: "/tmp/prd-agent/934",
+      output: "Re-review: one thread fixed at the head, one where the author disagrees — handed back to you.",
+      plan: {
+        event: "COMMENT",
+        body: "**Re-review.** The tenant probe now caches per host (thread on TenantProbe.cs:40 — fixed, resolving).",
+        comments: [],
+        replies: [],
+        resolves: 1,
+        escalations: [{ replyTo: 2002, body: "The author says the probe cache is per tenant by design; the finding says a stale entry outlives a tenant switch. A design call — yours." }],
+      },
+    }),
+    item(142, {
+      key: `${byNumber(142)?.id}|drive|${byNumber(142)?.headOid}|ci`,
+      scenario: "drive",
+      state: "needsYou",
+      headline: "Would push 2 commits: fix: back off on 403 with retry-after",
+      reasons: ["ci"],
+      finishedAt: iso(3 * 60_000),
+      sessionId: "77777777-7777-4777-8777-777777777777",
+      worktree: "/tmp/agent-dashboard-142",
+      drive: {
+        base: byNumber(142)?.headOid ?? "0".repeat(40),
+        head: "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+        reasons: ["ci"],
+        commits: [
+          { oid: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", subject: "test: cover a 403 with retry-after" },
+          { oid: "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3", subject: "fix: back off on 403 with retry-after" },
+        ],
+        stat: " src/main/poller.ts        | 12 ++++++------\n tests/poller.test.cjs     | 18 ++++++++++++++++++\n 2 files changed, 24 insertions(+), 6 deletions(-)",
+        patch: "diff --git a/src/main/poller.ts b/src/main/poller.ts\n@@ -561,7 +561,13 @@\n-    const wait = 60_000;\n+    const retryAfter = Number(res.headers.get(\"retry-after\"));\n+    const wait = Number.isFinite(retryAfter) ? retryAfter * 1000 : 60_000;\n",
+      },
+    }),
+    item(85, {
+      key: `${byNumber(85)?.id}|merge|${byNumber(85)?.headOid}`,
+      scenario: "merge",
+      mode: "on",
+      state: "needsYou",
+      headline: "Ready to merge — squash",
+      finishedAt: iso(2 * 60_000),
+      mergeMethods: byNumber(85)?.mergeMethods,
+      mergeMethod: "squash",
+    }),
+    // Your PR's self-review found a product decision only you can make.
+    item(137, {
+      key: `${byNumber(137)?.id}|drive|${byNumber(137)?.headOid}|self`,
+      scenario: "drive",
+      reasons: ["self"],
+      state: "needsYou",
+      headline: "Would push 1 commit: fix: keep the Usr prefix on rename",
+      finishedAt: iso(6 * 60_000),
+      sessionId: "88888888-8888-4888-8888-888888888888",
+      worktree: "/tmp/agent-dashboard-137",
+      result: {
+        summary: "Fixed the prefix on rename; one finding is a product decision.",
+        asks: [{ question: "Should the retry threshold be configurable per environment?", options: ["Yes, a system setting", "No, keep it fixed"] }],
+        findings: [],
+        authorQuestions: [],
+        structured: true,
+      },
+      drive: {
+        base: byNumber(137)?.headOid ?? "0".repeat(40),
+        head: "f".repeat(40),
+        reasons: ["self"],
+        commits: [{ oid: "f".repeat(40), subject: "fix: keep the Usr prefix on rename" }],
+        stat: " src/Schema/SchemaColumn.cs | 4 ++--\n 1 file changed, 2 insertions(+), 2 deletions(-)",
+        patch: "",
+      },
+    }),
+    // A review the agent sent a moment ago: the author's move now, the snapshot not caught up yet.
+    item(603, { state: "done", headline: "Published: request changes, 2 inline comments", published: true, finishedAt: iso(40 * 60_000) }),
+  ].filter((i): i is AgentItem => i !== null);
+  // A PR the agent merged this morning: gone from the dashboard, done today.
+  items.push({
+    runId: runId(931),
+    key: "PR_merged_931|merge|1a2b3c",
+    prId: "PR_merged_931",
+    prNumber: 931,
+    repo: "acme/dashboard",
+    url: "https://github.com/acme/dashboard/pull/931",
+    title: "Back off on secondary rate limits",
+    hostLabel: prs[0]?.hostLabel ?? "GitHub",
+    scenario: "merge",
+    mode: "on",
+    state: "done",
+    headline: "Merged (squash), branch deleted",
+    queuedAt: iso(3 * 3_600_000),
+    finishedAt: iso(2 * 3_600_000),
+  });
+  // A PR you merged a moment ago: gone from the dashboard, its Jira dry run still waits on the Board.
+  items.push({
+    runId: runId(930),
+    key: "PR_merged_930|afterMerge|0f1e2d",
+    prId: "PR_merged_930",
+    prNumber: 930,
+    repo: "acme/clio",
+    url: "https://github.com/acme/clio/pull/930",
+    title: "Document the retry budget",
+    hostLabel: prs[0]?.hostLabel ?? "GitHub",
+    scenario: "afterMerge",
+    mode: "on",
+    state: "needsYou",
+    headline: "Jira dry run ready — apply it in a session",
+    queuedAt: iso(12 * 60_000),
+    finishedAt: iso(9 * 60_000),
+    sessionId: "55555555-5555-4555-8555-555555555555",
+    output: "Would resolve ENG-93380 (Done → Closed): merged PR #930 implements every acceptance criterion.\nWould leave ENG-93374 open: its PR #912 is still in review.\n\nApply these changes?",
+  });
+  const run = (n: number, steps: Array<[string, "pending" | "in_progress" | "completed"]>, activity: string) => ({
+    runId: runId(n),
+    progress: {
+      sessionId: null,
+      steps: steps.map(([subject, status], i) => ({ id: String(i + 1), subject, status })),
+      pendingCreates: [],
+      activity,
+      lastText: null,
+      toolCalls: 12,
+      rateLimit: { status: "allowed", resetsAt: null },
+      backgroundTasks: 0,
+      result: null,
+    },
+    recent: [
+      { at: iso(150_000), text: `$ gh pr view ${n} --json title,body,files` },
+      { at: iso(120_000), text: `$ gh pr diff ${n}` },
+      { at: iso(60_000), text: activity },
+    ],
+    paused: false,
+  });
+  return {
+    enabled: true,
+    items,
+    running: [
+      run(
+        911,
+        [
+          ["Check whether you already reviewed it", "completed"],
+          ["Read the Jira task", "completed"],
+          ["Collect the diff", "completed"],
+          ["Run 5 reviewers in parallel", "in_progress"],
+          ["Decide", "pending"],
+          ["Write up the review", "pending"],
+        ],
+        "Agent: security reviewer",
+      ),
+      run(44, [["Read the PR", "in_progress"], ["Review the dependency bumps", "pending"]], "$ gh pr diff 44"),
+    ].filter((r) => items.some((i) => i.runId === r.runId)),
+    idle: Object.fromEntries(
+      prs.map((p) => [p.id, p.roles.includes("author") ? "Yours: nothing for the agent yet" : p.isDraft ? "Draft: picked up once ready for review" : "Nothing for the agent"]),
+    ),
+    runsToday: 6,
+    perDay: 30,
+    parallel: 2,
+    heldUntil: null,
+    headerChip: true,
+    trayState: true,
+    paused: false,
+    quietUntil: null,
+    acceptedUnchanged: 4,
+    suggestOn: false,
+    // Your PR an SDLC orchestrator run drives: its card wears the run's badge.
+    orchestrated: Object.fromEntries(
+      [byNumber(139)].filter((p): p is PullRequest => Boolean(p)).map((p) => [p.id, { key: "ENG-93412", stage: "fixing review" }]),
+    ),
+  };
+}
+
+const agentListeners = new Set<(s: AgentState) => void>();
+let agentState: AgentState =
+  mood === "agent"
+    ? mockAgentState()
+    : { enabled: false, items: [], running: [], idle: {}, runsToday: 0, perDay: 30, parallel: 2, heldUntil: null, headerChip: true, trayState: true, paused: false, quietUntil: null, acceptedUnchanged: 0, suggestOn: false };
+
+function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error: string } {
+  if (!agentState.enabled) return { ok: false, error: "The agent is off: switch it on in Settings > Agent." };
+  const items = agentState.items.map((i) => ({ ...i }));
+  const at = new Date().toISOString();
+  if (action.type === "pauseAgent" || action.type === "resumeAgent") {
+    const paused = action.type === "pauseAgent";
+    agentState = { ...agentState, paused, running: agentState.running.map((r) => ({ ...r, paused })) };
+    for (const l of agentListeners) l(agentState);
+    return { ok: true };
+  }
+  if (action.type === "enqueue") {
+    const pr = snapshot.pullRequests.find((p) => p.id === action.prId);
+    if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+    const rank = action.before ? rankBefore(items.filter((i) => i.state === "queued"), action.before) : undefined;
+    items.push({
+      ...(rank !== undefined ? { rank } : {}),
+      runId: crypto.randomUUID(),
+      key: `${pr.id}|review|${pr.headOid}|asked`,
+      prId: pr.id,
+      prNumber: pr.number,
+      repo: pr.repo,
+      url: pr.url,
+      title: pr.title,
+      hostLabel: pr.hostLabel,
+      scenario: "review",
+      mode: "shadow",
+      state: "queued",
+      headline: "Queued: review (asked by you)",
+      queuedAt: at,
+    });
+  } else {
+    const it = items.find((i) => i.runId === action.runId);
+    if (!it) return { ok: false, error: "That run is gone." };
+    const running = agentState.running.find((r) => r.runId === action.runId);
+    switch (action.type) {
+      case "skip":
+        Object.assign(it, { state: "done", headline: "Dismissed", finishedAt: at });
+        break;
+      case "retry":
+      case "reviewAnyway":
+        Object.assign(it, { state: "queued", scenario: "review", headline: "Queued: review (asked by you)", queuedAt: at, output: undefined });
+        break;
+      case "pause":
+      case "resume":
+        if (running) running.paused = action.type === "pause";
+        break;
+      case "stop":
+      case "takeOver":
+        agentState.running = agentState.running.filter((r) => r !== running);
+        Object.assign(it, {
+          state: "done",
+          headline: action.type === "stop" ? "Stopped by you" : "You took it over in your terminal",
+          finishedAt: at,
+          worktree: "/tmp/x",
+        });
+        break;
+      case "hint":
+        if (running) running.recent = [...running.recent, { at, text: `You: ${action.text}` }];
+        break;
+      case "continue":
+        break;
+      case "moveQueued": {
+        const rank = rankBefore(items.filter((i) => i.state === "queued" && i !== it), action.before);
+        if (rank === undefined) delete it.rank;
+        else it.rank = rank;
+        break;
+      }
+      case "dispute":
+        it.disputes = { ...(it.disputes ?? {}), [String(action.replyTo)]: action.choice };
+        break;
+      case "answer":
+        Object.assign(it, { state: "queued", resumeSession: true, answer: action.text, headline: "Queued: going on with your answer", finishedAt: undefined });
+        break;
+      case "publish":
+        if (!it.plan) return { ok: false, error: "Nothing prepared to publish." };
+        Object.assign(it, { state: "done", published: true, headline: "Published: request changes, 1 inline comment, 1 reply", finishedAt: at });
+        agentState = { ...agentState, acceptedUnchanged: agentState.acceptedUnchanged + 1 };
+        break;
+      case "push":
+        if (!it.drive) return { ok: false, error: "There is nothing to push." };
+        Object.assign(it, { state: "done", pushed: true, headline: `Pushed ${it.drive.commits.length} commits`, finishedAt: at });
+        break;
+      case "merge":
+        Object.assign(it, { state: "done", headline: `Merged (${action.method ?? it.mergeMethod ?? "squash"}), branch deleted`, finishedAt: at });
+        items.push({ ...it, runId: crypto.randomUUID(), key: `${it.prId}|afterMerge|x`, scenario: "afterMerge", state: "queued", headline: "Queued: the Jira dry run", queuedAt: at });
+        break;
+    }
+  }
+  agentState = { ...agentState, items };
+  for (const l of agentListeners) l(agentState);
+  return { ok: true };
+}
+
 const api: PrManagerApi = {
   getDashboard: async () => ({ ok: true, snapshot }),
   refresh: async () => ({ ok: true, snapshot }),
@@ -427,6 +851,41 @@ const api: PrManagerApi = {
   focusClaudeSession: async () => ({ ok: false, error: "Not available in mock mode." }),
   onClaudeSessions: () => () => {},
   copyText: async () => {},
+  getStaleJiraTask: async (prId) => {
+    const found = snapshot.pullRequests.find((p) => p.id === prId);
+    if (!found?.issueKey) return { ok: false, error: "No Jira key in this PR's title or branch." };
+    return {
+      ok: true,
+      task: {
+        key: found.issueKey,
+        summary: found.issueSummary,
+        status: "In Progress",
+        statusCategory: "indeterminate",
+        subtaskCount: 2,
+        transitions: [
+          { id: "11", name: "To Do", toStatus: "To Do", toCategory: "new", resolutions: [], resolutionRequired: false },
+          { id: "31", name: "Code review", toStatus: "Code Review", toCategory: "indeterminate", resolutions: [], resolutionRequired: false },
+          {
+            id: "41",
+            name: "Close",
+            toStatus: "Closed",
+            toCategory: "done",
+            resolutions: [
+              { id: "10000", name: "Done" },
+              { id: "10001", name: "Won't Do" },
+              { id: "10002", name: "Duplicate" },
+            ],
+            resolutionRequired: true,
+          },
+        ],
+      },
+    };
+  },
+  closeStalePr: async (_prId, options) => ({
+    ok: true,
+    prClosed: true,
+    jira: options.jira.action === "keep" ? null : { ok: true, message: `Task: ${options.jira.action} (mock).` },
+  }),
   getWhatsNew: async () => null,
   dismissWhatsNew: async () => {},
   onSnapshot: () => () => {},
@@ -435,6 +894,17 @@ const api: PrManagerApi = {
   onNotifySound: () => () => {},
   onOpenSettings: () => () => {},
   onRefreshRequest: () => () => {},
+  getAgentState: async () => agentState,
+  agentAction: async (action) => mockAgentAction(action),
+  revealAgentLog: async () => {},
+  onAgentState: (listener) => {
+    agentListeners.add(listener);
+    return () => {
+      agentListeners.delete(listener);
+    };
+  },
+  onAgentShowBoard: () => () => {},
+  onAgentOpenCompanion: () => () => {},
 };
 
 (window as unknown as { api: PrManagerApi }).api = api;

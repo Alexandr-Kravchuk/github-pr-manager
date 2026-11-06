@@ -1,3 +1,4 @@
+import { DEFAULT_AGENT_PROMPTS } from "./agent-defaults";
 import { prSignal } from "./pr-filter";
 import type { ClaudeSettings, PullRequest } from "./types";
 
@@ -46,6 +47,7 @@ export const DEFAULT_CLAUDE_SETTINGS: ClaudeSettings = {
   projectsRoot: "",
   repoPaths: {},
   prompts: { ...DEFAULT_CLAUDE_PROMPTS },
+  agentPrompts: { ...DEFAULT_AGENT_PROMPTS },
   terminal: "auto",
 };
 

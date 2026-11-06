@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import type {
+  AgentPromptKey,
+  AgentSettings,
   ClaudeSettings,
   GhStatus,
   JiraStatus,
@@ -16,6 +18,9 @@ import type {
 import { DEFAULT_NOTIFICATION_SETTINGS as DEFAULT_NOTIFICATIONS } from "../../../shared/notify";
 // Node-free (see AGENTS.md) — the defaults the Claude section starts from.
 import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "../../../shared/claude-launch";
+// Node-free too — the Agent tab starts from these before settings load.
+import { DEFAULT_AGENT_PROMPTS, DEFAULT_AGENT_SETTINGS } from "../../../shared/agent-defaults";
+import { DEFAULT_STALE_AFTER_DAYS, MAX_STALE_AFTER_DAYS } from "../../../shared/stale";
 import {
   SETTINGS_TABS,
   searchSettings,
@@ -25,6 +30,7 @@ import {
   type SettingsTabId,
 } from "../../../shared/settings-search";
 import { cn } from "../format";
+import { agentSectionContent } from "./AgentSettings";
 
 /** localStorage key of the last open Settings tab. */
 const TAB_KEY = "prd:settings-tab:v1";
@@ -119,10 +125,12 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [autoUpdate, setAutoUpdate] = useState(true);
   const [closeToTray, setCloseToTray] = useState(true);
   const [trackComments, setTrackComments] = useState(true);
+  const [staleAfterDays, setStaleAfterDays] = useState(DEFAULT_STALE_AFTER_DAYS);
   const [theme, setTheme] = useState<ThemePreference>("system");
   const [notifications, setNotifications] = useState<NotificationSettings>(DEFAULT_NOTIFICATIONS);
   const [hosts, setHosts] = useState<DraftHost[]>([]);
   const [claude, setClaude] = useState<ClaudeSettings>(DEFAULT_CLAUDE_SETTINGS);
+  const [agent, setAgent] = useState<AgentSettings>(DEFAULT_AGENT_SETTINGS);
   // Rows of the repository → folder registry, kept as rows while editing so a
   // half-typed entry isn't dropped; turned into `claude.repoPaths` on save.
   const [repoFolders, setRepoFolders] = useState<RepoFolderRow[]>([]);
@@ -157,6 +165,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setAutoUpdate(s.autoUpdate);
         setCloseToTray(s.closeToTray);
         setTrackComments(s.trackComments);
+        setStaleAfterDays(s.staleAfterDays ?? DEFAULT_STALE_AFTER_DAYS);
         setTheme(s.theme);
         setNotifications(s.notifications ?? DEFAULT_NOTIFICATIONS);
         setHosts(
@@ -169,6 +178,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           })),
         );
         setClaude(s.claude ?? DEFAULT_CLAUDE_SETTINGS);
+        setAgent(s.agent ?? DEFAULT_AGENT_SETTINGS);
         setRepoFolders(
           Object.entries(s.claude?.repoPaths ?? {}).map(([repo, path]) => ({ repo, path })),
         );
@@ -243,6 +253,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         // Only persist Jira when both fields are present; otherwise leave it off.
         jira: baseUrl && email ? { baseUrl, email } : undefined,
         claude: { ...claude, repoPaths: folders },
+        agent,
+        staleAfterDays,
       };
       const res = await window.api.saveSettings(settings);
       if (!res.ok) {
@@ -275,6 +287,16 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
     "mt-1 w-full rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none";
 
   const sectionContent: Record<SettingsSectionId, ReactNode> = {
+    ...agentSectionContent({
+      agent,
+      setAgent,
+      inputCls,
+      // The agent's prompts live with the Claude button's ones: one place to edit them.
+      onEditPrompts: () => {
+        setQuery("");
+        selectTab("integrations");
+      },
+    }),
     appearance: (
       <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
         <div className="flex items-center justify-between gap-4">
@@ -376,6 +398,32 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             </span>
           </span>
         </label>
+        <div className="flex items-start justify-between gap-4">
+          <span>
+            <label htmlFor="stale-days" className="block text-sm text-fg-secondary">
+              Stale PRs after
+            </label>
+            <span className="block text-xs text-fg-faint">
+              A PR open this long gets a &ldquo;Stale&rdquo; badge and chip. On your own, a
+              &ldquo;Close…&rdquo; button closes it and can move its Jira task back to To Do, close it
+              as Won&apos;t Do or delete it. 0 turns this off.
+            </span>
+          </span>
+          <span className="flex shrink-0 items-center gap-2 text-xs text-fg-subtle">
+            <input
+              id="stale-days"
+              type="number"
+              min={0}
+              max={MAX_STALE_AFTER_DAYS}
+              value={staleAfterDays}
+              onChange={(e) =>
+                setStaleAfterDays(Math.min(MAX_STALE_AFTER_DAYS, Math.max(0, Math.round(Number(e.target.value) || 0))))
+              }
+              className={cn(inputCls.replace("w-full", "w-20"), "mt-0")}
+            />
+            days
+          </span>
+        </div>
       </section>
     ),
     notifications: (
@@ -736,9 +784,14 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             title="Start Claude sessions from PRs"
           />
         </div>
-        {claude.enabled && (
+        {/* The PR agent finds checkouts and takes its prompts from here too, so the
+            block stays while either is on; "Open in" is the button's alone. */}
+        {(claude.enabled || agent.enabled) && (
           <div className="mt-3 space-y-3">
-            <div>
+            {!claude.enabled && (
+              <p className="text-xs text-fg-faint">The PR agent uses the folders and prompts below.</p>
+            )}
+            <div className={claude.enabled ? undefined : "hidden"}>
               <label className={labelCls} htmlFor="claude-terminal">
                 Open in
               </label>
@@ -796,6 +849,34 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                   placeholder={DEFAULT_CLAUDE_PROMPTS[kind]}
                   onChange={(e) =>
                     setClaude((prev) => ({ ...prev, prompts: { ...prev.prompts, [kind]: e.target.value } }))
+                  }
+                  className={cn(inputCls, "font-mono")}
+                />
+              </div>
+            ))}
+            <div className="pt-1">
+              <span className={labelCls}>Agent prompts</span>
+              <p className="mt-0.5 text-xs text-fg-faint">Only the PR agent runs these; they are not in the Claude button&apos;s menu.</p>
+            </div>
+            {(
+              [
+                ["triage", "Brief for a big PR"],
+                ["rereview", "Re-review — the author replied in your threads"],
+                ["afterMerge", "After merging your PR"],
+                ["selfReview", "Self-review of your PR, before reviewers"],
+                ["validateComments", "Reviewers commented on your PR"],
+              ] as const satisfies ReadonlyArray<readonly [AgentPromptKey, string]>
+            ).map(([key, title]) => (
+              <div key={key}>
+                <label className={labelCls} htmlFor={`agent-prompt-${key}`}>
+                  {title}
+                </label>
+                <input
+                  id={`agent-prompt-${key}`}
+                  value={claude.agentPrompts[key]}
+                  placeholder={DEFAULT_AGENT_PROMPTS[key]}
+                  onChange={(e) =>
+                    setClaude((prev) => ({ ...prev, agentPrompts: { ...prev.agentPrompts, [key]: e.target.value } }))
                   }
                   className={cn(inputCls, "font-mono")}
                 />

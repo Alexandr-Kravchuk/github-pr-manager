@@ -6,7 +6,9 @@ import type { PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { AuthorButton } from "./AuthorButton";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
+import { StaleCloseButton } from "./StaleCloseDialog";
 import { StackBadge } from "./StackBadge";
+import { AgentGlyph } from "./AgentStatus";
 
 /**
  * The Compact tile: the same information architecture as `PrCard` shrunk to
@@ -202,6 +204,17 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
             ⚠
           </span>
         )}
+        {/* Your own stale PR gets the glyph as a button that opens the close
+            dialog; anyone else's just says it is stale. */}
+        {pr.isStale && pr.roles.includes("author") ? (
+          <StaleCloseButton pr={pr} iconOnly />
+        ) : (
+          pr.isStale && (
+            <span title="Open past the stale threshold" className="shrink-0 text-stone-600 dark:text-stone-300">
+              🕸
+            </span>
+          )
+        )}
         {pr.unresolvedThreads > 0 && (
           <span
             title={`${pr.unresolvedThreads} unresolved thread(s)`}
@@ -234,6 +247,8 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
         </span>
         {/* Icon only: a labelled button took a line of its own and made every
             tile taller. Its colour still says which action a click starts. */}
+        {/* The PR agent's state on this PR, as a dot with its words in the title. */}
+        <AgentGlyph pr={pr} />
         <ClaudeButton pr={pr} trackComments={trackComments} iconOnly className="ml-1" />
       </div>
 

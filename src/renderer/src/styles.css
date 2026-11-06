@@ -338,3 +338,17 @@ input[type="search"]::-webkit-search-cancel-button {
   -webkit-appearance: none;
   appearance: none;
 }
+
+/* The card an Open, a notification or the popover pointed at: three fading
+   rings, then nothing — finite like every animation here (see AGENTS.md). */
+.focus-flash {
+  animation: focus-flash 0.9s ease-out 3;
+}
+@keyframes focus-flash {
+  0% {
+    box-shadow: 0 0 0 0 rgb(14 165 233 / 0.85);
+  }
+  100% {
+    box-shadow: 0 0 0 8px rgb(14 165 233 / 0);
+  }
+}

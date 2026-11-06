@@ -140,6 +140,12 @@ export interface IdleGateInputs {
    * be able to decide without it. Read at most once, only in the hidden branch.
    */
   notificationsActionable: () => boolean;
+  /**
+   * The PR agent is on. It acts on what the poll sees, so a hidden window must
+   * not park polling while it is — even with notifications off. Optional: an
+   * absent thunk reads as off.
+   */
+  agentActive?: () => boolean;
 }
 
 /**
@@ -169,9 +175,10 @@ export function planPolling(inputs: IdleGateInputs): PollPlan {
   if (inputs.systemSuspended) return { mode: "park" };
   // No window: startup / activate — let the first fetch run at full cadence.
   if (!inputs.hasWindow) return { mode: "run", presenceFactor: 1 };
-  // Hidden window parks ONLY when no notification could reach the user anyway;
-  // when one could, keep polling so the transition surfaces.
-  if (inputs.windowHidden && !inputs.notificationsActionable()) return { mode: "park" };
+  // Hidden window parks ONLY when no notification could reach the user anyway
+  // and the agent is not working from the polls; when either holds, keep
+  // polling so the transition surfaces.
+  if (inputs.windowHidden && !inputs.notificationsActionable() && !inputs.agentActive?.()) return { mode: "park" };
   // Present-ness is a matter of degree from here on — the only place the native
   // idle query is worth paying for.
   return { mode: "run", presenceFactor: computePresenceFactor(inputs.systemIdleSeconds()) };

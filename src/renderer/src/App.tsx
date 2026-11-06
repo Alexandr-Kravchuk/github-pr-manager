@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { AgentCompanion } from "./components/AgentCompanion";
+import { AgentContext } from "./components/agent-context";
 import { Buddy, type BuddyMood } from "./components/Buddy";
+import { PrBoard } from "./components/PrBoard";
 import { PrCard } from "./components/PrCard";
 import { PrTable } from "./components/PrTable";
 import { PrTile } from "./components/PrTile";
@@ -32,6 +35,8 @@ import {
 import { groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
 import { hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
 import { AuthorFilterContext } from "./components/author-filter-context";
+import { StaleCloseDialog } from "./components/StaleCloseDialog";
+import { StaleCloseContext } from "./components/stale-close-context";
 import { ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
@@ -52,6 +57,8 @@ import {
   type ViewMode,
 } from "../../shared/view-mode";
 import type {
+  AgentAction,
+  AgentState,
   ClaudeSessionInfo,
   DashboardResponse,
   HostError,
@@ -165,6 +172,7 @@ interface ViewPrefs {
   newOnly: boolean;
   mergeableOnly: boolean;
   noReviewsOnly: boolean;
+  staleOnly: boolean;
   hideApproved: boolean;
   showDrafts: boolean;
   showIgnored: boolean;
@@ -185,6 +193,7 @@ const DEFAULT_PREFS: ViewPrefs = {
   newOnly: false,
   mergeableOnly: false,
   noReviewsOnly: false,
+  staleOnly: false,
   hideApproved: false,
   showDrafts: false,
   showIgnored: false,
@@ -219,6 +228,7 @@ function loadPrefs(): ViewPrefs {
       newOnly: Boolean(p.newOnly),
       mergeableOnly: Boolean(p.mergeableOnly),
       noReviewsOnly: Boolean(p.noReviewsOnly),
+      staleOnly: Boolean(p.staleOnly),
       hideApproved: Boolean(p.hideApproved),
       showDrafts: Boolean(p.showDrafts),
       showIgnored: Boolean(p.showIgnored),
@@ -241,6 +251,9 @@ export function App() {
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraStatus | null>(null);
   const [claudeSessions, setClaudeSessions] = useState<ClaudeSessionInfo[]>([]);
+  // The PR agent — null in fixture mode and until the first pull.
+  const [agentState, setAgentState] = useState<AgentState | null>(null);
+  const [companion, setCompanion] = useState<{ open: boolean; focus: string | null }>({ open: false, focus: null });
   const [data, setData] = useState<DashboardResponse | null>(null);
   // Monotonic count of snapshots applied — the live-dot's remount key.
   const [beat, setBeat] = useState(0);
@@ -282,6 +295,9 @@ export function App() {
   const [newOnly, setNewOnly] = useState(boot.newOnly);
   const [mergeableOnly, setMergeableOnly] = useState(boot.mergeableOnly);
   const [noReviewsOnly, setNoReviewsOnly] = useState(boot.noReviewsOnly);
+  const [staleOnly, setStaleOnly] = useState(boot.staleOnly);
+  // The PR whose stale-close dialog is open, or null.
+  const [closingPr, setClosingPr] = useState<PullRequest | null>(null);
   const [hideApproved, setHideApproved] = useState(boot.hideApproved);
   const [sortBy, setSortBy] = useState<SortKey>(boot.sortBy);
   const [groupBy, setGroupBy] = useState<GroupMode>(boot.groupBy);
@@ -409,6 +425,88 @@ export function App() {
     };
   }, [loadInitial]);
 
+  // The agent's state: pushed while the window is visible, pulled again on
+  // show, like the sessions below.
+  useEffect(() => {
+    const off = window.api.onAgentState(setAgentState);
+    const load = () => {
+      window.api.getAgentState().then(setAgentState).catch(() => {});
+    };
+    const onWake = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    load();
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => {
+      off();
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+    };
+  }, []);
+  // One way to an item of the agent's: the Board, its card scrolled to and
+  // flashing. A request that comes while Settings are open (the tray's Show
+  // agent, a clicked notification) waits for them to close: switching the view
+  // out from under an edit was rejected for the shortcuts, for the same reason.
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const [boardFocus, setBoardFocus] = useState<{ runId: string | null; n: number }>({ runId: null, n: 0 });
+  const pendingAgentView = useRef<{ kind: "board"; runId: string | null } | { kind: "companion" } | null>(null);
+  const focusItem = useCallback((runId?: string) => {
+    if (viewRef.current === "settings") {
+      pendingAgentView.current = { kind: "board", runId: runId ?? null };
+      return;
+    }
+    setViewMode("board");
+    setBoardFocus((f) => ({ runId: runId ?? null, n: f.n + 1 }));
+  }, []);
+  // The tray's "Show agent": the window was likely hidden, so its state is pulled
+  // afresh — and with the header chip off there is no popover, so the Board.
+  const showAgentCompanion = useCallback(() => {
+    window.api
+      .getAgentState()
+      .then((s) => {
+        setAgentState(s);
+        if (s?.enabled && s.headerChip) setCompanion({ open: true, focus: null });
+        else focusItem();
+      })
+      .catch(() => focusItem());
+  }, [focusItem]);
+  // A clicked agent notification opens its card on the Board: that is where its decision waits.
+  useEffect(() => window.api.onAgentShowBoard((runId) => focusItem(runId)), [focusItem]);
+  useEffect(
+    () =>
+      window.api.onAgentOpenCompanion(() => {
+        if (viewRef.current === "settings") pendingAgentView.current = { kind: "companion" };
+        else showAgentCompanion();
+      }),
+    [showAgentCompanion],
+  );
+  // Settings closed: what the agent asked for meanwhile happens now.
+  useEffect(() => {
+    if (view !== "dashboard" || !pendingAgentView.current) return;
+    const p = pendingAgentView.current;
+    pendingAgentView.current = null;
+    if (p.kind === "companion") showAgentCompanion();
+    else focusItem(p.runId ?? undefined);
+  }, [view, focusItem, showAgentCompanion]);
+  const agentAct = useCallback(async (action: AgentAction) => {
+    const res = await window.api.agentAction(action);
+    // The push may lag a moment behind; pull so the click shows at once.
+    window.api.getAgentState().then(setAgentState).catch(() => {});
+    return res;
+  }, []);
+  const agentContext = useMemo(
+    () => ({
+      state: agentState,
+      act: agentAct,
+      openCompanion: (runId?: string) => setCompanion({ open: true, focus: runId ?? null }),
+      showBoard: () => focusItem(),
+      focusItem,
+    }),
+    [agentState, agentAct, focusItem],
+  );
+
   // Running Claude sessions: main pushes changes while the window is visible
   // and pushes nothing while it is hidden, so the list is pulled again on show.
   useEffect(() => {
@@ -450,6 +548,7 @@ export function App() {
       newOnly,
       mergeableOnly,
       noReviewsOnly,
+      staleOnly,
       hideApproved,
       showDrafts,
       showIgnored,
@@ -467,6 +566,7 @@ export function App() {
     newOnly,
     mergeableOnly,
     noReviewsOnly,
+    staleOnly,
     hideApproved,
     showDrafts,
     showIgnored,
@@ -571,6 +671,7 @@ export function App() {
   }, []);
 
   const allPrs = useMemo(() => data?.pullRequests ?? [], [data]);
+  const allPrIds = useMemo(() => new Set(allPrs.map((p) => p.id)), [allPrs]);
 
   // Whether the unread-comment channel exists at all (the `trackComments`
   // setting). Off hides the chip and the header stat, drops a stored `newOnly`,
@@ -594,6 +695,7 @@ export function App() {
       newOnly,
       mergeableOnly,
       noReviewsOnly,
+      staleOnly,
       hideApproved,
       showDrafts,
       showIgnored,
@@ -608,6 +710,7 @@ export function App() {
       newOnly,
       mergeableOnly,
       noReviewsOnly,
+      staleOnly,
       hideApproved,
       showDrafts,
       showIgnored,
@@ -653,6 +756,7 @@ export function App() {
       fresh: sourceFacetCount(allPrs, filterState, "fresh"),
       mergeable: sourceFacetCount(allPrs, filterState, "mergeable"),
       noReviews: sourceFacetCount(allPrs, filterState, "noReviews"),
+      stale: sourceFacetCount(allPrs, filterState, "stale"),
       approved: excludeDelta(allPrs, filterState),
       drafts: revealDelta(allPrs, filterState, "drafts"),
       ignored: revealDelta(allPrs, filterState, "ignored"),
@@ -826,6 +930,7 @@ export function App() {
     setNewOnly(false);
     setMergeableOnly(false);
     setNoReviewsOnly(false);
+    setStaleOnly(false);
     setHideApproved(false);
   }, []);
 
@@ -878,6 +983,16 @@ export function App() {
                 {stats.returned > 0 && ` · ${stats.returned} back to you`}
               </p>
             </div>
+            {/* The PR agent as a companion: what it is doing, in one chip. */}
+            <AgentContext.Provider value={agentContext}>
+              <AgentCompanion
+                open={companion.open}
+                focus={companion.focus}
+                onToggle={() => setCompanion((c) => ({ open: !c.open, focus: null }))}
+                onClose={() => setCompanion({ open: false, focus: null })}
+                onFocus={(runId) => setCompanion({ open: true, focus: runId })}
+              />
+            </AgentContext.Provider>
           </div>
           <div className="flex items-center gap-2 text-xs text-fg-muted">
             {/* The display-variant switch sits with Refresh: it is a view control,
@@ -1132,6 +1247,18 @@ export function App() {
               >
                 ◷ No reviews yet
               </FilterChip>
+              {/* Shown while it holds a PR or is on — a 0 badge on a chip most
+                  dashboards never need would only crowd the row. */}
+              {(staleOnly || chipCounts.stale > 0) && (
+                <FilterChip
+                  active={staleOnly}
+                  count={chipCounts.stale}
+                  title="PRs open longer than the stale threshold (Settings → General → Behavior)"
+                  onClick={() => setStaleOnly((v) => !v)}
+                >
+                  🕸 Stale
+                </FilterChip>
+              )}
               <span aria-hidden className="mx-1 h-5 w-px self-center bg-fg-faint" />
               {/* The one chip that REMOVES rows: PRs you approved and that aren't
                   asking for you again. Its count is the rows it hides (or would),
@@ -1281,10 +1408,14 @@ export function App() {
         <div className="p-8 text-center text-sm text-fg-subtle">Loading…</div>
       )}
 
+      <AgentContext.Provider value={agentContext}>
       <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
       <ClaudeSessionsContext.Provider value={claudeSessions}>
       <AuthorFilterContext.Provider value={authorFilter}>
-      {viewMode === "cozy" ? (
+      <StaleCloseContext.Provider value={setClosingPr}>
+      {viewMode === "board" ? (
+        <PrBoard prs={filtered} all={allPrs} onOpen={openPr} focus={boardFocus} onClearFilters={clearFilters} />
+      ) : viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable
             prs={tableRows}
@@ -1362,9 +1493,18 @@ export function App() {
           onToggleIgnore={toggleIgnore}
         />
       )}
+      </StaleCloseContext.Provider>
       </AuthorFilterContext.Provider>
+      {closingPr && (
+        <StaleCloseDialog
+          pr={closingPr}
+          jiraConfigured={jiraStatus?.configured ?? false}
+          onDismiss={() => setClosingPr(null)}
+        />
+      )}
       </ClaudeSessionsContext.Provider>
       </ClaudeEnabledContext.Provider>
+      </AgentContext.Provider>
 
       <div className="pointer-events-none fixed bottom-2 right-3 z-10 flex items-center gap-2 text-[11px]">
         {whatsNew && (

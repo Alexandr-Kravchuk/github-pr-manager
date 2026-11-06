@@ -4,6 +4,7 @@ import type {
   CheckItem,
   CheckState,
   HostConfig,
+  MergeMethod,
   PrRole,
   PrStack,
   PrStackEntry,
@@ -73,9 +74,20 @@ fragment PrFields on PullRequest {
   headRefName
   mergeable
   mergeStateStatus
+  additions
+  deletions
+  changedFiles
+  isCrossRepository
   __STACK__
   author { login avatarUrl }
-  repository { nameWithOwner defaultBranchRef { name } }
+  repository {
+    nameWithOwner
+    defaultBranchRef { name }
+    viewerDefaultMergeMethod
+    squashMergeAllowed
+    mergeCommitAllowed
+    rebaseMergeAllowed
+  }
   reviewDecision
   reviewRequests(first: 15) {
     totalCount
@@ -232,6 +244,45 @@ async function hydrate(host: HostConfig, ids: string[]): Promise<NonNullable<Raw
   }
 }
 
+/** A PR read fresh, with what the dashboard's search can't say: whether it is still open. */
+export interface FreshPullRequest {
+  pr: PullRequest;
+  state: "OPEN" | "MERGED" | "CLOSED";
+  /** Your login on that host. */
+  viewer: string | null;
+}
+
+/**
+ * One PR read again by id, right before the agent posts to it or merges it —
+ * the snapshot can be minutes old, and its search only ever sees open PRs.
+ * Mapped by the same `mapPr` as the dashboard, so "ready to merge" means the
+ * same thing in both places. Roles come from the caller: a read by id doesn't
+ * say how you relate to the PR. Null when the PR is gone or out of reach.
+ */
+export async function fetchPullRequest(host: HostConfig, id: string, roles: PrRole[]): Promise<FreshPullRequest | null> {
+  const query = (withStacks: boolean) => /* GraphQL */ `
+query ($ids: [ID!]!) {
+  viewer { login }
+  hydrated: nodes(ids: $ids) { ...PrFields }
+  status: nodes(ids: $ids) { ... on PullRequest { state } }
+}
+${prFieldsFragment(withStacks)}`;
+  const withStacks = !hostsWithoutStacks.has(host.graphqlUrl);
+  let data: NonNullable<RawResponse["data"]>;
+  try {
+    data = await postSearch(host, query(withStacks), { ids: [id] }, { allowNotFound: true });
+  } catch (e) {
+    if (!withStacks || !isMissingStackField(e)) throw e;
+    hostsWithoutStacks.add(host.graphqlUrl);
+    data = await postSearch(host, query(false), { ids: [id] }, { allowNotFound: true });
+  }
+  const node = (data.hydrated as HydratedNodes | undefined)?.[0] ?? null;
+  if (!isRawPr(node)) return null;
+  const state = ((data.status as Array<{ state?: string } | null> | undefined)?.[0]?.state ?? "OPEN") as FreshPullRequest["state"];
+  const viewer = (data.viewer as { login: string } | null | undefined)?.login ?? null;
+  return { pr: mapPr(node, host.label, [...roles], viewer), state, viewer };
+}
+
 // --- Raw GraphQL response types (narrowed to the fields we need) ---
 
 interface RawCheckRun {
@@ -273,8 +324,21 @@ interface RawPr {
       nodes: Array<{ position: number; pullRequest: { number: number; title: string; url: string; state: string } | null }>;
     };
   } | null;
+  // Optional so hand-built fixtures stay valid; GitHub always sends them.
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
+  isCrossRepository?: boolean;
   author: { login: string; avatarUrl: string } | null;
-  repository: { nameWithOwner: string; defaultBranchRef: { name: string } | null };
+  repository: {
+    nameWithOwner: string;
+    defaultBranchRef: { name: string } | null;
+    // GitHub's PullRequestMergeMethod enum: "MERGE" | "SQUASH" | "REBASE".
+    viewerDefaultMergeMethod?: string | null;
+    squashMergeAllowed?: boolean;
+    mergeCommitAllowed?: boolean;
+    rebaseMergeAllowed?: boolean;
+  };
   reviewDecision: ReviewDecision;
   reviewRequests: {
     totalCount: number;
@@ -526,6 +590,24 @@ export function mapPr(
     return lastCommentLogin !== authorLogin;
   }).length + hiddenThreads;
   const hasUnaddressedComments = unaddressedThreads > 0;
+
+  // When the author last answered in a thread, and when someone else last
+  // wrote in one — from the latest comment of each thread, which the query
+  // already reads. The PR agent keys its re-review and drive runs on these, so
+  // a reply without a push is new work too. Whose thread it is would take the
+  // first comment's author, which doubles the read (measured: 26 → 51 points
+  // for 25 PRs); the review skill sorts out its own threads instead.
+  let authorRepliedAt: string | null = null;
+  let reviewerRepliedAt: string | null = null;
+  for (const t of threads) {
+    const last = t.comments.nodes[t.comments.nodes.length - 1];
+    if (!last?.createdAt) continue;
+    if (authorLogin != null && last.author?.login === authorLogin) {
+      if (authorRepliedAt === null || last.createdAt > authorRepliedAt) authorRepliedAt = last.createdAt;
+    } else if (!t.isResolved && (reviewerRepliedAt === null || last.createdAt > reviewerRepliedAt)) {
+      reviewerRepliedAt = last.createdAt;
+    }
+  }
   const hasUnaddressedReviewFeedback = pr.latestOpinionatedReviews.nodes.some(
     (r) => r.state === "APPROVED" && r.author?.__typename === "User" &&
       r.author.login !== authorLogin && approvalBodyNeedsAttention(r.body) &&
@@ -715,6 +797,16 @@ export function mapPr(
     updatedAt: pr.updatedAt,
     lastCommitPushedAt,
     headRefName: pr.headRefName,
+    headOid,
+    additions: pr.additions ?? 0,
+    deletions: pr.deletions ?? 0,
+    changedFiles: pr.changedFiles ?? 0,
+    isCrossRepository: pr.isCrossRepository === true,
+    authorRepliedAt,
+    reviewerRepliedAt,
+    mergeMethods: mapMergeMethods(pr.repository),
+    // Set by fetchHost when the personal review-request search found it.
+    requestedOfMe: false,
     issueKey,
     reviewDecision: pr.reviewDecision,
     roles,
@@ -724,6 +816,8 @@ export function mapPr(
     viewerReviewedHead,
     myReReviewDue,
     hasNoReviews,
+    // The threshold is a setting — the poller sets the real value.
+    isStale: false,
     unresolvedThreads,
     unaddressedThreads,
     totalComments,
@@ -754,6 +848,26 @@ export function mapPr(
     // Overwritten in ignored.ts from the persistent ignored set:
     isIgnored: false,
   };
+}
+
+const MERGE_METHOD: Record<string, MergeMethod> = { MERGE: "merge", SQUASH: "squash", REBASE: "rebase" };
+
+/**
+ * GitHub's suggestion for this viewer and the methods the repository allows.
+ * A host that sends no flags reads as "all allowed" — a refused merge is then
+ * GitHub's answer, not a guess here.
+ */
+export function mapMergeMethods(repo: RawPr["repository"]): PullRequest["mergeMethods"] {
+  const known = repo.squashMergeAllowed !== undefined || repo.mergeCommitAllowed !== undefined || repo.rebaseMergeAllowed !== undefined;
+  const allowed: MergeMethod[] = known
+    ? [
+        ...(repo.mergeCommitAllowed ? (["merge"] as const) : []),
+        ...(repo.squashMergeAllowed ? (["squash"] as const) : []),
+        ...(repo.rebaseMergeAllowed ? (["rebase"] as const) : []),
+      ]
+    : ["merge", "squash", "rebase"];
+  const suggested = MERGE_METHOD[repo.viewerDefaultMergeMethod ?? ""] ?? null;
+  return { suggested: suggested && allowed.includes(suggested) ? suggested : (allowed[0] ?? null), allowed };
 }
 
 function isRawPr(node: RawPr | Record<string, never> | null): node is RawPr {
@@ -1135,18 +1249,22 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
   const isOwnPr = (node: RawSearchPr) =>
     viewerLogin != null && node.author?.login.toLowerCase() === viewerLogin.toLowerCase();
 
-  const addNodes = (nodes: Array<RawSearchPr | Record<string, never>>, role: PrRole) => {
+  // `personal`: the node came from `review-requested:@me`, which — unlike the
+  // team searches — means a review asked of you by name (`requestedOfMe`).
+  const addNodes = (nodes: Array<RawSearchPr | Record<string, never>>, role: PrRole, personal: boolean) => {
     for (const node of nodes) {
       if (!isSearchPr(node)) continue;
       const full = fullById.get(node.id);
       if (!full) continue;
       const effectiveRole: PrRole = role !== "author" && isOwnPr(node) ? "author" : role;
-      const existing = byId.get(node.id);
-      if (existing) {
-        if (!existing.roles.includes(effectiveRole)) existing.roles.push(effectiveRole);
+      let pr = byId.get(node.id);
+      if (pr) {
+        if (!pr.roles.includes(effectiveRole)) pr.roles.push(effectiveRole);
       } else {
-        byId.set(node.id, mapPr(full, host.label, [effectiveRole], viewerLogin));
+        pr = mapPr(full, host.label, [effectiveRole], viewerLogin);
+        byId.set(node.id, pr);
       }
+      if (personal && effectiveRole === "reviewer") pr.requestedOfMe = true;
     }
   };
 
@@ -1158,11 +1276,37 @@ export async function fetchHost(host: HostConfig): Promise<HostFetchResult> {
   // next to "author"; harmless, and dropping it would need a lookahead.
   for (const spec of specs) {
     const nodes = nodesByAlias.get(spec.alias);
-    if (nodes) addNodes(nodes, spec.role);
+    if (nodes) addNodes(nodes, spec.role, spec.alias === "reviewing");
   }
 
   return {
     pullRequests: [...byId.values()],
     rateLimit: { hostLabel: host.label, remaining: remaining ?? 0, cost, resetAt, limit },
   };
+}
+
+/**
+ * Closes a PR, posting `comment` on it first when one is given — so whoever
+ * opens the closed PR later reads why. Two mutations, comment first: a comment
+ * that fails leaves the PR open rather than closed without its explanation.
+ * Throws on any failure; nothing is retried, since a mutation is not a poll.
+ */
+export async function closePullRequest(
+  host: Pick<HostConfig, "label" | "graphqlUrl" | "token">,
+  prId: string,
+  comment: string,
+): Promise<void> {
+  const target = { ...host, repos: [] } as HostConfig;
+  if (comment.trim()) {
+    await postSearch(
+      target,
+      "mutation($id: ID!, $body: String!) { addComment(input: { subjectId: $id, body: $body }) { clientMutationId } }",
+      { id: prId, body: comment.trim() },
+    );
+  }
+  await postSearch(
+    target,
+    "mutation($id: ID!) { closePullRequest(input: { pullRequestId: $id }) { pullRequest { state } } }",
+    { id: prId },
+  );
 }
