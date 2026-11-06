@@ -1414,7 +1414,7 @@ export function App() {
       <AuthorFilterContext.Provider value={authorFilter}>
       <StaleCloseContext.Provider value={setClosingPr}>
       {viewMode === "board" ? (
-        <PrBoard prs={filtered} onOpen={openPr} focus={boardFocus} />
+        <PrBoard prs={filtered} all={allPrs} onOpen={openPr} focus={boardFocus} onClearFilters={clearFilters} />
       ) : viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable

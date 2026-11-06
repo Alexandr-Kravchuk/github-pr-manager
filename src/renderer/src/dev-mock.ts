@@ -590,7 +590,52 @@ function mockAgentState(): AgentState {
       mergeMethods: byNumber(85)?.mergeMethods,
       mergeMethod: "squash",
     }),
+    // Your PR's self-review found a product decision only you can make.
+    item(137, {
+      key: `${byNumber(137)?.id}|drive|${byNumber(137)?.headOid}|self`,
+      scenario: "drive",
+      reasons: ["self"],
+      state: "needsYou",
+      headline: "Would push 1 commit: fix: keep the Usr prefix on rename",
+      finishedAt: iso(6 * 60_000),
+      sessionId: "88888888-8888-4888-8888-888888888888",
+      worktree: "/tmp/agent-dashboard-137",
+      result: {
+        summary: "Fixed the prefix on rename; one finding is a product decision.",
+        asks: [{ question: "Should the retry threshold be configurable per environment?", options: ["Yes, a system setting", "No, keep it fixed"] }],
+        findings: [],
+        authorQuestions: [],
+        structured: true,
+      },
+      drive: {
+        base: byNumber(137)?.headOid ?? "0".repeat(40),
+        head: "f".repeat(40),
+        reasons: ["self"],
+        commits: [{ oid: "f".repeat(40), subject: "fix: keep the Usr prefix on rename" }],
+        stat: " src/Schema/SchemaColumn.cs | 4 ++--\n 1 file changed, 2 insertions(+), 2 deletions(-)",
+        patch: "",
+      },
+    }),
+    // A review the agent sent a moment ago: the author's move now, the snapshot not caught up yet.
+    item(603, { state: "done", headline: "Published: request changes, 2 inline comments", published: true, finishedAt: iso(40 * 60_000) }),
   ].filter((i): i is AgentItem => i !== null);
+  // A PR the agent merged this morning: gone from the dashboard, done today.
+  items.push({
+    runId: runId(931),
+    key: "PR_merged_931|merge|1a2b3c",
+    prId: "PR_merged_931",
+    prNumber: 931,
+    repo: "acme/dashboard",
+    url: "https://github.com/acme/dashboard/pull/931",
+    title: "Back off on secondary rate limits",
+    hostLabel: prs[0]?.hostLabel ?? "GitHub",
+    scenario: "merge",
+    mode: "on",
+    state: "done",
+    headline: "Merged (squash), branch deleted",
+    queuedAt: iso(3 * 3_600_000),
+    finishedAt: iso(2 * 3_600_000),
+  });
   // A PR you merged a moment ago: gone from the dashboard, its Jira dry run still waits on the Board.
   items.push({
     runId: runId(930),

@@ -579,7 +579,7 @@ export function boardStage(pr: PullRequest | null, items: readonly AgentItem[], 
   if (lane === "mine") {
     if (sdlc) {
       // The orchestrator waits for someone to merge; everything else is its run's work.
-      if (githubReady(pr)) return card("you", pr.updatedAt, { kind: "merge", label: "Merge" });
+      if (githubReady(pr)) return card("you", pr.updatedAt, { kind: "merge", label: "Merge on GitHub" });
       if (pr.isDraft || needsWork(pr)) return card("agent", pr.updatedAt);
       return card("waiting", waitedSince);
     }
@@ -681,4 +681,110 @@ export function stageColumns(shown: readonly PullRequest[], all: readonly PullRe
     lane.done.sort((a, b) => b.stage.since.localeCompare(a.stage.since));
   }
   return board;
+}
+
+const EVENT_WORD: Record<string, string> = { APPROVE: "Approve", REQUEST_CHANGES: "Request changes", COMMENT: "Comment" };
+const REASON_WORK: Record<string, string> = { self: "Self-review before reviewers look", ci: "Fixing CI", conflicts: "Resolving the conflict", comments: "Answering reviewers' comments" };
+const REASON_NAME: Record<string, string> = { self: "Self-review", ci: "CI", conflicts: "Conflict", comments: "Reviewers' comments" };
+
+function count(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** What the agent is doing on a PR, in the words of the card, the tray and a list row. */
+export function workLine(item: Pick<AgentItem, "scenario" | "reasons">): string {
+  switch (item.scenario) {
+    case "review":
+      return "Drafting your review";
+    case "brief":
+      return "Reading a big PR for a brief";
+    case "rereview":
+      return "Re-reviewing — the author answered";
+    case "merge":
+      return "Merging";
+    case "afterMerge":
+      return "Checking Jira after the merge";
+    case "drive": {
+      const r = item.reasons ?? [];
+      return r.length > 0 ? r.map((x) => REASON_WORK[x] ?? x).join(" · ") : "Working on your PR";
+    }
+  }
+}
+
+/**
+ * A card's action line: what goes out, what waits, what happened — in your
+ * words, never the implementation's ("Request changes · 2 comments", "Self-review:
+ * 2 fixes ready to push", "Approved by anna, ivan · CI green").
+ */
+export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
+  const item = stage.item;
+  if (stage.column === "agent") {
+    if (item) return workLine(item);
+    return "The SDLC run is on it";
+  }
+  const kind = stage.action?.kind;
+  if (stage.column === "you" && item) {
+    if (kind === "send" && item.plan) {
+      const p = item.plan;
+      return [
+        p.event ? EVENT_WORD[p.event] : "Comment",
+        p.comments.length > 0 ? count(p.comments.length, "comment") : null,
+        p.replies.length > 0 ? count(p.replies.length, "reply", "replies") : null,
+        p.escalations.length > 0 ? `${p.escalations.length} pushed back` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    }
+    if (kind === "push") {
+      const n = item.drive?.commits.length ?? 0;
+      const what = (item.reasons ?? []).map((x) => REASON_NAME[x] ?? x).join(" + ") || "The agent";
+      const replies = item.plan && !item.published ? item.plan.replies.length : 0;
+      return `${what}: ${count(n, "fix", "fixes")}${replies > 0 ? ` and ${count(replies, "answer")}` : ""} ready to push`;
+    }
+    if (kind === "decide") {
+      const asks = item.result?.asks ?? [];
+      return `Your call: ${asks[0]?.question ?? ""}${asks.length > 1 ? ` (+${asks.length - 1} more)` : ""}`;
+    }
+    if (kind === "draftReview") {
+      const q = item.result?.authorQuestions.length ?? 0;
+      const lines = pr ? pr.additions + pr.deletions : 0;
+      return `${lines > 0 ? `Big PR, ${lines.toLocaleString("en-US")} lines — brief` : "Brief ready"}${q > 0 ? ` · ${count(q, "question")} for the author` : ""}`;
+    }
+    if (kind === "fix") return item.headline;
+  }
+  if (kind === "merge" && pr) {
+    const approved = pr.reviewers.filter((r) => r.reviewState === "approved").map((r) => r.login);
+    const ci = pr.ciState === "success" ? "CI green" : null;
+    return [approved.length > 0 ? `Approved by ${approved.join(", ")}` : "Ready to merge", ci].filter(Boolean).join(" · ");
+  }
+  if (kind === "updateJira") return "Merged — Jira changes to apply";
+  if (pr && stage.column === "you") {
+    if (kind === "review") return pr.requestedOfMe ? "Review requested" : "Review requested of your team";
+    if (kind === "rereview") return pr.myReReviewDue ? "The author answered your review" : "Asked to review again";
+    if (kind === "draft") return "Draft — the agent self-reviews it once it's ready for review";
+    if (kind === "fixYourself") {
+      const parts: string[] = [];
+      if (pr.ciState === "failure") {
+        const names = pr.failingChecks.map((c) => c.name);
+        parts.push(names.length > 0 ? `CI failing: ${names.slice(0, 3).join(", ")}${names.length > 3 ? ` +${names.length - 3}` : ""}` : "CI failing");
+      }
+      if (pr.hasConflicts) parts.push("Conflicts with the base branch");
+      if (pr.hasUnaddressedChangeRequest || pr.hasUnaddressedComments) parts.push("Reviewers wait for your answer");
+      return parts.join(" · ");
+    }
+  }
+  if (stage.column === "waiting" && pr) {
+    if (stage.lane === "mine") {
+      if (pr.blockedByStack) return "Waits for the PR below it in the stack";
+      const parts = pr.reviewers.map((r) => (r.reviewState === "approved" ? `${r.login} ✓` : r.reviewState === "changes_requested" ? `${r.login} asked for changes` : `${r.login} pending`));
+      return parts.length > 0 ? parts.join(" · ") : "Waiting for reviewers";
+    }
+    const verdict = pr.viewerHasReviewed ? (pr.viewerApproved ? "You approved" : "You asked for changes") : pr.roles.includes("reviewed") ? "You commented" : "Waiting for the author";
+    return `${verdict}${pr.unresolvedThreads > 0 ? ` · ${count(pr.unresolvedThreads, "thread")} open` : ""}`;
+  }
+  if (stage.column === "done") {
+    if (pr?.viewerApproved) return "You approved";
+    if (item) return item.headline;
+  }
+  return item?.headline ?? "";
 }

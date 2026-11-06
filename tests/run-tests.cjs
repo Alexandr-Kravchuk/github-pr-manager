@@ -8954,13 +8954,38 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ["the run's work", sPr({ hasUnaddressedChangeRequest: true }), ["mine", "agent", null, null, false]],
         ["a draft the run builds", sPr({ isDraft: true }), ["mine", "agent", null, null, false]],
         ["with reviewers", sPr(), ["mine", "waiting", null, null, false]],
-        ["ready: the run waits for someone to merge", sPr({ canBeMerged: true, awaitingReview: false }), ["mine", "you", "merge", "Merge", false]],
+        ["ready: the run waits for someone to merge", sPr({ canBeMerged: true, awaitingReview: false }), ["mine", "you", "merge", "Merge on GitHub", false]],
       ];
       for (const [name, pr, want] of rows) {
         const s = stage(pr, [], { orchestrated: sdlc });
         assert.deepStrictEqual(where(s), want, name);
         assert.deepStrictEqual(s.sdlc, sdlc.P, name);
       }
+    });
+
+    test("stageLine: a card says what goes out, what waits and what happened — in your words", () => {
+      const line = (pr, items) => view.stageLine(stage(pr, items), pr);
+      const esc = { ...plan("REQUEST_CHANGES", 1), escalations: [{ replyTo: 9, body: "b" }] };
+      assert.strictEqual(line(rPr(), [sIt({ state: "needsYou", plan: esc })]), "Request changes · 1 comment · 1 reply · 1 pushed back");
+      assert.strictEqual(line(sPr(), [sIt({ scenario: "drive", reasons: ["self"], state: "needsYou", drive: drive(2) })]), "Self-review: 2 fixes ready to push");
+      assert.strictEqual(
+        line(sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(1), plan: plan("COMMENT", 2) })]),
+        "Reviewers' comments: 1 fix and 2 answers ready to push",
+      );
+      const asks = [{ question: "Configurable?", options: [] }, { question: "Rename it?", options: [] }];
+      assert.strictEqual(line(sPr(), [sIt({ scenario: "drive", state: "needsYou", drive: drive(0), result: { summary: "", asks, findings: [], authorQuestions: [], structured: true } })]), "Your call: Configurable? (+1 more)");
+      const reviewers = [{ login: "anna", avatarUrl: "", reviewState: "approved" }, { login: "ivan", avatarUrl: "", reviewState: "pending" }];
+      assert.strictEqual(line(sPr({ canBeMerged: true, awaitingReview: false, reviewers: reviewers.slice(0, 1) }), []), "Approved by anna · CI green");
+      assert.strictEqual(line(sPr({ reviewers }), []), "anna ✓ · ivan pending");
+      assert.strictEqual(line(sPr({ reviewers: [] }), []), "Waiting for reviewers");
+      assert.strictEqual(
+        line(sPr({ ciState: "failure", failingChecks: [{ name: "lint" }, { name: "unit" }], hasConflicts: true }), []),
+        "CI failing: lint, unit · Conflicts with the base branch",
+      );
+      assert.strictEqual(line(rPr({ roles: ["reviewed"], viewerHasReviewed: true, unresolvedThreads: 3 }), []), "You asked for changes · 3 threads open");
+      assert.strictEqual(line(rPr({ requestedOfMe: false }), []), "Review requested of your team");
+      assert.strictEqual(view.workLine({ scenario: "drive", reasons: ["ci", "comments"] }), "Fixing CI · Answering reviewers' comments");
+      assert.strictEqual(view.workLine({ scenario: "rereview" }), "Re-reviewing — the author answered");
     });
 
     test("stageColumns: one card per PR, in its lane and column; filters hide cards but not the count of what's ready", () => {

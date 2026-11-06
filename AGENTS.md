@@ -174,9 +174,12 @@ Three layers:
   Finder-style `ViewSwitch` in the header row next to Refresh and persisted with
   the other view preferences in `localStorage`: `roomy` (`PrCard`, the original
   full cards and the default), `cozy` (`PrTable`), `compact` (`PrTile`) and
-  `board` (`PrBoard`: the filtered PRs in the PR agent's columns — Idle, Queued,
-  Working, Needs you, Done today — which, like Cozy, turns off Group-by and
-  Sort).
+  `board` (`PrBoard`: the filtered PRs by whose move it is, in two lanes — your
+  PRs and the PRs you review — of four columns: Your move, Agent on it, With
+  reviewers / With the author, Merged today / Done today. The column is
+  `boardStage` in `shared/agent-view.ts`, one pure function the chip and the
+  tray read too, so a PR is in one column only; a Your-move card has one
+  button and a ⋯ of at most three. Like Cozy it turns off Group-by and Sort).
   Roomy and Compact are the same grid at two densities — one `PrList` renders
   both, so their column counts are the only difference and can't drift. Cozy is
   the odd one out and deliberately so: it is one FLAT table sorted by any

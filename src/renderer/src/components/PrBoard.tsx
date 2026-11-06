@@ -1,45 +1,86 @@
-import { useContext, useEffect, useMemo, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
+import { useContext, useEffect, useState, type FormEvent, type ReactNode } from "react";
 
-// Node-free (see AGENTS.md): the columns, the day, and the plan's current step.
-import { agentSummary, BOARD_LANES, boardColumns, boardLanes, itemKind, primaryActionLabel, runFor, todayKey, type BoardLane } from "../../../shared/agent-view";
-import { currentStep, type RunProgress } from "../../../shared/agent-stream";
+// Node-free (see AGENTS.md): where each PR stands, the day, and the plan's current step.
+import {
+  agentSummary,
+  BOARD_COLUMNS,
+  BOARD_LANES,
+  queueOrder,
+  runFor,
+  stageColumns,
+  stageLine,
+  todayKey,
+  type BoardColumn,
+  type BoardLane,
+  type StageCard,
+} from "../../../shared/agent-view";
+import { currentStep } from "../../../shared/agent-stream";
 import type { PublishSummary } from "../../../shared/agent-publish";
 import { resultCard, type FindingSeverity, type RunAsk, type RunFinding } from "../../../shared/agent-result";
-import type { AgentAction, AgentItem, MergeMethod, PullRequest } from "../../../shared/types";
+import type { AgentAction, AgentItem, AgentState, MergeMethod, PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { AgentContext } from "./agent-context";
-import { AGENT_STATE_DOT } from "./AgentStatus";
 
-// The Board: what the PR agent is doing — Idle → Queued → Working → Needs you
-// → Done today. The agent's columns hold ALL of its work, whatever the
-// dashboard's filters show, so the Board, the header chip and the tray never
-// disagree; only Idle (the PRs you might hand it) follows the filters. The
-// columns are its order, so Sort and Group-by are off while it is on. The
-// queue's order is yours: drag a queued card, or "Run next"; an idle PR
-// dropped on a queued card takes that place.
+// The Board: every PR in the column of whose move it is — yours, the agent's,
+// the people you wait on — or done today, in two lanes: your PRs and the PRs
+// you review. One card per PR (`stageColumns`, which the chip and the tray
+// read too). A card in Your move has one button for the one thing to do, the
+// rest under ⋯; the other columns are there to look at. It follows the
+// dashboard's filters and says how many prepared moves they hide. The columns
+// are its order, so Sort and Group-by are off while it is on.
 
 const LANE_TITLE: Record<BoardLane, string> = { mine: "Your PRs", review: "PRs you review" };
-const LANE_HINT: Record<BoardLane, string> = {
-  mine: "self-review, reviewers' comments, CI and conflicts, merge offers",
-  review: "reviews, briefs, re-reviews",
-};
 const LANE_DOT: Record<BoardLane, string> = { mine: "bg-violet-500", review: "bg-sky-500" };
+const COLUMN_TITLE: Record<BoardLane, Record<BoardColumn, string>> = {
+  mine: { you: "Your move", agent: "Agent on it", waiting: "With reviewers", done: "Merged today" },
+  review: { you: "Your move", agent: "Agent on it", waiting: "With the author", done: "Done today" },
+};
+const COLUMN_EMPTY: Record<BoardLane, Record<BoardColumn, string>> = {
+  mine: { you: "Nothing waits for you", agent: "Nothing for the agent", waiting: "None waits on reviewers", done: "Nothing merged yet today" },
+  review: { you: "Nothing waits for you", agent: "Nothing for the agent", waiting: "None waits on its author", done: "Nothing finished yet today" },
+};
+const COLUMN_DOT: Record<BoardColumn, string> = { you: "bg-amber-500", agent: "bg-sky-500", waiting: "bg-zinc-400 dark:bg-zinc-500", done: "bg-emerald-500" };
 
 /** An answer is a note to the session, like a hint (main holds it to the same bound). */
 const AGENT_ANSWER_MAX = 2_000;
 
-/** An idle PR dragged towards the queue. */
-const DRAG_TYPE = "application/x-prd-pr";
-/** A queued run dragged to another place in the queue. */
-const RUN_DRAG = "application/x-prd-run";
-const BTN = "inline-flex items-center gap-1 rounded-md border border-line-strong bg-surface px-2.5 py-1 text-xs font-medium text-fg-secondary hover:bg-elevated";
-const BTN_PRIMARY = "inline-flex items-center gap-1 rounded-md border border-sky-600 bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-700";
+const BTN = "inline-flex items-center gap-1 rounded-md border border-line-strong bg-surface px-2.5 py-1 text-xs font-medium text-fg-secondary hover:bg-elevated disabled:opacity-60";
+const BTN_PRIMARY = "inline-flex items-center gap-1 rounded-md border border-sky-600 bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-60";
+const LINK = "text-xs text-sky-700 hover:underline dark:text-sky-300";
+
+type Run = (a: AgentAction) => Promise<boolean>;
 
 function shortRepo(repo: string): string {
   return repo.split("/")[1] ?? repo;
 }
 
-export function PrBoard({ prs, onOpen, focus }: { prs: PullRequest[]; onOpen: (pr: PullRequest) => void; focus?: { runId: string | null; n: number } }) {
+/** A queued run's place in the agent's one queue, as the card says it. */
+function inLine(n: number): string {
+  if (n <= 1) return "Up next";
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? "th" : n % 10 === 1 ? "st" : n % 10 === 2 ? "nd" : n % 10 === 3 ? "rd" : "th";
+  return `${n}${suffix} in line`;
+}
+
+function openUrl(url: string): void {
+  window.api.openExternal(url).catch(() => {});
+}
+
+export function PrBoard({
+  prs,
+  all,
+  onOpen,
+  focus,
+  onClearFilters,
+}: {
+  /** The PRs the dashboard's filters let through. */
+  prs: PullRequest[];
+  /** Every PR in the snapshot — to tell a filtered-out PR from one that left the dashboard. */
+  all: PullRequest[];
+  onOpen: (pr: PullRequest) => void;
+  focus?: { runId: string | null; n: number };
+  onClearFilters?: () => void;
+}) {
   const { state, act } = useContext(AgentContext);
   // Asked to show an item: its card, scrolled to and flashing (a finite animation).
   useEffect(() => {
@@ -56,47 +97,21 @@ export function PrBoard({ prs, onOpen, focus }: { prs: PullRequest[]; onOpen: (p
     }, 50);
     return () => window.clearTimeout(t);
   }, [focus?.n, focus?.runId]);
-  const [idleOpen, setIdleOpen] = useState(false);
-  /** The lane whose queue a drag is over. */
-  const [dropOn, setDropOn] = useState<BoardLane | null>(null);
-  /** The queued card a drag would land in front of. */
-  const [dropBefore, setDropBefore] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const byId = useMemo(() => new Map(prs.map((p) => [p.id, p])), [prs]);
 
   if (!state) {
     return <div className="rounded-lg border border-line bg-surface/40 p-8 text-center text-sm text-fg-subtle">The PR agent isn&apos;t available here.</div>;
   }
-  const all = boardColumns(prs, state, todayKey(new Date()));
+  const board = stageColumns(prs, all, state, { today: todayKey(new Date()), idle: state.idle });
   const sum = agentSummary(state);
-  const lanes = boardLanes(all);
   // The queue is one queue: a card's place in it, whichever lane shows it.
-  const place = new Map(all.queued.map((i, n) => [i.runId, n + 1]));
-  const run = async (action: AgentAction) => {
+  const queue = queueOrder(state.items.filter((i) => i.state === "queued"));
+  const place = new Map(queue.map((i, n) => [i.runId, n + 1]));
+  const run: Run = async (action) => {
     const res = await act(action);
     setNotice(res.ok ? null : res.error);
+    return res.ok;
   };
-  const openItem = (item: AgentItem) => {
-    const pr = byId.get(item.prId);
-    if (pr) onOpen(pr);
-    else window.api.openExternal(item.url).catch(() => {});
-  };
-  const accepts = (e: DragEvent) => e.dataTransfer.types.includes(DRAG_TYPE) || e.dataTransfer.types.includes(RUN_DRAG);
-  /** A drop in the queue: in front of `before`, or at the end. */
-  const dropAt = (e: DragEvent, before: string | null) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDropOn(null);
-    setDropBefore(null);
-    const runId = e.dataTransfer.getData(RUN_DRAG);
-    if (runId) {
-      if (runId !== before) void run({ type: "moveQueued", runId, before });
-      return;
-    }
-    const prId = e.dataTransfer.getData(DRAG_TYPE);
-    if (prId) void run({ type: "enqueue", prId, before });
-  };
-  const onDrop = (e: DragEvent) => dropAt(e, null);
 
   return (
     <div>
@@ -105,25 +120,39 @@ export function PrBoard({ prs, onOpen, focus }: { prs: PullRequest[]; onOpen: (p
         {state.enabled ? (
           <>
             <span>
-              Running {sum.running} of {state.parallel}
-              {sum.pausedRuns > 0 && ` (${sum.pausedRuns} paused)`} · runs today {state.runsToday} of {state.perDay}
+              {sum.running > 0 ? `Working on ${sum.running}` : "Not working on any"}
+              {sum.pausedRuns > 0 && ` (${sum.pausedRuns} paused)`}
+              {sum.queued > 0 && ` · ${sum.queued} in line`} · runs today {state.runsToday} of {state.perDay}
             </span>
             {sum.block === "paused" && <span className="font-medium text-amber-700 dark:text-amber-300">Paused — nothing starts, and nothing goes out on its own</span>}
             {sum.block === "quiet" && <span>{sum.blockText} — only what you ask for starts</span>}
             {sum.block === "usage" && <span className="text-amber-700 dark:text-amber-300">Claude&apos;s {sum.blockText?.toLowerCase()}</span>}
             {sum.block === "daily" && (
               <span className="text-amber-700 dark:text-amber-300">
-                {sum.blockText} — {sum.queued > 0 ? `${sum.queued} queued wait` : "new runs wait"} until tomorrow (Settings › Agent › Limits)
+                {sum.blockText} — {sum.queued > 0 ? `${sum.queued} in line wait` : "new runs wait"} until tomorrow (Settings › Agent › Limits)
               </span>
             )}
             {state.suggestOn && (
               <span className="text-emerald-700 dark:text-emerald-300">
-                You published {state.acceptedUnchanged} reviews exactly as prepared — reviews can go On in Settings › Agent.
+                You sent {state.acceptedUnchanged} reviews exactly as drafted — reviews can go On in Settings › Agent.
               </span>
             )}
           </>
         ) : (
-          <span>Off — switch it on in Settings › Agent.</span>
+          <span>Off — the Board still shows whose move each PR is; switch the agent on in Settings › Agent.</span>
+        )}
+        {board.hiddenReady > 0 && (
+          <span className="text-amber-700 dark:text-amber-300">
+            {board.hiddenReady} ready for you {board.hiddenReady === 1 ? "is" : "are"} hidden by the filters
+            {onClearFilters && (
+              <>
+                {" · "}
+                <button type="button" className="font-medium underline" onClick={onClearFilters}>
+                  Clear
+                </button>
+              </>
+            )}
+          </span>
         )}
         <span className="ml-auto flex items-center gap-3">
           {notice && (
@@ -140,159 +169,39 @@ export function PrBoard({ prs, onOpen, focus }: { prs: PullRequest[]; onOpen: (p
       </div>
 
       {BOARD_LANES.map((lane) => {
-        const cols = lanes[lane];
-        const busy = cols.queued.length + cols.working.length + cols.needsYou.filter((i) => !i.later).length;
+        const cols = board[lane];
         return (
           <section key={lane} aria-label={LANE_TITLE[lane]} className="mb-4">
             <h2 className="mb-2 flex items-baseline gap-2 px-1">
               <span aria-hidden className={cn("inline-block size-2 self-center rounded-full", LANE_DOT[lane])} />
               <span className="text-sm font-semibold text-fg">{LANE_TITLE[lane]}</span>
-              <span className="text-xs tabular-nums text-fg-muted" title="Queued, working and waiting for you in this lane">
-                {busy}
-              </span>
-              <span className="text-xs text-fg-subtle">— {LANE_HINT[lane]}</span>
+              {cols.you.length > 0 && <span className="text-xs text-amber-700 dark:text-amber-300">{cols.you.length} your move</span>}
             </h2>
             <div className="flex items-start gap-3 overflow-x-auto pb-2">
-              {idleOpen ? (
-                <Column label="Idle" count={cols.idle.length} dot="queued" className="min-w-[11rem] flex-1 basis-0 border-dashed" aside={<button type="button" onClick={() => setIdleOpen(false)} className="text-xs text-fg-subtle hover:text-fg">Fold</button>}>
-                  {cols.idle.length === 0 ? (
-                    <Empty>Every PR has the agent&apos;s attention.</Empty>
+              {BOARD_COLUMNS.map((col) => (
+                <Column
+                  key={col}
+                  title={COLUMN_TITLE[lane][col]}
+                  count={cols[col].length}
+                  dot={COLUMN_DOT[col]}
+                  className={col === "you" ? "min-w-[15rem] flex-[1.6] border-amber-500/50 bg-amber-500/[0.05]" : "min-w-[11rem] flex-1"}
+                  aside={
+                    col === "done" && cols.earlier > 0 ? (
+                      <span className="text-[11px] text-fg-subtle" title="Your approvals from earlier days: their PRs wait on others now">
+                        +{cols.earlier} earlier
+                      </span>
+                    ) : undefined
+                  }
+                >
+                  {cols[col].length === 0 ? (
+                    <Empty>{state.enabled || col !== "agent" ? COLUMN_EMPTY[lane][col] : "The agent is off"}</Empty>
                   ) : (
-                    cols.idle.map(({ pr, reason }) => <IdleCard key={pr.id} pr={pr} reason={reason} onOpen={onOpen} onQueue={state.enabled ? () => void run({ type: "enqueue", prId: pr.id }) : undefined} />)
+                    cols[col].map((card) => (
+                      <BoardCard key={card.prId} card={card} state={state} place={place} first={queue[0]?.runId ?? null} run={run} onOpen={() => (card.pr ? onOpen(card.pr) : card.stage.item && openUrl(card.stage.item.url))} />
+                    ))
                   )}
                 </Column>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setIdleOpen(true)}
-                  title="Show the PRs the agent has nothing for"
-                  className="flex w-10 shrink-0 flex-col items-center gap-2 self-stretch rounded-lg border border-dashed border-line-strong bg-elevated/30 py-3 text-xs text-fg-muted hover:bg-elevated/60"
-                >
-                  <span className="rounded-full border border-line-strong px-1.5 tabular-nums">{cols.idle.length}</span>
-                  <span className="[writing-mode:vertical-rl]">Idle — open to hand PRs to the agent</span>
-                </button>
-              )}
-
-              <Column
-                label="Queued"
-                count={cols.queued.length}
-                dot="queued"
-                className={cn("min-w-[11rem] flex-1 basis-0", dropOn === lane && "border-sky-500 bg-sky-500/10")}
-                dropProps={{
-                  onDragOver: (e) => {
-                    if (accepts(e)) {
-                      e.preventDefault();
-                      setDropOn(lane);
-                      setDropBefore(null);
-                    }
-                  },
-                  onDragLeave: () => setDropOn(null),
-                  onDrop,
-                }}
-              >
-                {cols.queued.length === 0 ? (
-                  <Empty>{state.enabled ? "Drop an idle PR here to hand it to the agent" : "Nothing queued"}</Empty>
-                ) : (
-                  cols.queued.map((item) => (
-                    <article
-                      key={item.runId}
-                      data-run-id={item.runId}
-                      draggable
-                      onDragStart={(e) => {
-                        e.dataTransfer.setData(RUN_DRAG, item.runId);
-                        e.dataTransfer.effectAllowed = "move";
-                      }}
-                      onDragOver={(e) => {
-                        if (accepts(e)) {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setDropOn(lane);
-                          setDropBefore(item.runId);
-                        }
-                      }}
-                      onDrop={(e) => dropAt(e, item.runId)}
-                      className={cn(
-                        "cursor-grab rounded-md border border-line bg-surface p-2.5 shadow-sm active:cursor-grabbing",
-                        // Where the drop lands: a line above this card.
-                        dropOn === lane && dropBefore === item.runId && "border-t-2 border-t-sky-500",
-                      )}
-                    >
-                      <CardHead item={item} onTitle={() => openItem(item)} />
-                      <div className="mt-1 text-xs text-fg-muted">{item.headline}</div>
-                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                        {place.get(item.runId) === 1 ? (
-                          <span className="text-[11px] font-medium text-sky-700 dark:text-sky-300">Next up</span>
-                        ) : (
-                          <>
-                            <span className="text-[11px] tabular-nums text-fg-subtle" title="Its place in the agent's one queue — both lanes">
-                              {place.get(item.runId)} of {all.queued.length}
-                            </span>
-                            <button
-                              type="button"
-                              className={BTN}
-                              title="Put it at the front of the queue"
-                              onClick={() => void run({ type: "moveQueued", runId: item.runId, before: all.queued[0].runId })}
-                            >
-                              Run next
-                            </button>
-                          </>
-                        )}
-                        <button type="button" className={BTN} title="Take it out of the queue — the agent won't queue it again for this head" onClick={() => void run({ type: "skip", runId: item.runId })}>
-                          Skip
-                        </button>
-                      </div>
-                    </article>
-                  ))
-                )}
-              </Column>
-
-              <Column label="Working" count={cols.working.length} dot="working" className="min-w-[11rem] flex-1 basis-0">
-                {cols.working.length === 0 ? (
-                  <Empty>Nothing running</Empty>
-                ) : (
-                  cols.working.map((item) => {
-                    const r = runFor(state, item.runId);
-                    return <WorkingCard key={item.runId} item={item} progress={r?.progress ?? null} paused={r?.paused ?? false} onTitle={() => openItem(item)} run={run} />;
-                  })
-                )}
-              </Column>
-
-              <Column label="Needs you" count={cols.needsYou.filter((i) => !i.later).length} aside={cols.needsYou.some((i) => i.later) ? <span className="text-[11px] text-fg-subtle" title="Put aside with Later — at the end of the column">+{cols.needsYou.filter((i) => i.later).length} later</span> : undefined} dot="needsYou" className="min-w-[15rem] flex-[1.6] basis-0 border-amber-500/50 bg-amber-500/[0.05]">
-                {cols.needsYou.length === 0 ? (
-                  <Empty>Nothing waits for you</Empty>
-                ) : (
-                  cols.needsYou.map((item) => <NeedsYouCard key={item.runId} item={item} onTitle={() => openItem(item)} run={run} />)
-                )}
-              </Column>
-
-              <Column label="Done today" count={cols.done.length} dot="done" className="min-w-[11rem] flex-1 basis-0">
-                {cols.done.length === 0 ? (
-                  <Empty>Nothing finished yet</Empty>
-                ) : (
-                  cols.done.map((item) => (
-                    <ItemCard key={item.runId} item={item} onTitle={() => openItem(item)}>
-                      {item.finishedAt && <span className="text-[11px] text-fg-subtle">{relativeTime(item.finishedAt)}</span>}
-                      {(cols.doneRuns[item.runId] ?? 1) > 1 && (
-                        <span className="text-[11px] text-fg-subtle" title="This PR's earlier results today are folded into this card; this is the latest">
-                          · {cols.doneRuns[item.runId] - 1} earlier today
-                        </span>
-                      )}
-                      {resultCard(item)?.summary && <span className="line-clamp-2 w-full text-[11px] text-fg-subtle">{resultCard(item)?.summary}</span>}
-                      {/* Off Idle until tomorrow, so the card itself hands the PR over again. */}
-                      {state.enabled && byId.has(item.prId) && item.scenario !== "afterMerge" && (
-                        <button
-                          type="button"
-                          className={cn(BTN, "mt-1 py-0.5")}
-                          title="Queue it for the agent again"
-                          onClick={() => void run({ type: "enqueue", prId: item.prId })}
-                        >
-                          Hand to agent again
-                        </button>
-                      )}
-                    </ItemCard>
-                  ))
-                )}
-              </Column>
+              ))}
             </div>
           </section>
         );
@@ -301,33 +210,13 @@ export function PrBoard({ prs, onOpen, focus }: { prs: PullRequest[]; onOpen: (p
   );
 }
 
-function Column({
-  label,
-  count,
-  limit,
-  dot,
-  className,
-  aside,
-  dropProps,
-  children,
-}: {
-  label: string;
-  count: number;
-  limit?: number;
-  dot: AgentItem["state"];
-  className?: string;
-  aside?: ReactNode;
-  dropProps?: { onDragOver: (e: DragEvent) => void; onDragLeave: () => void; onDrop: (e: DragEvent) => void };
-  children: ReactNode;
-}) {
+function Column({ title, count, dot, className, aside, children }: { title: string; count: number; dot: string; className?: string; aside?: ReactNode; children: ReactNode }) {
   return (
-    <section {...dropProps} aria-label={label} className={cn("flex flex-col self-stretch rounded-lg border border-line bg-elevated/40", className)}>
+    <section aria-label={title} className={cn("flex basis-0 flex-col self-stretch rounded-lg border border-line bg-elevated/40", className)}>
       <header className="flex items-center gap-2 px-3 py-2">
-        <span aria-hidden className={cn("inline-block size-2 rounded-full", AGENT_STATE_DOT[dot])} />
-        <h3 className="text-sm font-semibold text-fg-secondary">{label}</h3>
-        <span className="rounded-full border border-line-strong px-1.5 text-xs tabular-nums text-fg-muted" title={limit ? `${count} running, at most ${limit} at a time` : undefined}>
-          {limit ? `${count} / ${limit}` : count}
-        </span>
+        <span aria-hidden className={cn("inline-block size-2 rounded-full", dot)} />
+        <h3 className="text-sm font-semibold text-fg-secondary">{title}</h3>
+        <span className="rounded-full border border-line-strong px-1.5 text-xs tabular-nums text-fg-muted">{count}</span>
         <span className="flex-1" />
         {aside}
       </header>
@@ -340,92 +229,361 @@ function Empty({ children }: { children: ReactNode }) {
   return <div className="px-1 py-4 text-center text-xs text-fg-faint">{children}</div>;
 }
 
-function Chip({ children }: { children: ReactNode }) {
-  return <span className="inline-flex items-center rounded border border-line-strong px-1.5 py-px text-[11px] text-fg-muted">{children}</span>;
+interface MenuItem {
+  label: string;
+  title?: string;
+  action: () => void | Promise<unknown>;
 }
 
-function CardHead({ item, onTitle }: { item: AgentItem; onTitle: () => void }) {
+/** What the ⋯ menu offers on a card: at most three things, never the card's own button. */
+function menuFor(card: StageCard, state: AgentState, first: string | null, run: Run, openCompanion: (runId?: string) => void): MenuItem[] {
+  const { stage, pr } = card;
+  const item = stage.item;
+  const out: MenuItem[] = [];
+  const hasSession = Boolean(item?.sessionId && (item.worktree || item.scenario === "afterMerge"));
+  const hand = (label: string, title: string) => {
+    if (state.enabled && pr && !stage.sdlc) out.push({ label, title, action: () => run({ type: "enqueue", prId: pr.id }) });
+  };
+  if (stage.column === "agent" && item) {
+    if (item.state === "working") {
+      if (state.headerChip) out.push({ label: "Watch", title: "The plan, the log, a note to the agent", action: () => openCompanion(item.runId) });
+      out.push({ label: "Stop", title: "Stop the run; it comes back as a note on the card", action: () => run({ type: "stop", runId: item.runId }) });
+    } else {
+      if (first && first !== item.runId) out.push({ label: "Run now", title: "Put it at the front of the line", action: () => run({ type: "moveQueued", runId: item.runId, before: first }) });
+      out.push({ label: "Don't run", title: "Take it out of the line — the agent won't take it up again for this head", action: () => run({ type: "skip", runId: item.runId }) });
+    }
+    return out;
+  }
+  if (stage.column === "waiting") {
+    hand(stage.lane === "mine" ? "Self-review again" : "Re-review now", stage.lane === "mine" ? "The agent reviews its head again before reviewers look" : "The agent re-reviews it now");
+    return out;
+  }
+  if (stage.column !== "you" || !stage.action) return out;
+  const discard = (label: string, title: string) => item && out.push({ label, title, action: () => run({ type: "skip", runId: item.runId }) });
+  const claude = (label: string, title: string) => hasSession && item && out.push({ label, title, action: () => run({ type: "continue", runId: item.runId }) });
+  switch (stage.action.kind) {
+    case "send":
+      claude("Edit in Claude", "Open the session in your terminal to change the review; the card shows the new draft when you're back");
+      discard("Discard draft", "You'll review it yourself — the agent leaves this head alone");
+      break;
+    case "push":
+      claude("Open in Claude", "Open the session in your terminal");
+      discard("Discard", "Drop these commits — the agent leaves this head alone");
+      break;
+    case "decide": {
+      const n = item?.drive && !item.pushed ? item.drive.commits.length : 0;
+      if (item && n > 0) out.push({ label: `Push ${n} fix${n === 1 ? "" : "es"}`, title: "Push what it has without answering", action: () => run({ type: "push", runId: item.runId }) });
+      claude("Open in Claude", "Answer it in the session instead");
+      discard("Discard", "Drop it — the agent leaves this head alone");
+      break;
+    }
+    case "merge":
+      if (item && pr) out.push({ label: "Open on GitHub", action: () => openUrl(pr.url) });
+      break;
+    case "draftReview":
+      discard("I'll review myself", "Drop the brief — the agent leaves this head alone");
+      break;
+    case "fix":
+      if (item && stage.action.label !== "Try again") out.push({ label: "Try again", title: "Start over with a new session", action: () => run({ type: "retry", runId: item.runId }) });
+      discard("Discard", "Leave it — the agent won't try this head again");
+      break;
+    case "review":
+      hand("Let the agent draft it", "Queue a review draft for you to send");
+      break;
+    case "rereview":
+      hand("Let the agent re-review it", "Queue a re-review for you to send");
+      break;
+    case "fixYourself":
+      hand("Let the agent fix it", "Queue a run that fixes it; you push what it prepares");
+      break;
+    default:
+      break;
+  }
+  return out.slice(0, 3);
+}
+
+function BoardCard({
+  card,
+  state,
+  place,
+  first,
+  run,
+  onOpen,
+}: {
+  card: StageCard;
+  state: AgentState;
+  place: ReadonlyMap<string, number>;
+  first: string | null;
+  run: Run;
+  onOpen: () => void;
+}) {
+  const { openCompanion } = useContext(AgentContext);
+  const [more, setMore] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const { stage, pr } = card;
+  const item = stage.item;
+  const repo = pr?.repo ?? item?.repo ?? "";
+  const number = pr?.number ?? item?.prNumber ?? 0;
+  const title = pr?.title ?? item?.title ?? "";
+  const url = pr?.url ?? item?.url ?? "";
+  const line = stageLine(stage, pr);
+  const note = stage.note && stage.note !== line ? stage.note : null;
+  const menu = menuFor(card, state, first, run, openCompanion);
+  const kind = stage.action?.kind ?? null;
+  const result = item ? resultCard(item) : null;
+  const doing = async (action: AgentAction) => {
+    setBusy(true);
+    await run(action);
+    setBusy(false);
+  };
+  const tone =
+    kind === "fix"
+      ? "border-red-500/60"
+      : kind === "merge" && stage.ready
+        ? "border-emerald-500/50"
+        : kind === "decide"
+          ? "border-amber-500/60"
+          : item?.state === "working"
+            ? "border-sky-500/40"
+            : "border-line";
+
   return (
-    <>
+    <article data-run-id={item?.runId} data-pr-id={card.prId} className={cn("rounded-md border bg-surface p-2.5 shadow-sm", tone, stage.action?.kind === "draft" && "opacity-75")}>
       <div className="flex items-center gap-1.5 text-[11px] text-fg-subtle">
         <span className="truncate">
-          {shortRepo(item.repo)} #{item.prNumber}
+          {shortRepo(repo)} #{number}
+          {pr?.issueKey ? ` · ${pr.issueKey}` : ""}
         </span>
+        {stage.sdlc && (
+          <span className="shrink-0 rounded border border-violet-500/50 bg-violet-500/10 px-1 text-[10px] font-medium text-violet-700 dark:text-violet-300" title="An SDLC orchestrator run drives this PR; the PR agent leaves it alone">
+            SDLC · {stage.sdlc.key}
+            {stage.sdlc.stage ? ` · ${stage.sdlc.stage}` : ""}
+          </span>
+        )}
         <span className="flex-1" />
-        <Chip>{itemKind(item)}</Chip>
-        {item.mode === "shadow" && (item.scenario === "review" || item.scenario === "rereview" || item.scenario === "drive") && <Chip>shadow</Chip>}
+        <span className="shrink-0" title={`Here since ${new Date(stage.since).toLocaleString()}`}>
+          {relativeTime(stage.since)}
+        </span>
+        {menu.length > 0 && (
+          <button type="button" className="shrink-0 rounded px-1 leading-none text-fg-muted hover:bg-elevated hover:text-fg" aria-expanded={more} aria-label="More actions" title="More actions" onClick={() => setMore((v) => !v)}>
+            ⋯
+          </button>
+        )}
       </div>
-      <button type="button" onClick={onTitle} className="mt-0.5 line-clamp-2 text-left text-sm font-medium text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300">
-        {item.title}
+      <button type="button" onClick={onOpen} className="mt-0.5 line-clamp-2 text-left text-sm font-medium text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300">
+        {title}
       </button>
-    </>
-  );
-}
+      <div className={cn("mt-1 text-xs", stage.column === "you" ? "font-semibold text-fg" : "text-fg-muted", kind === "fix" && "text-red-700 dark:text-red-300")}>{line}</div>
 
-function ItemCard({ item, onTitle, children }: { item: AgentItem; onTitle: () => void; children?: ReactNode }) {
-  return (
-    <article data-run-id={item.runId} className="rounded-md border border-line bg-surface p-2.5 shadow-sm">
-      <CardHead item={item} onTitle={onTitle} />
-      <div className="mt-1 text-xs text-fg-muted">{item.headline}</div>
-      {children && <div className="mt-2 flex flex-wrap items-center gap-1.5">{children}</div>}
+      {stage.column === "agent" && item && <AgentProgress item={item} state={state} place={place.get(item.runId) ?? 0} />}
+
+      {stage.column === "you" && item && (
+        <YouDetails item={item} kind={kind} open={open} setOpen={setOpen} run={run} summary={result?.summary ?? null} />
+      )}
+      {stage.column === "you" && !stage.ready && stage.why && <div className="mt-1 text-[11px] text-fg-subtle">The agent: {stage.why}</div>}
+
+      {stage.action && stage.column !== "waiting" && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {kind === "merge" && item ? (
+            <MergeButton item={item} run={run} />
+          ) : kind === "send" && item ? (
+            <button type="button" className={BTN_PRIMARY} disabled={busy} onClick={() => void doing({ type: "publish", runId: item.runId })}>
+              {busy ? "Sending…" : stage.action.label}
+            </button>
+          ) : kind === "push" && item ? (
+            <button type="button" className={BTN_PRIMARY} disabled={busy} onClick={() => void doing({ type: "push", runId: item.runId })}>
+              {busy ? "Pushing…" : stage.action.label}
+            </button>
+          ) : kind === "draftReview" && item ? (
+            <button type="button" className={BTN_PRIMARY} disabled={busy} onClick={() => void doing({ type: "reviewAnyway", runId: item.runId })}>
+              {stage.action.label}
+            </button>
+          ) : kind === "fix" && item ? (
+            <button type="button" className={BTN_PRIMARY} disabled={busy} onClick={() => void doing(stage.action?.label === "Open in Claude" ? { type: "continue", runId: item.runId } : { type: "retry", runId: item.runId })}>
+              {stage.action.label}
+            </button>
+          ) : kind === "updateJira" && item ? (
+            <button type="button" className={BTN} title="Opens the Jira dry run's session in your terminal, where it asks before every change" onClick={() => void doing({ type: "continue", runId: item.runId })}>
+              {stage.action.label}
+            </button>
+          ) : kind === "decide" ? null : (
+            <button type="button" className={BTN} onClick={() => openUrl(url)}>
+              {stage.action.label}
+            </button>
+          )}
+        </div>
+      )}
+      {stage.ready && item?.mode === "shadow" && kind === "send" && <div className="mt-1.5 text-[11px] text-fg-faint">Nothing is on GitHub until you send it. It goes out with the agent&apos;s signature.</div>}
+      {stage.ready && item?.mode === "shadow" && kind === "push" && <div className="mt-1.5 text-[11px] text-fg-faint">Nothing is on the branch until you push. Fast-forward only, and only while nobody else pushed.</div>}
+      {kind === "merge" && item && <div className="mt-1.5 text-[11px] text-fg-faint">Merges only the commit shown here — GitHub refuses it if anyone pushes first.</div>}
+
+      {more && menu.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5 rounded-md border border-line bg-elevated/40 p-1.5">
+          {menu.map((m) => (
+            <button
+              key={m.label}
+              type="button"
+              className={BTN}
+              title={m.title}
+              onClick={() => {
+                setMore(false);
+                void m.action();
+              }}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {note && (
+        <div className="mt-1.5 truncate text-[11px] text-fg-faint" title={note}>
+          {note}
+          {item?.finishedAt ? ` · ${relativeTime(item.finishedAt)}` : ""}
+        </div>
+      )}
     </article>
   );
 }
 
-function WorkingCard({
-  item,
-  progress,
-  paused,
-  onTitle,
-  run,
-}: {
-  item: AgentItem;
-  progress: RunProgress | null;
-  paused: boolean;
-  onTitle: () => void;
-  run: (a: AgentAction) => Promise<void>;
-}) {
-  const { state, openCompanion } = useContext(AgentContext);
-  const steps = progress?.steps ?? [];
-  const step = progress ? currentStep(progress) : null;
+/** A run on its card: its plan's progress and current step, or its place in line. */
+function AgentProgress({ item, state, place }: { item: AgentItem; state: AgentState; place: number }) {
+  if (item.state === "queued") {
+    const held = item.headline.startsWith("Queued —") ? item.headline.slice("Queued — ".length) : null;
+    return (
+      <div className="mt-1 text-[11px] text-fg-subtle">
+        <span className="font-medium text-sky-700 dark:text-sky-300">{inLine(place)}</span>
+        {held && ` · ${held}`}
+      </div>
+    );
+  }
+  const r = runFor(state, item.runId);
+  const steps = r?.progress.steps ?? [];
+  const step = r ? currentStep(r.progress) : null;
+  const paused = r?.paused ?? false;
   return (
-    <article data-run-id={item.runId} className="rounded-md border border-sky-500/40 bg-surface p-2.5 shadow-sm">
-      <CardHead item={item} onTitle={onTitle} />
+    <>
       {steps.length > 0 && (
         <div className="mt-1.5 flex gap-0.5" aria-hidden>
           {steps.map((s) => (
             <span
               key={s.id}
-              className={cn(
-                "h-1 flex-1 rounded-full",
-                s.status === "completed" ? "bg-emerald-500" : s.status === "in_progress" ? (paused ? "bg-amber-500" : "bg-sky-500") : "bg-line-strong",
-              )}
+              className={cn("h-1 flex-1 rounded-full", s.status === "completed" ? "bg-emerald-500" : s.status === "in_progress" ? (paused ? "bg-amber-500" : "bg-sky-500") : "bg-line-strong")}
             />
           ))}
         </div>
       )}
-      <div className="mt-1 text-xs font-medium text-fg-secondary">{paused ? "Paused" : (step?.subject ?? item.headline)}</div>
-      {progress?.activity && (
-        <div className="mt-0.5 truncate font-mono text-[11px] text-fg-subtle" title={progress.activity}>
-          {progress.activity}
+      <div className="mt-1 text-[11px] text-fg-secondary">{paused ? "Paused" : (step?.subject ?? item.headline)}</div>
+      {r?.progress.activity && (
+        <div className="mt-0.5 truncate font-mono text-[11px] text-fg-subtle" title={r.progress.activity}>
+          {r.progress.activity}
         </div>
       )}
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {/* The plan and log live in the popover, which exists only with the header chip. */}
-        {state?.headerChip && (
-          <button type="button" className={BTN} title="The plan, the log, a note to the agent" onClick={() => openCompanion(item.runId)}>
-            Watch
-          </button>
-        )}
-        <button type="button" className={BTN} onClick={() => void run({ type: paused ? "resume" : "pause", runId: item.runId })}>
-          {paused ? "Resume" : "Pause"}
-        </button>
-        <button type="button" className={BTN} onClick={() => void run({ type: "stop", runId: item.runId })}>
-          Stop
-        </button>
-      </div>
-    </article>
+    </>
   );
+}
+
+/** The one block of details a Your-move card has: what goes out, the commits, the question, the brief, what went wrong. */
+function YouDetails({
+  item,
+  kind,
+  open,
+  setOpen,
+  run,
+  summary,
+}: {
+  item: AgentItem;
+  kind: string | null;
+  open: boolean;
+  setOpen: (v: boolean) => void;
+  run: Run;
+  summary: string | null;
+}) {
+  const card = resultCard(item);
+  const report = item.output && item.output.trim() !== summary ? item.output : null;
+  const toggle = (label: string, openLabel = "Hide") => (
+    <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className={cn(LINK, "mt-1.5")}>
+      {open ? openLabel : `▸ ${label}`}
+    </button>
+  );
+  const summaryP = summary ? <p className="mt-1.5 line-clamp-6 whitespace-pre-wrap text-xs leading-snug text-fg-secondary">{summary}</p> : null;
+  if (kind === "send" && item.plan) {
+    const plan = item.plan;
+    return (
+      <>
+        {plan.escalations.length > 0 && <Disputes item={item} plan={plan} run={run} />}
+        <div>{toggle("What goes out")}</div>
+        {open && (
+          <>
+            {summaryP}
+            <PlanView plan={plan} />
+          </>
+        )}
+      </>
+    );
+  }
+  if ((kind === "push" || kind === "decide") && item.drive) {
+    const n = item.drive.commits.length;
+    const replies = item.plan?.replies.length ?? 0;
+    return (
+      <>
+        {kind === "decide" && card && card.asks.length > 0 && <YourCall item={item} asks={card.asks} canAnswer={Boolean(item.sessionId)} run={run} />}
+        {n > 0 && (
+          <>
+            <div>{toggle(`The ${n} commit${n === 1 ? "" : "s"}${replies > 0 ? ` and ${replies} repl${replies === 1 ? "y" : "ies"}` : ""}`)}</div>
+            {open && (
+              <>
+                {summaryP}
+                <DriveView drive={item.drive} />
+                {item.plan && replies > 0 && <PlanView plan={item.plan} />}
+              </>
+            )}
+          </>
+        )}
+      </>
+    );
+  }
+  if (kind === "decide" && card && card.asks.length > 0) return <YourCall item={item} asks={card.asks} canAnswer={Boolean(item.sessionId)} run={run} />;
+  if (kind === "draftReview") {
+    return (
+      <>
+        {card && card.authorQuestions.length > 0 && (
+          <div className="mt-1.5 rounded-md border border-line bg-elevated/40 p-2 text-xs">
+            <div className="font-medium text-fg">Questions for the author</div>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4 text-fg-secondary">
+              {card.authorQuestions.map((q, i) => (
+                <li key={i}>{q}</li>
+              ))}
+            </ul>
+            <div className="mt-1 text-[11px] text-fg-faint">Draft a review puts them in it, as comments.</div>
+          </div>
+        )}
+        <div>{toggle("Read the brief")}</div>
+        {open && (
+          <>
+            {summaryP}
+            {report && <div className="mt-1 max-h-96 overflow-y-auto whitespace-pre-wrap rounded border border-line bg-elevated/40 p-2 text-xs text-fg-secondary">{report}</div>}
+          </>
+        )}
+      </>
+    );
+  }
+  if (kind === "fix") {
+    return (
+      <>
+        <div>{toggle("What happened")}</div>
+        {open && (
+          <>
+            {item.error && <div className="mt-1 whitespace-pre-wrap font-mono text-[11px] text-fg-subtle">{item.error}</div>}
+            {summaryP}
+            {card && card.findings.length > 0 && <FindingsList findings={card.findings} />}
+            {report && <div className="mt-1 max-h-96 overflow-y-auto whitespace-pre-wrap rounded border border-line bg-elevated/40 p-2 text-xs text-fg-secondary">{report}</div>}
+          </>
+        )}
+      </>
+    );
+  }
+  return null;
 }
 
 const EVENT_TEXT: Record<NonNullable<PublishSummary["event"]>, string> = {
@@ -467,16 +625,6 @@ function PlanView({ plan }: { plan: PublishSummary }) {
         </div>
       ))}
       {plan.resolves > 0 && <div className="text-[11px] text-fg-subtle">Resolves {plan.resolves} thread{plan.resolves === 1 ? "" : "s"}.</div>}
-      {(plan.escalations ?? []).length > 0 && (
-        <div className="space-y-1 rounded border border-amber-500/40 bg-amber-500/[0.06] p-1.5">
-          <div className="text-[11px] font-semibold text-amber-700 dark:text-amber-300">The author pushed back — the agent doesn&apos;t argue; you keep or drop it</div>
-          {plan.escalations.map((e, i) => (
-            <div key={i} className="whitespace-pre-wrap">
-              {e.body}
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -507,7 +655,7 @@ function DriveView({ drive }: { drive: NonNullable<AgentItem["drive"]> }) {
   );
 }
 
-function MergeButton({ item, run }: { item: AgentItem; run: (a: AgentAction) => Promise<void> }) {
+function MergeButton({ item, run }: { item: AgentItem; run: Run }) {
   const allowed = item.mergeMethods?.allowed ?? [];
   const [method, setMethod] = useState<MergeMethod | undefined>(item.mergeMethod);
   const [busy, setBusy] = useState(false);
@@ -540,8 +688,6 @@ function MergeButton({ item, run }: { item: AgentItem; run: (a: AgentAction) => 
   );
 }
 
-const VERDICT: Record<string, string> = { APPROVE: "Would approve", REQUEST_CHANGES: "Would request changes", COMMENT: "Would comment" };
-
 /** One line of a comment, without its markdown: enough to know what it says. */
 function gist(text: string): string {
   return text
@@ -557,7 +703,7 @@ function gist(text: string): string {
  * resolved) — applied when the review is sent, no new session. Undecided
  * counts as keep: nothing changes that you didn't choose.
  */
-function Disputes({ item, plan, run }: { item: AgentItem; plan: PublishSummary; run: (a: AgentAction) => Promise<void> }) {
+function Disputes({ item, plan, run }: { item: AgentItem; plan: PublishSummary; run: Run }) {
   const pick = (replyTo: number, choice: "keep" | "drop") => void run({ type: "dispute", runId: item.runId, replyTo, choice });
   const opt = (on: boolean) =>
     cn("rounded-md border px-2 py-0.5 text-xs font-medium", on ? "border-sky-600 bg-sky-600 text-white" : "border-line-strong bg-surface text-fg-secondary hover:bg-elevated");
@@ -581,46 +727,6 @@ function Disputes({ item, plan, run }: { item: AgentItem; plan: PublishSummary; 
         );
       })}
       <div className="mt-1.5 text-[11px] text-fg-faint">Applied when you send: a kept thread stays open; a dropped one gets &ldquo;Fair point — I&apos;m dropping this.&rdquo; and is resolved.</div>
-    </div>
-  );
-}
-
-/**
- * What a review would post, at a glance: its verdict and the comments it
- * leaves — the file, the line, what each says. The full text stays one click
- * away; this is what you decide Publish on.
- */
-function PlanDigest({ plan }: { plan: PublishSummary }) {
-  const [all, setAll] = useState(false);
-  const shown = all ? plan.comments : plan.comments.slice(0, 3);
-  const extras = [
-    `${plan.comments.length} comment${plan.comments.length === 1 ? "" : "s"}`,
-    plan.replies.length > 0 ? `${plan.replies.length} repl${plan.replies.length === 1 ? "y" : "ies"}` : null,
-    plan.resolves > 0 ? `${plan.resolves} to resolve` : null,
-    plan.escalations.length > 0 ? `${plan.escalations.length} pushed back` : null,
-  ].filter(Boolean);
-  return (
-    <div className="mt-2 rounded-md border border-line bg-elevated/40 p-2 text-xs">
-      <div className="font-medium text-fg">
-        {plan.event ? (VERDICT[plan.event] ?? plan.event) : "Would post"}
-        <span className="font-normal text-fg-subtle"> · {extras.join(" · ")}</span>
-      </div>
-      {shown.map((c, i) => (
-        <div key={i} className="mt-1.5">
-          <div className="truncate font-mono text-[11px] text-fg-subtle" title={c.path}>
-            {c.path}
-            {c.line !== undefined ? `:${c.line}` : ""}
-          </div>
-          <div className="line-clamp-2 text-fg-secondary" title={gist(c.body)}>
-            {gist(c.body)}
-          </div>
-        </div>
-      ))}
-      {plan.comments.length > 3 && (
-        <button type="button" onClick={() => setAll((v) => !v)} className="mt-1 text-sky-700 hover:underline dark:text-sky-300">
-          {all ? "Fewer" : `+${plan.comments.length - 3} more`}
-        </button>
-      )}
     </div>
   );
 }
@@ -659,12 +765,12 @@ function FindingsList({ findings }: { findings: RunFinding[] }) {
 }
 
 /**
- * What the run asks you, with the answers it offers and room for your own.
+ * A decision on your own PR that only you can make, with the answers the run offers and room for your own.
  * One question: an answer goes at once. Several: pick or write each, then Send.
  * The same session goes on with what you said (`answer`); where the app can't
  * do that (the Jira dry run changes nothing), the question is only shown.
  */
-function AsksBox({ item, asks, canAnswer, run }: { item: AgentItem; asks: RunAsk[]; canAnswer: boolean; run: (a: AgentAction) => Promise<void> }) {
+function YourCall({ item, asks, canAnswer, run }: { item: AgentItem; asks: RunAsk[]; canAnswer: boolean; run: Run }) {
   const [picked, setPicked] = useState<Record<number, string>>({});
   const [typed, setTyped] = useState<Record<number, string>>({});
   const [sending, setSending] = useState(false);
@@ -683,7 +789,7 @@ function AsksBox({ item, asks, canAnswer, run }: { item: AgentItem; asks: RunAsk
       .join("\n\n");
   return (
     <div className="mt-2 rounded-md border border-amber-500/50 bg-amber-500/[0.07] p-2">
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">{single ? "It asks you" : `It asks you ${asks.length} things`}</div>
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">{single ? "Your call" : `Your call — ${asks.length} questions`}</div>
       {asks.map((a, i) => (
         <div key={i} className={cn(i > 0 && "mt-2 border-t border-amber-500/20 pt-2")}>
           <div className="text-xs text-fg">{a.question}</div>
@@ -740,175 +846,5 @@ function AsksBox({ item, asks, canAnswer, run }: { item: AgentItem; asks: RunAsk
         {canAnswer ? "The same session goes on with your answer and comes back here." : "Answer it in the session: the dry run changes nothing by itself."}
       </div>
     </div>
-  );
-}
-
-function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => void; run: (a: AgentAction) => Promise<void> }) {
-  const [open, setOpen] = useState<"plan" | "drive" | "report" | null>(null);
-  const [more, setMore] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
-  const primary = primaryActionLabel(item);
-  const error = item.state === "error";
-  const merge = item.scenario === "merge";
-  const drive = item.scenario === "drive" && item.drive && item.drive.commits.length > 0 && !item.pushed ? item.drive : null;
-  const plan = item.plan && !item.published && !drive ? item.plan : null;
-  const card = resultCard(item);
-  const asks = card?.asks ?? [];
-  const findings = card?.findings ?? [];
-  // Only a run on your own PR asks you; on a PR you review you are the one asking.
-  const canAnswer = item.scenario === "drive" && Boolean(item.sessionId) && !error;
-  const hasSession = Boolean(item.sessionId && (item.worktree || item.scenario === "afterMerge"));
-  const toggle = (what: "plan" | "drive" | "report") => setOpen((v) => (v === what ? null : what));
-  const doing = async (label: string, action: AgentAction) => {
-    setBusy(label);
-    await run(action);
-    setBusy(null);
-  };
-  const primaryButton = (label: string, action: AgentAction, busyLabel?: string, title?: string) => (
-    <button type="button" className={BTN_PRIMARY} disabled={busy !== null} title={title} onClick={() => void doing(label, action)}>
-      {busy === label && busyLabel ? busyLabel : label}
-    </button>
-  );
-  // The full message, when it says more than the summary above it.
-  const report = item.output && item.output.trim() !== card?.summary ? item.output : null;
-  return (
-    <article data-run-id={item.runId} className={cn("rounded-md border bg-surface p-2.5 shadow-sm", error ? "border-red-500/60" : merge ? "border-emerald-500/50" : asks.length > 0 ? "border-amber-500/60" : "border-line", item.later && "opacity-60")}>
-      <CardHead item={item} onTitle={onTitle} />
-      <div className={cn("mt-1 text-xs", error ? "text-red-700 dark:text-red-300" : "text-fg-muted")}>{item.headline}</div>
-      {error && item.error && <div className="mt-0.5 line-clamp-3 font-mono text-[11px] text-fg-subtle" title={item.error}>{item.error}</div>}
-      {card?.summary && <p className="mt-1.5 line-clamp-4 text-[13px] leading-snug text-fg">{card.summary}</p>}
-      {/* A review's findings are its comments (below); shown apart only where nothing would be posted. */}
-      {findings.length > 0 && !plan && <FindingsList findings={findings} />}
-      {asks.length > 0 && <AsksBox item={item} asks={asks} canAnswer={canAnswer} run={run} />}
-      {(card?.authorQuestions.length ?? 0) > 0 && (
-        <div className="mt-2 rounded-md border border-line bg-elevated/40 p-2 text-xs">
-          <div className="font-medium text-fg">Questions for the author</div>
-          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-fg-secondary">
-            {card?.authorQuestions.map((q, i) => <li key={i}>{q}</li>)}
-          </ul>
-          {item.scenario === "brief" && <div className="mt-1 text-[11px] text-fg-faint">Draft a review puts them in it, as comments.</div>}
-        </div>
-      )}
-      {/* A review's verdict and comments, in the card: what Publish would post. */}
-      {plan && <PlanDigest plan={plan} />}
-      {plan && plan.escalations.length > 0 && <Disputes item={item} plan={plan} run={run} />}
-
-      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
-        {plan && (
-          <button type="button" onClick={() => toggle("plan")} aria-expanded={open === "plan"} className="text-xs text-sky-700 hover:underline dark:text-sky-300">
-            {open === "plan" ? "Hide the full text" : "The full text it would post"}
-          </button>
-        )}
-        {drive && (
-          <button type="button" onClick={() => toggle("drive")} aria-expanded={open === "drive"} className="text-xs text-sky-700 hover:underline dark:text-sky-300">
-            {open === "drive"
-              ? "Hide the commits"
-              : `The ${drive.commits.length} commit${drive.commits.length === 1 ? "" : "s"}${item.plan?.replies.length ? ` and ${item.plan.replies.length} repl${item.plan.replies.length === 1 ? "y" : "ies"}` : ""}`}
-          </button>
-        )}
-        {report && (
-          <button type="button" onClick={() => toggle("report")} aria-expanded={open === "report"} className="text-xs text-sky-700 hover:underline dark:text-sky-300">
-            {open === "report" ? "Hide the report" : item.scenario === "brief" ? "Read the brief" : item.scenario === "afterMerge" ? "The Jira dry run" : "Full report"}
-          </button>
-        )}
-      </div>
-      {open === "plan" && plan && <PlanView plan={plan} />}
-      {open === "drive" && drive && (
-        <>
-          <DriveView drive={drive} />
-          {item.plan && item.plan.replies.length > 0 && <PlanView plan={item.plan} />}
-        </>
-      )}
-      {open === "report" && report && <div className="mt-1 max-h-96 overflow-y-auto whitespace-pre-wrap rounded border border-line bg-elevated/40 p-2 text-xs text-fg-secondary">{report}</div>}
-
-      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        {merge && <MergeButton item={item} run={run} />}
-        {primary === "Push" && primaryButton("Push", { type: "push", runId: item.runId }, "Pushing…")}
-        {primary === "Publish" && primaryButton("Publish", { type: "publish", runId: item.runId }, "Publishing…")}
-        {primary === "Resume" && primaryButton("Resume", { type: "resumeSession", runId: item.runId }, undefined, "The same session goes on where it stopped, in the same worktree")}
-        {primary === "Run again" && primaryButton("Run again", { type: "retry", runId: item.runId })}
-        {primary === "Review anyway" && primaryButton("Review anyway", { type: "reviewAnyway", runId: item.runId })}
-        {primary === "Apply in session" && primaryButton("Apply in session", { type: "continue", runId: item.runId }, undefined, "Opens the session in your terminal, where it asks before every change")}
-        {primary === "Done" && primaryButton("Done", { type: "ack", runId: item.runId }, undefined, "Nothing left for you here: it moves to Done today")}
-        <button type="button" className={BTN} onClick={() => void run({ type: "later", runId: item.runId })}>
-          {item.later ? "Bring back" : "Later"}
-        </button>
-        <button type="button" className={BTN} aria-expanded={more} aria-label="More actions" title="More actions" onClick={() => setMore((v) => !v)}>
-          ⋯
-        </button>
-      </div>
-      {more && (
-        <div className="mt-1.5 flex flex-wrap gap-1.5 rounded-md border border-line bg-elevated/40 p-1.5">
-          {hasSession && primary !== "Apply in session" && (
-            <button
-              type="button"
-              className={BTN}
-              title={plan ? "Open the session in your terminal to change the review before it goes out" : "Open the session in your terminal"}
-              onClick={() => void run({ type: "continue", runId: item.runId })}
-            >
-              {plan ? "Edit first" : "Continue in session"}
-            </button>
-          )}
-          {!merge && item.scenario !== "afterMerge" && primary !== "Run again" && (
-            <button type="button" className={BTN} title="Start over with a new session" onClick={() => void run({ type: "retry", runId: item.runId })}>
-              Run again
-            </button>
-          )}
-          {!merge && primary !== "Done" && (
-            <button type="button" className={BTN} title="Nothing more to do: it moves to Done today" onClick={() => void run({ type: "ack", runId: item.runId })}>
-              Done
-            </button>
-          )}
-          <button type="button" className={BTN} title="Drop it; it won't show in Done today" onClick={() => void run({ type: "skip", runId: item.runId })}>
-            Dismiss
-          </button>
-        </div>
-      )}
-      {plan && item.mode === "shadow" && <div className="mt-1.5 text-[11px] text-fg-faint">Shadow: nothing is on GitHub until you press Publish. It goes out with the agent&apos;s signature.</div>}
-      {merge && <div className="mt-1.5 text-[11px] text-fg-faint">Merges only the commit shown here — GitHub refuses it if anyone pushes first.</div>}
-      {item.interrupted && (primary === "Resume" || item.scenario === "drive") && (
-        <div className="mt-1.5 text-[11px] text-fg-faint">
-          {item.scenario === "drive"
-            ? "A drive starts over: its push is checked against what the app read before the session."
-            : "Resume picks the session up where it stopped; Run again starts over."}
-        </div>
-      )}
-      {drive && item.mode === "shadow" && (
-        <div className="mt-1.5 text-[11px] text-fg-faint">Shadow: nothing is on the branch until you press Push. It goes out as a fast-forward only, and only while nobody else pushed.</div>
-      )}
-    </article>
-  );
-}
-
-function IdleCard({ pr, reason, onOpen, onQueue }: { pr: PullRequest; reason: string; onOpen: (pr: PullRequest) => void; onQueue?: () => void }) {
-  // Yours too: the agent drives your PR when CI, a conflict or comments need it (it says so if nothing does).
-  const canHand = onQueue && (pr.roles.includes("reviewer") || pr.roles.includes("reviewed") || pr.roles.includes("author"));
-  return (
-    <article
-      draggable={Boolean(canHand)}
-      onDragStart={(e) => {
-        e.dataTransfer.setData(DRAG_TYPE, pr.id);
-        e.dataTransfer.effectAllowed = "move";
-      }}
-      title={canHand ? "Drag it to the queue — onto a queued card to run it before that one" : undefined}
-      className={cn("rounded-md border border-line bg-surface p-2.5", canHand && "cursor-grab active:cursor-grabbing")}
-    >
-      <div className="flex items-center gap-1.5 text-[11px] text-fg-subtle">
-        <span className="truncate">
-          {shortRepo(pr.repo)} #{pr.number}
-        </span>
-        <span className="flex-1" />
-        {relativeTime(pr.updatedAt)}
-      </div>
-      <button type="button" onClick={() => onOpen(pr)} className="mt-0.5 line-clamp-2 text-left text-sm font-medium text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300">
-        {pr.title}
-      </button>
-      <div className="mt-1 text-xs text-fg-subtle">{reason}</div>
-      {canHand && (
-        <button type="button" onClick={onQueue} className={cn(BTN, "mt-2 py-0.5")}>
-          Hand to agent →
-        </button>
-      )}
-    </article>
   );
 }
