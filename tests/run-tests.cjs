@@ -7578,6 +7578,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(cl.groupMarkerOf(review), { kind: "review", key: "ENG-7" });
       assert.match(review, /start_session/);
       assert.match(review, /1\) \/my-review https:\/\/github\.com\/a\/b\/pull\/1 2\) \/my-review https:\/\/github\.com\/a\/b\/pull\/2/, "each PR's own review prompt");
+      const placed = cl.renderGroupPrompt({}, "review", "ENG-7", prs, ["C:\\Projects\\core", null]);
+      assert.match(placed, /start_session's cwd/);
+      assert.ok(
+        placed.includes("1) in C:\\Projects\\core: /creatio-code-review https://github.com/a/b/pull/1 2) /creatio-code-review https://github.com/a/b/pull/2"),
+        "a PR from another repository names its own checkout; one with none runs in the parent's folder",
+      );
       for (const prompt of [explain, review]) {
         assert.ok(!/[{}]/.test(prompt), "every placeholder is filled");
         assert.ok(!/["%^&|<>]/.test(prompt), "cmd.exe could not pass the default prompt");
@@ -7638,6 +7644,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual(rev, { ok: true, count: 3, dir: path.join(root, "ui") });
         assert.ok(opened[1].includes("[PR Dashboard review of ENG-7] Review the 3 pull requests of ENG-7"), opened[1]);
         assert.ok(!opened[1].includes("/pull/4"), "your own PR is never sent for review");
+        assert.ok(
+          opened[1].includes(`1) in ${path.join(root, "core")}: /creatio-code-review https://github.com/acme/core/pull/1 2) /creatio-code-review https://github.com/acme/ui/pull/2`),
+          "the core PR is reviewed in core's checkout, the ui ones in the parent's folder",
+        );
 
         const terminal = await launcher.launchGroup("review", "ENG-7", prs, { ...settings, terminal: "auto" }, { openUrl });
         assert.match(terminal.ok ? "" : terminal.error, /only Claude Desktop/);

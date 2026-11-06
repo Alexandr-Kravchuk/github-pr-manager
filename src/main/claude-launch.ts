@@ -271,7 +271,16 @@ export async function launchGroup(
       error: `No checkout of ${repos} was found in ${settings.projectsRoot || "~/Projects"}. Set its folder in Settings → Claude.`,
     };
   }
-  const prompt = renderGroupPrompt(settings.prompts, kind, key, prs);
+  // A review runs in its own PR's checkout when that is not the parent's
+  // folder; with no checkout found it stays in the parent's.
+  const folders =
+    kind === "review"
+      ? prs.map((pr) => {
+          const own = findCheckout(pr, settings);
+          return own && own !== dir ? own : null;
+        })
+      : [];
+  const prompt = renderGroupPrompt(settings.prompts, kind, key, prs, folders);
   const error = await startSession(dir, prompt, settings, opts.openUrl);
   return error ? { ok: false, error } : { ok: true, count: prs.length, dir };
 }

@@ -58,7 +58,8 @@ export const GROUP_PROMPT_KEY: Record<GroupLaunchKind, "explainGroup" | "reviewG
  * `{url}` is replaced with the PR's URL. The group templates take `{key}` (the
  * group's Jira key), `{count}` and `{urls}` (the links, space-separated);
  * `reviewGroup` also takes `{prompts}` — each PR's own "Your review is due"
- * prompt, numbered, for the sessions it starts.
+ * prompt, numbered, for the sessions it starts, behind the folder of that PR's
+ * own checkout when it differs from the parent's (`in <folder>:`).
  */
 export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
   drive: "/drive-pr-green {url}",
@@ -75,7 +76,9 @@ export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
   reviewGroup:
     "Review the {count} pull requests of {key} that wait for my review. Do not review them here: start one session per PR " +
     "with the start_session tool (initiation user_asked, context fresh, use_worktree false), so each review runs in its own " +
-    "session nested under this one, with these prompts: {prompts}. " +
+    "session nested under this one. A prompt that starts with a folder (in, the folder, a colon) is that PR's own repository: start its " +
+    "session there through start_session's cwd, so it reads that repository's rules and code; the others run in this folder. " +
+    "The prompts: {prompts}. " +
     "When every session has reported, give me one summary: for each PR its decision and its Blocker and Major findings, " +
     "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently.",
 };
@@ -104,12 +107,19 @@ export function groupMarkerOf(text: string): { kind: GroupLaunchKind; key: strin
  */
 export const MAX_GROUP_PRS = 30;
 
-/** A group launch's prompt: its template filled in, behind the marker. */
+/**
+ * A group launch's prompt: its template filled in, behind the marker.
+ * `folders[i]` is where the review of `prs[i]` should run — its repository's
+ * checkout — or null to run it in the parent's folder: a review started in
+ * another repository's folder loads that repository's CLAUDE.md as its own
+ * rules and searches the wrong code for callers and patterns.
+ */
 export function renderGroupPrompt(
   prompts: Partial<Record<ClaudePromptKey, string>>,
   kind: GroupLaunchKind,
   key: string,
   prs: readonly Pick<PullRequest, "url">[],
+  folders: readonly (string | null)[] = [],
 ): string {
   const templateKey = GROUP_PROMPT_KEY[kind];
   const template = prompts[templateKey]?.trim() || DEFAULT_CLAUDE_PROMPTS[templateKey];
@@ -117,7 +127,13 @@ export function renderGroupPrompt(
   let filled = fill(template, "{key}", key);
   filled = fill(filled, "{count}", String(prs.length));
   filled = fill(filled, "{urls}", prs.map((p) => p.url).join(" "));
-  filled = fill(filled, "{prompts}", prs.map((p, i) => `${i + 1}) ${renderClaudePrompt(prompts, "review", p)}`).join(" "));
+  filled = fill(
+    filled,
+    "{prompts}",
+    prs
+      .map((p, i) => `${i + 1}) ${folders[i] ? `in ${folders[i]}: ` : ""}${renderClaudePrompt(prompts, "review", p)}`)
+      .join(" "),
+  );
   return `${groupMarker(kind, key)} ${filled}`;
 }
 

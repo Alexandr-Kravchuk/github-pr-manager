@@ -100,7 +100,11 @@ Three layers:
   exists in Desktop, so with a terminal the item is disabled and says why).
   Both send only the kind, the key and the PR ids; main picks the PRs again
   (`groupLaunchPrs` — review takes `isReviewDue` only, so never your own PR)
-  and runs in the checkout of the repository most of them belong to. Each
+  and runs in the checkout of the repository most of them belong to; Review
+  all also names, for each PR from another repository, that PR's own
+  checkout (`in <folder>:`, started through `start_session`'s `cwd`), since a
+  review in a foreign folder loads that folder's CLAUDE.md as its rules and
+  searches the wrong code. Each
   prompt starts with `groupMarker(kind, key)`: the session scanner records it
   as the session's `groups` instead of binding the session to every PR it
   lists — also once Desktop pauses it, through `groupsSeen` — and the
