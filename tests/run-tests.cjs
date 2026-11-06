@@ -9647,6 +9647,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       write(path.join(co, ".claude", "worktrees", "w1", ".sdlc", "state"), "ENG-6.json", { lifecycle_status: "blocked", current_stage: "fix_findings", outputs: { published_pr_reference: { url } } });
       assert.deepStrictEqual(sdlc.orchestratorRunFor(co, url), { key: "ENG-6", stage: "fix_findings", status: "blocked" }, "found in a worktree; blocked still holds it");
       assert.strictEqual(sdlc.describeOrchestratorRun({ key: "ENG-6", stage: "fix_findings", status: "blocked" }), "the SDLC orchestrator runs ENG-6 (stage fix findings) — the agent leaves it to it");
+      // A metarepo's run keeps its state at home and publishes to a member repository.
+      const projects = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-projects-"));
+      const meta = path.join(projects, "meta");
+      const member = path.join(projects, "member");
+      nfsA.mkdirSync(member, { recursive: true });
+      const memberPr = "https://creatio.ghe.com/eng/member/pull/22";
+      write(path.join(meta, ".sdlc", "state"), "ENG-4.json", { lifecycle_status: "blocked", current_stage: "publish_pr", outputs: { published_pr_reference: { url: memberPr } } });
+      assert.strictEqual(sdlc.orchestratorRunFor(member, memberPr), null, "not in the PR's own checkout");
+      const roots = sdlc.orchestratorRoots(member, { projectsRoot: projects, repoPaths: {} });
+      assert.ok(roots.includes(meta) && roots.includes(member));
+      assert.strictEqual(sdlc.orchestratorRunFor(roots, memberPr).key, "ENG-4", "found at the metarepo's home");
     });
 
     await atest("agent: your PR an orchestrator run published gets no run, says why on the Board, and refuses a hand-over", async () => {

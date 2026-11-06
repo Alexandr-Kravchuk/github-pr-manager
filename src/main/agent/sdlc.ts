@@ -8,10 +8,13 @@ import path from "node:path";
 // self-review would repeat the run's review stage, and two agents answering
 // the same threads would edit and push the same branch.
 //
-// A run's state is `.sdlc/state/<KEY>.json` in the checkout, or in one of its
+// A run's state is `.sdlc/state/<KEY>.json` in a checkout, or in one of its
 // worktrees (`.claude/worktrees/*`, where a run often works); the PR it
 // published is in it as a URL, with the run's `lifecycle_status` and
-// `current_stage`. Read-only, and cached by file time: the state files are
+// `current_stage`. Not always the PR's own checkout: a metarepo's run
+// (`mode = "metarepo"`) publishes PRs to its member repositories and keeps
+// its state at home — so every checkout the app knows that has a `.sdlc` is
+// looked through. Read-only, and cached by file time: the state files are
 // rewritten at every step of a run, read on the agent's snapshots.
 
 export interface OrchestratorRun {
@@ -71,14 +74,38 @@ function readRun(file: string): CacheEntry | null {
 }
 
 /**
+ * The checkouts that can hold a run's state: the PR's own, every repository
+ * folder set in Settings › Claude, and each folder under the projects folder
+ * that has a `.sdlc` — a metarepo's runs live there, not with the PRs they publish.
+ */
+export function orchestratorRoots(own: string | null, claude: { projectsRoot: string; repoPaths: Record<string, string> }): string[] {
+  const roots = new Set<string>();
+  if (own) roots.add(own);
+  for (const p of Object.values(claude.repoPaths)) if (p) roots.add(p);
+  const base = claude.projectsRoot.trim();
+  if (base) {
+    try {
+      for (const name of fs.readdirSync(base)) {
+        const dir = path.join(base, name);
+        if (fs.existsSync(path.join(dir, ".sdlc"))) roots.add(dir);
+      }
+    } catch {
+      // No projects folder.
+    }
+  }
+  return [...roots].filter((dir) => fs.existsSync(path.join(dir, ".sdlc")) || dir === own);
+}
+
+/**
  * The live orchestrator run that published this PR, or null. Only a run's own
  * state file counts (`<KEY>.json`, not its side files), and only while the run
  * hasn't ended.
  */
-export function orchestratorRunFor(checkout: string, prUrl: string): OrchestratorRun | null {
+export function orchestratorRunFor(checkouts: string | readonly string[], prUrl: string): OrchestratorRun | null {
   // The URL as a whole JSON string: …/pull/37 must not match …/pull/371.
   const needle = JSON.stringify(prUrl.replace(/\/$/, ""));
-  for (const dir of stateDirs(checkout)) {
+  const dirs = (typeof checkouts === "string" ? [checkouts] : checkouts).flatMap(stateDirs);
+  for (const dir of dirs) {
     let names: string[];
     try {
       names = fs.readdirSync(dir);

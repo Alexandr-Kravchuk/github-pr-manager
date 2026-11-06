@@ -35,7 +35,7 @@ import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { openStore, type AgentItemRecord, type AgentStore, type LedgerEntry } from "./store";
-import { describeOrchestratorRun, orchestratorRunFor } from "./sdlc";
+import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor } from "./sdlc";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
 
 // The PR agent's core in the main process. It reads each dashboard snapshot,
@@ -394,8 +394,7 @@ export function createAgent(deps: AgentDeps): Agent {
   /** Your PR an SDLC orchestrator run drives: why the agent leaves it alone, or null. */
   function orchestrated(pr: PullRequest, claude: ClaudeSettings | undefined): string | null {
     if (!claude) return null;
-    const checkout = deps.findCheckout(pr, claude);
-    const run = checkout ? orchestratorRunFor(checkout, pr.url) : null;
+    const run = orchestratorRunFor(orchestratorRoots(deps.findCheckout(pr, claude), claude), pr.url);
     return run ? describeOrchestratorRun(run) : null;
   }
 
