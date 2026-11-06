@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
-import { driveReasons, isBigPr, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
+import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, gitBashPath, readPlanLines, summarizePlan } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
@@ -35,6 +35,7 @@ import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { openStore, type AgentItemRecord, type AgentStore, type LedgerEntry } from "./store";
+import { describeOrchestratorRun, orchestratorRunFor } from "./sdlc";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
 
 // The PR agent's core in the main process. It reads each dashboard snapshot,
@@ -122,7 +123,7 @@ export function runKindOf(scenario: AgentScenario): AgentRunKind {
   }
 }
 
-const REASON_TEXT: Record<string, string> = { ci: "failing CI", conflicts: "conflicts", comments: "review comments" };
+const REASON_TEXT: Record<string, string> = { ci: "failing CI", conflicts: "conflicts", comments: "review comments", self: "self-review" };
 
 /** "failing CI and review comments" */
 export function describeReasons(reasons: readonly string[]): string {
@@ -137,7 +138,11 @@ function queuedHeadline(job: Pick<AgentJob, "scenario" | "key" | "reasons">): st
     case "rereview":
       return job.key.includes("|asked@") ? "Queued: re-review — you were asked again" : "Queued: re-review — the author answered";
     case "drive":
-      return `Queued: drive — ${describeReasons(job.reasons ?? [])}`;
+      return job.reasons?.includes("self")
+        ? "Queued: self-review before reviewers"
+        : job.reasons?.length && job.reasons.every((r) => r === "comments")
+          ? "Queued: reviewers' comments to check"
+          : `Queued: drive — ${describeReasons(job.reasons ?? [])}`;
     default:
       return "Queued: review";
   }
@@ -160,6 +165,8 @@ function workingHeadline(scenario: AgentScenario): string {
 
 /** A running item's line: what it drives for, or what its scenario does. */
 function runningHeadline(item: Pick<AgentItem, "scenario" | "reasons">): string {
+  if (item.reasons?.includes("self")) return "Self-reviewing before reviewers";
+  if (item.reasons?.length && item.reasons.every((r) => r === "comments")) return "Checking reviewers' comments";
   return item.reasons?.length ? `Driving — ${describeReasons(item.reasons)}` : workingHeadline(item.scenario);
 }
 
@@ -193,16 +200,33 @@ export function agentRules(
   scenario: AgentScenario,
   mode: "shadow" | "on",
   folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null = null,
-  pr: { repo: string; number: number; baseRef?: string } | null = null,
+  pr: { repo: string; number: number; baseRef?: string; reasons?: readonly string[] } | null = null,
 ): string {
   return `${scenarioRules(scenario, mode, folder, pr)} ${RESULT_RULE}`;
+}
+
+/** What a run on your own PR is for, on top of the drive rules. */
+function driveFocus(reasons: readonly string[]): string {
+  if (reasons.includes("self")) {
+    return (
+      "This is a self-review of the user's own PR, before reviewers see it. Run the review with dryRun: true — it must post nothing, and never call the publish wrapper for it. " +
+      "Then validate its findings against the code and fix only the confirmed ones, one commit each. A finding that is a business, product or design decision is not yours to settle: change nothing for it and ask the user in the prd-result block. "
+    );
+  }
+  if (reasons.includes("comments")) {
+    return (
+      "Reviewers commented on the user's PR. Validate every open comment against the head commit before changing code: fix the confirmed ones (a commit each) and answer in each thread — what you fixed, or why it doesn't hold — through the wrapper. " +
+      "A comment that is a business, product or design decision is not yours to settle: change nothing for it, don't argue in the thread, and ask the user in the prd-result block, as a blocker finding. "
+    );
+  }
+  return "";
 }
 
 function scenarioRules(
   scenario: AgentScenario,
   mode: "shadow" | "on",
   folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null,
-  pr: { repo: string; number: number; baseRef?: string } | null,
+  pr: { repo: string; number: number; baseRef?: string; reasons?: readonly string[] } | null,
 ): string {
   const plan =
     "You run unattended as the user's PR agent. First write your plan as a task list with TaskCreate — one short task per step — and keep it current with TaskUpdate as you go, so the user can follow along. (A skill that runs as a Workflow shows its own phases; then no task list is needed.)";
@@ -224,6 +248,7 @@ function scenarioRules(
     const target = pr ? `${pr.repo} ${pr.number}` : "<owner/repo> <number>";
     return (
       `${plan} You work on the user's own PR${pr ? ` (${pr.repo}#${pr.number})` : ""}, in a detached checkout of its head. ` +
+      driveFocus(pr?.reasons ?? []) +
       `Commit each fix with git (add, commit) and follow the repository's own conventions — read its CLAUDE.md and AGENTS.md first, since this session doesn't load them on its own — and end every commit message with the trailer "Co-Authored-By: Claude <noreply@anthropic.com>". ` +
       `Never push and never rewrite history (no rebase, no amend of a commit that was already there): the app pushes your commits to the PR's branch as a fast-forward${later}, after checking them. ` +
       `Resolve a conflict by merging the base branch in — it is fetched for you as ${pr?.baseRef ?? "<remote>/<base>"}; this session's git has no network — never by rebasing. CI runs once the app pushes, so don't wait for it. ` +
@@ -254,7 +279,22 @@ function scenarioRules(
   return `${plan} This is a dry run: post NOTHING to GitHub; if your skill has a dry-run mode (dryRun: true), use it. ${jira} End with exactly what you would post — the summary, every inline comment with its file and line, and whether you would approve — as your final message. ${never}`;
 }
 
-function promptFor(scenario: AgentScenario, claude: ClaudeSettings): string {
+/**
+ * The prompt a run starts from. Your PR's runs differ by why they run: a
+ * self-review before reviewers, reviewers' comments to check (and fix where
+ * they hold), or a drive to green (CI, a conflict — comments with them too).
+ */
+export function promptFor(item: Pick<AgentItem, "scenario" | "reasons">, claude: ClaudeSettings): string {
+  if (item.scenario === "drive") {
+    const r = item.reasons ?? [];
+    if (r.includes("self")) return claude.agentPrompts.selfReview || DEFAULT_AGENT_PROMPTS.selfReview;
+    if (r.length > 0 && r.every((x) => x === "comments")) return claude.agentPrompts.validateComments || DEFAULT_AGENT_PROMPTS.validateComments;
+    return claude.prompts.drive || DEFAULT_CLAUDE_PROMPTS.drive;
+  }
+  return promptForScenario(item.scenario, claude);
+}
+
+function promptForScenario(scenario: AgentScenario, claude: ClaudeSettings): string {
   if (scenario === "brief") return claude.agentPrompts.triage || DEFAULT_AGENT_PROMPTS.triage;
   if (scenario === "afterMerge") return claude.agentPrompts.afterMerge || DEFAULT_AGENT_PROMPTS.afterMerge;
   if (scenario === "rereview") return claude.agentPrompts.rereview || DEFAULT_AGENT_PROMPTS.rereview;
@@ -349,6 +389,14 @@ export function createAgent(deps: AgentDeps): Agent {
       if (s && !s.removeWorktree) item.worktree = undefined;
       void closeAs(item, AGENT_CLOSED.offDashboard);
     }
+  }
+
+  /** Your PR an SDLC orchestrator run drives: why the agent leaves it alone, or null. */
+  function orchestrated(pr: PullRequest, claude: ClaudeSettings | undefined): string | null {
+    if (!claude) return null;
+    const checkout = deps.findCheckout(pr, claude);
+    const run = checkout ? orchestratorRunFor(checkout, pr.url) : null;
+    return run ? describeOrchestratorRun(run) : null;
   }
 
   /** A newer run on a PR replaces what waited there in its lane: an older review, an older drive. */
@@ -468,12 +516,15 @@ export function createAgent(deps: AgentDeps): Agent {
         dirty = true;
       }
     }
+    const claudeSettings = loadAll()?.claude;
     const plan = planJobs(snapshot.pullRequests, s, {
       hasOwnSession: (pr) => sessionsForPr(pr, sessions).length > 0,
       driveExhausted: (pr) => {
         const d = store.data.drive[pr.id];
         return d && d.attempts >= s.scenarios.driveCi.maxAttempts ? `Yours — the agent tried ${d.attempts} time${d.attempts === 1 ? "" : "s"}; over to you` : null;
       },
+      selfReviewed: (pr) => Boolean(store.data.ledger[jobKey(pr, "drive", "self")]) || (pr.headOid !== null && store.data.pushedHeads[pr.id] === pr.headOid),
+      orchestrated: (pr) => orchestrated(pr, claudeSettings),
     });
     idle = Object.fromEntries(plan.idle);
     sweepWorktrees();
@@ -640,7 +691,7 @@ export function createAgent(deps: AgentDeps): Agent {
         : null;
     if (folder) item.runFolder = folder.runDir;
 
-    const fromPlugins = resolveSkillRefs(renderAgentPrompt(promptFor(item.scenario, all.claude), "", item.url), plugins());
+    const fromPlugins = resolveSkillRefs(renderAgentPrompt(promptFor(item, all.claude), "", item.url), plugins());
     const mine = mountUserSkills(fromPlugins.prompt, plugins(), path.join(runDir, "user-skills"), deps.userSkillsDir);
     const pluginDirs = [...fromPlugins.pluginDirs, ...mine.pluginDirs];
     const settingsFile = path.join(runDir, "settings.json");
@@ -675,6 +726,7 @@ export function createAgent(deps: AgentDeps): Agent {
           repo: item.repo,
           number: item.prNumber,
           ...(kind === "drive" && pr && remote ? { baseRef: `${remote}/${pr.baseRefName}` } : {}),
+          ...(item.reasons ? { reasons: item.reasons } : {}),
         }),
         allowedTools,
         pluginDirs,
@@ -1049,6 +1101,8 @@ export function createAgent(deps: AgentDeps): Agent {
     item.finishedAt = stamp();
     const d = store.data.drive[item.prId] ?? { attempts: 0 };
     store.data.drive[item.prId] = { attempts: d.attempts + 1, agentHead: head };
+    // A head the agent pushed is not one to self-review again.
+    store.data.pushedHeads[item.prId] = head;
     store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
     store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: "drive", runId: item.runId, event: "pushed", headOid: head, sessionId: item.sessionId, detail: `${n} commit(s)` });
     let headline = `Pushed ${n} commit${n === 1 ? "" : "s"}`;
@@ -1217,11 +1271,14 @@ export function createAgent(deps: AgentDeps): Agent {
         : scenario === "rereview"
           ? on(s.scenarios.rereview.mode)
           : scenario === "drive"
-            ? s.scenarios.driveCi.mode === "on" && s.scenarios.driveComments.mode === "on"
-              ? "on"
-              : "shadow"
+            ? reasons?.includes("self")
+              ? on(s.scenarios.selfReview.mode)
+              : s.scenarios.driveCi.mode === "on" && s.scenarios.driveComments.mode === "on"
+                ? "on"
+                : "shadow"
             : on(s.scenarios.review.mode);
-    const what = { brief: "a brief", rereview: "re-review", drive: `drive — ${describeReasons(reasons ?? [])}` }[scenario as string] ?? "review";
+    const what =
+      { brief: "a brief", rereview: "re-review", drive: reasons?.includes("self") ? "self-review" : `drive — ${describeReasons(reasons ?? [])}` }[scenario as string] ?? "review";
     const others = store.data.items.filter((i) => i.state === "queued");
     const item = newItem({ key, prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario, mode, reasons }, pr, `Queued: ${what} (asked by you)`);
     // Dropped in front of a queued run: it takes that place.
@@ -1250,10 +1307,13 @@ export function createAgent(deps: AgentDeps): Agent {
       const pr = snapshot?.pullRequests.find((p) => p.id === action.prId);
       if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
       if (pr.roles.includes("author")) {
+        // Left to its orchestrator run, even when you ask: two agents on one branch edit and push over each other.
+        const run = orchestrated(pr, all.claude);
+        if (run) return { ok: false, error: `Yours — ${run}.` };
         if (pr.isCrossRepository) return { ok: false, error: "Its branch is in a fork — the agent pushes only to branches of the repository itself." };
+        // Nothing broken: a self-review of its head, before reviewers see it.
         const reasons = driveReasons(pr, all.agent);
-        if (reasons.length === 0) return { ok: false, error: "Nothing to drive: CI isn't red, there are no conflicts and no review comments waiting." };
-        return enqueueAsked(pr, all.agent, "drive", reasons, action.before);
+        return enqueueAsked(pr, all.agent, "drive", reasons.length > 0 ? reasons : ["self"], action.before);
       }
       if (!pr.roles.includes("reviewer") && !pr.roles.includes("reviewed")) return { ok: false, error: "The agent works on PRs you review or your own." };
       if (pr.viewerHasReviewed) return enqueueAsked(pr, all.agent, "rereview", undefined, action.before);
@@ -1404,8 +1464,9 @@ export function createAgent(deps: AgentDeps): Agent {
         const pr = snapshot?.pullRequests.find((p) => p.id === item.prId);
         if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
         // A drive goes again for what the PR needs now, not what it needed then.
-        const reasons = item.scenario === "drive" ? driveReasons(pr, all.agent) : undefined;
-        if (reasons && reasons.length === 0) return { ok: false, error: "Nothing to drive any more: CI isn't red, there are no conflicts and no review comments waiting." };
+        // Nothing broken any more: run again as a self-review.
+        const found = item.scenario === "drive" ? driveReasons(pr, all.agent) : undefined;
+        const reasons = found && found.length === 0 ? ["self"] : found;
         // The old result goes only once the new run is in the queue: a refusal
         // (the agent is already on the PR) leaves it where it was.
         const queued = enqueueAsked(pr, all.agent, item.scenario, reasons);

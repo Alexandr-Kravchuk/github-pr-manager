@@ -1,9 +1,9 @@
 import { useContext, useEffect, useMemo, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
 
 // Node-free (see AGENTS.md): the columns, the day, and the plan's current step.
-import { agentSummary, BOARD_LANES, boardColumns, boardLanes, primaryActionLabel, runFor, todayKey, type BoardLane } from "../../../shared/agent-view";
+import { agentSummary, BOARD_LANES, boardColumns, boardLanes, itemKind, primaryActionLabel, runFor, todayKey, type BoardLane } from "../../../shared/agent-view";
 import { currentStep, type RunProgress } from "../../../shared/agent-stream";
-import { describePlan, type PublishSummary } from "../../../shared/agent-publish";
+import type { PublishSummary } from "../../../shared/agent-publish";
 import { resultCard, type FindingSeverity, type RunAsk, type RunFinding } from "../../../shared/agent-result";
 import type { AgentAction, AgentItem, MergeMethod, PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
@@ -20,7 +20,7 @@ import { AGENT_STATE_DOT } from "./AgentStatus";
 
 const LANE_TITLE: Record<BoardLane, string> = { mine: "Your PRs", review: "PRs you review" };
 const LANE_HINT: Record<BoardLane, string> = {
-  mine: "driven to green, merge offers, Jira after a merge",
+  mine: "self-review, reviewers' comments, CI and conflicts, merge offers",
   review: "reviews, briefs, re-reviews",
 };
 const LANE_DOT: Record<BoardLane, string> = { mine: "bg-violet-500", review: "bg-sky-500" };
@@ -34,15 +34,6 @@ const DRAG_TYPE = "application/x-prd-pr";
 const RUN_DRAG = "application/x-prd-run";
 const BTN = "inline-flex items-center gap-1 rounded-md border border-line-strong bg-surface px-2.5 py-1 text-xs font-medium text-fg-secondary hover:bg-elevated";
 const BTN_PRIMARY = "inline-flex items-center gap-1 rounded-md border border-sky-600 bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-700";
-
-const SCENARIO_CHIP: Record<AgentItem["scenario"], string> = {
-  review: "Review",
-  brief: "Brief",
-  rereview: "Re-review",
-  drive: "Drive",
-  merge: "Merge",
-  afterMerge: "Jira",
-};
 
 function shortRepo(repo: string): string {
   return repo.split("/")[1] ?? repo;
@@ -361,7 +352,7 @@ function CardHead({ item, onTitle }: { item: AgentItem; onTitle: () => void }) {
           {shortRepo(item.repo)} #{item.prNumber}
         </span>
         <span className="flex-1" />
-        <Chip>{SCENARIO_CHIP[item.scenario]}</Chip>
+        <Chip>{itemKind(item)}</Chip>
         {item.mode === "shadow" && (item.scenario === "review" || item.scenario === "rereview" || item.scenario === "drive") && <Chip>shadow</Chip>}
       </div>
       <button type="button" onClick={onTitle} className="mt-0.5 line-clamp-2 text-left text-sm font-medium text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300">
@@ -549,6 +540,57 @@ function MergeButton({ item, run }: { item: AgentItem; run: (a: AgentAction) => 
   );
 }
 
+const VERDICT: Record<string, string> = { APPROVE: "Would approve", REQUEST_CHANGES: "Would request changes", COMMENT: "Would comment" };
+
+/** One line of a comment, without its markdown: enough to know what it says. */
+function gist(text: string): string {
+  return text
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_`#>]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * What a review would post, at a glance: its verdict and the comments it
+ * leaves — the file, the line, what each says. The full text stays one click
+ * away; this is what you decide Publish on.
+ */
+function PlanDigest({ plan }: { plan: PublishSummary }) {
+  const [all, setAll] = useState(false);
+  const shown = all ? plan.comments : plan.comments.slice(0, 3);
+  const extras = [
+    `${plan.comments.length} comment${plan.comments.length === 1 ? "" : "s"}`,
+    plan.replies.length > 0 ? `${plan.replies.length} repl${plan.replies.length === 1 ? "y" : "ies"}` : null,
+    plan.resolves > 0 ? `${plan.resolves} to resolve` : null,
+    plan.escalations.length > 0 ? `${plan.escalations.length} for you` : null,
+  ].filter(Boolean);
+  return (
+    <div className="mt-2 rounded-md border border-line bg-elevated/40 p-2 text-xs">
+      <div className="font-medium text-fg">
+        {plan.event ? (VERDICT[plan.event] ?? plan.event) : "Would post"}
+        <span className="font-normal text-fg-subtle"> · {extras.join(" · ")}</span>
+      </div>
+      {shown.map((c, i) => (
+        <div key={i} className="mt-1.5">
+          <div className="truncate font-mono text-[11px] text-fg-subtle" title={c.path}>
+            {c.path}
+            {c.line !== undefined ? `:${c.line}` : ""}
+          </div>
+          <div className="line-clamp-2 text-fg-secondary" title={gist(c.body)}>
+            {gist(c.body)}
+          </div>
+        </div>
+      ))}
+      {plan.comments.length > 3 && (
+        <button type="button" onClick={() => setAll((v) => !v)} className="mt-1 text-sky-700 hover:underline dark:text-sky-300">
+          {all ? "Fewer" : `+${plan.comments.length - 3} more`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 const SEVERITY_CHIP: Record<FindingSeverity, string> = {
   blocker: "border-red-500/60 bg-red-500/10 text-red-700 dark:text-red-300",
   major: "border-amber-500/60 bg-amber-500/10 text-amber-800 dark:text-amber-300",
@@ -702,11 +744,13 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
       {card?.summary && <p className="mt-1.5 line-clamp-4 text-[13px] leading-snug text-fg">{card.summary}</p>}
       {findings.length > 0 && <FindingsList findings={findings} />}
       {asks.length > 0 && <AsksBox item={item} asks={asks} canAnswer={canAnswer} run={run} />}
+      {/* A review's verdict and comments, in the card: what Publish would post. */}
+      {plan && <PlanDigest plan={plan} />}
 
       <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
         {plan && (
           <button type="button" onClick={() => toggle("plan")} aria-expanded={open === "plan"} className="text-xs text-sky-700 hover:underline dark:text-sky-300">
-            {open === "plan" ? "Hide what it would post" : `What it would post: ${describePlan(plan)}`}
+            {open === "plan" ? "Hide the full text" : "The full text it would post"}
           </button>
         )}
         {drive && (

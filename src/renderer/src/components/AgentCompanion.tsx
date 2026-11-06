@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 // Node-free (see AGENTS.md).
 import { currentStep, type PlanStep, type RunProgress } from "../../../shared/agent-stream";
 import { resultCard } from "../../../shared/agent-result";
-import { agentSummary, queueOrder, SCENARIO_VERB as VERB, stepLabel } from "../../../shared/agent-view";
+import { agentSummary, itemVerb, queueOrder, stepLabel } from "../../../shared/agent-view";
 import type { AgentItem, AgentRunState } from "../../../shared/types";
 import { cn } from "../format";
 import { AgentContext } from "./agent-context";
@@ -168,7 +168,7 @@ export function AgentCompanion({
         </span>
         <span className="min-w-0 leading-tight">
           <span className="block truncate text-xs font-semibold text-fg">
-            {firstItem ? `${VERB[firstItem.scenario]} #${firstItem.prNumber}` : "Agent"}
+            {firstItem ? `${itemVerb(firstItem)} #${firstItem.prNumber}` : "Agent"}
             {state.running.length > 1 && <span className="font-normal text-fg-subtle"> +{state.running.length - 1}</span>}
           </span>
           {flash ? (

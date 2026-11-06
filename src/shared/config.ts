@@ -276,6 +276,8 @@ export function validateClaude(raw: unknown): ClaudeSettings {
       triage: agentPrompt("triage"),
       rereview: agentPrompt("rereview"),
       afterMerge: agentPrompt("afterMerge"),
+      selfReview: agentPrompt("selfReview"),
+      validateComments: agentPrompt("validateComments"),
     },
     terminal:
       obj.terminal === "iterm" || obj.terminal === "terminal" || obj.terminal === "desktop"
@@ -318,6 +320,7 @@ export function validateAgent(raw: unknown): AgentSettings {
   const brief = o(sc.brief);
   const rereview = o(sc.rereview);
   const merge = o(sc.merge);
+  const selfReview = o(sc.selfReview);
   const driveCi = o(sc.driveCi);
   const driveComments = o(sc.driveComments);
   const limits = o(obj.limits);
@@ -366,6 +369,7 @@ export function validateAgent(raw: unknown): AgentSettings {
         method: oneOf(merge.method, ["github", "merge", "squash", "rebase"] as const, d.scenarios.merge.method),
         deleteBranch: bool(merge.deleteBranch, d.scenarios.merge.deleteBranch),
       },
+      selfReview: { mode: oneOf(selfReview.mode, MODES, d.scenarios.selfReview.mode) },
       driveCi: {
         mode: oneOf(driveCi.mode, MODES, d.scenarios.driveCi.mode),
         maxAttempts: num(driveCi.maxAttempts, "maxAttempts", d.scenarios.driveCi.maxAttempts),

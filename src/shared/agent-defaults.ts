@@ -12,6 +12,10 @@ export const DEFAULT_AGENT_PROMPTS: Record<AgentPromptKey, string> = {
   rereview:
     "/creatio-development:creatio-code-review {url} — a re-review: check every reply in my threads against the head commit, answer where a «fixed» isn't, resolve where the reply holds up, and leave design disputes to me.",
   afterMerge: "/twg-jira-resolve-merged-work {url} as a dry run: show what it would change in Jira and change nothing.",
+  selfReview:
+    "/creatio-development:creatio-code-review {url} — a self-review of my own PR before reviewers see it: run it with dryRun: true and post nothing. Then check its findings with /validate-and-fix-review-comments and fix only the confirmed ones as commits; where a finding is a business or design decision, change nothing and ask me.",
+  validateComments:
+    "/validate-and-fix-review-comments {url} — check every open reviewer comment on my PR against the head commit: fix the confirmed ones as commits and answer in each thread (what you fixed, or why not); where a comment is a business or product decision, change nothing and ask me.",
 };
 
 /**
@@ -93,6 +97,8 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "Bash(git merge *)",
     "Bash(git add *)",
     "Bash(git commit *)",
+    // A self-review reads the PR's Jira task (the review skill stops without its acceptance criteria).
+    "Bash(twg *)",
     // No test commands by default: a test runs your repository's code, and the
     // session can edit that code. Add them in Settings › Agent › Permissions if
     // you accept that; CI checks every push either way.
@@ -106,10 +112,12 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
  * it, so each version names what it added, and loading a list saved under an
  * older version adds those rules (once: the list is saved at this version).
  */
-export const AGENT_TOOLS_VERSION = 2;
+export const AGENT_TOOLS_VERSION = 3;
 export const AGENT_TOOL_ADDITIONS: ReadonlyArray<{ version: number; add: Partial<Record<AgentRunKind, string[]>> }> = [
   // Drive couldn't merge the base in (a conflict) nor read the threads it answers: every drive ended "No commits".
   { version: 2, add: { drive: ["Bash(gh pr diff *)", "Bash(gh api *)", "Bash(git show *)", "Bash(git merge-base *)", "Bash(git merge *)"] } },
+  // The self-review of your own PR runs the review skill, which reads the PR's Jira task.
+  { version: 3, add: { drive: ["Bash(twg *)"] } },
 ];
 
 /** A saved tool list brought up to date: the rules added to the defaults since it was saved, appended. */
@@ -164,6 +172,7 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
       method: "github",
       deleteBranch: true,
     },
+    selfReview: { mode: "shadow" },
     driveCi: { mode: "shadow", maxAttempts: 2 },
     driveComments: { mode: "shadow" },
   },

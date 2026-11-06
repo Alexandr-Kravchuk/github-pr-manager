@@ -38,12 +38,14 @@ export interface AgentStoreData {
    * the agent pushed, `agentHead`).
    */
   drive: Record<string, { attempts: number; agentHead?: string }>;
+  /** The last head the agent pushed to each of your PRs — a head that needs no self-review of its own. */
+  pushedHeads: Record<string, string>;
   /** Paused as a whole (Board, companion, tray) — it stays paused across a restart. */
   paused: boolean;
 }
 
 export function emptyStore(day: string): AgentStoreData {
-  return { version: 1, ledger: {}, day, runsToday: 0, items: [], acceptedUnchanged: 0, drive: {}, paused: false };
+  return { version: 1, ledger: {}, day, runsToday: 0, items: [], acceptedUnchanged: 0, drive: {}, pushedHeads: {}, paused: false };
 }
 
 /** Reads state.json; a missing or broken file starts empty rather than failing the agent. */
@@ -63,6 +65,7 @@ export function readStore(file: string, day: string): AgentStoreData {
       }),
       acceptedUnchanged: typeof raw.acceptedUnchanged === "number" ? raw.acceptedUnchanged : 0,
       drive: typeof raw.drive === "object" && raw.drive !== null ? raw.drive : {},
+      pushedHeads: typeof raw.pushedHeads === "object" && raw.pushedHeads !== null ? raw.pushedHeads : {},
       paused: raw.paused === true,
     };
   } catch {

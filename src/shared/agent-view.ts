@@ -148,6 +148,34 @@ export function primaryActionLabel(item: AgentItem): string | null {
   return "Done";
 }
 
+/**
+ * An item's kind as the Board's chip says it: a run on your PR is a
+ * self-review, an answer to reviewers' comments, or a drive (CI, a conflict).
+ */
+export function itemKind(item: Pick<AgentItem, "scenario" | "reasons">): string {
+  if (item.scenario !== "drive") return SCENARIO_CHIP[item.scenario];
+  const r = item.reasons ?? [];
+  if (r.includes("self")) return "Self-review";
+  if (r.length > 0 && r.every((x) => x === "comments")) return "Comments";
+  return "Drive";
+}
+
+/** …and what it is doing, as the chip and the tray say it: "Self-reviewing #42". */
+export function itemVerb(item: Pick<AgentItem, "scenario" | "reasons">): string {
+  if (item.scenario !== "drive") return SCENARIO_VERB[item.scenario];
+  const kind = itemKind(item);
+  return kind === "Self-review" ? "Self-reviewing" : kind === "Comments" ? "Answering reviewers on" : "Driving";
+}
+
+const SCENARIO_CHIP: Record<AgentItem["scenario"], string> = {
+  review: "Review",
+  brief: "Brief",
+  rereview: "Re-review",
+  drive: "Drive",
+  merge: "Merge",
+  afterMerge: "Jira",
+};
+
 /** What a run of each scenario is doing, as the chip and the tray say it. */
 export const SCENARIO_VERB: Record<AgentItem["scenario"], string> = {
   review: "Reviewing",
@@ -263,7 +291,7 @@ export function agentTrayLine(state: AgentState): string {
     line = "Paused";
   } else if (first && item) {
     const step = stepLabel(first.progress.steps);
-    line = `${SCENARIO_VERB[item.scenario]} #${item.prNumber}${first.paused ? " (paused)" : step ? ` · ${step}` : ""}${sum.running > 1 ? ` +${sum.running - 1}` : ""}`;
+    line = `${itemVerb(item)} #${item.prNumber}${first.paused ? " (paused)" : step ? ` · ${step}` : ""}${sum.running > 1 ? ` +${sum.running - 1}` : ""}`;
   } else if (sum.blockText && sum.queued > 0) {
     line = `${sum.blockText} · ${sum.queued} queued`;
   } else if (sum.blockText && sum.block !== "daily") {

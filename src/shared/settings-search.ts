@@ -146,6 +146,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       "triage",
       "re-review",
       "after merging",
+      "self-review",
+      "reviewer comments",
     ],
   },
   // The Agent tab. Its words stay clear of the exact searches other sections
@@ -204,6 +206,11 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       "conflict",
       "attempts",
       "comments",
+      "self-review",
+      "before reviewers",
+      "validate",
+      "orchestrator",
+      "sdlc",
     ],
   },
   {

@@ -863,6 +863,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                 ["triage", "Brief for a big PR"],
                 ["rereview", "Re-review — the author replied in your threads"],
                 ["afterMerge", "After merging your PR"],
+                ["selfReview", "Self-review of your PR, before reviewers"],
+                ["validateComments", "Reviewers commented on your PR"],
               ] as const satisfies ReadonlyArray<readonly [AgentPromptKey, string]>
             ).map(([key, title]) => (
               <div key={key}>

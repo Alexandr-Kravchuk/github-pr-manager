@@ -8790,7 +8790,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
       const mine = agentFixture({ pr: reviewPr({ role: "author" }), script: keepWorking });
       try {
-        assert.match((await mine.agent.act({ type: "enqueue", prId: mine.snapshot.pullRequests[0].id })).error, /Nothing to drive/, "a clean PR of yours has nothing to drive");
+        // A clean PR of yours is queued for a self-review of its head.
+        assert.deepStrictEqual(await mine.agent.act({ type: "enqueue", prId: mine.snapshot.pullRequests[0].id }), { ok: true });
+        assert.deepStrictEqual(mine.agent.getState().items.map((i) => [i.scenario, i.reasons]), [["drive", ["self"]]], "a clean PR of yours gets a self-review");
       } finally {
         mine.agent.stop();
       }
@@ -9580,6 +9582,127 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(policy.planJobs([mine({ isCrossRepository: true })], agentOn(), noSessions).idle.get("PR_R"), /fork/);
       assert.match(policy.planJobs([mine()], agentOn(), { ...noSessions, driveExhausted: () => "Yours — the agent tried 2 times; over to you" }).idle.get("PR_R"), /tried 2 times/);
       assert.strictEqual(policy.planJobs([mine()], agentOn(), noSessions).merges.length, 0, "a red PR is not offered for merge");
+    });
+
+    // --- three processes: your PR an orchestrator run drives (A), your PR without one (B), a PR you review (C) ---
+    test("agent policy B: your PR, not ready and nothing broken, gets a self-review per head — not one already self-reviewed, nor the agent's own push", () => {
+      const mine = (o = {}) => ({ ...reviewPr({ role: "author" }), awaitingReview: true, ...o });
+      const s = agentOn();
+      assert.ok(policy.mergeBlocker(mine(), s), "the fixture PR isn't ready to merge");
+      const job = policy.planJobs([mine()], s, noSessions).jobs[0];
+      assert.deepStrictEqual([job.scenario, job.kind, job.mode, job.reasons, job.key], ["drive", "drive", "shadow", ["self"], "PR_R|drive|aaa111|self"]);
+      const done = policy.planJobs([mine()], s, { ...noSessions, selfReviewed: () => true });
+      assert.deepStrictEqual(done.jobs, []);
+      assert.match(done.idle.get("PR_R"), /^Yours — self-reviewed; /, "waiting for reviewers, and says what it waits for");
+      assert.match(policy.planJobs([mine({ isDraft: true })], s, noSessions).idle.get("PR_R"), /^Yours — /, "a draft gets none");
+      assert.deepStrictEqual(policy.planJobs([mine()], agentOn({ scenarios: { selfReview: { mode: "off" } } }), noSessions).jobs, []);
+      assert.strictEqual(policy.planJobs([mine({ ciState: "failure" })], s, noSessions).jobs[0].reasons[0], "ci", "broken comes first: a drive, not a self-review");
+    });
+
+    test("agent policy A: your PR an SDLC orchestrator run drives is left alone — no self-review, no drive, no merge offer", () => {
+      const mine = (o = {}) => ({ ...reviewPr({ role: "author" }), ...o });
+      const ctx = { ...noSessions, orchestrated: () => "the SDLC orchestrator runs ENG-1 (stage review) — the agent leaves it to it" };
+      for (const pr of [mine(), mine({ ciState: "failure" }), mine({ hasUnaddressedComments: true })]) {
+        const r = policy.planJobs([pr], agentOn(), ctx);
+        assert.deepStrictEqual([r.jobs, r.merges], [[], []]);
+        assert.strictEqual(r.idle.get("PR_R"), "Yours — the SDLC orchestrator runs ENG-1 (stage review) — the agent leaves it to it");
+      }
+      // C: someone else's PR is reviewed whoever drives it.
+      assert.strictEqual(policy.planJobs([reviewPr()], agentOn(), ctx).jobs[0].scenario, "review");
+    });
+
+    test("agent prompts: each run on your PR starts from its own prompt; a review from yours", () => {
+      const claude = cfg.validateSettings({ hosts: [] }).claude;
+      assert.match(agentCore.promptFor({ scenario: "drive", reasons: ["self"] }, claude), /creatio-code-review .*dryRun: true[\s\S]*validate-and-fix-review-comments/);
+      assert.match(agentCore.promptFor({ scenario: "drive", reasons: ["comments"] }, claude), /^\/validate-and-fix-review-comments /);
+      assert.strictEqual(agentCore.promptFor({ scenario: "drive", reasons: ["ci", "comments"] }, claude), claude.prompts.drive, "broken: your «PR is blocked» prompt");
+      assert.strictEqual(agentCore.promptFor({ scenario: "review" }, claude), claude.prompts.review);
+      const mineSet = { ...claude, agentPrompts: { ...claude.agentPrompts, selfReview: "/my-self-review {url}" } };
+      assert.strictEqual(agentCore.promptFor({ scenario: "drive", reasons: ["self"] }, mineSet), "/my-self-review {url}");
+      const rules = agentCore.agentRules("drive", "shadow", null, { repo: "a/b", number: 7, reasons: ["self"] });
+      assert.match(rules, /self-review of the user's own PR[\s\S]*dryRun: true — it must post nothing/);
+      assert.match(agentCore.agentRules("drive", "shadow", null, { repo: "a/b", number: 7, reasons: ["comments"] }), /business, product or design decision/);
+      assert.deepStrictEqual(
+        [view.itemKind({ scenario: "drive", reasons: ["self"] }), view.itemKind({ scenario: "drive", reasons: ["comments"] }), view.itemKind({ scenario: "drive", reasons: ["ci"] }), view.itemKind({ scenario: "rereview" })],
+        ["Self-review", "Comments", "Drive", "Re-review"],
+      );
+      assert.strictEqual(view.itemVerb({ scenario: "drive", reasons: ["self"] }), "Self-reviewing");
+    });
+
+    test("agent sdlc: a live orchestrator run is found by the PR it published, in the checkout or a worktree; an ended one and a lookalike URL aren't", () => {
+      const sdlc = require(path.join(__dirname, "../dist/main/main/agent/sdlc.js"));
+      const co = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-sdlc-"));
+      const url = "https://creatio.ghe.com/eng/core/pull/37";
+      const write = (dir, name, o) => {
+        nfsA.mkdirSync(dir, { recursive: true });
+        nfsA.writeFileSync(path.join(dir, name), JSON.stringify(o, null, 2));
+      };
+      assert.strictEqual(sdlc.orchestratorRunFor(co, url), null, "no .sdlc at all");
+      write(path.join(co, ".sdlc", "state"), "ENG-9.json", { lifecycle_status: "in_progress", current_stage: "review", outputs: { published_pr_reference: { url: url + "1" } } });
+      assert.strictEqual(sdlc.orchestratorRunFor(co, url), null, "…/pull/371 is another PR");
+      write(path.join(co, ".sdlc", "state"), "ENG-8.change_set.json", { url });
+      assert.strictEqual(sdlc.orchestratorRunFor(co, url), null, "a side file isn't a run");
+      write(path.join(co, ".sdlc", "state"), "ENG-7.json", { lifecycle_status: "completed", current_stage: "done", outputs: { published_pr_reference: { url } } });
+      assert.strictEqual(sdlc.orchestratorRunFor(co, url), null, "an ended run lets the PR go");
+      write(path.join(co, ".claude", "worktrees", "w1", ".sdlc", "state"), "ENG-6.json", { lifecycle_status: "blocked", current_stage: "fix_findings", outputs: { published_pr_reference: { url } } });
+      assert.deepStrictEqual(sdlc.orchestratorRunFor(co, url), { key: "ENG-6", stage: "fix_findings", status: "blocked" }, "found in a worktree; blocked still holds it");
+      assert.strictEqual(sdlc.describeOrchestratorRun({ key: "ENG-6", stage: "fix_findings", status: "blocked" }), "the SDLC orchestrator runs ENG-6 (stage fix findings) — the agent leaves it to it");
+    });
+
+    await atest("agent: your PR an orchestrator run published gets no run, says why on the Board, and refuses a hand-over", async () => {
+      const mine = { ...reviewPr({ role: "author" }) };
+      const f = agentFixture({ pr: mine, script: succeed("done") });
+      try {
+        // The fixture's checkout carries the orchestrator's state for this very PR.
+        const state = path.join(f.dir, "checkout", ".sdlc", "state");
+        nfsA.mkdirSync(state, { recursive: true });
+        nfsA.writeFileSync(path.join(state, "ENG-5.json"), JSON.stringify({ lifecycle_status: "in_progress", current_stage: "review", outputs: { published_pr_reference: { url: mine.url } } }));
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.strictEqual(f.children.length, 0);
+        assert.match(f.agent.getState().idle[mine.id], /SDLC orchestrator runs ENG-5/);
+        assert.match((await f.agent.act({ type: "enqueue", prId: mine.id })).error, /SDLC orchestrator runs ENG-5/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: your PR without an orchestrator run gets its self-review, from the self-review prompt", async () => {
+      const mine = { ...reviewPr({ role: "author" }), awaitingReview: true };
+      // A drive reads its git place before the session; this stands in for git.
+      const common = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(common, "config"), "[core]\n");
+      const gitImpl = async (all) => {
+        let i = 0;
+        for (;;) {
+          if (all[i] === "-c") i += 2;
+          else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+          else break;
+        }
+        const args = all.slice(i);
+        if (args[0] === "config") return `file:${common}/config\0core.bare\0`;
+        if (args[0] === "rev-parse") return `${common}\n`;
+        if (args[0] === "remote") return "https://github.com/a/b.git\n";
+        return "";
+      };
+      const f = agentFixture({ pr: mine, script: succeed("Nothing to fix."), git: gitImpl });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1);
+        assert.match(f.children[0].written, /creatio-code-review/);
+        assert.match(f.children[0].written, /dryRun: true/);
+        const item = only(f)[0];
+        assert.deepStrictEqual([item.scenario, item.reasons], ["drive", ["self"]]);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("agent tools: a self-review reads Jira, so drive lists twg; a list saved before gets it", () => {
+      assert.ok(ad.DEFAULT_AGENT_TOOLS.drive.includes("Bash(twg *)"));
+      const migrated = cfg.validateAgent({ permissions: { tools: { drive: ["Read"] }, toolsVersion: 2 } });
+      assert.deepStrictEqual(migrated.permissions.tools.drive, ["Read", "Bash(twg *)"], "only what came after the version it was saved at");
+      assert.strictEqual(cfg.validateAgent(undefined).scenarios.selfReview.mode, "shadow");
     });
 
     await atest("drive: commits on top of the head are read oldest first; a rewritten history is not a fast-forward", async () => {

@@ -26,7 +26,8 @@ export interface AgentJob {
   reasons?: string[];
 }
 
-export type DriveReason = "ci" | "conflicts" | "comments";
+/** Why a run on your PR: CI, a conflict, reviewers' comments — or "self", a self-review before reviewers see it. */
+export type DriveReason = "ci" | "conflicts" | "comments" | "self";
 
 export interface PlanContext {
   /** A Claude session of yours is on this PR — the agent stays out of its way. */
@@ -37,6 +38,24 @@ export interface PlanContext {
    * green or someone else pushes.
    */
   driveExhausted?: (pr: PullRequest) => string | null;
+  /** This head of your PR had its self-review already — or is the agent's own push, which needs none. */
+  selfReviewed?: (pr: PullRequest) => boolean;
+  /**
+   * Your PR is driven by an SDLC orchestrator run — why the agent leaves it
+   * alone, or null. The run reviews it, fixes the findings, answers the
+   * reviewers and watches CI itself.
+   */
+  orchestrated?: (pr: PullRequest) => string | null;
+}
+
+/** Why your PR gets no self-review now, or null when it should get one. */
+function selfReviewBlock(pr: PullRequest, s: AgentSettings, ctx: PlanContext): string | null {
+  if (s.scenarios.selfReview.mode === "off") return "self-reviews are off";
+  if (pr.isDraft) return "a draft — self-reviewed once it is ready for review";
+  if (pr.isCrossRepository) return "from a fork — the agent pushes only to branches of the repository itself";
+  if (ctx.hasOwnSession(pr)) return "your Claude session is on it";
+  if (ctx.selfReviewed?.(pr)) return "self-reviewed at this head";
+  return null;
 }
 
 export interface PlanResult {
@@ -140,6 +159,12 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
       continue;
     }
     if (pr.roles.includes("author")) {
+      // An SDLC orchestrator run has it: everything a run here would do is that run's job.
+      const orchestrated = ctx.orchestrated?.(pr) ?? null;
+      if (orchestrated) {
+        skip(`Yours — ${orchestrated}`);
+        continue;
+      }
       // Your own PRs: driven to green when something is wrong, a Merge button once they're ready.
       const reasons = driveReasons(pr, s);
       if (reasons.length > 0) {
@@ -177,13 +202,32 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
         });
         continue;
       }
-      if (s.scenarios.merge.mode === "off") {
-        skip("Yours — merge offers are off");
-        continue;
-      }
       const blocker = mergeBlocker(pr, s);
       if (blocker) {
-        skip(`Yours — ${blocker.charAt(0).toLowerCase()}${blocker.slice(1)}`);
+        // Not ready yet, nothing broken: a self-review of this head before reviewers see
+        // it — the review in dry run, its findings validated, the confirmed ones fixed.
+        const noSelf = selfReviewBlock(pr, s, ctx);
+        if (!noSelf) {
+          jobs.push({
+            key: jobKey(pr, "drive", "self"),
+            prId: pr.id,
+            prNumber: pr.number,
+            repo: pr.repo,
+            url: pr.url,
+            scenario: "drive",
+            kind: "drive",
+            mode: s.scenarios.selfReview.mode === "on" ? "on" : "shadow",
+            createdAt: pr.createdAt,
+            reasons: ["self"],
+          });
+          continue;
+        }
+        const why = `${blocker.charAt(0).toLowerCase()}${blocker.slice(1)}`;
+        skip(noSelf === "self-reviewed at this head" ? `Yours — self-reviewed; ${why}` : `Yours — ${why}`);
+        continue;
+      }
+      if (s.scenarios.merge.mode === "off") {
+        skip("Yours — ready; merge offers are off");
         continue;
       }
       merges.push({

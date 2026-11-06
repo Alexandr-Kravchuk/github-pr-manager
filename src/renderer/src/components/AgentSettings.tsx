@@ -261,6 +261,19 @@ function ScenariosSection({ agent, setAgent, inputCls, onEditPrompts }: SectionP
           </Scenario>
 
           <Scenario
+            title="Your PR, before reviewers"
+            prompt={<PromptLink name="Self-review" onClick={onEditPrompts} />}
+            mode={sc.selfReview.mode}
+            modes={["off", "shadow", "on"]}
+            onMode={(mode) => patch("selfReview", { mode })}
+          >
+            <p className="text-xs text-fg-faint">
+              Each head you push gets a self-review: the review in dry run (nothing posted), its findings validated, the confirmed ones fixed as commits — pushed on your
+              Push in Shadow. Not a head the agent pushed itself.
+            </p>
+          </Scenario>
+
+          <Scenario
             title="Your PR fails CI or has a conflict"
             prompt={<PromptLink name="Your PR is blocked" onClick={onEditPrompts} />}
             mode={sc.driveCi.mode}
@@ -277,13 +290,19 @@ function ScenariosSection({ agent, setAgent, inputCls, onEditPrompts }: SectionP
 
           <Scenario
             title="Reviewers comment on your PR"
-            prompt={<PromptLink name="Your PR is blocked" onClick={onEditPrompts} />}
+            prompt={<PromptLink name="Reviewer comments" onClick={onEditPrompts} />}
             mode={sc.driveComments.mode}
             modes={["off", "shadow", "on"]}
             onMode={(mode) => patch("driveComments", { mode })}
           >
-            <p className="text-xs text-fg-faint">Runs your «PR is blocked» prompt on the comments: fixes the ones it confirms, replies on the rest.</p>
+            <p className="text-xs text-fg-faint">
+              Checks every open comment against the head: fixes the confirmed ones, answers in each thread, and asks you about business or design decisions. With failing CI
+              or a conflict as well, your «PR is blocked» prompt runs instead.
+            </p>
           </Scenario>
+          <Locked>
+            A PR of yours that an SDLC orchestrator run drives (its .sdlc/state names the PR) is left to that run: it reviews, fixes, answers the reviewers and merges itself.
+          </Locked>
         </div>
       </Dimmed>
     </section>

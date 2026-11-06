@@ -230,7 +230,7 @@ export interface Settings {
 }
 
 /** The prompts only the PR agent uses, next to the Claude button's ones. */
-export type AgentPromptKey = "triage" | "rereview" | "afterMerge";
+export type AgentPromptKey = "triage" | "rereview" | "afterMerge" | "selfReview" | "validateComments";
 
 /** Off never runs; shadow does the work and waits for you before posting; on posts and tells you after. */
 export type AgentMode = "off" | "shadow" | "on";
@@ -286,6 +286,11 @@ export interface AgentSettings {
       method: "github" | MergeMethod;
       deleteBranch: boolean;
     };
+    /**
+     * Your PR, before reviewers see it: a self-review of each head you push
+     * (the review in dry run, its findings validated, the confirmed ones fixed).
+     */
+    selfReview: { mode: AgentMode };
     /** Your PR fails CI or has a conflict. */
     driveCi: { mode: AgentMode; maxAttempts: number };
     /** Reviewers commented on your PR. */
