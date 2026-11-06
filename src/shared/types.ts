@@ -836,15 +836,13 @@ export interface AgentItem {
   /** Your choice on each thread the author pushed back on (by its first comment's id): keep your comment, or drop it. */
   disputes?: Record<string, "keep" | "drop">;
   error?: string;
-  /** Put aside with "Later": still waiting, out of the way. */
-  later?: boolean;
   /**
-   * The app closed while it ran. It does not go on by itself: Resume picks
-   * the same session up again (headless, in the same worktree), Run again
-   * starts over.
+   * The app closed while it ran. It goes on by itself at the next start: the
+   * same session where its folder is still there, else (and always for a
+   * drive) a new run.
    */
   interrupted?: boolean;
-  /** Queued by Resume: the next run continues `sessionId` instead of starting a session. */
+  /** The next run continues `sessionId` instead of starting a session: after a restart, or with your answer. */
   resumeSession?: boolean;
   /**
    * Your place for it in the queue (dragged, or "Run next"): lower runs first.
@@ -938,7 +936,7 @@ export interface AgentState {
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
 export type AgentAction =
-  | { type: "skip" | "later" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish" | "push" | "resumeSession" | "ack"; runId: string }
+  | { type: "skip" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish" | "push"; runId: string }
 
   // The whole agent — two members, so a check for both narrows the rest.
   | { type: "pauseAgent" }

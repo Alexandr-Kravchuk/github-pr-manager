@@ -476,11 +476,12 @@ function mockAgentState(): AgentState {
     item(911, { state: "working", headline: "Reviewing", startedAt: iso(3 * 60_000), sessionId: "11111111-1111-4111-8111-111111111111" }),
     item(44, { state: "working", headline: "Reviewing", startedAt: iso(40_000), sessionId: "22222222-2222-4222-8222-222222222222" }),
     item(88, { state: "queued", headline: "Queued: review" }),
-    // The app closed while it ran: Resume picks the session up again.
+    // You stopped a run: a note on its card, not a decision.
     item(139, {
-      state: "needsYou",
-      headline: "Interrupted — the app closed while it ran",
-      interrupted: true,
+      scenario: "drive",
+      reasons: ["comments"],
+      state: "done",
+      headline: "Stopped by you",
       finishedAt: iso(50 * 60_000),
       sessionId: "66666666-6666-4666-8666-666666666666",
       worktree: "/tmp/agent-clio-139",
@@ -751,10 +752,7 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
     const running = agentState.running.find((r) => r.runId === action.runId);
     switch (action.type) {
       case "skip":
-        Object.assign(it, { state: "done", headline: "Dismissed", finishedAt: at, later: false });
-        break;
-      case "later":
-        it.later = !it.later;
+        Object.assign(it, { state: "done", headline: "Dismissed", finishedAt: at });
         break;
       case "retry":
       case "reviewAnyway":
@@ -768,7 +766,7 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
       case "takeOver":
         agentState.running = agentState.running.filter((r) => r !== running);
         Object.assign(it, {
-          state: "needsYou",
+          state: "done",
           headline: action.type === "stop" ? "Stopped by you" : "You took it over in your terminal",
           finishedAt: at,
           worktree: "/tmp/x",
@@ -790,12 +788,6 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
         break;
       case "answer":
         Object.assign(it, { state: "queued", resumeSession: true, answer: action.text, headline: "Queued: going on with your answer", finishedAt: undefined });
-        break;
-      case "ack":
-        Object.assign(it, { state: "done", finishedAt: at, later: false });
-        break;
-      case "resumeSession":
-        Object.assign(it, { state: "queued", resumeSession: true, headline: "Queued: resume (asked by you)", finishedAt: undefined });
         break;
       case "publish":
         if (!it.plan) return { ok: false, error: "Nothing prepared to publish." };

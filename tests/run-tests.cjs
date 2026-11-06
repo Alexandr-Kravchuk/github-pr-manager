@@ -8594,20 +8594,30 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       return { agent, snapshot, gitCalls, children, dir, setAgent };
     };
 
+    const captureJs = path.join(__dirname, "../dist/main/main/agent/capture.js");
+    // A review session as the skill runs it: write the review JSON, hand it to
+    // the run's wrapper (the real capture script), finish.
+    const reviewWithPlan = (event = "REQUEST_CHANGES") => (c) => {
+      const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+      const runDir = path.dirname(outDir);
+      const run = JSON.parse(nfsA.readFileSync(path.join(runDir, "run.json"), "utf8"));
+      const file = path.join(outDir, "review.json");
+      nfsA.writeFileSync(file, JSON.stringify({ event, body: "Summary", comments: [{ path: "x.ts", line: 3, side: "RIGHT", body: "Major" }] }));
+      const r = spawnSync(process.execPath, [captureJs, runDir, "review", run.repo, String(run.number), file], { encoding: "utf8" });
+      if (r.status !== 0) throw new Error(r.stderr);
+      emit(c, { type: "system", subtype: "init", session_id: "s" });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review." });
+      setImmediate(() => c.emit("exit", 0));
+    };
+
     await atest("agent: a review request becomes a shadow review waiting for you, run once per head", async () => {
-      const f = agentFixture({
-        script: (c) => {
-          emit(c, { type: "system", subtype: "init", session_id: "real-session" });
-          emit(c, { type: "result", subtype: "success", is_error: false, result: "Would post: 1 Minor (x.ts:3). Would approve." });
-          setImmediate(() => c.emit("exit", 0));
-        },
-      });
+      const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs });
       try {
         f.agent.onSnapshot(f.snapshot);
         await until(() => f.agent.getState().items.some((i) => i.state === "needsYou"));
         const item = f.agent.getState().items[0];
-        assert.strictEqual(item.headline, "Review ready — it waits for your OK before posting");
-        assert.match(item.output, /Would approve/);
+        assert.strictEqual(item.headline, "Would post: request changes, 1 inline comment");
+        assert.match(item.output, /Prepared the review/);
         assert.ok(f.gitCalls.some((a) => a[0] === "fetch" && a[3] === "pull/7/head"));
         assert.ok(f.children[0].args.includes("--restricted"));
         const settingsFile = f.children[0].args[f.children[0].args.indexOf("--settings") + 1];
@@ -8667,7 +8677,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const keepWorking = (c) => emit(c, { type: "system", subtype: "init", session_id: "s" });
     const only = (f) => f.agent.getState().items;
 
-    await atest("agent act: pause, hint and resume reach the running session; Stop keeps the result for you", async () => {
+
+    await atest("agent act: pause, hint and resume reach the running session; Stop leaves a note, not a decision", async () => {
       const f = agentFixture({ script: keepWorking });
       try {
         f.agent.onSnapshot(f.snapshot);
@@ -8691,10 +8702,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual((await f.agent.act({ type: "skip", runId })).ok, false, "a running run is stopped before it is dismissed");
 
         assert.deepStrictEqual(await f.agent.act({ type: "stop", runId }), { ok: true });
-        await until(() => only(f)[0].state === "needsYou");
+        await until(() => only(f)[0].state === "done");
         assert.strictEqual(only(f)[0].headline, "Stopped by you");
-        assert.ok(only(f)[0].worktree, "the worktree stays so the session can be continued");
-        assert.ok(!f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"));
+        await until(() => f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"));
         assert.strictEqual((await f.agent.act({ type: "hint", runId, text: "x" })).ok, false, "a hint needs a running session");
       } finally {
         f.agent.stop();
@@ -8709,26 +8719,23 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await until(() => f.agent.getState().running.length === 1);
         const item = only(f)[0];
         assert.deepStrictEqual(await f.agent.act({ type: "takeOver", runId: item.runId }), { ok: true });
-        await until(() => only(f)[0].state === "needsYou");
+        await until(() => only(f)[0].state === "done");
         assert.strictEqual(only(f)[0].headline, "You took it over in your terminal");
         assert.deepStrictEqual(opened, [[only(f)[0].worktree, item.sessionId]]);
+        assert.ok(!f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"), "your session goes on in its folder");
         assert.ok(f.children[0].args.includes(item.sessionId), "it resumes the very session the run used");
       } finally {
         f.agent.stop();
       }
     });
 
-    await atest("agent act: Later sets a result aside, Run again replaces it, Dismiss closes it", async () => {
+    await atest("agent act: Run again replaces a result, Dismiss closes it", async () => {
       const opened = [];
-      const f = agentFixture({ script: succeed("Would post nothing."), openResume: async (dir, sid) => void opened.push([dir, sid]) });
+      const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, openResume: async (dir, sid) => void opened.push([dir, sid]) });
       try {
         f.agent.onSnapshot(f.snapshot);
         await until(() => only(f).some((i) => i.state === "needsYou"));
         const first = only(f)[0];
-        assert.deepStrictEqual(await f.agent.act({ type: "later", runId: first.runId }), { ok: true });
-        assert.strictEqual(only(f)[0].later, true);
-        await f.agent.act({ type: "later", runId: first.runId });
-        assert.strictEqual(only(f)[0].later, false, "Later toggles");
 
         assert.strictEqual((await f.agent.act({ type: "continue", runId: first.runId })).ok, false, "no worktree on disk, nothing to continue");
         nfsA.mkdirSync(first.worktree, { recursive: true });
@@ -8762,8 +8769,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(brief.scenario, "brief");
         assert.strictEqual(view.primaryActionLabel(brief), "Review anyway");
         assert.deepStrictEqual(await f.agent.act({ type: "reviewAnyway", runId: brief.runId }), { ok: true });
-        await until(() => only(f).length === 2 && only(f)[1].state === "needsYou");
-        assert.strictEqual(only(f)[0].headline, view.AGENT_CLOSED.reviewed, "the brief leaves Needs you");
+        await until(() => only(f).length === 2 && only(f)[1].state === "done");
+        assert.strictEqual(only(f)[1].headline, "Reviewed — nothing to post", "nothing captured to post: a note, not a decision");
+        assert.strictEqual(only(f)[0].headline, view.AGENT_CLOSED.reviewed, "the brief leaves Your move");
         assert.strictEqual(only(f)[1].scenario, "review");
         assert.ok(f.children[1].args.includes("--settings"));
         const settingsFile = f.children[1].args[f.children[1].args.indexOf("--settings") + 1];
@@ -8812,9 +8820,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(v({ type: "pause", runId: RID, extra: "dropped" }), { type: "pause", runId: RID });
       assert.deepStrictEqual(v({ type: "hint", runId: RID, text: "  look at x.ts  " }), { type: "hint", runId: RID, text: "look at x.ts" });
       assert.deepStrictEqual(v({ type: "enqueue", prId: "PR_kwDOA" }), { type: "enqueue", prId: "PR_kwDOA" });
-      for (const t of ["skip", "later", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver"]) {
+      for (const t of ["skip", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver"]) {
         assert.strictEqual(v({ type: t, runId: RID }).type, t);
       }
+      for (const gone of ["later", "ack", "resumeSession"]) assert.throws(() => v({ type: gone, runId: RID }), /unknown action/, gone);
       for (const bad of [
         null,
         "pause",
@@ -9052,48 +9061,6 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
       assert.strictEqual(view.itemForPr([working], "other", today), null);
     });
-    test("agent view: the Board holds all of the agent's work whatever the filters; Idle follows them; Done today keeps PRs that left", () => {
-      const today = view.todayKey(new Date());
-      const now = new Date().toISOString();
-      const pr = (id) => ({ id });
-      const prs = ["P1", "P2", "P3", "P4", "P5", "P6", "P7"].map(pr);
-      const items = [
-        vItem({ prId: "P1", state: "queued", queuedAt: "2026-11-05T10:00:00.000Z" }),
-        vItem({ prId: "P2", state: "queued", queuedAt: "2026-11-05T09:00:00.000Z" }),
-        vItem({ prId: "P3", state: "working" }),
-        vItem({ prId: "P4", state: "needsYou", later: true, finishedAt: "2026-11-05T07:00:00.000Z" }),
-        vItem({ prId: "P5", state: "error", finishedAt: "2026-11-05T09:30:00.000Z" }),
-        vItem({ prId: "P6", state: "done", headline: "Reviewed", finishedAt: now }),
-        vItem({ prId: "P7", state: "done", headline: view.AGENT_CLOSED.dismissed, finishedAt: now }),
-        vItem({ prId: "P8", state: "done", headline: "Filtered out", finishedAt: now }),
-        vItem({ prId: "P9", state: "done", headline: "Merged since", finishedAt: now }),
-      ];
-      const cols = view.boardColumns(prs, { enabled: true, items, running: [], idle: { P7: "Draft" } }, today);
-      assert.deepStrictEqual(cols.queued.map((i) => i.prId), ["P2", "P1"], "oldest ask first");
-      const ranked = view.boardColumns(prs, { enabled: true, items: [...items, vItem({ prId: "P10", state: "queued", queuedAt: "2026-11-05T11:00:00.000Z", rank: 0 })], running: [], idle: {} }, today);
-      assert.deepStrictEqual(ranked.queued.map((i) => i.prId), ["P10", "P2", "P1"], "the place you gave it first");
-      assert.deepStrictEqual(cols.working.map((i) => i.prId), ["P3"]);
-      assert.deepStrictEqual(cols.needsYou.map((i) => i.prId), ["P5", "P4"], "what you put off with Later comes last");
-      assert.deepStrictEqual(cols.done.map((i) => i.prId).sort(), ["P6", "P8", "P9"], "a PR the filters hide still shows its work — the chip and the tray count it too");
-      const twice = view.boardColumns(prs, { enabled: true, items: [...items, vItem({ prId: "P6", state: "done", headline: "Reviewed", finishedAt: new Date(Date.now() - 1_000).toISOString() })], running: [], idle: {} }, today);
-      assert.deepStrictEqual(twice.done.map((i) => i.prId).sort(), ["P6", "P8", "P9"], "a PR with two results today is one card");
-      const kept = twice.done.find((i) => i.prId === "P6");
-      assert.strictEqual(kept.finishedAt, now, "the latest run");
-      assert.strictEqual(twice.doneRuns[kept.runId], 2, "and it says it stands for two");
-      assert.deepStrictEqual(cols.doneRuns, {});
-      assert.deepStrictEqual(cols.idle.map((x) => [x.pr.id, x.reason]), [["P7", "Draft"]], "a PR done today is in Done today only — one column per PR; a dismissed one is Idle");
-      // Live work wins over today's result: a PR queued again leaves Done today.
-      const again = view.boardColumns(prs, { enabled: true, items: [...items, vItem({ prId: "P6", state: "queued" })], running: [], idle: {} }, today);
-      assert.deepStrictEqual([again.queued.some((i) => i.prId === "P6"), again.done.some((i) => i.prId === "P6"), again.idle.some((x) => x.pr.id === "P6")], [true, false, false]);
-      // Every PR of the filtered list is in exactly one column.
-      for (const c of [cols, again]) {
-        const where = (id) => [c.idle.some((x) => x.pr.id === id), ...["queued", "working", "needsYou", "done"].map((k) => c[k].some((i) => i.prId === id))].filter(Boolean).length;
-        for (const p of prs) assert.strictEqual(where(p.id), 1, `${p.id} in one column`);
-      }
-      const off = view.boardColumns(prs, { enabled: false, items: [], running: [], idle: {} }, today);
-      assert.strictEqual(off.idle.length, prs.length);
-      assert.strictEqual(off.idle[0].reason, "The agent is off");
-    });
     test("agent view: the first button names what an item asks of you", () => {
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "error" })), "Run again");
       assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "brief", output: "x" })), "Review anyway");
@@ -9108,7 +9075,6 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const pub = require(path.join(__dirname, "../dist/main/shared/agent-publish.js"));
     const publishMod = require(path.join(__dirname, "../dist/main/main/agent/publish.js"));
     const mergeMod = require(path.join(__dirname, "../dist/main/main/agent/merge.js"));
-    const captureJs = path.join(__dirname, "../dist/main/main/agent/capture.js");
     const SHA = "a".repeat(40);
 
     test("publish plan: a review is rebuilt from the allowed fields only, the way the skill's own wrapper checks it", () => {
@@ -9494,21 +9460,6 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(plugins.mountUserSkills("/nope", owned, mount, skills), { prompt: "/nope", pluginDirs: [] });
     });
 
-    // A review session as the skill runs it: write the review JSON, hand it to
-    // the run's wrapper (the real capture script), finish.
-    const reviewWithPlan = (event = "REQUEST_CHANGES") => (c) => {
-      const outDir = c.args[c.args.indexOf("--add-dir") + 1];
-      const runDir = path.dirname(outDir);
-      const run = JSON.parse(nfsA.readFileSync(path.join(runDir, "run.json"), "utf8"));
-      const file = path.join(outDir, "review.json");
-      nfsA.writeFileSync(file, JSON.stringify({ event, body: "Summary", comments: [{ path: "x.ts", line: 3, side: "RIGHT", body: "Major" }] }));
-      const r = spawnSync(process.execPath, [captureJs, runDir, "review", run.repo, String(run.number), file], { encoding: "utf8" });
-      if (r.status !== 0) throw new Error(r.stderr);
-      emit(c, { type: "system", subtype: "init", session_id: "s" });
-      emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review." });
-      setImmediate(() => c.emit("exit", 0));
-    };
-
     await atest("agent publish: a shadow review's writes are captured, then posted on your Publish — signed, once, at the head it saw", async () => {
       const posted = [];
       const notices = [];
@@ -9613,8 +9564,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(nfsA.readFileSync(settingsFile, "utf8"), /hook\.js[\s\S]*afterMerge/, "the dry run runs under the read-only guard");
         assert.match(f.children[0].args[f.children[0].args.indexOf("--append-system-prompt") + 1], /change nothing in Jira/);
         assert.ok(notices.includes("needsYou") && notices.includes("finished"));
-        const board = view.boardColumns([], f.agent.getState(), view.todayKey(new Date()));
-        assert.ok(board.needsYou.some((i) => i.runId === dry.runId), "it shows on the Board though its PR is gone");
+        const board = view.stageColumns([], [], f.agent.getState(), { today: view.todayKey(new Date()) });
+        assert.ok(board.mine.done.some((c) => c.stage.item?.runId === dry.runId && c.stage.action?.kind === "updateJira"), "it shows under Merged today though its PR is gone");
       } finally {
         f.agent.stop();
       }
@@ -10251,8 +10202,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.agentTrayLine({ ...base, items: [a], running: [{ ...run(a, ["in_progress"]), paused: true }] }), "Reviewing #911 (paused)");
       assert.strictEqual(view.agentTrayLine({ ...base, runsToday: 30, items: [vItem({ prId: "Q", state: "queued" })] }), "Daily limit reached (30) · 1 queued");
       assert.strictEqual(view.agentTrayLine({ ...base, items: [a, b], running: [run(a, []), run(b, [])] }), "Reviewing #911 +1");
-      const waiting = [vItem({ prId: "C", state: "needsYou" }), vItem({ prId: "D", state: "error" }), vItem({ prId: "E", state: "needsYou", later: true })];
-      assert.strictEqual(view.agentTrayLine({ ...base, items: waiting }), "Idle · 2 wait for you", "a result put aside with Later doesn't count");
+      const toSend = { event: "COMMENT", body: "b", comments: [], replies: [], resolves: 0, escalations: [] };
+      const waiting = [vItem({ prId: "C", state: "needsYou", plan: toSend }), vItem({ prId: "D", state: "error" }), vItem({ prId: "E", state: "needsYou" })];
+      assert.strictEqual(view.agentTrayLine({ ...base, items: waiting }), "Idle · 2 ready for you", "a result that asks nothing isn't counted");
       assert.strictEqual(view.agentTrayLine({ ...base, paused: true, items: [a], running: [run(a, [])] }), "Paused");
       const queued = [vItem({ prId: "F", state: "queued" })];
       assert.strictEqual(view.agentTrayLine({ ...base, quietUntil: "08:00", items: queued }), "Quiet hours until 08:00 · 1 queued");
@@ -10274,15 +10226,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.agentTakesToast([on({ prId: "Q", scenario: "rereview" })], { prId: "Q", kind: "returned_to_me" }), true);
     });
 
-    test("ipc: the whole agent is paused and resumed with nothing riding along; Resume names a run", () => {
-      const RID = "00000000-0000-4000-8000-000000000001";
+    test("ipc: the whole agent is paused and resumed with nothing riding along", () => {
       assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "pauseAgent", runId: "../x", path: "/etc" }), { type: "pauseAgent" });
       assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "resumeAgent" }), { type: "resumeAgent" });
-      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "resumeSession", runId: RID }), { type: "resumeSession", runId: RID });
-      assert.throws(() => ipcAgent.validateAgentAction({ type: "resumeSession", runId: "x" }));
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", interrupted: true, sessionId: "s" })), "Resume");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", interrupted: true, scenario: "drive", sessionId: "s" })), "Run again", "a drive starts over");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", interrupted: true })), "Run again", "no session to resume");
     });
 
     await atest("agent pause: the whole agent holds its queue, pauses the run in flight, and resumes only what it paused", async () => {
@@ -10364,7 +10310,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
-    await atest("agent: a run the app's closing cut short is Interrupted; Resume continues the same session in its worktree, never by itself", async () => {
+    await atest("agent: a run the app's closing cut short goes on by itself at the next start — the same session, in its worktree", async () => {
       const f = agentFixture({ script: keepWorking });
       f.agent.onSnapshot(f.snapshot);
       await until(() => f.agent.getState().running.length === 1);
@@ -10379,12 +10325,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       nfsA.mkdirSync(worktree, { recursive: true });
       const g = agentFixture({ home: f.dir, script: keepWorking });
       try {
+        assert.ok(only(g).find((i) => i.runId === runId).interrupted, "held until the PRs are known");
         g.agent.onSnapshot(g.snapshot);
-        await tickOnce();
-        assert.strictEqual(g.children.length, 0, "no auto-continue");
-        const item = only(g).find((i) => i.runId === runId);
-        assert.strictEqual(view.primaryActionLabel(item), "Resume");
-        assert.deepStrictEqual(await g.agent.act({ type: "resumeSession", runId }), { ok: true });
         await until(() => g.children.length === 1);
         const c = g.children[0];
         assert.strictEqual(c.args[c.args.indexOf("--resume") + 1], sessionId, "the very session it ran");
@@ -10395,31 +10337,30 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(c.written, /closed while you worked/);
         assert.strictEqual(only(g).find((i) => i.runId === runId).state, "working");
         assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"resumed"/);
-        assert.strictEqual((await g.agent.act({ type: "resumeSession", runId })).ok, false, "only an interrupted result can be resumed");
       } finally {
         g.agent.stop();
       }
     });
 
-    await atest("agent: an interrupted drive starts over — Resume is refused; a resume whose folder is gone fails plainly", async () => {
-      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+    await atest("agent: an interrupted drive, or a run whose folder is gone, starts over as a new run", async () => {
       const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", state: "working", headline: "h", queuedAt: "2026-11-05T00:00:00Z" };
-      const st = agentStore.emptyStore("2026-11-05");
-      st.items = [
-        { ...base, runId: "00000000-0000-4000-8000-0000000000d1", key: "PR_R|drive|aaa111", scenario: "drive", sessionId: "11111111-1111-4111-8111-111111111111", worktree: home },
-        { ...base, runId: "00000000-0000-4000-8000-0000000000d2", key: "PR_R|review|aaa111", scenario: "review", sessionId: "22222222-2222-4222-8222-222222222222", worktree: path.join(home, "gone") },
-      ];
-      agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
-      const g = agentFixture({ home, script: keepWorking });
-      try {
-        assert.ok(only(g).every((i) => i.state === "needsYou" && i.interrupted));
-        assert.match((await g.agent.act({ type: "resumeSession", runId: "00000000-0000-4000-8000-0000000000d1" })).error, /drive starts over/);
-        assert.deepStrictEqual(await g.agent.act({ type: "resumeSession", runId: "00000000-0000-4000-8000-0000000000d2" }), { ok: true });
-        await until(() => only(g).some((i) => i.state === "error"));
-        assert.match(only(g).find((i) => i.state === "error").headline, /folder is gone/);
-        assert.strictEqual(g.children.length, 0);
-      } finally {
-        g.agent.stop();
+      for (const [scenario, folder] of [["drive", "here"], ["review", "gone"]]) {
+        const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+        const runId = "00000000-0000-4000-8000-0000000000d1";
+        const st = agentStore.emptyStore("2026-11-05");
+        st.items = [{ ...base, runId, key: `PR_R|${scenario}|aaa111`, scenario, sessionId: "11111111-1111-4111-8111-111111111111", worktree: folder === "here" ? home : path.join(home, "gone") }];
+        agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
+        const g = agentFixture({ home, script: keepWorking });
+        try {
+          assert.ok(only(g).every((i) => i.state === "needsYou" && i.interrupted), scenario);
+          g.agent.onSnapshot(g.snapshot);
+          await until(() => only(g).some((i) => i.key === `PR_R|${scenario}|aaa111|asked`));
+          assert.strictEqual(only(g).find((i) => i.runId === runId).headline, view.AGENT_CLOSED.rerun, scenario);
+          await until(() => g.children.length > 0);
+          assert.ok(g.children.every((c) => c.args.includes("--session-id") && !c.args.includes("--resume")), `${scenario}: a new session`);
+        } finally {
+          g.agent.stop();
+        }
       }
     });
 
@@ -10476,34 +10417,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.rankBefore([], null), undefined, "an empty queue: its own time will do");
     });
 
-    test("agent board lanes: your PRs apart from the PRs you review — idle by role, work by scenario, one queue order", () => {
-      const today = view.todayKey(new Date());
-      const now = new Date().toISOString();
-      const prs = [{ id: "MINE", roles: ["author"] }, { id: "THEIRS", roles: ["reviewer"] }, { id: "OLD", roles: ["reviewed"] }];
-      const items = [
-        vItem({ prId: "A", state: "queued", scenario: "drive", queuedAt: "2026-11-05T09:00:00.000Z" }),
-        vItem({ prId: "B", state: "queued", scenario: "review", queuedAt: "2026-11-05T10:00:00.000Z" }),
-        vItem({ prId: "C", state: "queued", scenario: "rereview", queuedAt: "2026-11-05T08:00:00.000Z" }),
-        vItem({ prId: "D", state: "working", scenario: "brief" }),
-        vItem({ prId: "E", state: "needsYou", scenario: "merge" }),
-        vItem({ prId: "F", state: "done", scenario: "afterMerge", headline: "Jira dry run applied", finishedAt: now }),
-      ];
-      const all = view.boardColumns(prs, { enabled: true, items, running: [], idle: {} }, today);
-      const lanes = view.boardLanes(all);
-      assert.deepStrictEqual(lanes.mine.idle.map((x) => x.pr.id), ["MINE"]);
-      assert.deepStrictEqual(lanes.review.idle.map((x) => x.pr.id), ["THEIRS", "OLD"]);
-      assert.deepStrictEqual(lanes.mine.queued.map((i) => i.prId), ["A"]);
-      assert.deepStrictEqual(lanes.review.queued.map((i) => i.prId), ["C", "B"], "each lane keeps the queue's order");
-      assert.deepStrictEqual(all.queued.map((i) => i.prId), ["C", "A", "B"], "and the queue stays one");
-      assert.deepStrictEqual([lanes.review.working.map((i) => i.prId), lanes.mine.needsYou.map((i) => i.prId), lanes.mine.done.map((i) => i.prId)], [["D"], ["E"], ["F"]]);
-      for (const k of ["idle", "queued", "working", "needsYou", "done"]) {
-        assert.strictEqual(lanes.mine[k].length + lanes.review[k].length, all[k].length, `nothing lost or doubled in ${k}`);
-      }
-    });
-
     await atest("agent worktrees: Run again gets a folder of its own, and the old one stays while your session works in it", async () => {
       const sessions = [];
-      const f = agentFixture({ script: succeed("Would post nothing."), sessions });
+      const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, sessions });
       try {
         f.agent.onSnapshot(f.snapshot);
         await until(() => only(f).some((i) => i.state === "needsYou"));
@@ -10563,7 +10479,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
-    await atest("agent answer: a run on your PR that asks you waits with its question; your answer goes on in the same session; Done closes it", async () => {
+    await atest("agent answer: a run on your PR that asks you waits with its question; your answer goes on in the same session; Discard closes it", async () => {
       const text = "Prose.\n\n```prd-result\n" + JSON.stringify({ summary: "One finding is a product decision.", asks: [{ question: "Make the threshold configurable?", options: ["Yes", "No"] }], findings: [] }) + "\n```";
       const mine = { ...reviewPr({ role: "author", headOid: "abcdef1234567" }), awaitingReview: true };
       const common = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
@@ -10598,8 +10514,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(c.written, /The user answered from the app: Q: Make the threshold configurable\?\\nA: No/);
         assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"answered"/);
         assert.strictEqual(only(f)[0].answer, undefined, "the answer is used once");
-        // Done: it moves to Done today with its own headline.
-        assert.deepStrictEqual(await f.agent.act({ type: "ack", runId: item.runId }), { ok: true });
+        // Discard: it closes.
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: item.runId }), { ok: true });
         assert.strictEqual(only(f)[0].state, "done");
         assert.strictEqual((await f.agent.act({ type: "answer", runId: item.runId, text: "late" })).ok, false, "a closed result can't be answered");
       } finally {
@@ -10639,12 +10555,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
-    test("ipc: an answer is text held to a bound; Done names a run", () => {
+    test("ipc: an answer is text held to a bound", () => {
       const RID = "00000000-0000-4000-8000-000000000001";
       assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "answer", runId: RID, text: "  Keep  " }), { type: "answer", runId: RID, text: "Keep" });
       assert.throws(() => ipcAgent.validateAgentAction({ type: "answer", runId: RID, text: "" }));
       assert.throws(() => ipcAgent.validateAgentAction({ type: "answer", runId: RID, text: "x".repeat(ipcAgent.AGENT_HINT_MAX + 1) }));
-      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "ack", runId: RID }), { type: "ack", runId: RID });
     });
 
     // --- blockers from the deep test: what you saw is what goes out; off is off; drive can do its job ---
@@ -10765,11 +10680,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         const runId = only(f)[0].runId;
         f.setAgent({ enabled: false, scenarios: { review: { mode: "on" } } });
         f.agent.refresh();
-        await until(() => only(f)[0].state === "needsYou");
+        await until(() => only(f)[0].state === "done");
         assert.strictEqual(only(f)[0].headline, "Stopped — the agent was switched off");
         assert.strictEqual(f.agent.getState().running.length, 0);
         // Your own clicks, with the agent off.
-        assert.deepStrictEqual(await f.agent.act({ type: "later", runId }), { ok: true });
         assert.match((await f.agent.act({ type: "retry", runId })).error, /The agent is off/, "a new run waits until it is on");
         assert.match((await f.agent.act({ type: "enqueue", prId: "PR_R" })).error, /The agent is off/);
         assert.deepStrictEqual(await f.agent.act({ type: "skip", runId }), { ok: true });
@@ -10860,7 +10774,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
 
     await atest("agent reconcile: a new head supersedes the waiting result; a PR that left the dashboard closes its items", async () => {
-      const f = agentFixture({ script: succeed("Would post: a comment.") });
+      const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs });
       try {
         f.agent.onSnapshot(f.snapshot);
         await until(() => only(f).some((i) => i.state === "needsYou"));
@@ -10878,14 +10792,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         f.agent.onSnapshot(f.snapshot);
         await until(() => !only(f).some((i) => i.state === "needsYou"));
         assert.ok(only(f).some((i) => i.headline === view.AGENT_CLOSED.offDashboard));
-        const board = view.boardColumns([], f.agent.getState(), view.todayKey(new Date()));
-        assert.deepStrictEqual([board.needsYou.length, board.done.length], [0, 0], "both close quietly: no decision, no Done today card");
+        const board = view.stageColumns([], [], f.agent.getState(), { today: view.todayKey(new Date()) });
+        assert.deepStrictEqual([board.review.you.length, board.review.done.length], [0, 0], "both close quietly: no decision, no Done today card");
       } finally {
         f.agent.stop();
       }
     });
 
-    await atest("agent reconcile: a review with nothing to post, ask or worry about goes straight to Done today", async () => {
+    await atest("agent reconcile: a review with nothing to post is a note, not a decision", async () => {
       const text = "Checked.\n\n```prd-result\n" + JSON.stringify({ summary: "Nothing to post: your approve stands.", asks: [], findings: [{ severity: "note", text: "fine", where: "" }] }) + "\n```";
       const notices = [];
       const f = agentFixture({ script: succeed(text), captureScript: captureJs, notify: (n) => notices.push(n.kind) });
@@ -10893,10 +10807,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         f.agent.onSnapshot(f.snapshot);
         await until(() => only(f).some((i) => i.state === "done"));
         const item = only(f)[0];
-        assert.strictEqual(item.headline, "Review ready — nothing to post");
+        assert.strictEqual(item.headline, "Reviewed — nothing to post");
         assert.deepStrictEqual(notices, ["finished"], "not a decision for you");
-        const board = view.boardColumns([], f.agent.getState(), view.todayKey(new Date()));
-        assert.ok(board.done.some((i) => i.runId === item.runId));
+        const board = view.stageColumns([], [], f.agent.getState(), { today: view.todayKey(new Date()) });
+        assert.ok(board.review.done.some((c) => c.stage.item?.runId === item.runId), "its PR gone, the note is today's");
       } finally {
         f.agent.stop();
       }
@@ -10904,13 +10818,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("agent summary: one set of numbers and words for the chip, the tray, the Board and the cards", () => {
       const base = { enabled: true, items: [], running: [], idle: {}, runsToday: 3, perDay: 30, parallel: 2, heldUntil: null, headerChip: true, trayState: true, paused: false, quietUntil: null, acceptedUnchanged: 0, suggestOn: false };
-      const items = [vItem({ prId: "A", state: "queued" }), vItem({ prId: "B", state: "needsYou" }), vItem({ prId: "C", state: "error", later: true }), vItem({ prId: "D", state: "working" })];
+      const items = [vItem({ prId: "A", state: "queued" }), vItem({ prId: "B", state: "needsYou" }), vItem({ prId: "C", state: "error" }), vItem({ prId: "D", state: "working" })];
       const running = [{ runId: items[3].runId, progress: { steps: [] }, recent: [], paused: true }];
       const sum = view.agentSummary({ ...base, items, running });
       assert.deepStrictEqual(
-        { running: sum.running, pausedRuns: sum.pausedRuns, queued: sum.queued, waiting: sum.waiting, later: sum.later, block: sum.block },
-        { running: 1, pausedRuns: 1, queued: 1, waiting: 1, later: 1, block: null },
+        { running: sum.running, pausedRuns: sum.pausedRuns, queued: sum.queued, readyForYou: sum.readyForYou, block: sum.block },
+        { running: 1, pausedRuns: 1, queued: 1, readyForYou: 1, block: null },
+        "B asks nothing (no plan); C failed: that is ready for you",
       );
+      assert.strictEqual(view.readyItems([...items, vItem({ prId: "C", state: "queued" })]).length, 0, "not while the agent is on the PR again");
       assert.deepStrictEqual([view.agentSummary({ ...base, paused: true }).block, view.agentSummary({ ...base, quietUntil: "08:00" }).blockText], ["paused", "Quiet hours until 08:00"]);
       assert.strictEqual(view.agentSummary({ ...base, runsToday: 30 }).blockText, "Daily limit reached (30)");
       assert.deepStrictEqual([view.stepLabel([]), view.stepLabel([{ status: "completed" }, { status: "pending" }]), view.stepLabel([{ status: "completed" }])], ["", "2/2", "1/1"]);

@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 // Node-free (see AGENTS.md).
 import { currentStep, type PlanStep, type RunProgress } from "../../../shared/agent-stream";
 import { resultCard } from "../../../shared/agent-result";
-import { agentSummary, itemVerb, queueOrder, stepLabel } from "../../../shared/agent-view";
+import { agentSummary, itemVerb, queueOrder, readyItems, stepLabel } from "../../../shared/agent-view";
 import type { AgentItem, AgentRunState } from "../../../shared/types";
 import { cn } from "../format";
 import { AgentContext } from "./agent-context";
@@ -138,7 +138,7 @@ export function AgentCompanion({
   if (!state?.enabled || !state.headerChip) return null;
   // The same numbers and words the tray and the Board show.
   const sum = agentSummary(state);
-  const waiting = sum.waiting;
+  const waiting = sum.readyForYou;
   const first = state.running[0];
   const firstItem = first ? state.items.find((i) => i.runId === first.runId) : undefined;
   const step = first ? currentStep(first.progress) : null;
@@ -255,11 +255,9 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
   // The order the agent runs them in — yours where you set it.
   const queued = queueOrder(state.items.filter((i) => i.state === "queued"));
   const sum = agentSummary(state);
-  const waiting = sum.waiting;
-  // The results that wait for you, oldest first — each one click from its card.
-  const waitingItems = state.items
-    .filter((i) => (i.state === "needsYou" || i.state === "error") && !i.later)
-    .sort((a, b) => (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
+  const waiting = sum.readyForYou;
+  // The moves ready for you, oldest first — each one click from its card.
+  const waitingItems = readyItems(state.items);
   const go = (runId?: string) => {
     onClose();
     focusItem(runId);

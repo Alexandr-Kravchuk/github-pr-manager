@@ -54,66 +54,6 @@ export function runFor(state: Pick<AgentState, "running">, runId: string): Agent
   return state.running.find((r) => r.runId === runId) ?? null;
 }
 
-export interface BoardColumns {
-  idle: Array<{ pr: PullRequest; reason: string }>;
-  queued: AgentItem[];
-  working: AgentItem[];
-  /** Waiting for you; the ones put aside with "Later" come last. */
-  needsYou: AgentItem[];
-  /** One card per PR: the latest of today's results, for a PR with no live work. */
-  done: AgentItem[];
-  /** How many of today's results a Done card stands for, by its run id — set only where more than one. */
-  doneRuns: Record<string, number>;
-}
-
-/**
- * The Board: ALL of the agent's work in its columns — whatever the
- * dashboard's filters show, so the Board, the header chip and the tray count
- * the same runs and the same decisions — and the filtered PRs it has done
- * nothing with today as Idle, with the reason the agent gives. Done today also
- * shows PRs that left the dashboard (merged, closed): their work was today's.
- *
- * A kanban: a PR is in one column only. Live work (Queued, Working, Needs you)
- * comes first, then today's result, then Idle — a PR the agent finished with
- * today stays in Done today (its card can hand it over again) and is back in
- * Idle tomorrow.
- */
-export function boardColumns(prs: readonly PullRequest[], state: AgentState, today: string): BoardColumns {
-  const cols: BoardColumns = { idle: [], queued: [], working: [], needsYou: [], done: [], doneRuns: {} };
-  const busy = new Set<string>();
-  for (const item of state.items) {
-    if (item.state === "queued") cols.queued.push(item);
-    else if (item.state === "working") cols.working.push(item);
-    else if (item.state === "needsYou" || item.state === "error") cols.needsYou.push(item);
-    else if (item.state === "done" && !isQuiet(item) && finishedOn(item, today)) cols.done.push(item);
-    if (item.state === "queued" || item.state === "working" || item.state === "needsYou" || item.state === "error") busy.add(item.prId);
-  }
-  // Today's result only for a PR with no live work; Idle only for a PR with neither.
-  cols.done = cols.done.filter((item) => !busy.has(item.prId));
-  const doneToday = new Set(cols.done.map((item) => item.prId));
-  for (const pr of prs) {
-    if (!busy.has(pr.id) && !doneToday.has(pr.id)) cols.idle.push({ pr, reason: state.idle[pr.id] ?? (state.enabled ? "Nothing for the agent" : "The agent is off") });
-  }
-  cols.queued = queueOrder(cols.queued);
-  cols.working.sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
-  cols.needsYou.sort((a, b) => Number(a.later ?? false) - Number(b.later ?? false) || (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
-  cols.done.sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""));
-  // A PR with several results today (you handed it over again, it was merged
-  // and then its Jira run finished) is one card — the latest — that says so.
-  const latest = new Map<string, AgentItem>();
-  cols.done = cols.done.filter((item) => {
-    const key = item.prId;
-    const kept = latest.get(key);
-    if (!kept) {
-      latest.set(key, item);
-      return true;
-    }
-    cols.doneRuns[kept.runId] = (cols.doneRuns[kept.runId] ?? 1) + 1;
-    return false;
-  });
-  return cols;
-}
-
 /**
  * The local calendar day as "YYYY-MM-DD" — the day "Done today" and the daily
  * run limit mean. Local, not UTC: in Kyiv a UTC day rolls over at 02:00 or
@@ -237,9 +177,8 @@ export interface AgentSummary {
   /** Of those, paused (by you, or by pausing the agent). */
   pausedRuns: number;
   queued: number;
-  /** Results waiting for you, not put aside with Later. */
-  waiting: number;
-  later: number;
+  /** Moves the agent prepared for you — the Your-move cards it made ready (`readyItems`). */
+  readyForYou: number;
   /** What holds the queue; null when nothing does. */
   block: QueueBlock | null;
   /** That, in words: "Paused", "Quiet hours until 08:00", "Usage limit — waits until 14:05", "Daily limit reached (30)". */
@@ -247,7 +186,6 @@ export interface AgentSummary {
 }
 
 export function agentSummary(state: AgentState): AgentSummary {
-  const results = state.items.filter((i) => i.state === "needsYou" || i.state === "error");
   const block: QueueBlock | null = state.paused
     ? "paused"
     : state.quietUntil
@@ -271,8 +209,7 @@ export function agentSummary(state: AgentState): AgentSummary {
     running: state.running.length,
     pausedRuns: state.running.filter((r) => r.paused).length,
     queued: state.items.filter((i) => i.state === "queued").length,
-    waiting: results.filter((i) => !i.later).length,
-    later: results.filter((i) => i.later).length,
+    readyForYou: readyItems(state.items).length,
     block,
     blockText,
   };
@@ -302,7 +239,7 @@ export function agentTrayLine(state: AgentState): string {
   } else {
     line = "Idle";
   }
-  return sum.waiting > 0 ? `${line} · ${sum.waiting} wait${sum.waiting === 1 ? "s" : ""} for you` : line;
+  return sum.readyForYou > 0 ? `${line} · ${sum.readyForYou} ready for you` : line;
 }
 
 /** Which of the agent's runs stands in for each regular toast. */
@@ -371,21 +308,6 @@ export function laneOfPr(pr: Pick<PullRequest, "roles">): BoardLane {
   return pr.roles.includes("author") ? "mine" : "review";
 }
 
-/**
- * The Board's columns split into its two lanes, each in the columns' own
- * order. The queue stays one queue — the lanes only show which of it is yours.
- */
-export function boardLanes(cols: BoardColumns): Record<BoardLane, BoardColumns> {
-  const lane = (l: BoardLane): BoardColumns => ({
-    idle: cols.idle.filter((x) => laneOfPr(x.pr) === l),
-    queued: cols.queued.filter((i) => laneOfScenario(i.scenario) === l),
-    working: cols.working.filter((i) => laneOfScenario(i.scenario) === l),
-    needsYou: cols.needsYou.filter((i) => laneOfScenario(i.scenario) === l),
-    done: cols.done.filter((i) => laneOfScenario(i.scenario) === l),
-    doneRuns: cols.doneRuns,
-  });
-  return { mine: lane("mine"), review: lane("review") };
-}
 
 // ---------------------------------------------------------------------------
 // The Board by whose move it is. A column is not the state of an agent run but
@@ -510,6 +432,29 @@ export function resultAction(item: AgentItem, lane: BoardLane): StageAction | nu
       return item.drive ? fix() : null;
     }
   }
+}
+
+/**
+ * The moves the agent prepared for you, one per PR, oldest first: the result
+ * a PR's card asks you to act on in Your move (`boardStage` rule 2) — not
+ * while the agent is on the PR again, never a run that asks nothing. What the
+ * header chip, the tray and the popover count as "ready for you".
+ */
+export function readyItems(items: readonly AgentItem[]): AgentItem[] {
+  const byPr = new Map<string, AgentItem[]>();
+  for (const i of items) {
+    const list = byPr.get(i.prId);
+    if (list) list.push(i);
+    else byPr.set(i.prId, [i]);
+  }
+  const out: AgentItem[] = [];
+  for (const list of byPr.values()) {
+    const { live, result } = stageItems(list, "");
+    if (live || !result) continue;
+    const action = resultAction(result, laneOfScenario(result.scenario));
+    if (action && action.kind !== "updateJira") out.push(result);
+  }
+  return out.sort((a, b) => (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
 }
 
 /** Your PR is ready to merge as GitHub sees it. */
