@@ -148,6 +148,11 @@ export function validateAgentAction(value: unknown): AgentAction {
   if (v.type === "pauseAgent" || v.type === "resumeAgent") return { type: v.type };
   if (typeof v.runId !== "string" || !RUN_ID.test(v.runId)) throw new Error("agentAction: expected a run id.");
   if (v.type === "moveQueued") return { type: "moveQueued", runId: v.runId, before: before() };
+  if (v.type === "dispute") {
+    if (typeof v.replyTo !== "number" || !Number.isInteger(v.replyTo) || v.replyTo <= 0) throw new Error("agentAction: expected a comment id.");
+    if (v.choice !== "keep" && v.choice !== "drop") throw new Error("agentAction: a dispute is kept or dropped.");
+    return { type: "dispute", runId: v.runId, replyTo: v.replyTo, choice: v.choice };
+  }
   if (v.type === "hint" || v.type === "answer") {
     if (typeof v.text !== "string" || !v.text.trim() || v.text.length > AGENT_HINT_MAX) {
       throw new Error(`agentAction: ${v.type === "hint" ? "a hint" : "an answer"} is 1–${AGENT_HINT_MAX} characters.`);

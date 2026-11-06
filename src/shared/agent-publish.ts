@@ -244,6 +244,29 @@ export function postedSteps(steps: readonly PublishStep[], ctx: Pick<PublishCont
   );
 }
 
+/** The reply that drops your comment in a thread where the author pushed back. */
+export const DROP_REPLY = "Fair point — I'm dropping this.";
+
+/**
+ * Your choices on the threads the author pushed back on, as writes: "drop"
+ * answers in the thread and resolves it; "keep" (or no choice) leaves it
+ * open, as it is. `threadIds` maps a thread's first comment to its thread.
+ */
+export function disputeSteps(
+  escalations: ReadonlyArray<{ replyTo: number }>,
+  choices: Readonly<Record<string, "keep" | "drop">>,
+  threadIds: ReadonlyMap<number, string>,
+): PublishStep[] {
+  const out: PublishStep[] = [];
+  for (const e of escalations) {
+    if (choices[String(e.replyTo)] !== "drop") continue;
+    out.push({ kind: "reply", replyTo: e.replyTo, body: DROP_REPLY });
+    const thread = threadIds.get(e.replyTo);
+    if (thread) out.push({ kind: "resolve", threadId: thread });
+  }
+  return out;
+}
+
 export const HELD_APPROVE_NOTE = "_The agent would approve, but another reviewer's change request is still open — approve is held until it is addressed._";
 
 function commentBody(c: PlanComment, signature: string | null): Record<string, unknown> {

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
-import { describePlan, gitBashPath, readPlanLines, summarizePlan } from "../../shared/agent-publish";
+import { describePlan, disputeSteps, gitBashPath, readPlanLines, summarizePlan } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
@@ -28,7 +28,19 @@ import type {
 } from "../../shared/types";
 import { chooseMergeMethod, mergeArgs } from "./merge";
 import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
-import { ghError, planHash, prepareRunFolder, publishedCount, publishPlan, readPlanText, runFolderRoots, runGh, type GhRunner, type RunFolder } from "./publish";
+import {
+  ghError,
+  planHash,
+  prepareRunFolder,
+  publishedCount,
+  publishPlan,
+  readPlanText,
+  runFolderRoots,
+  runGh,
+  threadIdsByFirstComment,
+  type GhRunner,
+  type RunFolder,
+} from "./publish";
 import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
@@ -988,6 +1000,9 @@ export function createAgent(deps: AgentDeps): Agent {
     item.headline = "Publishing…";
     changed();
     const rr = item.scenario === "rereview" ? all.agent.scenarios.rereview : null;
+    // Threads where the author pushed back and you dropped your comment: answered and resolved with the review.
+    const dropped = (item.plan.escalations ?? []).filter((e) => item.disputes?.[String(e.replyTo)] === "drop");
+    const extra = dropped.length > 0 ? disputeSteps(dropped, item.disputes ?? {}, await threadIdsByFirstComment(item.url, item.repo, item.prNumber, gh)) : [];
     const out = await publishPlan(
       item.runFolder,
       item.url,
@@ -1002,6 +1017,7 @@ export function createAgent(deps: AgentDeps): Agent {
       { viewer, mine: true },
       gh,
       item.planHash,
+      extra,
     );
     if (!out.ok && out.changed) {
       // Edited in the session since you saw it: show the new plan, post nothing.
@@ -1372,6 +1388,12 @@ export function createAgent(deps: AgentDeps): Agent {
         changed();
         tick();
         return { ok: true };
+      }
+      case "dispute": {
+        if (item.state !== "needsYou" || !item.plan || item.published) return { ok: false, error: "There is no review waiting to be sent here." };
+        if (!item.plan.escalations.some((e) => e.replyTo === action.replyTo)) return { ok: false, error: "The author didn't push back on that thread." };
+        item.disputes = { ...(item.disputes ?? {}), [String(action.replyTo)]: action.choice };
+        break;
       }
       case "ack": {
         if (r || (item.state !== "needsYou" && item.state !== "error")) return { ok: false, error: "Only a result can be marked done." };

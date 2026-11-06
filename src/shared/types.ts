@@ -833,6 +833,8 @@ export interface AgentItem {
   answer?: string;
   /** A brief's questions for the author, carried into the review "Draft a review" queues. */
   carry?: string[];
+  /** Your choice on each thread the author pushed back on (by its first comment's id): keep your comment, or drop it. */
+  disputes?: Record<string, "keep" | "drop">;
   error?: string;
   /** Put aside with "Later": still waiting, out of the way. */
   later?: boolean;
@@ -944,6 +946,8 @@ export type AgentAction =
   | { type: "hint"; runId: string; text: string }
   /** Your answer to a finished run's question: the same session goes on with it. */
   | { type: "answer"; runId: string; text: string }
+  /** Keep your comment, or drop it, in a thread where the author pushed back — applied when the review is sent. */
+  | { type: "dispute"; runId: string; replyTo: number; choice: "keep" | "drop" }
   | { type: "merge"; runId: string; method?: MergeMethod }
   /** `before`: the queued run it goes in front of; null or absent, the end of the queue. */
   | { type: "enqueue"; prId: string; before?: string | null }

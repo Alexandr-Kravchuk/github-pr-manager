@@ -740,6 +740,9 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
         else it.rank = rank;
         break;
       }
+      case "dispute":
+        it.disputes = { ...(it.disputes ?? {}), [String(action.replyTo)]: action.choice };
+        break;
       case "answer":
         Object.assign(it, { state: "queued", resumeSession: true, answer: action.text, headline: "Queued: going on with your answer", finishedAt: undefined });
         break;

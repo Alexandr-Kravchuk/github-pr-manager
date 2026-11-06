@@ -254,6 +254,25 @@ export async function checkPlanTargets(
   return null;
 }
 
+const PR_THREADS_QUERY =
+  "query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ pullRequest(number:$number){ reviewThreads(first:100){ nodes{ id comments(first:1){ nodes{ databaseId } } } } } } }";
+
+/** Each review thread of a PR by its first comment's id — what a dispute names, mapped to what resolve needs. */
+export async function threadIdsByFirstComment(prUrl: string, repo: string, number: number, gh: GhRunner = runGh): Promise<Map<number, string>> {
+  const [owner, name] = repo.split("/");
+  const r = await gh(["api", "graphql", "--input", "-", ...hostFlag(prUrl)], {
+    input: JSON.stringify({ query: PR_THREADS_QUERY, variables: { owner, name, number } }),
+  });
+  const out = new Map<number, string>();
+  if (r.code !== 0) return out;
+  type Threads = { data?: { repository?: { pullRequest?: { reviewThreads?: { nodes?: Array<{ id?: string; comments?: { nodes?: Array<{ databaseId?: number }> } }> } } } } };
+  for (const t of (json(r.stdout) as Threads | null)?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []) {
+    const first = t.comments?.nodes?.[0]?.databaseId;
+    if (typeof first === "number" && typeof t.id === "string") out.set(first, t.id);
+  }
+  return out;
+}
+
 /**
  * Posts a run's plan: every write in order, the count of those that landed
  * kept on disk after each one. Called again after a failure, it starts at the
@@ -268,6 +287,8 @@ export async function publishPlan(
   gh: GhRunner = runGh,
   /** The fingerprint of the plan you were shown; a plan that differs posts nothing. */
   shownHash?: string,
+  /** Writes of your own choices (a dispute you dropped), after the plan's: checked and posted the same way. */
+  extra: readonly PublishStep[] = [],
 ): Promise<PublishOutcome> {
   // Read once: what is checked against what you saw is exactly what goes out.
   const text = readPlanText(runDir);
@@ -275,11 +296,12 @@ export async function publishPlan(
     return { ok: false, changed: true, error: "it changed since you saw it", posted: readDone(runDir), total: 0 };
   }
   const steps = readPlanLines(text);
-  const requests = planRequests(steps, ctx);
+  // Your choices go after the plan's own writes, so a retry finds them at the same place.
+  const requests = [...planRequests(steps, ctx), ...planRequests(extra, ctx)];
   let done = Math.min(readDone(runDir), requests.length);
   // Nothing goes out unless every thread and comment the rest of the plan
   // touches is this PR's — and, for a review, yours.
-  const stray = await checkPlanTargets(postedSteps(steps, ctx).slice(done), prUrl, ctx.repo, ctx.number, targets, gh);
+  const stray = await checkPlanTargets([...postedSteps(steps, ctx), ...postedSteps(extra, ctx)].slice(done), prUrl, ctx.repo, ctx.number, targets, gh);
   if (stray) return { ok: false, error: stray, posted: done, total: requests.length };
   for (let i = done; i < requests.length; i++) {
     const req = requests[i];

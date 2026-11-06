@@ -469,7 +469,7 @@ function PlanView({ plan }: { plan: PublishSummary }) {
       {plan.resolves > 0 && <div className="text-[11px] text-fg-subtle">Resolves {plan.resolves} thread{plan.resolves === 1 ? "" : "s"}.</div>}
       {(plan.escalations ?? []).length > 0 && (
         <div className="space-y-1 rounded border border-amber-500/40 bg-amber-500/[0.06] p-1.5">
-          <div className="text-[11px] font-semibold text-amber-700 dark:text-amber-300">Handed back to you — the agent doesn't argue with the author</div>
+          <div className="text-[11px] font-semibold text-amber-700 dark:text-amber-300">The author pushed back — the agent doesn&apos;t argue; you keep or drop it</div>
           {plan.escalations.map((e, i) => (
             <div key={i} className="whitespace-pre-wrap">
               {e.body}
@@ -552,6 +552,40 @@ function gist(text: string): string {
 }
 
 /**
+ * The threads where the author pushed back on your comment: keep it (the
+ * thread stays open) or drop it (a short "fair point" and the thread is
+ * resolved) — applied when the review is sent, no new session. Undecided
+ * counts as keep: nothing changes that you didn't choose.
+ */
+function Disputes({ item, plan, run }: { item: AgentItem; plan: PublishSummary; run: (a: AgentAction) => Promise<void> }) {
+  const pick = (replyTo: number, choice: "keep" | "drop") => void run({ type: "dispute", runId: item.runId, replyTo, choice });
+  const opt = (on: boolean) =>
+    cn("rounded-md border px-2 py-0.5 text-xs font-medium", on ? "border-sky-600 bg-sky-600 text-white" : "border-line-strong bg-surface text-fg-secondary hover:bg-elevated");
+  return (
+    <div className="mt-2 rounded-md border border-amber-500/50 bg-amber-500/[0.07] p-2 text-xs">
+      <div className="font-medium text-amber-800 dark:text-amber-300">The author pushed back</div>
+      {plan.escalations.map((e) => {
+        const choice = item.disputes?.[String(e.replyTo)] ?? "keep";
+        return (
+          <div key={e.replyTo} className="mt-1.5">
+            <div className="text-fg-secondary">{gist(e.body)}</div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              <button type="button" aria-pressed={choice === "keep"} className={opt(choice === "keep")} onClick={() => pick(e.replyTo, "keep")}>
+                Keep my comment
+              </button>
+              <button type="button" aria-pressed={choice === "drop"} className={opt(choice === "drop")} onClick={() => pick(e.replyTo, "drop")}>
+                Drop it
+              </button>
+            </div>
+          </div>
+        );
+      })}
+      <div className="mt-1.5 text-[11px] text-fg-faint">Applied when you send: a kept thread stays open; a dropped one gets &ldquo;Fair point — I&apos;m dropping this.&rdquo; and is resolved.</div>
+    </div>
+  );
+}
+
+/**
  * What a review would post, at a glance: its verdict and the comments it
  * leaves — the file, the line, what each says. The full text stays one click
  * away; this is what you decide Publish on.
@@ -563,7 +597,7 @@ function PlanDigest({ plan }: { plan: PublishSummary }) {
     `${plan.comments.length} comment${plan.comments.length === 1 ? "" : "s"}`,
     plan.replies.length > 0 ? `${plan.replies.length} repl${plan.replies.length === 1 ? "y" : "ies"}` : null,
     plan.resolves > 0 ? `${plan.resolves} to resolve` : null,
-    plan.escalations.length > 0 ? `${plan.escalations.length} for you` : null,
+    plan.escalations.length > 0 ? `${plan.escalations.length} pushed back` : null,
   ].filter(Boolean);
   return (
     <div className="mt-2 rounded-md border border-line bg-elevated/40 p-2 text-xs">
@@ -757,6 +791,7 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
       )}
       {/* A review's verdict and comments, in the card: what Publish would post. */}
       {plan && <PlanDigest plan={plan} />}
+      {plan && plan.escalations.length > 0 && <Disputes item={item} plan={plan} run={run} />}
 
       <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
         {plan && (

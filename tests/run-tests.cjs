@@ -10475,6 +10475,76 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(steps[1].body, "second", "the summary you see and what is posted are the same review");
     });
 
+    test("agent publish: a dispute you drop is a reply and a resolve; one you keep, or didn't choose, changes nothing", () => {
+      const esc = [{ replyTo: 501, body: "caller checks" }, { replyTo: 502, body: "naming" }, { replyTo: 503, body: "scope" }];
+      const steps = pub.disputeSteps(esc, { 501: "drop", 502: "keep" }, new Map([[501, "PRRT_a"], [502, "PRRT_b"]]));
+      assert.deepStrictEqual(steps, [
+        { kind: "reply", replyTo: 501, body: pub.DROP_REPLY },
+        { kind: "resolve", threadId: "PRRT_a" },
+      ]);
+    });
+
+    await atest("agent re-review: Keep or Drop the author's pushback — a dropped thread is answered and resolved when the review is sent", async () => {
+      const writes = [];
+      const reviewWithDispute = (c) => {
+        const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+        const runDir = path.dirname(outDir);
+        const run = JSON.parse(nfsA.readFileSync(path.join(runDir, "run.json"), "utf8"));
+        const rf = path.join(outDir, "review.json");
+        nfsA.writeFileSync(rf, JSON.stringify({ event: "COMMENT", body: "Re-review: 2 of 3 fixed.", comments: [] }));
+        const ef = path.join(outDir, "dispute.txt");
+        nfsA.writeFileSync(ef, "The author says the caller checks for null.");
+        for (const a of [["review", run.repo, String(run.number), rf], ["escalate", run.repo, String(run.number), "501", ef]]) {
+          const r = spawnSync(process.execPath, [captureJs, runDir, ...a], { encoding: "utf8" });
+          if (r.status !== 0) throw new Error(r.stderr);
+        }
+        emit(c, { type: "system", subtype: "init", session_id: "s" });
+        emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the re-review." });
+        setImmediate(() => c.emit("exit", 0));
+      };
+      const gh = async (args, opts) => {
+        const body = opts?.input ? JSON.parse(opts.input) : null;
+        if (args[1] === "graphql") {
+          if (/mutation/.test(body.query)) return writes.push(["resolve", body.variables.id]), { code: 0, stdout: "{}", stderr: "" };
+          if (/reviewThreads/.test(body.query)) {
+            return { code: 0, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [{ id: "PRRT_x1", comments: { nodes: [{ databaseId: 501 }] } }] } } } } }), stderr: "" };
+          }
+          return { code: 0, stdout: JSON.stringify({ data: { node: { isResolved: false, pullRequest: { number: 7, repository: { nameWithOwner: "a/b" } }, comments: { nodes: [{ author: { login: "me" } }] } } } }), stderr: "" };
+        }
+        if (!body && /pulls\/comments\/\d+$/.test(args[1])) {
+          return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "me" }, in_reply_to_id: null }), stderr: "" };
+        }
+        writes.push([args[1], body?.body ?? body?.event]);
+        return { code: 0, stdout: "{}", stderr: "" };
+      };
+      const f = agentFixture({ script: reviewWithDispute, captureScript: captureJs, gh, fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.deepStrictEqual(item.plan.escalations.map((e) => e.replyTo), [501]);
+        assert.match((await f.agent.act({ type: "dispute", runId: item.runId, replyTo: 999, choice: "drop" })).error, /didn't push back/);
+        assert.deepStrictEqual(await f.agent.act({ type: "dispute", runId: item.runId, replyTo: 501, choice: "drop" }), { ok: true });
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(
+          writes.map((w) => w[0]),
+          ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/501/replies", "resolve"],
+          "the review, then your drop: a reply in the thread and its resolve",
+        );
+        assert.ok(writes[1][1].startsWith(pub.DROP_REPLY) && writes[1][1].endsWith(ad.DEFAULT_AGENT_SIGNATURE), "signed like every write");
+        assert.strictEqual(writes[2][1], "PRRT_x1");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("ipc: a dispute choice names a comment and keep or drop, nothing else", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "dispute", runId: RID, replyTo: 501, choice: "drop", body: "x" }), { type: "dispute", runId: RID, replyTo: 501, choice: "drop" });
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "dispute", runId: RID, replyTo: "501", choice: "drop" }));
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "dispute", runId: RID, replyTo: 501, choice: "argue" }));
+    });
+
     await atest("agent publish: a plan changed in the session since you saw it posts nothing; the card shows the new one and Publish then posts it", async () => {
       const posted = [];
       const f = agentFixture({
