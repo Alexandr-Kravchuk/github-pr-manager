@@ -1,4 +1,4 @@
-import { prSignal } from "./pr-filter";
+import { isReviewDue, prSignal } from "./pr-filter";
 import type { ClaudeSettings, PullRequest } from "./types";
 
 // "Start a Claude session on this PR": which prompt the session opens with, and
@@ -32,14 +32,33 @@ export function claudeKindsFor(pr: Pick<PullRequest, "roles">): ClaudeLaunchKind
 }
 
 /**
- * A prompt template's key: one per launch kind, plus `explainGroup` — the
- * group heading's "Explain all", which is not a kind of the PR button.
+ * What a group heading's Claude button starts for a Jira key:
+ *  - `explain` — "Explain all": one session that explains the group's open PRs
+ *    together, shown in the session;
+ *  - `review` — "Review all": a parent session that starts one nested Claude
+ *    Desktop session per PR awaiting your review and sums their reports up.
+ *    Nesting is something only a Desktop session can do (its `start_session`
+ *    tool) — a `claude://` link starts a top-level session — so it is offered
+ *    only while Settings → Claude opens sessions in Claude Desktop.
  */
-export type ClaudePromptKey = ClaudeLaunchKind | "explainGroup";
+export type GroupLaunchKind = "explain" | "review";
+
+export const GROUP_LAUNCH_KINDS: readonly GroupLaunchKind[] = ["explain", "review"];
+
+/** A prompt template's key: one per PR launch kind, plus one per group launch kind. */
+export type ClaudePromptKey = ClaudeLaunchKind | "explainGroup" | "reviewGroup";
+
+/** The template a group launch kind fills in. */
+export const GROUP_PROMPT_KEY: Record<GroupLaunchKind, "explainGroup" | "reviewGroup"> = {
+  explain: "explainGroup",
+  review: "reviewGroup",
+};
 
 /**
- * `{url}` is replaced with the PR's URL. The `explainGroup` template takes
- * `{key}` (the group's Jira key), `{count}` and `{urls}` (the links, space-separated).
+ * `{url}` is replaced with the PR's URL. The group templates take `{key}` (the
+ * group's Jira key), `{count}` and `{urls}` (the links, space-separated);
+ * `reviewGroup` also takes `{prompts}` — each PR's own "Your review is due"
+ * prompt, numbered, for the sessions it starts.
  */
 export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
   drive: "/drive-pr-green {url}",
@@ -53,62 +72,76 @@ export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
     "the goal they serve together, how the changes fit into one design, the order to read them in (a stack bottom-up), " +
     "where they overlap or repeat each other, and which one to review first. " +
     "Show the result here in the session; do not send a letter and post nothing on the PRs.",
+  reviewGroup:
+    "Review the {count} pull requests of {key} that wait for my review. Do not review them here: start one session per PR " +
+    "with the start_session tool (initiation user_asked, context fresh, use_worktree false), so each review runs in its own " +
+    "session nested under this one, with these prompts: {prompts}. " +
+    "When every session has reported, give me one summary: for each PR its decision and its Blocker and Major findings, " +
+    "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently.",
 };
 
 /**
- * Starts every "Explain all" prompt, whatever the template says:
- * `[PR Dashboard overview of ENG-1]`. The session scanner reads it two ways:
- * the session is the overview of that key — the group heading's button shows
- * it and switches to it — and it holds none of the PRs it lists, since an
- * overview works on none of them and counting it would hand each of those
- * cards' Claude button to the overview.
+ * Starts every group prompt, whatever the template says:
+ * `[PR Dashboard overview of ENG-1]` or `[PR Dashboard review of ENG-1]`. The
+ * session scanner reads it two ways: the session belongs to that key's
+ * heading — its button shows it and switches to it — and it holds none of the
+ * PRs it lists, since it works on none of them itself and counting it would
+ * hand each of those cards' Claude button to it.
  */
-export function groupExplainMarker(key: string): string {
-  return `[PR Dashboard overview of ${key}]`;
+export function groupMarker(kind: GroupLaunchKind, key: string): string {
+  return `[PR Dashboard ${kind === "explain" ? "overview" : "review"} of ${key}]`;
 }
 
-/** The Jira key in a prompt's `groupExplainMarker`, or null when the prompt has none. */
-export function groupExplainKeyOf(text: string): string | null {
-  return /\[PR Dashboard overview of ([A-Z][A-Z0-9_]{0,19}-\d{1,9})\]/.exec(text)?.[1] ?? null;
+/** The kind and Jira key in a prompt's `groupMarker`, or null when the prompt has none. */
+export function groupMarkerOf(text: string): { kind: GroupLaunchKind; key: string } | null {
+  const m = /\[PR Dashboard (overview|review) of ([A-Z][A-Z0-9_]{0,19}-\d{1,9})\]/.exec(text);
+  return m ? { kind: m[1] === "overview" ? "explain" : "review", key: m[2] } : null;
 }
 
 /**
- * At most this many PRs go into one overview: past it the overview stops
+ * At most this many PRs go into one group launch: past it an overview stops
  * being high-level, and cmd.exe caps a command line at 8191 characters.
  */
-export const MAX_GROUP_EXPLAIN_PRS = 30;
+export const MAX_GROUP_PRS = 30;
 
-/** The "Explain all" prompt: the template filled in, behind the marker. */
-export function renderGroupExplainPrompt(
+/** A group launch's prompt: its template filled in, behind the marker. */
+export function renderGroupPrompt(
   prompts: Partial<Record<ClaudePromptKey, string>>,
+  kind: GroupLaunchKind,
   key: string,
   prs: readonly Pick<PullRequest, "url">[],
 ): string {
-  const template = prompts.explainGroup?.trim() || DEFAULT_CLAUDE_PROMPTS.explainGroup;
-  const filled = template
-    .split("{key}")
-    .join(key)
-    .split("{count}")
-    .join(String(prs.length))
-    .split("{urls}")
-    .join(prs.map((p) => p.url).join(" "));
-  return `${groupExplainMarker(key)} ${filled}`;
+  const templateKey = GROUP_PROMPT_KEY[kind];
+  const template = prompts[templateKey]?.trim() || DEFAULT_CLAUDE_PROMPTS[templateKey];
+  const fill = (text: string, token: string, value: string) => text.split(token).join(value);
+  let filled = fill(template, "{key}", key);
+  filled = fill(filled, "{count}", String(prs.length));
+  filled = fill(filled, "{urls}", prs.map((p) => p.url).join(" "));
+  filled = fill(filled, "{prompts}", prs.map((p, i) => `${i + 1}) ${renderClaudePrompt(prompts, "review", p)}`).join(" "));
+  return `${groupMarker(kind, key)} ${filled}`;
 }
 
-/** A Jira issue key — the only group key "Explain all" accepts, since it reaches the shell. */
+/** A Jira issue key — the only group key a group launch accepts, since it reaches the shell. */
 export const JIRA_KEY_RE = /^[A-Z][A-Z0-9_]{0,19}-\d{1,9}$/;
 
 /**
- * The PRs "Explain all" takes from a group, or null when the heading offers
- * none: only a Jira-key group (by issue or by parent task — the "Other" bucket
- * and a repository have no task to explain), drafts left out since nobody is
- * reviewing them yet, at least two left — one PR has its own Explain — and the
- * first `MAX_GROUP_EXPLAIN_PRS` of them in the order shown.
+ * The PRs a group launch takes, or null when the heading offers it none. Only
+ * a Jira-key group (by issue or by parent task — the "Other" bucket and a
+ * repository have no task); the first `MAX_GROUP_PRS` in the order shown.
+ *  - `explain`: the open ones, drafts left out since nobody reviews them yet;
+ *    at least two — one PR has its own Explain;
+ *  - `review`: the ones your review is due on (`isReviewDue`, the card's
+ *    "Review" and the `To review` segment), so it never reviews your own PR,
+ *    a draft or one nobody asked you about; at least one.
  */
-export function groupExplainPrs<T extends Pick<PullRequest, "isDraft">>(key: string, prs: readonly T[]): T[] | null {
+export function groupLaunchPrs<T extends Pick<PullRequest, "isDraft" | "roles" | "myReReviewDue">>(
+  kind: GroupLaunchKind,
+  key: string,
+  prs: readonly T[],
+): T[] | null {
   if (!JIRA_KEY_RE.test(key)) return null;
-  const open = prs.filter((p) => !p.isDraft);
-  return open.length >= 2 ? open.slice(0, MAX_GROUP_EXPLAIN_PRS) : null;
+  const picked = kind === "explain" ? prs.filter((p) => !p.isDraft) : prs.filter(isReviewDue);
+  return picked.length >= (kind === "explain" ? 2 : 1) ? picked.slice(0, MAX_GROUP_PRS) : null;
 }
 
 /** The integration is opt-in: nothing on the cards until it is switched on. */

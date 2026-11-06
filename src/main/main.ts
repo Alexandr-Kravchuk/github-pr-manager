@@ -27,7 +27,7 @@ import type {
   Settings,
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
-import { launchClaude, launchGroupExplain } from "./claude-launch";
+import { launchClaude, launchGroup } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
 import { clearJiraCaches } from "../shared/jira";
@@ -38,7 +38,7 @@ import {
   validateIgnoredArgs,
   validateJiraToken,
   validateClaudeKind,
-  validateGroupExplainArgs,
+  validateGroupLaunchArgs,
   validateClaudeSessionId,
   validatePrId,
   validateSeenItems,
@@ -659,12 +659,13 @@ function registerIpc(): void {
     return result;
   });
 
-  // Like claude:launch: only the group's Jira key and the PR ids cross over,
-  // and the PRs (their links, their repositories) come from main's snapshot.
+  // Like claude:launch: only the kind, the group's Jira key and the PR ids
+  // cross over, and the PRs (their links, repositories, roles) come from
+  // main's snapshot.
   ipcMain.handle(
-    "claude:explainGroup",
-    async (_event, rawKey: unknown, rawIds: unknown): Promise<ClaudeGroupLaunchResult> => {
-      const { key, ids } = validateGroupExplainArgs(rawKey, rawIds);
+    "claude:launchGroup",
+    async (_event, rawKind: unknown, rawKey: unknown, rawIds: unknown): Promise<ClaudeGroupLaunchResult> => {
+      const { kind, key, ids } = validateGroupLaunchArgs(rawKind, rawKey, rawIds);
       const all = poller?.getSnapshot()?.pullRequests ?? [];
       // In the order the renderer listed them, which is the order it shows.
       const prs = ids.flatMap((id) => all.filter((p) => p.id === id));
@@ -674,7 +675,7 @@ function registerIpc(): void {
       } catch (e) {
         return { ok: false, error: (e as Error).message };
       }
-      const result = await launchGroupExplain(key, prs, settings.claude, {
+      const result = await launchGroup(kind, key, prs, settings.claude, {
         openUrl: (url) => shell.openExternal(url),
       });
       if (result.ok) setTimeout(() => void refreshClaudeSessions(), 2_000);

@@ -1,7 +1,9 @@
 import {
   CLAUDE_LAUNCH_KINDS,
   JIRA_KEY_RE,
-  MAX_GROUP_EXPLAIN_PRS,
+  GROUP_LAUNCH_KINDS,
+  MAX_GROUP_PRS,
+  type GroupLaunchKind,
   type ClaudeLaunchKind,
 } from "../shared/claude-launch";
 import type { SeenInput, ThemePreference } from "../shared/types";
@@ -118,20 +120,28 @@ export function validatePrId(value: unknown): string {
 }
 
 /**
- * Validates "Explain all"'s arguments: the group's Jira key — it is written
- * into the prompt, so nothing but a key's characters may pass — and 2 to
- * `MAX_GROUP_EXPLAIN_PRS` distinct PR ids.
+ * Validates a group launch's arguments: the kind, the group's Jira key — it is
+ * written into the prompt, so nothing but a key's characters may pass — and 1
+ * to `MAX_GROUP_PRS` distinct PR ids. Which of them a launch takes is decided
+ * in main (`groupLaunchPrs`), not here.
  */
-export function validateGroupExplainArgs(key: unknown, ids: unknown): { key: string; ids: string[] } {
+export function validateGroupLaunchArgs(
+  kind: unknown,
+  key: unknown,
+  ids: unknown,
+): { kind: GroupLaunchKind; key: string; ids: string[] } {
+  if (typeof kind !== "string" || !(GROUP_LAUNCH_KINDS as readonly string[]).includes(kind)) {
+    throw new Error("launchClaudeGroup: unknown action.");
+  }
   if (typeof key !== "string" || !JIRA_KEY_RE.test(key)) {
-    throw new Error("explainGroupWithClaude: expected a Jira issue key.");
+    throw new Error("launchClaudeGroup: expected a Jira issue key.");
   }
-  if (!Array.isArray(ids)) throw new Error("explainGroupWithClaude: expected a list of PR ids.");
+  if (!Array.isArray(ids)) throw new Error("launchClaudeGroup: expected a list of PR ids.");
   const unique = [...new Set(ids.map((id) => validatePrId(id)))];
-  if (unique.length < 2 || unique.length > MAX_GROUP_EXPLAIN_PRS) {
-    throw new Error(`explainGroupWithClaude: expected 2 to ${MAX_GROUP_EXPLAIN_PRS} PRs.`);
+  if (unique.length < 1 || unique.length > MAX_GROUP_PRS) {
+    throw new Error(`launchClaudeGroup: expected 1 to ${MAX_GROUP_PRS} PRs.`);
   }
-  return { key, ids: unique };
+  return { kind: kind as GroupLaunchKind, key, ids: unique };
 }
 
 /** Validates the Claude Code session id the renderer asks to switch to. */

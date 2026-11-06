@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { normalizeRemote } from "../shared/claude-launch";
+import { normalizeRemote, type GroupLaunchKind } from "../shared/claude-launch";
 import { claudeDesktopSessionUrl, focusTtyScript, promptLinks, prUrlKey } from "../shared/claude-sessions";
 import type { ClaudeSessionInfo, FocusClaudeSessionResult } from "../shared/types";
 import { expandHome, parseRemoteUrls } from "./claude-launch";
@@ -147,7 +147,8 @@ interface TranscriptState {
   offset: number;
   carry: Buffer;
   prKeys: Set<string>;
-  overviewKeys: Set<string>;
+  /** The group launches its prompts named, by `kind:key`. */
+  groups: Map<string, { kind: GroupLaunchKind; key: string }>;
 }
 
 /** Reads what was appended to the transcript since the last scan. */
@@ -166,7 +167,7 @@ async function readTranscript(state: TranscriptState): Promise<void> {
       state.offset = 0;
       state.carry = Buffer.alloc(0);
       state.prKeys.clear();
-      state.overviewKeys.clear();
+      state.groups.clear();
     }
     while (state.offset < size) {
       const buf = Buffer.alloc(Math.min(CHUNK_BYTES, size - state.offset));
@@ -185,7 +186,7 @@ async function readTranscript(state: TranscriptState): Promise<void> {
       for (const line of data.toString("utf8", 0, end).split("\n")) {
         const links = promptLinks(line);
         for (const key of links.prKeys) state.prKeys.add(key);
-        if (links.overviewKey) state.overviewKeys.add(links.overviewKey);
+        if (links.group) state.groups.set(`${links.group.kind}:${links.group.key}`, links.group);
       }
     }
   } finally {
@@ -390,12 +391,12 @@ export function createClaudeSessionScanner(
   /** Paused Desktop sessions of the last scan: session id → Desktop's id. */
   let paused = new Map<string, string>();
   /**
-   * The "Explain all" keys of every overview seen running this app run, by
+   * The group launches of every group session seen running this app run, by
    * session id. A transcript's state goes when its process does, but Desktop
    * pauses an idle session — and a finished overview is idle — so without
-   * this a paused overview would leave its group heading.
+   * this a paused one would leave its group heading.
    */
-  const overviewsSeen = new Map<string, string[]>();
+  const groupsSeen = new Map<string, Array<{ kind: GroupLaunchKind; key: string }>>();
   let inFlight: Promise<ClaudeSessionInfo[]> | null = null;
 
   async function scanOnce(): Promise<ClaudeSessionInfo[]> {
@@ -439,18 +440,18 @@ export function createClaudeSessionScanner(
       if (record?.isArchived) continue;
       let state = transcripts.get(entry.sessionId);
       if (!state) {
-        state = { file: null, offset: 0, carry: Buffer.alloc(0), prKeys: new Set(), overviewKeys: new Set() };
+        state = { file: null, offset: 0, carry: Buffer.alloc(0), prKeys: new Set(), groups: new Map() };
         transcripts.set(entry.sessionId, state);
       }
       // A new session writes its transcript only after the first prompt.
       if (!state.file) state.file = findTranscript(projectsDir, entry);
       await readTranscript(state);
       const git = gitInfo(entry.cwd);
-      if (state.overviewKeys.size > 0) overviewsSeen.set(entry.sessionId, [...state.overviewKeys].sort());
-      const overviewKeys = overviewsSeen.get(entry.sessionId);
+      if (state.groups.size > 0) groupsSeen.set(entry.sessionId, [...state.groups.values()]);
+      const groups = groupsSeen.get(entry.sessionId);
       // A routine's run touches many PRs; it counts only by what it was sent.
-      // An overview holds none of the PRs it explains, whatever Desktop bound.
-      const desktopPrs = record && !record.scheduled && !overviewKeys ? record.prKeys : [];
+      // A group session holds none of the PRs it lists, whatever Desktop bound.
+      const desktopPrs = record && !record.scheduled && !groups ? record.prKeys : [];
       const info: ClaudeSessionInfo = {
         id: entry.sessionId,
         name: record?.title ?? entry.name,
@@ -460,7 +461,7 @@ export function createClaudeSessionScanner(
         repoKeys: [...new Set(git.remotes.map(normalizeRemote).filter((k): k is string => k !== null))].sort(),
         branch: git.branch,
       };
-      if (overviewKeys) info.overviewKeys = overviewKeys;
+      if (groups) info.groups = groups;
       if (entry.waitingFor) info.waitingFor = entry.waitingFor;
       sessions.push(info);
     }
@@ -474,20 +475,20 @@ export function createClaudeSessionScanner(
       if (r.isArchived || r.scheduled || liveHosts.has(r.sessionId)) continue;
       const id = r.cliSessionId ?? r.sessionId.slice("local_".length);
       if (!SESSION_ID_RE.test(id) || live.has(id)) continue;
-      const overviewKeys = overviewsSeen.get(id);
-      if (!overviewKeys && r.prKeys.length === 0) continue;
+      const groups = groupsSeen.get(id);
+      if (!groups && r.prKeys.length === 0) continue;
       nextPaused.set(id, r.sessionId);
       const info: ClaudeSessionInfo = {
         id,
         name: r.title,
         status: "paused",
         where: "desktop",
-        prKeys: overviewKeys ? [] : r.prKeys,
+        prKeys: groups ? [] : r.prKeys,
         repoKeys: [],
         branch: null,
         lastActivityAt: r.lastActivityAt,
       };
-      if (overviewKeys) info.overviewKeys = overviewKeys;
+      if (groups) info.groups = groups;
       sessions.push(info);
     }
     paused = nextPaused;

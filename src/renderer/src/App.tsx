@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Buddy, type BuddyMood } from "./components/Buddy";
-import { GroupExplainButton } from "./components/ClaudeButton";
+import { GroupClaudeButton } from "./components/ClaudeButton";
 import { PrCard } from "./components/PrCard";
 import { PrTable } from "./components/PrTable";
 import { PrTile } from "./components/PrTile";
@@ -1339,7 +1339,9 @@ export function App() {
                       </span>
                     )}
                   </button>
-                  {groupBy !== "repo" && <GroupExplainButton groupKey={g.key} prs={g.prs} />}
+                  {groupBy !== "repo" && (
+                    <GroupClaudeButton groupKey={g.key} prs={g.prs} desktop={config?.claudeDesktop ?? false} />
+                  )}
                   <div aria-hidden className="flex-1 self-stretch" onClick={() => toggleGroup(g.key)} />
                 </div>
                 {!isCollapsed && (

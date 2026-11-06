@@ -14,7 +14,9 @@ import {
   posixLaunchCommand,
   prRemoteKey,
   renderClaudePrompt,
-  renderGroupExplainPrompt,
+  groupLaunchPrs,
+  renderGroupPrompt,
+  type GroupLaunchKind,
   terminalScript,
 } from "../shared/claude-launch";
 import type {
@@ -231,17 +233,36 @@ export function overviewCheckout(
 }
 
 /**
- * "Explain all" on a group heading: one session that explains the group's PRs
- * together, in the folder `overviewCheckout` picks.
+ * A group heading's launch, in the folder `overviewCheckout` picks: "Explain
+ * all" or "Review all". The PRs are picked again here by `groupLaunchPrs` from
+ * main's own copies, so "Review all" can never be handed your own PR or one
+ * nobody asked you to review, whatever the renderer sent; it also needs
+ * Claude Desktop, the only place a session can start nested sessions.
  */
-export async function launchGroupExplain(
+export async function launchGroup(
+  kind: GroupLaunchKind,
   key: string,
-  prs: readonly PullRequest[],
+  candidates: readonly PullRequest[],
   settings: ClaudeSettings,
   opts: { openUrl: (url: string) => Promise<void> },
 ): Promise<ClaudeGroupLaunchResult> {
   if (!settings.enabled) return { ok: false, error: "Claude integration is off — turn it on in Settings." };
-  if (prs.length < 2) return { ok: false, error: "Fewer than two of these PRs are still on the dashboard." };
+  if (kind === "review" && settings.terminal !== "desktop") {
+    return {
+      ok: false,
+      error: "Review all starts nested sessions, which only Claude Desktop can do. Choose Claude Desktop in Settings → Claude.",
+    };
+  }
+  const prs = groupLaunchPrs(kind, key, candidates);
+  if (!prs) {
+    return {
+      ok: false,
+      error:
+        kind === "explain"
+          ? "Fewer than two of these PRs are still open on the dashboard."
+          : "None of these PRs waits for your review any more.",
+    };
+  }
   const dir = overviewCheckout(prs, settings);
   if (!dir) {
     const repos = [...new Set(prs.map((p) => p.repo))].join(", ");
@@ -250,7 +271,7 @@ export async function launchGroupExplain(
       error: `No checkout of ${repos} was found in ${settings.projectsRoot || "~/Projects"}. Set its folder in Settings → Claude.`,
     };
   }
-  const prompt = renderGroupExplainPrompt(settings.prompts, key, prs);
+  const prompt = renderGroupPrompt(settings.prompts, kind, key, prs);
   const error = await startSession(dir, prompt, settings, opts.openUrl);
   return error ? { ok: false, error } : { ok: true, count: prs.length, dir };
 }

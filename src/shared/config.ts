@@ -250,6 +250,7 @@ export function validateClaude(raw: unknown): ClaudeSettings {
       explain: prompt("explain"),
       open: prompt("open"),
       explainGroup: prompt("explainGroup"),
+      reviewGroup: prompt("reviewGroup"),
     },
     terminal:
       obj.terminal === "iterm" || obj.terminal === "terminal" || obj.terminal === "desktop"
@@ -325,6 +326,7 @@ export function toPublicConfig(settings: Settings): PublicConfig {
     hosts: settings.hosts.map((h) => ({ label: h.label, repos: h.repos })),
     trackComments: settings.trackComments,
     claudeEnabled: settings.claude.enabled,
+    claudeDesktop: settings.claude.terminal === "desktop",
   };
 }
 

@@ -8,14 +8,16 @@ import {
   CLAUDE_BUTTON_TEXT,
   CLAUDE_LAUNCH_LABEL,
   claudeKindsFor,
-  groupExplainPrs,
-  MAX_GROUP_EXPLAIN_PRS,
+  groupLaunchPrs,
+  MAX_GROUP_PRS,
   pickClaudeLaunch,
   type ClaudeLaunchKind,
+  type GroupLaunchKind,
 } from "../../../shared/claude-launch";
 import {
   describeSession,
-  OVERVIEW_STATUS_TEXT,
+  GROUP_STATUS_TEXT,
+  groupKindOf,
   SESSION_STATUS_TEXT,
   sessionGlow,
   sessionsForGroup,
@@ -341,111 +343,157 @@ function ClaudeMark({ size }: { size: number }) {
 }
 
 /**
- * "Explain all" beside a Jira group heading's PR count: starts one Claude
- * session that explains the group's open PRs together — the goal, how the
- * changes fit, the order to read them in, where they overlap — shown in the
- * session, no letter. Only the key and the PR ids go to main, which reads the
- * PRs from its own snapshot.
+ * The Claude button beside a Jira group heading's PR count. Two actions, both
+ * sending only the kind, the key and the PR ids — main reads the PRs from its
+ * own snapshot and picks them again:
+ *  - "Explain all" — one session that explains the group's open PRs together
+ *    (the goal, how the changes fit, the order to read them in, where they
+ *    overlap), shown in the session, no letter;
+ *  - "Review all" — a parent session that starts one nested Claude Desktop
+ *    session per PR awaiting your review and sums their reports up. Offered
+ *    only with Claude Desktop, the one place a session can nest others; with a
+ *    terminal it stays in the menu, disabled, saying why.
  *
- * Split like the PR's own button: while an overview of this key runs, the main
- * part shows its status and a click switches to it; the arrow lists the
- * running overviews and starts a new one. Renders nothing while the
- * integration is off or the group has no two open PRs (`groupExplainPrs`).
+ * Split like the PR's own button: while a session of this key runs, the main
+ * part shows its status in that kind's words (`GROUP_STATUS_TEXT`) and a click
+ * switches to it; otherwise it starts "Explain all". The arrow lists the
+ * running sessions and both actions. Renders nothing while the integration is
+ * off or the group offers neither action (`groupLaunchPrs`).
  */
-export function GroupExplainButton({ groupKey, prs }: { groupKey: string; prs: readonly PullRequest[] }) {
+export function GroupClaudeButton({
+  groupKey,
+  prs,
+  desktop,
+}: {
+  groupKey: string;
+  prs: readonly PullRequest[];
+  /** Whether sessions open in Claude Desktop — "Review all" needs it. */
+  desktop: boolean;
+}) {
   const enabled = useContext(ClaudeEnabledContext);
   const allSessions = useContext(ClaudeSessionsContext);
   const sessions = useMemo(() => sessionsForGroup(groupKey, allSessions), [groupKey, allSessions]);
   const [state, run] = useLaunchState();
   const menu = useAnchoredMenu(SESSIONS_MENU_WIDTH_PX);
-  const picked = useMemo(() => groupExplainPrs(groupKey, prs), [groupKey, prs]);
-  const launch = useCallback(() => {
-    if (picked) run(() => window.api.explainGroupWithClaude(groupKey, picked.map((p) => p.id)));
-  }, [run, groupKey, picked]);
+  const explainPrs = useMemo(() => groupLaunchPrs("explain", groupKey, prs), [groupKey, prs]);
+  const reviewPrs = useMemo(() => groupLaunchPrs("review", groupKey, prs), [groupKey, prs]);
+  const launch = useCallback(
+    (kind: GroupLaunchKind) => {
+      const picked = kind === "explain" ? explainPrs : reviewPrs;
+      if (picked) run(() => window.api.launchClaudeGroup(kind, groupKey, picked.map((p) => p.id)));
+    },
+    [run, groupKey, explainPrs, reviewPrs],
+  );
 
-  if (!enabled || !picked) return null;
+  if (!enabled || (!explainPrs && !reviewPrs)) return null;
   const drafts = prs.filter((p) => p.isDraft).length;
-  const capped = prs.length - drafts > MAX_GROUP_EXPLAIN_PRS;
-  const startLabel =
-    `Start Claude to explain the ${picked.length} open PRs of ${groupKey} together` +
-    (capped ? ` (the first ${MAX_GROUP_EXPLAIN_PRS} shown)` : "") +
-    (drafts > 0 ? `; ${drafts} draft${drafts === 1 ? "" : "s"} left out` : "");
+  const explainLabel = explainPrs
+    ? `Start Claude to explain the ${explainPrs.length} open PRs of ${groupKey} together` +
+      (prs.length - drafts > MAX_GROUP_PRS ? ` (the first ${MAX_GROUP_PRS} shown)` : "") +
+      (drafts > 0 ? `; ${drafts} draft${drafts === 1 ? "" : "s"} left out` : "")
+    : `${groupKey} has fewer than two open PRs to explain together`;
+  const reviewLabel = !reviewPrs
+    ? `None of the PRs of ${groupKey} waits for your review`
+    : !desktop
+      ? "Review all starts one nested session per PR, which only Claude Desktop can do — choose Claude Desktop in Settings → Claude"
+      : `Start Claude Desktop to review the ${reviewPrs.length} PR${reviewPrs.length === 1 ? "" : "s"} of ${groupKey} ` +
+        "that wait for your review, one nested session per PR, and sum the reviews up";
   const shown = shownSession(sessions);
   const current = shown?.where === "background" ? undefined : shown;
+  const words = (s: ClaudeSessionInfo) => GROUP_STATUS_TEXT[groupKindOf(s, groupKey)][s.status];
   const more = sessions.length > 1 ? ` ${sessions.length - 1} more in the menu.` : "";
+  // With no session the main part starts what the group offers, Explain first.
+  const mainKind: GroupLaunchKind = explainPrs ? "explain" : "review";
+  const mainDisabled = !current && mainKind === "review" && !desktop;
   const label = current
-    ? `${OVERVIEW_STATUS_TEXT[current.status]}: ${describeSession(current)}. Click to switch to it.${more}`
-    : startLabel;
-  const tone = state === "done" ? KIND_CLASS.done : current ? SESSION_CLASS[current.status] : KIND_CLASS.explain;
-  const text = state === "done" ? "Started" : current ? OVERVIEW_STATUS_TEXT[current.status] : "Explain all";
+    ? `${words(current)}: ${describeSession(current)}. Click to switch to it.${more}`
+    : mainKind === "explain"
+      ? explainLabel
+      : reviewLabel;
+  const tone = state === "done" ? KIND_CLASS.done : current ? SESSION_CLASS[current.status] : KIND_CLASS[mainKind];
+  const text = state === "done" ? "Started" : current ? words(current) : mainKind === "explain" ? "Explain all" : "Review all";
   const segment = cn(
     "inline-flex items-center border py-0.5 text-[11px] font-medium transition-colors disabled:opacity-50",
     tone,
   );
+  const actions: Array<{ kind: GroupLaunchKind; text: string; title: string; disabled: boolean }> = [
+    { kind: "explain", text: "Explain all", title: explainLabel, disabled: !explainPrs },
+    {
+      kind: "review",
+      text: reviewPrs ? `Review all (${reviewPrs.length})` : "Review all",
+      title: reviewLabel,
+      disabled: !reviewPrs || !desktop,
+    },
+  ];
   return (
     <span className="inline-flex shrink-0 whitespace-nowrap">
       <button
         type="button"
-        onClick={() => (current ? focusSession(current.id) : launch())}
-        disabled={state === "busy"}
+        onClick={() => (current ? focusSession(current.id) : launch(mainKind))}
+        disabled={state === "busy" || mainDisabled}
         title={label}
         aria-label={label}
-        className={cn(segment, "gap-1 pl-1.5 pr-1", sessions.length > 0 ? "rounded-l-md" : "rounded-md pr-2")}
+        className={cn(segment, "gap-1 rounded-l-md pl-1.5 pr-1")}
       >
         <ClaudeMark size={12} />
         {shown && state !== "done" && <StatusDot status={shown.status} />}
         {text}
       </button>
-      {sessions.length > 0 && (
-        <button
-          ref={menu.buttonRef}
-          type="button"
-          onClick={menu.toggle}
-          disabled={state === "busy"}
-          title="Overview sessions"
-          aria-label="Overview sessions"
-          aria-haspopup="menu"
-          aria-expanded={menu.open}
-          className={cn(segment, "-ml-px rounded-r-md px-0.5")}
-        >
-          <ChevronDown size={10} />
-        </button>
-      )}
+      <button
+        ref={menu.buttonRef}
+        type="button"
+        onClick={menu.toggle}
+        disabled={state === "busy"}
+        title="Claude on this group"
+        aria-label="Claude on this group"
+        aria-haspopup="menu"
+        aria-expanded={menu.open}
+        className={cn(segment, "-ml-px rounded-r-md px-0.5")}
+      >
+        <ChevronDown size={10} />
+      </button>
       {menu.open &&
         createPortal(
           <div
             ref={menu.menuRef}
             role="menu"
-            aria-label="Overview sessions"
+            aria-label="Claude on this group"
             style={menu.style}
             className="z-50 overflow-hidden rounded-lg border border-line bg-surface py-1 text-sm shadow-xl"
           >
-            <div className={MENU_HEADING}>Overviews of {groupKey}</div>
-            {sessions.map((s) => (
-              <SessionItem
-                key={s.id}
-                session={s}
-                onSwitch={() => {
-                  menu.close();
-                  focusSession(s.id);
-                }}
-              />
-            ))}
-            <div className="mt-1 border-t border-line pt-1">
+            {sessions.length > 0 && (
+              <>
+                <div className={MENU_HEADING}>Running for {groupKey}</div>
+                {sessions.map((s) => (
+                  <SessionItem
+                    key={s.id}
+                    session={s}
+                    onSwitch={() => {
+                      menu.close();
+                      focusSession(s.id);
+                    }}
+                  />
+                ))}
+                <div className={cn(MENU_HEADING, "mt-1 border-t border-line pt-2")}>Start a new session</div>
+              </>
+            )}
+            {actions.map((a) => (
               <button
+                key={a.kind}
                 type="button"
                 role="menuitem"
+                disabled={a.disabled}
                 onClick={() => {
                   menu.close();
-                  launch();
+                  launch(a.kind);
                 }}
-                title={startLabel}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-elevated"
+                title={a.title}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-elevated disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
               >
-                <span className={cn("h-2 w-2 shrink-0 rounded-full", KIND_DOT.explain)} aria-hidden />
-                <span className="flex-1 text-fg-secondary">Start a new overview</span>
+                <span className={cn("h-2 w-2 shrink-0 rounded-full", KIND_DOT[a.kind])} aria-hidden />
+                <span className="flex-1 text-fg-secondary">{a.text}</span>
               </button>
-            </div>
+            ))}
           </div>,
           document.body,
         )}

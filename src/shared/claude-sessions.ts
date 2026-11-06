@@ -1,4 +1,4 @@
-import { appleScriptString, groupExplainKeyOf, prRemoteKey } from "./claude-launch";
+import { appleScriptString, groupMarkerOf, prRemoteKey, type GroupLaunchKind } from "./claude-launch";
 import type { ClaudeSessionInfo, PullRequest } from "./types";
 
 // Which running Claude Code session works on which PR, and what the card says
@@ -36,12 +36,15 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * notifications quote PR links the user never asked this session about — a
  * routine's report alone lists dozens. Transcripts written before Claude Code
  * recorded `origin` are judged by the content alone. System reminders the app
- * adds to a prompt are dropped too, for the same reason. A prompt the group
- * heading's "Explain all" started (`groupExplainMarker`) gives its Jira key
- * instead of PR keys: it lists every PR of the group but works on none of them.
+ * adds to a prompt are dropped too, for the same reason. A prompt a group
+ * heading started (`groupMarker`) gives its kind and Jira key instead of PR
+ * keys: it lists every PR of the group but works on none of them itself.
  */
-export function promptLinks(line: string): { prKeys: string[]; overviewKey: string | null } {
-  const none = { prKeys: [], overviewKey: null };
+export function promptLinks(line: string): {
+  prKeys: string[];
+  group: { kind: GroupLaunchKind; key: string } | null;
+} {
+  const none = { prKeys: [], group: null };
   // Most lines are tool traffic megabytes long — skip them before parsing.
   if (!line.includes('"type":"user"') || !line.includes("/pull/")) return none;
   let entry: unknown;
@@ -65,8 +68,8 @@ export function promptLinks(line: string): { prKeys: string[]; overviewKey: stri
     }
   }
   const text = texts.join("\n").replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "");
-  const overviewKey = groupExplainKeyOf(text);
-  return overviewKey ? { prKeys: [], overviewKey } : { prKeys: extractPrKeys(text), overviewKey: null };
+  const group = groupMarkerOf(text);
+  return group ? { prKeys: [], group } : { prKeys: extractPrKeys(text), group: null };
 }
 
 /** The PR keys one transcript line binds the session to (`promptLinks`). */
@@ -110,9 +113,14 @@ function bySessionNeed(a: ClaudeSessionInfo, b: ClaudeSessionInfo): number {
   );
 }
 
-/** The "Explain all" sessions of a group heading's Jira key, in `sessionsForPr`'s order. */
+/** The sessions a group heading's Jira key started, either kind, in `sessionsForPr`'s order. */
 export function sessionsForGroup(key: string, sessions: readonly ClaudeSessionInfo[]): ClaudeSessionInfo[] {
-  return sessions.filter((s) => s.overviewKeys?.includes(key)).sort(bySessionNeed);
+  return sessions.filter((s) => s.groups?.some((g) => g.key === key)).sort(bySessionNeed);
+}
+
+/** Which kind of group session `session` is for `key` — "Review all" when it was started for both. */
+export function groupKindOf(session: ClaudeSessionInfo, key: string): GroupLaunchKind {
+  return session.groups?.some((g) => g.key === key && g.kind === "review") ? "review" : "explain";
 }
 
 /**
@@ -140,16 +148,25 @@ export const SESSION_STATUS_TEXT: Record<ClaudeSessionInfo["status"], string> = 
 };
 
 /**
- * What a group heading's button says while an "Explain all" overview runs. Not
- * the card's words: on a heading "Needs you" read as "these reviews need you",
- * and the overview's most useful state — its turn ended, the result is there
- * to read — would say only "Idle".
+ * What a group heading's button says while one of its sessions runs. Not the
+ * card's words: on a heading "Needs you" read as "these reviews need you", and
+ * a finished overview — its result there to read — would say only "Idle". A
+ * "Review all" parent is idle both while its nested reviews run and once it
+ * has summed them up, so its idle word claims neither.
  */
-export const OVERVIEW_STATUS_TEXT: Record<ClaudeSessionInfo["status"], string> = {
-  busy: "Explaining…",
-  waiting: "Overview asks you",
-  idle: "Overview ready",
-  paused: "Overview paused",
+export const GROUP_STATUS_TEXT: Record<GroupLaunchKind, Record<ClaudeSessionInfo["status"], string>> = {
+  explain: {
+    busy: "Explaining…",
+    waiting: "Overview asks you",
+    idle: "Overview ready",
+    paused: "Overview paused",
+  },
+  review: {
+    busy: "Reviewing…",
+    waiting: "Review asks you",
+    idle: "Review idle",
+    paused: "Review paused",
+  },
 };
 
 const SESSION_STATUS_PHRASE: Record<ClaudeSessionInfo["status"], string> = {
