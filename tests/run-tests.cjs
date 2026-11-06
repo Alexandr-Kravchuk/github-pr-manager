@@ -7961,6 +7961,38 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    // A finished overview is idle, and Desktop pauses idle sessions: the
+    // heading must keep it, and neither state may hand it the group's cards.
+    await atest("claude sessions: an overview keeps its group heading once Desktop pauses it", async () => {
+      const root = nfs.mkdtempSync(path.join(os.tmpdir(), "prd-overview-"));
+      try {
+        const configDir = path.join(root, "claude");
+        const desktopDir = path.join(root, "desktop");
+        const org = path.join(desktopDir, "claude-code-sessions", "acct", "org");
+        nfs.mkdirSync(org, { recursive: true });
+        nfs.mkdirSync(path.join(configDir, "sessions"), { recursive: true });
+        const pr7 = "https://github.com/acme/widgets/pull/7";
+        nfs.writeFileSync(path.join(org, "local_ov.json"), JSON.stringify({ sessionId: "local_ov", cliSessionId: SID, isArchived: false, title: "Overview", prs: [{ url: pr7 }] }));
+        nfs.writeFileSync(path.join(configDir, "sessions", "301.json"), JSON.stringify({
+          pid: 301, sessionId: SID, cwd: root, entrypoint: "claude-desktop", hostSessionId: "local_ov", status: "idle",
+        }));
+        const tdir = path.join(configDir, "projects", scanner.projectDirName(root));
+        nfs.mkdirSync(tdir, { recursive: true });
+        const cl = require(path.join(__dirname, "../dist/main/shared/claude-launch.js"));
+        nfs.writeFileSync(path.join(tdir, `${SID}.jsonl`), promptLine(cl.renderGroupExplainPrompt({}, "ENG-9", [{ url: pr7 }, { url: pr7 + "0" }])) + "\n");
+        let running = true;
+        const sc = scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => running });
+        let [ov] = await sc.scan();
+        assert.deepStrictEqual({ status: ov.status, overviewKeys: ov.overviewKeys, prKeys: ov.prKeys }, { status: "idle", overviewKeys: ["ENG-9"], prKeys: [] }, "Desktop's bound PRs do not reach a running overview");
+        running = false;
+        [ov] = await sc.scan();
+        assert.deepStrictEqual({ status: ov.status, overviewKeys: ov.overviewKeys, prKeys: ov.prKeys }, { status: "paused", overviewKeys: ["ENG-9"], prKeys: [] }, "nor a paused one");
+        assert.deepStrictEqual(cs.sessionsForGroup("ENG-9", [ov]).map((x) => x.id), [SID]);
+      } finally {
+        nfs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     test("main.js wiring: sessions are scanned on a timer, pushed only while visible, focused by id", () => {
       const src = nfs.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
       assert.match(src, /"claude:focusSession"[\s\S]{0,200}validateClaudeSessionId[\s\S]{0,300}claudeSessionScanner\.focus\(/);

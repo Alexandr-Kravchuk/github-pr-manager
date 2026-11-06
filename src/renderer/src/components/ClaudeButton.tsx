@@ -63,38 +63,10 @@ export function ClaudeButton({
   const enabled = useContext(ClaudeEnabledContext);
   const allSessions = useContext(ClaudeSessionsContext);
   const sessions = useMemo(() => sessionsForPr(pr, allSessions), [pr, allSessions]);
-  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [state, run] = useLaunchState();
   const menu = useAnchoredMenu(sessions.length > 0 ? SESSIONS_MENU_WIDTH_PX : MENU_WIDTH_PX);
   // Without `kind` main picks from the PR's state, exactly as the button shows.
-  const launch = useCallback(
-    (kind?: ClaudeLaunchKind) => {
-      setState("busy");
-      window.api
-        .launchClaude(pr.id, kind)
-        .then((res) => {
-          if (res.ok) {
-            setState("done");
-            setTimeout(() => setState("idle"), 1500);
-          } else {
-            setState("idle");
-            window.alert(res.error);
-          }
-        })
-        .catch((e: unknown) => {
-          setState("idle");
-          window.alert((e as Error).message);
-        });
-    },
-    [pr.id],
-  );
-  const focus = useCallback((sessionId: string) => {
-    window.api
-      .focusClaudeSession(sessionId)
-      .then((res) => {
-        if (!res.ok) window.alert(res.error);
-      })
-      .catch((e: unknown) => window.alert((e as Error).message));
-  }, []);
+  const launch = useCallback((kind?: ClaudeLaunchKind) => run(() => window.api.launchClaude(pr.id, kind)), [run, pr.id]);
 
   if (!enabled) return null;
   const kind = pickClaudeLaunch(pr, { trackComments });
@@ -117,7 +89,7 @@ export function ClaudeButton({
     <span className={cn("inline-flex shrink-0 whitespace-nowrap", className)}>
       <button
         type="button"
-        onClick={() => (current ? focus(current.id) : launch())}
+        onClick={() => (current ? focusSession(current.id) : launch())}
         disabled={state === "busy"}
         title={iconOnly ? `${text} — ${label}` : label}
         aria-label={label}
@@ -167,7 +139,7 @@ export function ClaudeButton({
                     session={s}
                     onSwitch={() => {
                       menu.close();
-                      focus(s.id);
+                      focusSession(s.id);
                     }}
                   />
                 ))}
@@ -220,6 +192,45 @@ export function ClaudeGlow({ pr }: { pr: PullRequest }) {
       className={cn("claude-glow pointer-events-none absolute inset-0 -z-10", `claude-glow-${glow}`)}
     />
   );
+}
+
+/**
+ * A launch button's state — idle, waiting for main, or "Started" for a
+ * moment — and `run`, which starts a launch and shows its refusal.
+ */
+function useLaunchState(): [
+  "idle" | "busy" | "done",
+  (start: () => Promise<{ ok: true } | { ok: false; error: string }>) => void,
+] {
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const run = useCallback((start: () => Promise<{ ok: true } | { ok: false; error: string }>) => {
+    setState("busy");
+    start()
+      .then((res) => {
+        if (res.ok) {
+          setState("done");
+          setTimeout(() => setState("idle"), 1500);
+        } else {
+          setState("idle");
+          window.alert(res.error);
+        }
+      })
+      .catch((e: unknown) => {
+        setState("idle");
+        window.alert((e as Error).message);
+      });
+  }, []);
+  return [state, run];
+}
+
+/** Brings a running session to the front; a refusal says why. */
+function focusSession(sessionId: string): void {
+  window.api
+    .focusClaudeSession(sessionId)
+    .then((res) => {
+      if (!res.ok) window.alert(res.error);
+    })
+    .catch((e: unknown) => window.alert((e as Error).message));
 }
 
 const MENU_HEADING = "px-3 pb-1 pt-1 text-xs font-semibold text-fg-subtle";
@@ -345,36 +356,12 @@ export function GroupExplainButton({ groupKey, prs }: { groupKey: string; prs: r
   const enabled = useContext(ClaudeEnabledContext);
   const allSessions = useContext(ClaudeSessionsContext);
   const sessions = useMemo(() => sessionsForGroup(groupKey, allSessions), [groupKey, allSessions]);
-  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [state, run] = useLaunchState();
   const menu = useAnchoredMenu(SESSIONS_MENU_WIDTH_PX);
-  const picked = groupExplainPrs(groupKey, prs);
-  const pickedIds = picked?.map((p) => p.id).join("\n") ?? "";
+  const picked = useMemo(() => groupExplainPrs(groupKey, prs), [groupKey, prs]);
   const launch = useCallback(() => {
-    setState("busy");
-    window.api
-      .explainGroupWithClaude(groupKey, pickedIds.split("\n"))
-      .then((res) => {
-        if (res.ok) {
-          setState("done");
-          setTimeout(() => setState("idle"), 1500);
-        } else {
-          setState("idle");
-          window.alert(res.error);
-        }
-      })
-      .catch((e: unknown) => {
-        setState("idle");
-        window.alert((e as Error).message);
-      });
-  }, [groupKey, pickedIds]);
-  const focus = useCallback((sessionId: string) => {
-    window.api
-      .focusClaudeSession(sessionId)
-      .then((res) => {
-        if (!res.ok) window.alert(res.error);
-      })
-      .catch((e: unknown) => window.alert((e as Error).message));
-  }, []);
+    if (picked) run(() => window.api.explainGroupWithClaude(groupKey, picked.map((p) => p.id)));
+  }, [run, groupKey, picked]);
 
   if (!enabled || !picked) return null;
   const drafts = prs.filter((p) => p.isDraft).length;
@@ -399,7 +386,7 @@ export function GroupExplainButton({ groupKey, prs }: { groupKey: string; prs: r
     <span className="inline-flex shrink-0 whitespace-nowrap">
       <button
         type="button"
-        onClick={() => (current ? focus(current.id) : launch())}
+        onClick={() => (current ? focusSession(current.id) : launch())}
         disabled={state === "busy"}
         title={label}
         aria-label={label}
@@ -440,7 +427,7 @@ export function GroupExplainButton({ groupKey, prs }: { groupKey: string; prs: r
                 session={s}
                 onSwitch={() => {
                   menu.close();
-                  focus(s.id);
+                  focusSession(s.id);
                 }}
               />
             ))}

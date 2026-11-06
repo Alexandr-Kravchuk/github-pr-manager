@@ -389,6 +389,13 @@ export function createClaudeSessionScanner(
   let entries = new Map<string, RegistryEntry>();
   /** Paused Desktop sessions of the last scan: session id → Desktop's id. */
   let paused = new Map<string, string>();
+  /**
+   * The "Explain all" keys of every overview seen running this app run, by
+   * session id. A transcript's state goes when its process does, but Desktop
+   * pauses an idle session — and a finished overview is idle — so without
+   * this a paused overview would leave its group heading.
+   */
+  const overviewsSeen = new Map<string, string[]>();
   let inFlight: Promise<ClaudeSessionInfo[]> | null = null;
 
   async function scanOnce(): Promise<ClaudeSessionInfo[]> {
@@ -439,8 +446,11 @@ export function createClaudeSessionScanner(
       if (!state.file) state.file = findTranscript(projectsDir, entry);
       await readTranscript(state);
       const git = gitInfo(entry.cwd);
+      if (state.overviewKeys.size > 0) overviewsSeen.set(entry.sessionId, [...state.overviewKeys].sort());
+      const overviewKeys = overviewsSeen.get(entry.sessionId);
       // A routine's run touches many PRs; it counts only by what it was sent.
-      const desktopPrs = record && !record.scheduled ? record.prKeys : [];
+      // An overview holds none of the PRs it explains, whatever Desktop bound.
+      const desktopPrs = record && !record.scheduled && !overviewKeys ? record.prKeys : [];
       const info: ClaudeSessionInfo = {
         id: entry.sessionId,
         name: record?.title ?? entry.name,
@@ -450,30 +460,35 @@ export function createClaudeSessionScanner(
         repoKeys: [...new Set(git.remotes.map(normalizeRemote).filter((k): k is string => k !== null))].sort(),
         branch: git.branch,
       };
-      if (state.overviewKeys.size > 0) info.overviewKeys = [...state.overviewKeys].sort();
+      if (overviewKeys) info.overviewKeys = overviewKeys;
       if (entry.waitingFor) info.waitingFor = entry.waitingFor;
       sessions.push(info);
     }
 
     // Paused: in Desktop, not archived, no process. Matched by the PRs Desktop
     // bound to them only — their folder is often a shared checkout whose
-    // branch has moved on since, so a branch match would be a guess.
+    // branch has moved on since, so a branch match would be a guess — or, for
+    // an overview seen running earlier, by its group key.
     const nextPaused = new Map<string, string>();
     for (const r of records) {
-      if (r.isArchived || r.scheduled || liveHosts.has(r.sessionId) || r.prKeys.length === 0) continue;
+      if (r.isArchived || r.scheduled || liveHosts.has(r.sessionId)) continue;
       const id = r.cliSessionId ?? r.sessionId.slice("local_".length);
       if (!SESSION_ID_RE.test(id) || live.has(id)) continue;
+      const overviewKeys = overviewsSeen.get(id);
+      if (!overviewKeys && r.prKeys.length === 0) continue;
       nextPaused.set(id, r.sessionId);
-      sessions.push({
+      const info: ClaudeSessionInfo = {
         id,
         name: r.title,
         status: "paused",
         where: "desktop",
-        prKeys: r.prKeys,
+        prKeys: overviewKeys ? [] : r.prKeys,
         repoKeys: [],
         branch: null,
         lastActivityAt: r.lastActivityAt,
-      });
+      };
+      if (overviewKeys) info.overviewKeys = overviewKeys;
+      sessions.push(info);
     }
     paused = nextPaused;
     return sessions.sort((a, b) => a.id.localeCompare(b.id));
