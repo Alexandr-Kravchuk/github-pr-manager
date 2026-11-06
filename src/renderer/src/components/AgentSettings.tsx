@@ -466,6 +466,14 @@ function PolicySection({ agent, setAgent, inputCls }: SectionProps) {
         <div className="flex flex-wrap items-center gap-2 text-sm text-fg-secondary">
           Keep the agent&apos;s log for
           <Num bound="logRetentionDays" value={agent.policy.logRetentionDays} onChange={(logRetentionDays) => patch({ logRetentionDays })} unit="days" />
+          <button
+            type="button"
+            onClick={() => void window.api.revealAgentLog()}
+            title="One line per thing the agent did and per card that moved on the Board — to read back when something went wrong"
+            className="ml-1 text-xs text-sky-700 hover:underline dark:text-sky-300"
+          >
+            Show the log
+          </button>
         </div>
       </Dimmed>
     </section>

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { AgentItem, AgentScenario } from "../../shared/types";
+import type { BoardMark } from "./journal";
 
 // The agent's memory across restarts, in its own files under userData/agent —
 // never in settings.json, whose validation must not be able to trip on it.
@@ -42,6 +43,12 @@ export interface AgentStoreData {
   pushedHeads: Record<string, string>;
   /** Paused as a whole (Board, companion, tray) — it stays paused across a restart. */
   paused: boolean;
+  /**
+   * Where each PR's card stood on the Board when the journal last looked
+   * (`journal.ts`): kept across a restart, so a card that moved while the app
+   * was closed is logged as one move. Absent until the journal's first look.
+   */
+  board?: Record<string, BoardMark>;
 }
 
 export function emptyStore(day: string): AgentStoreData {
@@ -67,6 +74,7 @@ export function readStore(file: string, day: string): AgentStoreData {
       drive: typeof raw.drive === "object" && raw.drive !== null ? raw.drive : {},
       pushedHeads: typeof raw.pushedHeads === "object" && raw.pushedHeads !== null ? raw.pushedHeads : {},
       paused: raw.paused === true,
+      ...(typeof raw.board === "object" && raw.board !== null && !Array.isArray(raw.board) ? { board: raw.board } : {}),
     };
   } catch {
     return emptyStore(day);
@@ -81,16 +89,37 @@ export function writeFileAtomic(file: string, text: string): void {
   fs.renameSync(tmp, file);
 }
 
+/**
+ * What a log line is about (`journal.ts` has the full list of events):
+ * - `run`    — a run's own steps: queued, started, its end with time, cost and tokens, published, pushed, merged;
+ * - `item`   — an item's state changed (queued → working → needsYou → done), with how long the old state lasted;
+ * - `board`  — a PR's card moved to another column, or got another button, with how long it stood where it was;
+ * - `plan`   — why the agent leaves a PR alone changed, or what holds the queue changed;
+ * - `action` — something you did: a button, a menu, the tray — with what came of it;
+ * - `agent`  — the agent itself: start, stop, settings changed.
+ * Lines written before kinds existed have none: they are `run` lines.
+ */
+export type AgentLogKind = "run" | "item" | "board" | "plan" | "action" | "agent";
+
 export interface AgentLogEntry {
   at: string;
-  prNumber: number;
-  repo: string;
-  scenario: AgentScenario;
-  runId: string;
+  kind: AgentLogKind;
   event: string;
+  prId?: string;
+  prNumber?: number;
+  repo?: string;
+  scenario?: AgentScenario;
+  runId?: string;
   headOid?: string | null;
   sessionId?: string;
   detail?: string;
+  /** A change's two ends: states, columns, reasons; null where there was none (a new card) or is none (it left). */
+  from?: string | null;
+  to?: string | null;
+  /** How long it took, or how long the `from` side lasted. */
+  ms?: number;
+  /** The rest, by event: a run's stats, a card's lane and button, an action's arguments. */
+  data?: Record<string, unknown>;
 }
 
 /** Keeps the log lines newer than the retention; malformed lines go too. */
@@ -120,12 +149,25 @@ export interface AgentStore {
   prune(retentionDays: number, now: number): void;
 }
 
-export function openStore(dir: string, today: string): AgentStore {
+/**
+ * `beforeSave` runs at the start of every save and flush, before the state is
+ * written — where the journal compares what changed and writes its lines, so
+ * the state on disk and the log agree.
+ */
+export function openStore(dir: string, today: string, beforeSave?: () => void): AgentStore {
   const stateFile = path.join(dir, "state.json");
   const logFile = path.join(dir, "log.jsonl");
   const data = readStore(stateFile, today);
   let chain: Promise<void> = Promise.resolve();
-  const serialize = () => JSON.stringify(store.data, (key, value: unknown) => (key === "pushTo" ? undefined : value), 2);
+  const serialize = () => {
+    try {
+      beforeSave?.();
+    } catch (e) {
+      // The journal is best-effort: it never stops the state being saved.
+      console.warn(`[agent] journal: ${(e as Error).message}`);
+    }
+    return JSON.stringify(store.data, (key, value: unknown) => (key === "pushTo" ? undefined : value), 2);
+  };
   const store: AgentStore = {
     data,
     save() {

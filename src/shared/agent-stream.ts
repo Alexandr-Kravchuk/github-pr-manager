@@ -24,6 +24,13 @@ export interface RunResult {
   text: string;
   /** Tool calls the permission rules refused. */
   denials: number;
+  /** The refused tools by name, once each — what to look at when a run couldn't do its job. */
+  deniedTools?: string[];
+  /** What Claude reports for the session so far — for the agent's log. */
+  turns?: number;
+  costUsd?: number;
+  durationMs?: number;
+  tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
 
 export interface RunProgress {
@@ -227,6 +234,13 @@ export function applyStreamEvent(p: RunProgress, ev: unknown): RunProgress {
   }
 
   if (type === "result") {
+    const denied = Array.isArray(ev.permission_denials) ? ev.permission_denials : [];
+    const deniedTools = [...new Set(denied.map((d) => (isObj(d) ? str(d.tool_name) : "")).filter(Boolean))];
+    const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+    const usage = isObj(ev.usage) ? ev.usage : null;
+    const turns = num(ev.num_turns);
+    const costUsd = num(ev.total_cost_usd);
+    const durationMs = num(ev.duration_ms);
     return {
       ...p,
       sessionId: str(ev.session_id) || p.sessionId,
@@ -234,7 +248,21 @@ export function applyStreamEvent(p: RunProgress, ev: unknown): RunProgress {
         subtype: str(ev.subtype) || "unknown",
         isError: ev.is_error === true,
         text: str(ev.result),
-        denials: Array.isArray(ev.permission_denials) ? ev.permission_denials.length : 0,
+        denials: denied.length,
+        ...(deniedTools.length > 0 ? { deniedTools } : {}),
+        ...(turns !== undefined ? { turns } : {}),
+        ...(costUsd !== undefined ? { costUsd } : {}),
+        ...(durationMs !== undefined ? { durationMs } : {}),
+        ...(usage
+          ? {
+              tokens: {
+                input: num(usage.input_tokens) ?? 0,
+                output: num(usage.output_tokens) ?? 0,
+                cacheRead: num(usage.cache_read_input_tokens) ?? 0,
+                cacheWrite: num(usage.cache_creation_input_tokens) ?? 0,
+              },
+            }
+          : {}),
       },
     };
   }

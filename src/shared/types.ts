@@ -1020,6 +1020,8 @@ export interface PrManagerApi {
   getAgentState(): Promise<AgentState | null>;
   /** Act on an agent run or hand a PR to the agent. */
   agentAction(action: AgentAction): Promise<AgentActionResult>;
+  /** Shows the agent's log (userData/agent/log.jsonl) in the file manager. */
+  revealAgentLog(): Promise<void>;
   /** Subscribe to agent state pushes (sent only while the window is visible). */
   onAgentState(listener: (state: AgentState) => void): () => void;
   /** An agent notification was clicked: show the Board, where its decision waits. */

@@ -23,6 +23,7 @@ const api: PrManagerApi = {
   focusClaudeSession: (sessionId) => ipcRenderer.invoke("claude:focusSession", sessionId),
   getAgentState: () => ipcRenderer.invoke("agent:get"),
   agentAction: (action) => ipcRenderer.invoke("agent:action", action),
+  revealAgentLog: () => ipcRenderer.invoke("agent:revealLog"),
   onAgentState: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, state: AgentState) => listener(state);
     ipcRenderer.on("agent-state", handler);

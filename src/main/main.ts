@@ -764,6 +764,19 @@ function registerIpc(): void {
     }
     return agent.act(action);
   });
+  // The agent's log in the file manager: one JSON line per thing it did and per
+  // card that moved on the Board — what to read back when something went wrong.
+  // Nothing crosses over: the path is main's own.
+  ipcMain.handle("agent:revealLog", async (): Promise<void> => {
+    const dir = path.join(app.getPath("userData"), "agent");
+    const log = path.join(dir, "log.jsonl");
+    if (fs.existsSync(log)) {
+      shell.showItemInFolder(log);
+      return;
+    }
+    fs.mkdirSync(dir, { recursive: true });
+    await shell.openPath(dir);
+  });
 
   // Only the session id crosses over: what to open for it — the Desktop link or
   // the terminal tab — comes from main's own scan of the registry.

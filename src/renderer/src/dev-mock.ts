@@ -896,6 +896,7 @@ const api: PrManagerApi = {
   onRefreshRequest: () => () => {},
   getAgentState: async () => agentState,
   agentAction: async (action) => mockAgentAction(action),
+  revealAgentLog: async () => {},
   onAgentState: (listener) => {
     agentListeners.add(listener);
     return () => {

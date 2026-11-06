@@ -307,6 +307,27 @@ Three layers:
   `staleLoginItemsFor` deletes it on every apply, whatever the preference is.
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes
   `electron .` self-quit after the renderer loads (a non-interactive boot check).
+- **The PR agent's log** is `userData/agent/log.jsonl` — one JSON line per
+  event, kept for Settings › Agent › Policy's retention (its "Show the log"
+  opens the folder). Read it first when the agent did something odd. Every line
+  has `at`, `kind`, `event`; most have `prId`/`prNumber`/`repo`/`runId`, a
+  change has `from`/`to` and `ms` (how long the `from` side lasted), the rest is
+  in `data`. Kinds: `run` (a run's own steps — `queued` with mode, reasons and
+  PR size; `started` with its folder, model and queue wait; its end,
+  `needsYou`/`done`/`failed`, with time, turns, cost, tokens, tool calls,
+  refused tools and stderr's tail; `published`/`pushed`/`merged` and their
+  `not-*` refusals; `notice`), `item` (every state change of an item), `board`
+  (a card's column or button changed: `seen` on the first look, `move`,
+  `action`, `left`), `plan` (why the agent leaves a PR alone — `idle` — and
+  what holds the queue — `held`/`released`), `action` (each `act`, i.e. each
+  click, with its result) and `agent` (start, stop, `on`/`off`, `settings`
+  path by path). State changes are found by diffing in `main/agent/journal.ts`,
+  run before every save (`openStore`'s `beforeSave`) and after every plan, so a
+  new code path can't leave a hole in them; run events are written where they
+  happen. Board lines use the same `boardStage` as the Board, over all PRs
+  rather than the filtered ones, and only while the agent is on — pruning runs
+  only then; their marks persist in `state.json` (`board`), so a restart logs
+  what moved while the app was closed rather than every card again.
 - **No always-running animation in the renderer.** An `infinite` CSS animation —
   including Tailwind's `animate-pulse` / `-spin` / `-bounce` / `-ping` — keeps the
   compositor producing frames for as long as the app is open, and Electron

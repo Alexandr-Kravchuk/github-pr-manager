@@ -46,7 +46,8 @@ import { execFileSync } from "node:child_process";
 import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
-import { openStore, type AgentItemRecord, type AgentStore, type LedgerEntry } from "./store";
+import { actionArgs, boardNow, clip, diffBoard, diffIdle, diffItems, itemFields, runStats, settingsDiff, type ItemMark } from "./journal";
+import { openStore, type AgentItemRecord, type AgentLogEntry, type AgentStore, type LedgerEntry } from "./store";
 import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor, type OrchestratorRun } from "./sdlc";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
 
@@ -349,12 +350,42 @@ export function createAgent(deps: AgentDeps): Agent {
   const now = deps.now ?? (() => new Date());
   const git = deps.git ?? runGit;
   const plugins = deps.plugins ?? (() => readInstalledPlugins());
-  const store: AgentStore = openStore(deps.dir, localDay(now()));
+  /** Set once everything the journal reads exists: the first saves of the constructor come before it. */
+  let journalReady = false;
+  const store: AgentStore = openStore(deps.dir, localDay(now()), () => {
+    if (journalReady) observe();
+  });
   const running = new Map<string, Running>();
   let idle: Record<string, string> = {};
   let heldUntil: number | null = null;
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
+
+  // The journal's last look (`journal.ts`): each item's state as it was on
+  // disk — so what the restart below changes is logged as a change — the
+  // reasons the agent left PRs alone, what held the queue, and the settings.
+  let itemMarks = new Map<string, ItemMark>(
+    store.data.items.map((i) => [i.runId, { state: i.state, at: (i.state === "working" ? i.startedAt : i.state === "queued" ? i.queuedAt : i.finishedAt) ?? i.queuedAt }]),
+  );
+  /** Null until the first plan after a start (or after switching on): that one is the baseline, not a change. */
+  let loggedIdle: Record<string, string> | null = null;
+  let lastHold: string | null = null;
+  /** The Board is logged while the agent is on — off, it writes nothing it would never prune. */
+  let boardOn = false;
+  {
+    const s = (() => {
+      try {
+        return deps.loadSettings().agent;
+      } catch {
+        return null;
+      }
+    })();
+    boardOn = s?.enabled === true;
+    if (s?.enabled || store.data.items.length > 0) {
+      const interrupted = store.data.items.filter((i) => i.state === "working").length;
+      store.log({ at: now().toISOString(), kind: "agent", event: "start", data: { enabled: s?.enabled === true, paused: store.data.paused, items: store.data.items.length, interrupted, runsToday: store.data.runsToday } });
+    }
+  }
 
   // A run that was in flight when the app closed did not finish: say so now.
   // It goes on by itself once the PRs are known (`recoverInterrupted`).
@@ -374,6 +405,35 @@ export function createAgent(deps: AgentDeps): Agent {
   const changed = () => deps.onChange?.();
   const stamp = () => now().toISOString();
   const findItem = (runId: string) => store.data.items.find((i) => i.runId === runId);
+  /** One of a run's own steps, in the log. */
+  const logRun = (item: AgentItemRecord, event: string, extra: Partial<AgentLogEntry> = {}) => store.log({ at: stamp(), kind: "run", event, ...itemFields(item), ...extra });
+
+  /**
+   * The journal's look: every item whose state changed, every card that moved
+   * on the Board, logged with how long it stood where it was. Runs before each
+   * save, and after each plan — where GitHub alone may have moved a card.
+   * True when a card moved: the Board's marks are part of the state to save.
+   */
+  function observe(snapshot: DashboardResponse | null = deps.getSnapshot()): boolean {
+    const at = stamp();
+    const items = diffItems(itemMarks, store.data.items, at);
+    itemMarks = items.marks;
+    for (const e of items.entries) store.log(e);
+    if (!boardOn || !snapshot) return false;
+    const ctx = { today: localDay(now()), idle, orchestrated: sdlcBadges };
+    const failed = new Set((snapshot.errors ?? []).map((e) => e.hostLabel));
+    const board = diffBoard(store.data.board ?? null, boardNow(snapshot.pullRequests, store.data.items, ctx), at, failed);
+    for (const e of board.entries) store.log(e);
+    store.data.board = board.marks;
+    return board.entries.length > 0;
+  }
+
+  /** What holds the queue, logged when it changes: paused, quiet hours, the usage or daily limit, a host's budget. */
+  function noteHold(hold: string | null): void {
+    if (hold === lastHold) return;
+    store.log({ at: stamp(), kind: "plan", event: hold ? "held" : "released", from: lastHold, to: hold });
+    lastHold = hold;
+  }
   const gh = deps.gh ?? runGh;
   /** Merge offers whose click is being carried out — a snapshot in between must not close them. */
   const merging = new Set<string>();
@@ -386,6 +446,18 @@ export function createAgent(deps: AgentDeps): Agent {
    * is the poller's first snapshot, as before.
    */
   let plannedWith: string | null = JSON.stringify(settings());
+  /** The agent settings the log last knew: a change is logged path by path, switching on and off by name. */
+  let loggedSettings: AgentSettings | null = settings();
+  function logSettings(s: AgentSettings | null): void {
+    const was = loggedSettings?.enabled === true;
+    const on = s?.enabled === true;
+    // Edits while the agent is off are logged with switching it on — as one change.
+    if (!was && !on) return;
+    const changed = settingsDiff(loggedSettings, s);
+    loggedSettings = s;
+    if (!changed) return;
+    store.log({ at: stamp(), kind: "agent", event: was !== on ? (on ? "on" : "off") : "settings", data: { changed } });
+  }
   /** Snapshots in a row each live item's PR has been missing from (`goneItems`). */
   const missing = new Map<string, number>();
 
@@ -420,6 +492,7 @@ export function createAgent(deps: AgentDeps): Agent {
     for (const old of supersededBy(store.data.items, fresh)) void closeAs(old, AGENT_CLOSED.superseded);
   }
   const announce = (item: AgentItemRecord, kind: AgentNotice["kind"]) => {
+    logRun(item, "notice", { detail: kind });
     try {
       deps.notify?.({ kind, item: { ...item } });
     } catch {
@@ -489,7 +562,7 @@ export function createAgent(deps: AgentDeps): Agent {
         item.resumeSession = true;
         item.finishedAt = undefined;
         item.headline = "Queued: going on — the app closed while it ran";
-        store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "resumed", detail: "after a restart" });
+        logRun(item, "resumed", { detail: "after a restart" });
         continue;
       }
       const pr = snapshot.pullRequests.find((p) => p.id === item.prId);
@@ -524,7 +597,17 @@ export function createAgent(deps: AgentDeps): Agent {
       ...(job.reasons ? { reasons: job.reasons } : {}),
     };
     store.data.items.push(item);
-    store.log({ at: stamp(), prNumber: job.prNumber, repo: job.repo, scenario: job.scenario, runId: item.runId, event: "queued", headOid: pr.headOid });
+    // A merge offer is never queued: it waits for your click from the start.
+    logRun(item, job.scenario === "merge" ? "offered" : "queued", {
+      headOid: pr.headOid,
+      detail: clip(headline),
+      data: {
+        mode: job.mode,
+        ...(job.reasons ? { reasons: job.reasons } : {}),
+        asked: job.key.endsWith("|asked"),
+        size: { additions: pr.additions, deletions: pr.deletions, files: pr.changedFiles },
+      },
+    });
     return item;
   }
 
@@ -543,14 +626,24 @@ export function createAgent(deps: AgentDeps): Agent {
   function onSnapshot(snapshot: DashboardResponse): void {
     const s = settings();
     plannedWith = JSON.stringify(s);
+    logSettings(s);
     // Housekeeping holds whether the agent is on or off.
     closeGone(snapshot, s);
     if (!s?.enabled) {
       idle = Object.fromEntries(snapshot.pullRequests.map((p) => [p.id, "The agent is off"]));
       sdlcBadges = {};
       stopRunsForOff();
+      // Switched on again, the journal starts from where things stand then.
+      loggedIdle = null;
+      noteHold(null);
+      if (boardOn) {
+        boardOn = false;
+        store.data.board = undefined;
+        void store.save();
+      }
       return;
     }
+    boardOn = true;
     recoverInterrupted(snapshot, s);
     const own = new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!));
     const sessions = deps.getSessions().filter((x) => !own.has(x.id));
@@ -634,6 +727,11 @@ export function createAgent(deps: AgentDeps): Agent {
         dirty = true;
       }
     }
+    // Why the agent leaves each PR alone, where that changed since the last plan.
+    if (loggedIdle) for (const e of diffIdle(loggedIdle, idle, stamp(), byId)) store.log(e);
+    loggedIdle = { ...idle };
+    // GitHub alone may have moved a card (a review came in, CI went green): the Board's marks are state too.
+    if (observe(snapshot)) dirty = true;
     if (dirty) {
       void store.save();
       changed();
@@ -643,6 +741,8 @@ export function createAgent(deps: AgentDeps): Agent {
 
   async function run(item: AgentItemRecord, pr: PullRequest | null, all: Settings): Promise<void> {
     const s = all.agent;
+    /** How the session went, once it has ended — on the run's end line, failed or not. */
+    let endStats: Record<string, unknown> | undefined;
     const fail = (headline: string, error?: string) => {
       item.state = "error";
       item.headline = headline;
@@ -651,7 +751,11 @@ export function createAgent(deps: AgentDeps): Agent {
       // Recorded even when the run never started, or every tick would queue the
       // same PR again; a new head commit is a new key and gets another try.
       store.data.ledger[item.key] = { state: "failed", at: item.finishedAt, runId: item.runId };
-      store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "failed", detail: error ?? headline });
+      logRun(item, "failed", {
+        detail: clip(error ? `${headline}: ${error}` : headline, 1500),
+        ...(item.sessionId ? { sessionId: item.sessionId } : {}),
+        ...(endStats ? { ...(typeof endStats.ms === "number" ? { ms: endStats.ms } : {}), data: endStats } : {}),
+      });
       void store.save();
       changed();
       announce(item, "failed");
@@ -765,7 +869,21 @@ export function createAgent(deps: AgentDeps): Agent {
     writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url, guardFile));
     const sessionId = resume ?? randomUUID();
     item.sessionId = sessionId;
-    store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: resume ? (answer ? "answered" : "resumed") : "started", ...(answer ? { detail: answer } : {}), headOid: pr?.headOid ?? keyHead(item.key) ?? undefined, sessionId });
+    logRun(item, resume ? (answer ? "answered" : "resumed") : "started", {
+      ...(answer ? { detail: clip(answer) } : {}),
+      headOid: pr?.headOid ?? keyHead(item.key) ?? undefined,
+      sessionId,
+      // Where it ran, so a run can be found again: the folder its transcript is filed under.
+      data: {
+        cwd: dir,
+        mode: item.mode,
+        model: s.model,
+        effort: s.effort,
+        ...(item.reasons ? { reasons: item.reasons } : {}),
+        // How long it stood in the queue (a resumed run's queue time is its first run's).
+        ...(!resume ? { waitedMs: Math.max(0, Date.parse(item.startedAt ?? stamp()) - Date.parse(item.queuedAt)) } : {}),
+      },
+    });
 
     // The wrapper's own rule, and Write — which the guard holds to the payload folder.
     const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : [])])];
@@ -836,6 +954,7 @@ export function createAgent(deps: AgentDeps): Agent {
     if (stopped) return;
     const result = outcome.progress.result;
     item.finishedAt = stamp();
+    endStats = runStats(item, outcome, item.finishedAt, { takeOver: entry.takeOver, offStop: entry.offStop });
     let publishNow = false;
     let pushNow = false;
     // A run that asks nothing of you — you took it over, stopped it, or it
@@ -925,7 +1044,20 @@ export function createAgent(deps: AgentDeps): Agent {
     // `fail` changes the state behind TypeScript's back; read it afresh.
     const ended = item.state as AgentItem["state"];
     if (ended !== "error") {
-      store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: ended, sessionId, detail: item.headline });
+      logRun(item, ended, {
+        sessionId,
+        detail: clip(item.headline),
+        ...(typeof endStats.ms === "number" ? { ms: endStats.ms } : {}),
+        data: {
+          ...endStats,
+          // What it prepared: the review it would post, the commits, the questions it left you.
+          ...(item.plan ? { plan: describePlan(item.plan), comments: item.plan.comments.length, replies: item.plan.replies.length, escalations: item.plan.escalations.length } : {}),
+          ...(item.drive ? { commits: item.drive.commits.length } : {}),
+          ...(item.result ? { asks: item.result.asks.length, findings: item.result.findings.length, structured: item.result.structured } : {}),
+          ...(publishNow ? { publishNow: true } : {}),
+          ...(pushNow ? { pushNow: true } : {}),
+        },
+      });
     }
     // Only a result you still have to look at keeps its worktree (to continue the session in it) —
     // and a run you took over, whose session goes on in your terminal there.
@@ -1031,6 +1163,7 @@ export function createAgent(deps: AgentDeps): Agent {
    */
   async function publishItem(item: AgentItemRecord, all: Settings, byYou: boolean): Promise<AgentActionResult> {
     const refuse = (error: string): AgentActionResult => {
+      logRun(item, "not-published", { detail: clip(error), data: { byYou } });
       item.state = "needsYou";
       item.headline = `Not published — ${error}`;
       void store.save();
@@ -1080,12 +1213,12 @@ export function createAgent(deps: AgentDeps): Agent {
       item.planEdited = true;
       item.state = "needsYou";
       item.headline = `Would post: ${describePlan(item.plan)} — changed in the session, check it again`;
+      logRun(item, "not-published", { detail: "the plan changed in the session since it was shown", data: { byYou } });
       void store.save();
       changed();
       return { ok: false, error: "It changed in the session since you saw it — check what it would post now, then Publish." };
     }
     if (!out.ok) {
-      store.log({ at: stamp(), prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "publish-failed", detail: out.error });
       return refuse(`stopped after ${out.posted} of ${out.total}: ${out.error}`);
     }
     item.published = true;
@@ -1096,7 +1229,13 @@ export function createAgent(deps: AgentDeps): Agent {
     store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
     // Published as the run prepared it — not after an edit in the session.
     if (byYou && item.mode === "shadow" && !item.planEdited) store.data.acceptedUnchanged += 1;
-    store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: item.scenario, runId: item.runId, event: "published", headOid: head ?? undefined, sessionId: item.sessionId, detail: describePlan(item.plan) });
+    logRun(item, "published", {
+      headOid: head ?? undefined,
+      sessionId: item.sessionId,
+      detail: describePlan(item.plan),
+      // Who sent it, and whether it went out as prepared: what the Shadow → On hint counts.
+      data: { byYou, mode: item.mode, edited: item.planEdited === true, ...(held ? { approveHeld: true } : {}), ...(item.disputes ? { disputes: item.disputes } : {}) },
+    });
     await dropWorktree(item);
     void store.save();
     changed();
@@ -1119,6 +1258,7 @@ export function createAgent(deps: AgentDeps): Agent {
    */
   async function pushItem(item: AgentItemRecord, all: Settings): Promise<AgentActionResult> {
     const refuse = (error: string): AgentActionResult => {
+      logRun(item, "not-pushed", { detail: clip(error) });
       item.state = "needsYou";
       item.headline = `Not pushed — ${error}`;
       void store.save();
@@ -1178,7 +1318,7 @@ export function createAgent(deps: AgentDeps): Agent {
     // A head the agent pushed is not one to self-review again.
     store.data.pushedHeads[item.prId] = head;
     store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
-    store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: "drive", runId: item.runId, event: "pushed", headOid: head, sessionId: item.sessionId, detail: `${n} commit(s)` });
+    logRun(item, "pushed", { headOid: head, sessionId: item.sessionId, detail: `${n} commit(s)`, data: { attempt: store.data.drive[item.prId].attempts, mode: item.mode } });
     let headline = `Pushed ${n} commit${n === 1 ? "" : "s"}`;
     // The run's answers to reviewers go out once the code they talk about is on the branch.
     if (item.runFolder && item.plan && item.plan.replies.length > 0) {
@@ -1240,6 +1380,7 @@ export function createAgent(deps: AgentDeps): Agent {
       changed();
       const r = await gh(mergeArgs(item.url, method, head, s.scenarios.merge.deleteBranch));
       if (r.code !== 0) {
+        logRun(item, "not-merged", { headOid: head, detail: clip(ghError(r)) });
         item.headline = `GitHub refused the merge — ${ghError(r)}`;
         void store.save();
         changed();
@@ -1251,7 +1392,7 @@ export function createAgent(deps: AgentDeps): Agent {
       item.headline = queued ? "Added to the merge queue" : `Merged (${method})${s.scenarios.merge.deleteBranch ? ", branch deleted" : ""}`;
       item.finishedAt = stamp();
       store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
-      store.log({ at: item.finishedAt, prNumber: item.prNumber, repo: item.repo, scenario: "merge", runId: item.runId, event: queued ? "queued-to-merge" : "merged", headOid: head, detail: method });
+      logRun(item, queued ? "queued-to-merge" : "merged", { headOid: head, detail: method });
       if (!queued && all.claude.agentPrompts.afterMerge.trim()) {
         newItem({ key: `${item.prId}|afterMerge|${head}`, prId: item.prId, prNumber: item.prNumber, repo: item.repo, url: item.url, scenario: "afterMerge", mode: "on" }, pr, "Queued: the Jira dry run");
       }
@@ -1301,33 +1442,46 @@ export function createAgent(deps: AgentDeps): Agent {
       lastSweep = now().getTime();
       sweepWorktrees();
     }
+    // Your order first (dragged, or "Run next"), then the oldest.
+    const queued = queueOrder(store.data.items.filter((i) => i.state === "queued"));
     // Paused: nothing starts, whoever asked.
-    if (store.data.paused) return;
-    if (heldUntil !== null && now().getTime() < heldUntil) return;
+    if (store.data.paused) return noteHold(queued.length > 0 ? "paused" : null);
+    if (heldUntil !== null && now().getTime() < heldUntil) {
+      return noteHold(queued.length > 0 ? `Claude usage limit until ${new Date(heldUntil).toISOString()}` : null);
+    }
     heldUntil = null;
     const snapshot = deps.getSnapshot();
     const byId = new Map((snapshot?.pullRequests ?? []).map((p) => [p.id, p]));
-    // Your order first (dragged, or "Run next"), then the oldest.
-    const queued = queueOrder(store.data.items.filter((i) => i.state === "queued"));
+    /** Why queued runs wait this tick — a full house of parallel runs is the queue working, not a hold. */
+    const holds = new Set<string>();
     for (const item of queued) {
       // Counted by state, not by `running`: a run is "working" from its first
       // synchronous step, before its worktree exists and its process starts.
       const busy = store.data.items.filter((i) => i.state === "working").length;
-      if (busy >= s.limits.parallel || store.data.runsToday >= s.limits.perDay) break;
+      if (busy >= s.limits.parallel) break;
+      if (store.data.runsToday >= s.limits.perDay) {
+        holds.add(`daily limit of ${s.limits.perDay} runs reached`);
+        break;
+      }
       // A merged PR has left the snapshot; its Jira dry run goes by the item alone.
       const pr = byId.get(item.prId) ?? null;
       if (!pr && item.scenario !== "afterMerge") continue;
       // Quiet hours hold what the agent found itself; what you asked for (or resumed) runs.
-      if (quiet && !item.key.endsWith("|asked") && !item.resumeSession) continue;
+      if (quiet && !item.key.endsWith("|asked") && !item.resumeSession) {
+        holds.add(`quiet hours until ${quiet}`);
+        continue;
+      }
       const held = hostHeld(snapshot, item.hostLabel);
       if (held) {
         item.headline = `Queued — ${held}`;
+        holds.add(`${item.hostLabel}: ${held}`);
         continue;
       }
       // One run per PR at a time.
       if (store.data.items.some((i) => i.prId === item.prId && i.state === "working")) continue;
       void run(item, pr, all).catch((e) => console.warn(`[agent] run failed: ${(e as Error).message}`));
     }
+    noteHold(holds.size > 0 ? [...holds].sort().join("; ") : null);
   }
 
   /** Puts a PR in the queue on your say-so; its key is its own, so the ledger of the automatic one doesn't stop it. */
@@ -1368,7 +1522,40 @@ export function createAgent(deps: AgentDeps): Agent {
     return { ok: true };
   }
 
+  /**
+   * Something you did — a card's button, a menu, the companion, the tray — and
+   * what came of it, in the log: what the agent prepared and what you did with
+   * it is what tells whether it helps.
+   */
   async function act(action: AgentAction): Promise<AgentActionResult> {
+    const started = now().getTime();
+    // The item it names, and its state before: a skip or a retry closes it.
+    const item = "runId" in action ? findItem(action.runId) : undefined;
+    const from = item?.state;
+    const record = (res: AgentActionResult) => {
+      const pr = "prId" in action ? snapshotPr(action.prId) : null;
+      store.log({
+        at: stamp(),
+        kind: "action",
+        event: action.type,
+        ...(item ? itemFields(item) : pr ? { prId: pr.id, prNumber: pr.number, repo: pr.repo } : "runId" in action ? { runId: action.runId } : {}),
+        ...(item ? { from, to: item.state } : {}),
+        ...(res.ok ? {} : { detail: clip(res.error) }),
+        ms: Math.max(0, now().getTime() - started),
+        data: { ok: res.ok, ...(actionArgs(action as unknown as Record<string, unknown>) ?? {}) },
+      });
+    };
+    try {
+      const res = await perform(action);
+      record(res);
+      return res;
+    } catch (e) {
+      record({ ok: false, error: (e as Error).message });
+      throw e;
+    }
+  }
+
+  async function perform(action: AgentAction): Promise<AgentActionResult> {
     const all = loadAll();
     if (!all) return { ok: false, error: "The settings can't be read — open Settings to fix them." };
     // Off: nothing new starts; stopping, dismissing, publishing what you saw still work.
@@ -1544,6 +1731,9 @@ export function createAgent(deps: AgentDeps): Agent {
     timer = setTimeout(loop, deps.tickMs ?? 5_000);
     timer.unref?.();
   };
+  // Everything the journal reads exists from here on: log what the start changed (runs it cut short).
+  journalReady = true;
+  if (observe()) void store.save();
   loop();
 
   return {
@@ -1582,9 +1772,9 @@ export function createAgent(deps: AgentDeps): Agent {
       // What runs now is interrupted by the app's closing, not stopped by you:
       // written down before the processes go, since the app won't wait.
       const at = stamp();
-      for (const item of store.data.items) {
-        if (item.state === "working") markInterrupted(item, at);
-      }
+      const cut = store.data.items.filter((i) => i.state === "working");
+      for (const item of cut) markInterrupted(item, at);
+      if (boardOn || cut.length > 0) store.log({ at, kind: "agent", event: "stop", data: { interrupted: cut.length } });
       store.flush();
       for (const r of running.values()) r.handle.stop();
     },

@@ -8359,6 +8359,30 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       p = stream.applyStreamEvent(p, { type: "result", subtype: "success", is_error: false, result: "LGTM", permission_denials: [{}, {}] });
       assert.deepStrictEqual(p.result, { subtype: "success", isError: false, text: "LGTM", denials: 2 });
     });
+    test("agent stream: a result carries Claude's turns, cost, time, tokens and the refused tools by name", () => {
+      const p = stream.applyStreamEvent(stream.initialProgress(), {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "ok",
+        num_turns: 12,
+        total_cost_usd: 0.4321,
+        duration_ms: 95000,
+        usage: { input_tokens: 10, output_tokens: 2000, cache_read_input_tokens: 50000, cache_creation_input_tokens: 3000 },
+        permission_denials: [{ tool_name: "Bash", tool_use_id: "a" }, { tool_name: "Bash", tool_use_id: "b" }, { tool_name: "Edit", tool_use_id: "c" }],
+      });
+      assert.deepStrictEqual(p.result, {
+        subtype: "success",
+        isError: false,
+        text: "ok",
+        denials: 3,
+        deniedTools: ["Bash", "Edit"],
+        turns: 12,
+        costUsd: 0.4321,
+        durationMs: 95000,
+        tokens: { input: 10, output: 2000, cacheRead: 50000, cacheWrite: 3000 },
+      });
+    });
     test("agent stream: junk lines and unknown events change nothing; TodoWrite still reads", () => {
       assert.strictEqual(stream.parseStreamLine("not json"), null);
       assert.strictEqual(stream.parseStreamLine("{broken"), null);
@@ -8597,7 +8621,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const captureJs = path.join(__dirname, "../dist/main/main/agent/capture.js");
     // A review session as the skill runs it: write the review JSON, hand it to
     // the run's wrapper (the real capture script), finish.
-    const reviewWithPlan = (event = "REQUEST_CHANGES") => (c) => {
+    const reviewWithPlan = (event = "REQUEST_CHANGES", resultExtra = {}) => (c) => {
       const outDir = c.args[c.args.indexOf("--add-dir") + 1];
       const runDir = path.dirname(outDir);
       const run = JSON.parse(nfsA.readFileSync(path.join(runDir, "run.json"), "utf8"));
@@ -8606,7 +8630,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const r = spawnSync(process.execPath, [captureJs, runDir, "review", run.repo, String(run.number), file], { encoding: "utf8" });
       if (r.status !== 0) throw new Error(r.stderr);
       emit(c, { type: "system", subtype: "init", session_id: "s" });
-      emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review." });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review.", ...resultExtra });
       setImmediate(() => c.emit("exit", 0));
     };
 
@@ -8631,6 +8655,92 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"started"/);
       } finally {
         f.agent.stop();
+      }
+    });
+
+    const readLog = (f) =>
+      nfsA
+        .readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l));
+
+    await atest("agent log: a run's story — queued, started, its end with Claude's stats, every item state, the card's moves, your click", async () => {
+      const stats = { num_turns: 7, total_cost_usd: 0.21, duration_ms: 4000, usage: { input_tokens: 5, output_tokens: 600, cache_read_input_tokens: 9000, cache_creation_input_tokens: 100 } };
+      const f = agentFixture({ script: reviewWithPlan("COMMENT", stats), captureScript: captureJs });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().items.some((i) => i.state === "needsYou"));
+        const item = f.agent.getState().items[0];
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: item.runId }), { ok: true });
+        const log = readLog(f);
+        assert.ok(log.every((l) => typeof l.kind === "string" && typeof l.at === "string"), "every line says what it is about");
+        assert.deepStrictEqual(log[0].kind + ":" + log[0].event, "agent:start");
+
+        const run = log.filter((l) => l.kind === "run").map((l) => l.event);
+        assert.deepStrictEqual(run.slice(0, 3), ["queued", "started", "needsYou"]);
+        const queued = log.find((l) => l.kind === "run" && l.event === "queued");
+        assert.deepStrictEqual([queued.prNumber, queued.repo, queued.data.mode, queued.data.asked, queued.data.size], [7, "a/b", "shadow", false, { additions: 50, deletions: 10, files: 3 }]);
+        const started = log.find((l) => l.kind === "run" && l.event === "started");
+        assert.ok(started.sessionId && started.data.cwd && typeof started.data.waitedMs === "number", "where it ran and how long it waited");
+        const end = log.find((l) => l.kind === "run" && l.event === "needsYou");
+        assert.deepStrictEqual(
+          [end.data.turns, end.data.costUsd, end.data.claudeMs, end.data.tokens, end.data.exitCode, end.data.comments, typeof end.ms],
+          [7, 0.21, 4000, { input: 5, output: 600, cacheRead: 9000, cacheWrite: 100 }, 0, 1, "number"],
+        );
+
+        const states = log.filter((l) => l.kind === "item").map((l) => `${l.from}>${l.to}`);
+        assert.deepStrictEqual(states, ["null>queued", "queued>working", "working>needsYou", "needsYou>done"]);
+
+        const board = log.filter((l) => l.kind === "board").map((l) => [l.event, l.from, l.to, l.data.action]);
+        assert.deepStrictEqual(board, [
+          ["seen", null, "you", "review"],
+          ["move", "you", "agent", null],
+          ["move", "agent", "you", "send"],
+          ["action", "you", "you", "review"],
+        ]);
+
+        const click = log.find((l) => l.kind === "action");
+        assert.deepStrictEqual([click.event, click.runId, click.from, click.to, click.data.ok], ["skip", item.runId, "needsYou", "done", true]);
+        const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+        assert.deepStrictEqual([state.board.PR_R.column, state.board.PR_R.action], ["you", "review"], "the Board's marks are saved with the state");
+
+        // A refused click is logged with the refusal.
+        assert.strictEqual((await f.agent.act({ type: "publish", runId: item.runId })).ok, false);
+        const refused = readLog(f).filter((l) => l.kind === "action").pop();
+        assert.deepStrictEqual([refused.event, refused.data.ok, typeof refused.detail], ["publish", false, "string"]);
+
+        // Switched off: one line with what changed; the Board is no longer logged.
+        f.setAgent({ enabled: false });
+        f.agent.onSnapshot(f.snapshot);
+        const off = readLog(f).pop();
+        assert.deepStrictEqual([off.kind, off.event, off.data.changed.enabled], ["agent", "off", [true, false]]);
+        // Saved through the write chain: on disk a moment later.
+        await until(() => JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).board === undefined);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent log: the Board's marks outlive a restart — the same Board logs nothing again; a held queue says why", async () => {
+      const f = agentFixture({ script: () => {} });
+      // Paused before the first run starts: the queue is held, and says so once.
+      await f.agent.act({ type: "pauseAgent" });
+      f.agent.onSnapshot(f.snapshot);
+      assert.deepStrictEqual(readLog(f).filter((l) => l.kind === "plan" && l.event === "held").map((l) => l.to), ["paused"]);
+      f.agent.stop();
+      const g = agentFixture({ home: f.dir, script: () => {} });
+      try {
+        const before = readLog(g).length;
+        g.agent.onSnapshot(g.snapshot);
+        const fresh = readLog(g).slice(before);
+        assert.deepStrictEqual(fresh.filter((l) => l.kind === "board").map((l) => [l.event, l.from, l.to]), [], "no burst of 'seen' after a restart");
+        const holds = readLog(g).filter((l) => l.kind === "plan" && (l.event === "held" || l.event === "released"));
+        assert.deepStrictEqual(holds.map((l) => [l.event, l.to]).slice(-1), [["held", "paused"]]);
+        await g.agent.act({ type: "resumeAgent" });
+        assert.deepStrictEqual(readLog(g).filter((l) => l.kind === "plan" && l.event === "released").map((l) => l.from), ["paused"]);
+      } finally {
+        g.agent.stop();
       }
     });
 
@@ -8888,6 +8998,80 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const drive = (n) => ({ base: "a", head: "b", reasons: ["self"], commits: Array.from({ length: n }, (_, i) => ({ oid: `c${i}`, subject: `fix ${i}` })), stat: "", patch: "" });
     const stage = (pr, items = [], ctx = {}) => view.boardStage(pr, items, { today: sToday, ...ctx });
     const where = (s) => (s ? [s.lane, s.column, s.action?.kind ?? null, s.action?.label ?? null, s.ready] : null);
+
+    // --- the journal: what the agent did, and where each card went --------------
+    const journal = require(path.join(__dirname, "../dist/main/main/agent/journal.js"));
+    const jAt = (min) => new Date(Date.UTC(2026, 10, 6, 12, min)).toISOString();
+
+    test("agent journal: an item's state change is one line with how long the old state lasted; no change, no line", () => {
+      const a = sIt({ runId: "00000000-0000-4000-8000-00000000000a", state: "queued", headline: "Queued: review" });
+      let r = journal.diffItems(new Map(), [a], jAt(0));
+      assert.deepStrictEqual(r.entries.map((e) => [e.kind, e.event, e.from, e.to, e.prId, e.runId, e.scenario]), [["item", "state", null, "queued", "P", a.runId, "review"]]);
+      const same = journal.diffItems(r.marks, [a], jAt(1));
+      assert.deepStrictEqual(same.entries, []);
+      a.state = "working";
+      a.headline = "Drafting your review";
+      r = journal.diffItems(same.marks, [a], jAt(3));
+      assert.deepStrictEqual(r.entries.map((e) => [e.from, e.to, e.ms, e.detail]), [["queued", "working", 180_000, "Drafting your review"]], "timed from when it was queued, not from the last look");
+      assert.deepStrictEqual(journal.diffItems(r.marks, [], jAt(4)).entries, [], "pruned items leave without a line");
+    });
+
+    test("agent journal: a card's way across the Board — seen, moved with its time in the column, a new button, left; a failed host moves nothing", () => {
+      const pr = rPr({ hostLabel: "GH" });
+      const ctx = { today: sToday };
+      const look = (prev, prs, items, min, failed) => journal.diffBoard(prev, journal.boardNow(prs, items, ctx), jAt(min), failed);
+      const row = (e) => [e.kind, e.event, e.from, e.to, e.data?.lane, e.data?.action ?? null, e.ms ?? null];
+
+      let r = look(null, [pr], [], 0);
+      assert.deepStrictEqual(r.entries.map(row), [["board", "seen", null, "you", "review", "review", null]], "the first look ever: where each card stands");
+      assert.deepStrictEqual(look(r.marks, [pr], [], 1).entries, [], "nothing moved, nothing written");
+
+      const it = sIt({ state: "working", startedAt: jAt(2) });
+      r = look(r.marks, [pr], [it], 2);
+      assert.deepStrictEqual(r.entries.map(row), [["board", "move", "you", "agent", "review", null, 120_000]]);
+      assert.deepStrictEqual([r.entries[0].runId, r.entries[0].detail, r.entries[0].data.itemState], [it.runId, "Drafting your review", "working"]);
+
+      Object.assign(it, { state: "needsYou", finishedAt: jAt(9), plan: plan("COMMENT") });
+      r = look(r.marks, [pr], [it], 9);
+      assert.deepStrictEqual(r.entries.map(row), [["board", "move", "agent", "you", "review", "send", 420_000]]);
+      assert.deepStrictEqual([r.entries[0].detail, r.entries[0].data.ready], ["Comment · 1 comment", true]);
+
+      // The same column, another button: dismissed, the card is GitHub's again.
+      Object.assign(it, { state: "done", headline: "Dismissed" });
+      const before = r.marks.P.at;
+      r = look(r.marks, [pr], [], 12);
+      assert.deepStrictEqual(r.entries.map((e) => [e.event, e.data.fromAction, e.data.action, e.ms ?? null]), [["action", "send", "review", null]]);
+      assert.strictEqual(r.marks.P.at, before, "a new button isn't a new column: its time there goes on");
+
+      assert.deepStrictEqual(look(r.marks, [], [], 20, new Set(["GH"])).entries, [], "its host failed to load: the card didn't move");
+      const gone = look(r.marks, [], [], 20);
+      assert.deepStrictEqual(gone.entries.map(row), [["board", "left", "you", null, "review", null, 660_000]]);
+      assert.deepStrictEqual(gone.marks, {});
+    });
+
+    test("agent journal: why the agent leaves a PR alone, the settings that changed, a run's stats, an action's arguments", () => {
+      const prs = new Map([["A", { number: 1, repo: "a/b" }]]);
+      const idle = journal.diffIdle({}, { A: "Waiting for reviewers" }, jAt(0), prs);
+      assert.deepStrictEqual(idle.map((e) => [e.kind, e.event, e.prNumber, e.from, e.to]), [["plan", "idle", 1, null, "Waiting for reviewers"]]);
+      assert.deepStrictEqual(journal.diffIdle({ A: "x" }, { A: "x" }, jAt(0), prs), []);
+      assert.deepStrictEqual(journal.diffIdle({ A: "x" }, {}, jAt(0), prs), [], "taken up: its queued line says so");
+      assert.deepStrictEqual(journal.diffIdle({ A: "x" }, { A: "y" }, jAt(0), prs).map((e) => [e.from, e.to]), [["x", "y"]]);
+
+      const base = cfg.validateAgent({ enabled: true });
+      assert.strictEqual(journal.settingsDiff(base, cfg.validateAgent({ enabled: true })), null);
+      assert.deepStrictEqual(journal.settingsDiff(base, cfg.validateAgent({ enabled: true, scenarios: { review: { mode: "on" } } })), { "scenarios.review.mode": ["shadow", "on"] });
+
+      const progress = { ...stream.initialProgress(), toolCalls: 31, steps: [{ id: "1", subject: "a", status: "completed" }, { id: "2", subject: "b", status: "in_progress" }] };
+      const ok = journal.runStats({ startedAt: jAt(0) }, { progress: { ...progress, result: { subtype: "success", isError: false, text: "", denials: 1, deniedTools: ["Edit"], turns: 9, costUsd: 0.5, tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } } }, exitCode: 0, timedOut: false, stopped: false, stderr: "noise" }, jAt(4));
+      assert.deepStrictEqual(ok, { ms: 240_000, exitCode: 0, subtype: "success", turns: 9, costUsd: 0.5, tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }, toolCalls: 31, denials: 1, deniedTools: ["Edit"], steps: "1/2" });
+      const bad = journal.runStats({ startedAt: jAt(0) }, { progress, exitCode: 1, timedOut: true, stopped: false, stderr: "a\nb\nboom\n" }, jAt(1));
+      assert.deepStrictEqual([bad.timedOut, bad.stderr, "subtype" in bad], [true, "a\nb\nboom", false], "a failed run keeps the end of stderr");
+      assert.strictEqual(journal.runStats({}, { progress, exitCode: null, timedOut: false, stopped: true, stderr: "" }, jAt(1), { takeOver: true }).takenOver, true);
+
+      assert.deepStrictEqual(journal.actionArgs({ type: "hint", runId: "r", text: "x".repeat(600) }), { text: `${"x".repeat(499)}…` });
+      assert.deepStrictEqual(journal.actionArgs({ type: "merge", runId: "r", method: "squash" }), { method: "squash" });
+      assert.strictEqual(journal.actionArgs({ type: "skip", runId: "r" }), undefined);
+    });
 
     test("boardStage: your PR without an orchestrator — each step of the journey in its column, with one button", () => {
       const rows = [
@@ -10172,6 +10356,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(preload, /"agent:get"/);
       assert.match(preload, /"agent:action"/);
       assert.match(preload, /"agent-state"/);
+      // The log's path is main's own: the renderer asks to see it and sends nothing.
+      assert.match(src, /ipcMain\.handle\("agent:revealLog", async \(\) =>[\s\S]{0,200}"log\.jsonl"/);
+      assert.match(preload, /revealAgentLog: \(\) => electron_1\.ipcRenderer\.invoke\("agent:revealLog"\)/);
     });
 
     test("main.js wiring: the agent hears every snapshot, keeps hidden polling alive and stops on quit", () => {
