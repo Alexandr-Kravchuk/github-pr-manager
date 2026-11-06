@@ -1,4 +1,9 @@
-import { CLAUDE_LAUNCH_KINDS, type ClaudeLaunchKind } from "../shared/claude-launch";
+import {
+  CLAUDE_LAUNCH_KINDS,
+  JIRA_KEY_RE,
+  MAX_GROUP_EXPLAIN_PRS,
+  type ClaudeLaunchKind,
+} from "../shared/claude-launch";
 import type { SeenInput, ThemePreference } from "../shared/types";
 
 // Validators for values that cross the IPC boundary from the renderer. The
@@ -110,6 +115,23 @@ export function validatePrId(value: unknown): string {
     throw new Error("launchClaude: expected a PR id.");
   }
   return value;
+}
+
+/**
+ * Validates "Explain all"'s arguments: the group's Jira key — it is written
+ * into the prompt, so nothing but a key's characters may pass — and 2 to
+ * `MAX_GROUP_EXPLAIN_PRS` distinct PR ids.
+ */
+export function validateGroupExplainArgs(key: unknown, ids: unknown): { key: string; ids: string[] } {
+  if (typeof key !== "string" || !JIRA_KEY_RE.test(key)) {
+    throw new Error("explainGroupWithClaude: expected a Jira issue key.");
+  }
+  if (!Array.isArray(ids)) throw new Error("explainGroupWithClaude: expected a list of PR ids.");
+  const unique = [...new Set(ids.map((id) => validatePrId(id)))];
+  if (unique.length < 2 || unique.length > MAX_GROUP_EXPLAIN_PRS) {
+    throw new Error(`explainGroupWithClaude: expected 2 to ${MAX_GROUP_EXPLAIN_PRS} PRs.`);
+  }
+  return { key, ids: unique };
 }
 
 /** Validates the Claude Code session id the renderer asks to switch to. */

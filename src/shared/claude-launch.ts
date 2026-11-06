@@ -31,14 +31,85 @@ export function claudeKindsFor(pr: Pick<PullRequest, "roles">): ClaudeLaunchKind
   return CLAUDE_LAUNCH_KINDS.filter((k) => k !== "close" || pr.roles.includes("author"));
 }
 
-/** `{url}` is replaced with the PR's URL. */
-export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudeLaunchKind, string> = {
+/**
+ * A prompt template's key: one per launch kind, plus `explainGroup` — the
+ * group heading's "Explain all", which is not a kind of the PR button.
+ */
+export type ClaudePromptKey = ClaudeLaunchKind | "explainGroup";
+
+/**
+ * `{url}` is replaced with the PR's URL. The `explainGroup` template takes
+ * `{key}` (the group's Jira key), `{count}` and `{urls}` (the links, space-separated).
+ */
+export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
   drive: "/drive-pr-green {url}",
   review: "/creatio-code-review {url}",
   close: "/drive-pr-close {url}",
   explain: "/usercustom-dev:pr-first-look {url} — show the explanation here in the session; do not send a letter",
   open: "{url}",
+  explainGroup:
+    "Explain together the {count} open pull requests of {key}, so I get the big picture without reading each one: {urls} — " +
+    "read the Jira issue {key}, then each PR (one subagent per PR, so the diffs stay out of this context), and give: " +
+    "the goal they serve together, how the changes fit into one design, the order to read them in (a stack bottom-up), " +
+    "where they overlap or repeat each other, and which one to review first. " +
+    "Show the result here in the session; do not send a letter and post nothing on the PRs.",
 };
+
+/**
+ * Starts every "Explain all" prompt, whatever the template says:
+ * `[PR Dashboard overview of ENG-1]`. The session scanner reads it two ways:
+ * the session is the overview of that key — the group heading's button shows
+ * it and switches to it — and it holds none of the PRs it lists, since an
+ * overview works on none of them and counting it would hand each of those
+ * cards' Claude button to the overview.
+ */
+export function groupExplainMarker(key: string): string {
+  return `[PR Dashboard overview of ${key}]`;
+}
+
+/** The Jira key in a prompt's `groupExplainMarker`, or null when the prompt has none. */
+export function groupExplainKeyOf(text: string): string | null {
+  return /\[PR Dashboard overview of ([A-Z][A-Z0-9_]{0,19}-\d{1,9})\]/.exec(text)?.[1] ?? null;
+}
+
+/**
+ * At most this many PRs go into one overview: past it the overview stops
+ * being high-level, and cmd.exe caps a command line at 8191 characters.
+ */
+export const MAX_GROUP_EXPLAIN_PRS = 30;
+
+/** The "Explain all" prompt: the template filled in, behind the marker. */
+export function renderGroupExplainPrompt(
+  prompts: Partial<Record<ClaudePromptKey, string>>,
+  key: string,
+  prs: readonly Pick<PullRequest, "url">[],
+): string {
+  const template = prompts.explainGroup?.trim() || DEFAULT_CLAUDE_PROMPTS.explainGroup;
+  const filled = template
+    .split("{key}")
+    .join(key)
+    .split("{count}")
+    .join(String(prs.length))
+    .split("{urls}")
+    .join(prs.map((p) => p.url).join(" "));
+  return `${groupExplainMarker(key)} ${filled}`;
+}
+
+/** A Jira issue key — the only group key "Explain all" accepts, since it reaches the shell. */
+export const JIRA_KEY_RE = /^[A-Z][A-Z0-9_]{0,19}-\d{1,9}$/;
+
+/**
+ * The PRs "Explain all" takes from a group, or null when the heading offers
+ * none: only a Jira-key group (by issue or by parent task — the "Other" bucket
+ * and a repository have no task to explain), drafts left out since nobody is
+ * reviewing them yet, at least two left — one PR has its own Explain — and the
+ * first `MAX_GROUP_EXPLAIN_PRS` of them in the order shown.
+ */
+export function groupExplainPrs<T extends Pick<PullRequest, "isDraft">>(key: string, prs: readonly T[]): T[] | null {
+  if (!JIRA_KEY_RE.test(key)) return null;
+  const open = prs.filter((p) => !p.isDraft);
+  return open.length >= 2 ? open.slice(0, MAX_GROUP_EXPLAIN_PRS) : null;
+}
 
 /** The integration is opt-in: nothing on the cards until it is switched on. */
 export const DEFAULT_CLAUDE_SETTINGS: ClaudeSettings = {
@@ -78,7 +149,7 @@ export function pickClaudeLaunch(pr: LaunchPr, opts: { trackComments: boolean })
 
 /** The template for `kind` with `{url}` filled in; an empty template falls back to the default. */
 export function renderClaudePrompt(
-  prompts: Partial<Record<ClaudeLaunchKind, string>>,
+  prompts: Partial<Record<ClaudePromptKey, string>>,
   kind: ClaudeLaunchKind,
   pr: Pick<PullRequest, "url">,
 ): string {

@@ -1,4 +1,4 @@
-import { appleScriptString, prRemoteKey } from "./claude-launch";
+import { appleScriptString, groupExplainKeyOf, prRemoteKey } from "./claude-launch";
 import type { ClaudeSessionInfo, PullRequest } from "./types";
 
 // Which running Claude Code session works on which PR, and what the card says
@@ -30,38 +30,48 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * The PR keys in one transcript line, when the line is a prompt the user sent;
- * empty for anything else. Tool results, skill bodies (`isMeta`), subagent
+ * What one transcript line binds the session to, when the line is a prompt
+ * the user sent; nothing for anything else. Tool results, skill bodies (`isMeta`), subagent
  * turns, messages from other sessions (`origin.kind` "peer") and task
  * notifications quote PR links the user never asked this session about — a
  * routine's report alone lists dozens. Transcripts written before Claude Code
  * recorded `origin` are judged by the content alone. System reminders the app
- * adds to a prompt are dropped too, for the same reason.
+ * adds to a prompt are dropped too, for the same reason. A prompt the group
+ * heading's "Explain all" started (`groupExplainMarker`) gives its Jira key
+ * instead of PR keys: it lists every PR of the group but works on none of them.
  */
-export function promptPrKeys(line: string): string[] {
+export function promptLinks(line: string): { prKeys: string[]; overviewKey: string | null } {
+  const none = { prKeys: [], overviewKey: null };
   // Most lines are tool traffic megabytes long — skip them before parsing.
-  if (!line.includes('"type":"user"') || !line.includes("/pull/")) return [];
+  if (!line.includes('"type":"user"') || !line.includes("/pull/")) return none;
   let entry: unknown;
   try {
     entry = JSON.parse(line);
   } catch {
-    return [];
+    return none;
   }
-  if (!isRecord(entry) || entry.type !== "user" || entry.isMeta === true || entry.isSidechain === true) return [];
-  if (isRecord(entry.origin) && entry.origin.kind !== "human") return [];
+  if (!isRecord(entry) || entry.type !== "user" || entry.isMeta === true || entry.isSidechain === true) return none;
+  if (isRecord(entry.origin) && entry.origin.kind !== "human") return none;
   const message = entry.message;
-  if (!isRecord(message) || message.role !== "user") return [];
+  if (!isRecord(message) || message.role !== "user") return none;
   const texts: string[] = [];
   if (typeof message.content === "string") {
     texts.push(message.content);
   } else if (Array.isArray(message.content)) {
     for (const block of message.content) {
       if (!isRecord(block)) continue;
-      if (block.type === "tool_result") return [];
+      if (block.type === "tool_result") return none;
       if (block.type === "text" && typeof block.text === "string") texts.push(block.text);
     }
   }
-  return extractPrKeys(texts.join("\n").replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ""));
+  const text = texts.join("\n").replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "");
+  const overviewKey = groupExplainKeyOf(text);
+  return overviewKey ? { prKeys: [], overviewKey } : { prKeys: extractPrKeys(text), overviewKey: null };
+}
+
+/** The PR keys one transcript line binds the session to (`promptLinks`). */
+export function promptPrKeys(line: string): string[] {
+  return promptLinks(line).prKeys;
 }
 
 const STATUS_RANK: Record<ClaudeSessionInfo["status"], number> = { waiting: 0, busy: 1, idle: 2, paused: 3 };
@@ -87,13 +97,22 @@ export function sessionsForPr(
         (key !== null && s.prKeys.includes(key)) ||
         (repo !== null && s.branch !== null && s.branch === pr.headRefName && s.repoKeys.includes(repo)),
     )
-    .sort(
-      (a, b) =>
-        STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
-        Number(a.where === "background") - Number(b.where === "background") ||
-        (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) ||
-        a.name.localeCompare(b.name),
-    );
+    .sort(bySessionNeed);
+}
+
+/** The order `sessionsForPr` and `sessionsForGroup` give: the one that most needs the user first. */
+function bySessionNeed(a: ClaudeSessionInfo, b: ClaudeSessionInfo): number {
+  return (
+    STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
+    Number(a.where === "background") - Number(b.where === "background") ||
+    (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) ||
+    a.name.localeCompare(b.name)
+  );
+}
+
+/** The "Explain all" sessions of a group heading's Jira key, in `sessionsForPr`'s order. */
+export function sessionsForGroup(key: string, sessions: readonly ClaudeSessionInfo[]): ClaudeSessionInfo[] {
+  return sessions.filter((s) => s.overviewKeys?.includes(key)).sort(bySessionNeed);
 }
 
 /**
@@ -118,6 +137,19 @@ export const SESSION_STATUS_TEXT: Record<ClaudeSessionInfo["status"], string> = 
   waiting: "Needs you",
   idle: "Idle",
   paused: "Paused",
+};
+
+/**
+ * What a group heading's button says while an "Explain all" overview runs. Not
+ * the card's words: on a heading "Needs you" read as "these reviews need you",
+ * and the overview's most useful state — its turn ended, the result is there
+ * to read — would say only "Idle".
+ */
+export const OVERVIEW_STATUS_TEXT: Record<ClaudeSessionInfo["status"], string> = {
+  busy: "Explaining…",
+  waiting: "Overview asks you",
+  idle: "Overview ready",
+  paused: "Overview paused",
 };
 
 const SESSION_STATUS_PHRASE: Record<ClaudeSessionInfo["status"], string> = {

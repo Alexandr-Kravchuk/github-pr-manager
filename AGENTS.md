@@ -91,7 +91,14 @@ Three layers:
   review, own mergeable → close, else the bare link — plus the shell quoting;
   the renderer imports it for the tooltip, while finding the checkout by git
   remote and opening the terminal live in `main/claude-launch.ts`, and the
-  renderer sends only the PR id so nothing it supplies reaches the shell),
+  renderer sends only the PR id so nothing it supplies reaches the shell; a
+  Jira-key group heading also has "Explain all" beside its PR count — one
+  session that explains the group's open PRs together, no letter — which sends
+  only the key and the PR ids, runs in the checkout of the repository most of
+  them belong to, and starts its prompt with `groupExplainMarker(key)`: the
+  session scanner records that key as the session's `overviewKeys` instead of
+  binding the overview to every PR it lists, and the heading's split button
+  then shows that session's status and switches to it, like a card's button),
   `claude-sessions.ts` (which running Claude Code session works on which PR:
   a session counts when the user sent it the PR's link — only human prompts,
   never tool results, peer messages or task notifications, which quote PRs the

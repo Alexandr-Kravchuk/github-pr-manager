@@ -784,6 +784,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                 ["close", "Your PR is ready to merge"],
                 ["explain", "Explain (from the button's menu only)"],
                 ["open", "Anything else"],
+                ["explainGroup", "Explain all (a Jira group's heading)"],
               ] as const
             ).map(([kind, title]) => (
               <div key={kind}>
@@ -802,7 +803,9 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               </div>
             ))}
             <p className="text-xs text-fg-faint">
-              {"{url}"} is replaced with the PR link. An empty prompt goes back to the default.
+              {"{url}"} is replaced with the PR link; in Explain all, {"{key}"} with the group's
+              Jira key, {"{count}"} with the number of PRs and {"{urls}"} with their links. An
+              empty prompt goes back to the default.
             </p>
             <div>
               <div className="flex items-center justify-between">

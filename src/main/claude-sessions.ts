@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { normalizeRemote } from "../shared/claude-launch";
-import { claudeDesktopSessionUrl, focusTtyScript, promptPrKeys, prUrlKey } from "../shared/claude-sessions";
+import { claudeDesktopSessionUrl, focusTtyScript, promptLinks, prUrlKey } from "../shared/claude-sessions";
 import type { ClaudeSessionInfo, FocusClaudeSessionResult } from "../shared/types";
 import { expandHome, parseRemoteUrls } from "./claude-launch";
 
@@ -147,6 +147,7 @@ interface TranscriptState {
   offset: number;
   carry: Buffer;
   prKeys: Set<string>;
+  overviewKeys: Set<string>;
 }
 
 /** Reads what was appended to the transcript since the last scan. */
@@ -165,6 +166,7 @@ async function readTranscript(state: TranscriptState): Promise<void> {
       state.offset = 0;
       state.carry = Buffer.alloc(0);
       state.prKeys.clear();
+      state.overviewKeys.clear();
     }
     while (state.offset < size) {
       const buf = Buffer.alloc(Math.min(CHUNK_BYTES, size - state.offset));
@@ -181,7 +183,9 @@ async function readTranscript(state: TranscriptState): Promise<void> {
       }
       state.carry = Buffer.from(data.subarray(end + 1));
       for (const line of data.toString("utf8", 0, end).split("\n")) {
-        for (const key of promptPrKeys(line)) state.prKeys.add(key);
+        const links = promptLinks(line);
+        for (const key of links.prKeys) state.prKeys.add(key);
+        if (links.overviewKey) state.overviewKeys.add(links.overviewKey);
       }
     }
   } finally {
@@ -428,7 +432,7 @@ export function createClaudeSessionScanner(
       if (record?.isArchived) continue;
       let state = transcripts.get(entry.sessionId);
       if (!state) {
-        state = { file: null, offset: 0, carry: Buffer.alloc(0), prKeys: new Set() };
+        state = { file: null, offset: 0, carry: Buffer.alloc(0), prKeys: new Set(), overviewKeys: new Set() };
         transcripts.set(entry.sessionId, state);
       }
       // A new session writes its transcript only after the first prompt.
@@ -446,6 +450,7 @@ export function createClaudeSessionScanner(
         repoKeys: [...new Set(git.remotes.map(normalizeRemote).filter((k): k is string => k !== null))].sort(),
         branch: git.branch,
       };
+      if (state.overviewKeys.size > 0) info.overviewKeys = [...state.overviewKeys].sort();
       if (entry.waitingFor) info.waitingFor = entry.waitingFor;
       sessions.push(info);
     }

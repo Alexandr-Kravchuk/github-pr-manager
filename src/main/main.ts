@@ -14,6 +14,7 @@ import {
 } from "../shared/notify";
 import { markSeen } from "../shared/state";
 import type {
+  ClaudeGroupLaunchResult,
   ClaudeLaunchResult,
   ClaudeSessionInfo,
   ConfigResult,
@@ -26,7 +27,7 @@ import type {
   Settings,
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
-import { launchClaude } from "./claude-launch";
+import { launchClaude, launchGroupExplain } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
 import { clearJiraCaches } from "../shared/jira";
@@ -37,6 +38,7 @@ import {
   validateIgnoredArgs,
   validateJiraToken,
   validateClaudeKind,
+  validateGroupExplainArgs,
   validateClaudeSessionId,
   validatePrId,
   validateSeenItems,
@@ -656,6 +658,29 @@ function registerIpc(): void {
     if (result.ok) setTimeout(() => void refreshClaudeSessions(), 2_000);
     return result;
   });
+
+  // Like claude:launch: only the group's Jira key and the PR ids cross over,
+  // and the PRs (their links, their repositories) come from main's snapshot.
+  ipcMain.handle(
+    "claude:explainGroup",
+    async (_event, rawKey: unknown, rawIds: unknown): Promise<ClaudeGroupLaunchResult> => {
+      const { key, ids } = validateGroupExplainArgs(rawKey, rawIds);
+      const all = poller?.getSnapshot()?.pullRequests ?? [];
+      // In the order the renderer listed them, which is the order it shows.
+      const prs = ids.flatMap((id) => all.filter((p) => p.id === id));
+      let settings: Settings;
+      try {
+        settings = loadSettings();
+      } catch (e) {
+        return { ok: false, error: (e as Error).message };
+      }
+      const result = await launchGroupExplain(key, prs, settings.claude, {
+        openUrl: (url) => shell.openExternal(url),
+      });
+      if (result.ok) setTimeout(() => void refreshClaudeSessions(), 2_000);
+      return result;
+    },
+  );
 
   ipcMain.handle("claude:sessions", async (): Promise<ClaudeSessionInfo[]> => refreshClaudeSessions());
 

@@ -141,8 +141,11 @@ export interface ClaudeSettings {
   projectsRoot: string;
   /** Explicit checkout per "owner/name" — wins over the search. */
   repoPaths: Record<string, string>;
-  /** Prompt template per launch kind; `{url}` is the PR URL. */
-  prompts: Record<"drive" | "review" | "close" | "explain" | "open", string>;
+  /**
+   * Prompt template per launch kind; `{url}` is the PR URL. `explainGroup` is
+   * the group heading's "Explain all": `{key}`, `{count}` and `{urls}`.
+   */
+  prompts: Record<"drive" | "review" | "close" | "explain" | "open" | "explainGroup", string>;
   /**
    * Where the session opens. `auto` takes iTerm2 when it is installed, else
    * Terminal (macOS; a `cmd` window on Windows). The system's "default
@@ -614,6 +617,9 @@ export type ClaudeLaunchResult =
   | { ok: true; kind: "drive" | "review" | "close" | "explain" | "open"; dir: string }
   | { ok: false; error: string };
 
+/** Result of `explainGroupWithClaude`: how many PRs went in and where it runs, or why not. */
+export type ClaudeGroupLaunchResult = { ok: true; count: number; dir: string } | { ok: false; error: string };
+
 /**
  * A Claude Code session running on this machine, as its registry file
  * (`~/.claude/sessions/<pid>.json`) and transcript describe it — the input the
@@ -640,6 +646,8 @@ export interface ClaudeSessionInfo {
   where: "desktop" | "terminal" | "background";
   /** `host/owner/repo/pull/N` of every PR link the user sent it. */
   prKeys: string[];
+  /** The Jira keys whose group heading's "Explain all" started it. */
+  overviewKeys?: string[];
   /** `host/owner/repo` of each git remote of its working folder. */
   repoKeys: string[];
   /** The branch checked out in its working folder; null when detached or not a git folder. */
@@ -699,6 +707,12 @@ export interface PrManagerApi {
    * from the button's menu. Refused while the integration is off.
    */
   launchClaude(prId: string, kind?: "drive" | "review" | "close" | "explain" | "open"): Promise<ClaudeLaunchResult>;
+  /**
+   * Start one Claude session that explains a group's PRs together — the group
+   * heading's "Explain all". Only the Jira key and the PR ids cross over; main
+   * reads the PRs from its own snapshot. Refused while the integration is off.
+   */
+  explainGroupWithClaude(groupKey: string, prIds: string[]): Promise<ClaudeGroupLaunchResult>;
   /** The Claude Code sessions running now; empty while the integration is off. */
   getClaudeSessions(): Promise<ClaudeSessionInfo[]>;
   /**

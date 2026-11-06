@@ -14,9 +14,16 @@ import {
   posixLaunchCommand,
   prRemoteKey,
   renderClaudePrompt,
+  renderGroupExplainPrompt,
   terminalScript,
 } from "../shared/claude-launch";
-import type { ClaudeLaunchResult, ClaudeSettings, ClaudeTerminal, PullRequest } from "../shared/types";
+import type {
+  ClaudeGroupLaunchResult,
+  ClaudeLaunchResult,
+  ClaudeSettings,
+  ClaudeTerminal,
+  PullRequest,
+} from "../shared/types";
 
 /** Expands a leading `~` to the home directory. */
 export function expandHome(p: string): string {
@@ -141,6 +148,32 @@ async function openTerminal(
 }
 
 /**
+ * Starts `claude <prompt>` in `dir` where Settings say: Claude Desktop through
+ * `openUrl`, else a terminal. Returns the error to show, or null once started.
+ */
+async function startSession(
+  dir: string,
+  prompt: string,
+  settings: ClaudeSettings,
+  openUrl: (url: string) => Promise<void>,
+): Promise<string | null> {
+  if (settings.terminal === "desktop") {
+    try {
+      await openUrl(claudeDesktopUrl(dir, prompt));
+    } catch (e) {
+      return `Could not open Claude Desktop (is it installed?): ${(e as Error).message}`;
+    }
+    return null;
+  }
+  try {
+    await openTerminal(dir, prompt, settings.terminal);
+  } catch (e) {
+    return `Could not open a terminal: ${(e as Error).message}`;
+  }
+  return null;
+}
+
+/**
  * Picks the prompt for the PR's state, finds its checkout and opens the
  * terminal — or Claude Desktop, through `openUrl` (Electron's
  * `shell.openExternal`, injected so this module stays Electron-free).
@@ -168,18 +201,56 @@ export async function launchClaude(
   }
   const kind = opts.kind ?? pickClaudeLaunch(pr, opts);
   const prompt = renderClaudePrompt(settings.prompts, kind, pr);
-  if (settings.terminal === "desktop") {
-    try {
-      await opts.openUrl(claudeDesktopUrl(dir, prompt));
-    } catch (e) {
-      return { ok: false, error: `Could not open Claude Desktop (is it installed?): ${(e as Error).message}` };
-    }
-    return { ok: true, kind, dir };
+  const error = await startSession(dir, prompt, settings, opts.openUrl);
+  return error ? { ok: false, error } : { ok: true, kind, dir };
+}
+
+/**
+ * The folder an overview of `prs` runs in: a checkout of the repository most
+ * of them belong to (the first one listed on a tie), or of the next one when
+ * that one has no checkout. The session reads every PR through `gh` anyway;
+ * the folder only gives it the code most of them change.
+ */
+export function overviewCheckout(
+  prs: readonly Pick<PullRequest, "url" | "repo">[],
+  settings: Pick<ClaudeSettings, "projectsRoot" | "repoPaths">,
+): string | null {
+  const byRepo = new Map<string, { pr: Pick<PullRequest, "url" | "repo">; count: number }>();
+  for (const pr of prs) {
+    const key = prRemoteKey(pr) ?? pr.repo;
+    const entry = byRepo.get(key);
+    if (entry) entry.count += 1;
+    else byRepo.set(key, { pr, count: 1 });
   }
-  try {
-    await openTerminal(dir, prompt, settings.terminal);
-  } catch (e) {
-    return { ok: false, error: `Could not open a terminal: ${(e as Error).message}` };
+  // A stable sort keeps first-listed order among equal counts.
+  for (const { pr } of [...byRepo.values()].sort((a, b) => b.count - a.count)) {
+    const dir = findCheckout(pr, settings);
+    if (dir) return dir;
   }
-  return { ok: true, kind, dir };
+  return null;
+}
+
+/**
+ * "Explain all" on a group heading: one session that explains the group's PRs
+ * together, in the folder `overviewCheckout` picks.
+ */
+export async function launchGroupExplain(
+  key: string,
+  prs: readonly PullRequest[],
+  settings: ClaudeSettings,
+  opts: { openUrl: (url: string) => Promise<void> },
+): Promise<ClaudeGroupLaunchResult> {
+  if (!settings.enabled) return { ok: false, error: "Claude integration is off — turn it on in Settings." };
+  if (prs.length < 2) return { ok: false, error: "Fewer than two of these PRs are still on the dashboard." };
+  const dir = overviewCheckout(prs, settings);
+  if (!dir) {
+    const repos = [...new Set(prs.map((p) => p.repo))].join(", ");
+    return {
+      ok: false,
+      error: `No checkout of ${repos} was found in ${settings.projectsRoot || "~/Projects"}. Set its folder in Settings → Claude.`,
+    };
+  }
+  const prompt = renderGroupExplainPrompt(settings.prompts, key, prs);
+  const error = await startSession(dir, prompt, settings, opts.openUrl);
+  return error ? { ok: false, error } : { ok: true, count: prs.length, dir };
 }

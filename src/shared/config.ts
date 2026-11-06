@@ -249,6 +249,7 @@ export function validateClaude(raw: unknown): ClaudeSettings {
       close: prompt("close"),
       explain: prompt("explain"),
       open: prompt("open"),
+      explainGroup: prompt("explainGroup"),
     },
     terminal:
       obj.terminal === "iterm" || obj.terminal === "terminal" || obj.terminal === "desktop"

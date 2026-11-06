@@ -379,6 +379,18 @@ const CLAUDE_SESSIONS: ClaudeSessionInfo[] = [
     lastActivityAt: Date.now() - 3 * 36e5,
   },
   {
+    // An "Explain all" overview: it holds the ENG-93367 heading, none of the cards.
+    id: "00000000-0000-4000-8000-000000000006",
+    name: "✋🏻 ENG-93367 · Overview of the open reviews",
+    status: "waiting",
+    waitingFor: "input needed",
+    where: "desktop",
+    prKeys: [],
+    overviewKeys: ["ENG-93367"],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "main",
+  },
+  {
     id: "00000000-0000-4000-8000-000000000004",
     name: "widgets-7f",
     status: "busy",
@@ -423,6 +435,7 @@ const api: PrManagerApi = {
   setJiraToken: async () => ({ ok: true }),
   getAppVersion: async () => "dev",
   launchClaude: async () => ({ ok: false, error: "Not available in mock mode." }),
+  explainGroupWithClaude: async () => ({ ok: false, error: "Not available in mock mode." }),
   getClaudeSessions: async () => CLAUDE_SESSIONS,
   focusClaudeSession: async () => ({ ok: false, error: "Not available in mock mode." }),
   onClaudeSessions: () => () => {},

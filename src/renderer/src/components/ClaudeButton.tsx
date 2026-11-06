@@ -8,13 +8,17 @@ import {
   CLAUDE_BUTTON_TEXT,
   CLAUDE_LAUNCH_LABEL,
   claudeKindsFor,
+  groupExplainPrs,
+  MAX_GROUP_EXPLAIN_PRS,
   pickClaudeLaunch,
   type ClaudeLaunchKind,
 } from "../../../shared/claude-launch";
 import {
   describeSession,
+  OVERVIEW_STATUS_TEXT,
   SESSION_STATUS_TEXT,
   sessionGlow,
+  sessionsForGroup,
   sessionsForPr,
   shownSession,
 } from "../../../shared/claude-sessions";
@@ -322,5 +326,142 @@ function ClaudeMark({ size }: { size: number }) {
         <circle cx="12" cy="12" r="2.2" />
       </g>
     </svg>
+  );
+}
+
+/**
+ * "Explain all" beside a Jira group heading's PR count: starts one Claude
+ * session that explains the group's open PRs together — the goal, how the
+ * changes fit, the order to read them in, where they overlap — shown in the
+ * session, no letter. Only the key and the PR ids go to main, which reads the
+ * PRs from its own snapshot.
+ *
+ * Split like the PR's own button: while an overview of this key runs, the main
+ * part shows its status and a click switches to it; the arrow lists the
+ * running overviews and starts a new one. Renders nothing while the
+ * integration is off or the group has no two open PRs (`groupExplainPrs`).
+ */
+export function GroupExplainButton({ groupKey, prs }: { groupKey: string; prs: readonly PullRequest[] }) {
+  const enabled = useContext(ClaudeEnabledContext);
+  const allSessions = useContext(ClaudeSessionsContext);
+  const sessions = useMemo(() => sessionsForGroup(groupKey, allSessions), [groupKey, allSessions]);
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const menu = useAnchoredMenu(SESSIONS_MENU_WIDTH_PX);
+  const picked = groupExplainPrs(groupKey, prs);
+  const pickedIds = picked?.map((p) => p.id).join("\n") ?? "";
+  const launch = useCallback(() => {
+    setState("busy");
+    window.api
+      .explainGroupWithClaude(groupKey, pickedIds.split("\n"))
+      .then((res) => {
+        if (res.ok) {
+          setState("done");
+          setTimeout(() => setState("idle"), 1500);
+        } else {
+          setState("idle");
+          window.alert(res.error);
+        }
+      })
+      .catch((e: unknown) => {
+        setState("idle");
+        window.alert((e as Error).message);
+      });
+  }, [groupKey, pickedIds]);
+  const focus = useCallback((sessionId: string) => {
+    window.api
+      .focusClaudeSession(sessionId)
+      .then((res) => {
+        if (!res.ok) window.alert(res.error);
+      })
+      .catch((e: unknown) => window.alert((e as Error).message));
+  }, []);
+
+  if (!enabled || !picked) return null;
+  const drafts = prs.filter((p) => p.isDraft).length;
+  const capped = prs.length - drafts > MAX_GROUP_EXPLAIN_PRS;
+  const startLabel =
+    `Start Claude to explain the ${picked.length} open PRs of ${groupKey} together` +
+    (capped ? ` (the first ${MAX_GROUP_EXPLAIN_PRS} shown)` : "") +
+    (drafts > 0 ? `; ${drafts} draft${drafts === 1 ? "" : "s"} left out` : "");
+  const shown = shownSession(sessions);
+  const current = shown?.where === "background" ? undefined : shown;
+  const more = sessions.length > 1 ? ` ${sessions.length - 1} more in the menu.` : "";
+  const label = current
+    ? `${OVERVIEW_STATUS_TEXT[current.status]}: ${describeSession(current)}. Click to switch to it.${more}`
+    : startLabel;
+  const tone = state === "done" ? KIND_CLASS.done : current ? SESSION_CLASS[current.status] : KIND_CLASS.explain;
+  const text = state === "done" ? "Started" : current ? OVERVIEW_STATUS_TEXT[current.status] : "Explain all";
+  const segment = cn(
+    "inline-flex items-center border py-0.5 text-[11px] font-medium transition-colors disabled:opacity-50",
+    tone,
+  );
+  return (
+    <span className="inline-flex shrink-0 whitespace-nowrap">
+      <button
+        type="button"
+        onClick={() => (current ? focus(current.id) : launch())}
+        disabled={state === "busy"}
+        title={label}
+        aria-label={label}
+        className={cn(segment, "gap-1 pl-1.5 pr-1", sessions.length > 0 ? "rounded-l-md" : "rounded-md pr-2")}
+      >
+        <ClaudeMark size={12} />
+        {shown && state !== "done" && <StatusDot status={shown.status} />}
+        {text}
+      </button>
+      {sessions.length > 0 && (
+        <button
+          ref={menu.buttonRef}
+          type="button"
+          onClick={menu.toggle}
+          disabled={state === "busy"}
+          title="Overview sessions"
+          aria-label="Overview sessions"
+          aria-haspopup="menu"
+          aria-expanded={menu.open}
+          className={cn(segment, "-ml-px rounded-r-md px-0.5")}
+        >
+          <ChevronDown size={10} />
+        </button>
+      )}
+      {menu.open &&
+        createPortal(
+          <div
+            ref={menu.menuRef}
+            role="menu"
+            aria-label="Overview sessions"
+            style={menu.style}
+            className="z-50 overflow-hidden rounded-lg border border-line bg-surface py-1 text-sm shadow-xl"
+          >
+            <div className={MENU_HEADING}>Overviews of {groupKey}</div>
+            {sessions.map((s) => (
+              <SessionItem
+                key={s.id}
+                session={s}
+                onSwitch={() => {
+                  menu.close();
+                  focus(s.id);
+                }}
+              />
+            ))}
+            <div className="mt-1 border-t border-line pt-1">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  menu.close();
+                  launch();
+                }}
+                title={startLabel}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-elevated"
+              >
+                <span className={cn("h-2 w-2 shrink-0 rounded-full", KIND_DOT.explain)} aria-hidden />
+                <span className="flex-1 text-fg-secondary">Start a new overview</span>
+              </button>
+            </div>
+          </div>,
+          document.body,
+        )}
+    </span>
   );
 }
