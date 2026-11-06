@@ -101,11 +101,13 @@ export function itemKind(item: Pick<AgentItem, "scenario" | "reasons">): string 
   return "Drive";
 }
 
-/** …and what it is doing, as the chip and the tray say it: "Self-reviewing #42". */
+/** …and what it is doing, as the chip and the tray say it — "Drafting review #911", "Fixing CI on #142". */
 export function itemVerb(item: Pick<AgentItem, "scenario" | "reasons">): string {
   if (item.scenario !== "drive") return SCENARIO_VERB[item.scenario];
-  const kind = itemKind(item);
-  return kind === "Self-review" ? "Self-reviewing" : kind === "Comments" ? "Answering reviewers on" : "Driving";
+  const r = item.reasons ?? [];
+  if (r.includes("self")) return "Self-reviewing";
+  if (r.length === 1) return { comments: "Answering reviewers on", ci: "Fixing CI on", conflicts: "Resolving the conflict on" }[r[0]] ?? "Fixing";
+  return "Fixing";
 }
 
 const SCENARIO_CHIP: Record<AgentItem["scenario"], string> = {
@@ -119,7 +121,7 @@ const SCENARIO_CHIP: Record<AgentItem["scenario"], string> = {
 
 /** What a run of each scenario is doing, as the chip and the tray say it. */
 export const SCENARIO_VERB: Record<AgentItem["scenario"], string> = {
-  review: "Reviewing",
+  review: "Drafting review",
   brief: "Briefing",
   rereview: "Re-reviewing",
   drive: "Driving",
@@ -218,7 +220,7 @@ export function agentSummary(state: AgentState): AgentSummary {
 /**
  * The agent in one line, for the tray's tooltip and menu: what runs (with
  * the step its plan is on), else why nothing does, plus what waits for you —
- * "Reviewing #911 · 4/6 · 2 wait for you", "Paused", "Quiet hours until 08:00 · 3 queued".
+ * "Drafting review #911 · 4/6 · 2 ready for you", "Paused", "Quiet hours until 08:00 · 3 in line".
  */
 export function agentTrayLine(state: AgentState): string {
   const sum = agentSummary(state);
@@ -231,11 +233,11 @@ export function agentTrayLine(state: AgentState): string {
     const step = stepLabel(first.progress.steps);
     line = `${itemVerb(item)} #${item.prNumber}${first.paused ? " (paused)" : step ? ` · ${step}` : ""}${sum.running > 1 ? ` +${sum.running - 1}` : ""}`;
   } else if (sum.blockText && sum.queued > 0) {
-    line = `${sum.blockText} · ${sum.queued} queued`;
+    line = `${sum.blockText} · ${sum.queued} in line`;
   } else if (sum.blockText && sum.block !== "daily") {
     line = sum.blockText;
   } else if (sum.queued > 0) {
-    line = `${sum.queued} queued`;
+    line = `${sum.queued} in line`;
   } else {
     line = "Idle";
   }
@@ -320,6 +322,20 @@ export function laneOfPr(pr: Pick<PullRequest, "roles">): BoardLane {
 /** Your move · Agent on it · With reviewers / With the author · Done today / Merged today. */
 export type BoardColumn = "you" | "agent" | "waiting" | "done";
 export const BOARD_COLUMNS: readonly BoardColumn[] = ["you", "agent", "waiting", "done"];
+
+/** What each column is called in each lane — on the Board, and in the agent's line on a card, a cell, a tile. */
+export const COLUMN_TITLES: Record<BoardLane, Record<BoardColumn, string>> = {
+  mine: { you: "Your move", agent: "Agent on it", waiting: "With reviewers", done: "Merged today" },
+  review: { you: "Your move", agent: "Agent on it", waiting: "With the author", done: "Done today" },
+};
+
+/** A queued run's place in the agent's one queue, as a card says it: "Up next", "2nd in line". */
+export function inLine(n: number): string {
+  if (n <= 1) return "Up next";
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? "th" : n % 10 === 1 ? "st" : n % 10 === 2 ? "nd" : n % 10 === 3 ? "rd" : "th";
+  return `${n}${suffix} in line`;
+}
 
 /**
  * What a card asks of you, as its one button. The first six are moves the
@@ -732,4 +748,41 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
     if (item) return item.headline;
   }
   return item?.headline ?? "";
+}
+
+/**
+ * A notification's title, in the Board's words: what is ready for you and on
+ * which PR — "Review ready to send: #929", "2 fixes ready to push: #142",
+ * "Ready to merge: #85", "Your call on #150" — or that a run couldn't finish.
+ */
+export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item: AgentItem): string {
+  const pr = `#${item.prNumber}`;
+  if (kind === "failed") return `The agent couldn't finish ${pr}`;
+  if (kind === "finished") {
+    if (item.published) return `${item.scenario === "rereview" ? "Re-review" : "Review"} sent: ${pr}`;
+    if (item.pushed) return `Fixes pushed: ${pr}`;
+    if (item.scenario === "merge") return `Merged: ${pr}`;
+    return `The agent finished ${pr}`;
+  }
+  const action = resultAction(item, laneOfScenario(item.scenario));
+  switch (action?.kind) {
+    case "send":
+      return `${action.label === "Approve" ? "Approval" : item.scenario === "rereview" ? "Re-review" : "Review"} ready to send: ${pr}`;
+    case "push": {
+      const n = item.drive?.commits.length ?? 0;
+      return action.label === "Push & reply" ? `Fixes and replies ready to push: ${pr}` : `${n} fix${n === 1 ? "" : "es"} ready to push: ${pr}`;
+    }
+    case "merge":
+      return `Ready to merge: ${pr}`;
+    case "decide":
+      return `Your call on ${pr}`;
+    case "draftReview":
+      return `Brief ready: ${pr}`;
+    case "fix":
+      return `The agent couldn't finish ${pr}`;
+    case "updateJira":
+      return `Jira changes to apply: ${pr}`;
+    default:
+      return `The PR agent: ${pr}`;
+  }
 }

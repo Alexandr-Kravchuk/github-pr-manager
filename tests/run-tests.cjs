@@ -8997,6 +8997,34 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.workLine({ scenario: "rereview" }), "Re-reviewing — the author answered");
     });
 
+    test("one vocabulary: the tray's verb, a place in line and a notification's title say what the Board says", () => {
+      assert.deepStrictEqual(
+        [
+          view.itemVerb({ scenario: "review" }),
+          view.itemVerb({ scenario: "drive", reasons: ["self"] }),
+          view.itemVerb({ scenario: "drive", reasons: ["ci"] }),
+          view.itemVerb({ scenario: "drive", reasons: ["conflicts"] }),
+          view.itemVerb({ scenario: "drive", reasons: ["comments"] }),
+          view.itemVerb({ scenario: "drive", reasons: ["ci", "comments"] }),
+        ],
+        ["Drafting review", "Self-reviewing", "Fixing CI on", "Resolving the conflict on", "Answering reviewers on", "Fixing"],
+      );
+      assert.deepStrictEqual([1, 2, 3, 4, 11, 21, 112].map(view.inLine), ["Up next", "2nd in line", "3rd in line", "4th in line", "11th in line", "21st in line", "112th in line"]);
+      const t = (kind, o) => view.agentNoticeTitle(kind, sIt({ prNumber: 929, ...o }));
+      assert.strictEqual(t("needsYou", { state: "needsYou", plan: plan() }), "Review ready to send: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "rereview", plan: plan("COMMENT") }), "Re-review ready to send: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", plan: plan("APPROVE") }), "Approval ready to send: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(2) }), "2 fixes ready to push: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(1), plan: plan("COMMENT", 1) }), "Fixes and replies ready to push: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "merge" }), "Ready to merge: #929");
+      const ask = { summary: "", asks: [{ question: "q", options: [] }], findings: [], authorQuestions: [], structured: true };
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(0), result: ask }), "Your call on #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "brief", output: "b" }), "Brief ready: #929");
+      assert.strictEqual(t("failed", { state: "error" }), "The agent couldn't finish #929");
+      assert.strictEqual(t("finished", { state: "done", published: true }), "Review sent: #929");
+      assert.strictEqual(t("finished", { state: "done", scenario: "drive", pushed: true }), "Fixes pushed: #929");
+    });
+
     test("stageColumns: one card per PR, in its lane and column; filters hide cards but not the count of what's ready", () => {
       const prs = [
         sPr({ id: "D", isDraft: true }),
@@ -10198,17 +10226,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const b = vItem({ prId: "B", state: "working", scenario: "drive" });
       const run = (item, steps) => ({ runId: item.runId, progress: progress(steps), recent: [], paused: false });
       assert.strictEqual(view.agentTrayLine(base), "Idle");
-      assert.strictEqual(view.agentTrayLine({ ...base, items: [a], running: [run(a, ["completed", "completed", "in_progress", "pending"])] }), "Reviewing #911 · 3/4", "the step it is on — as the popover shows it");
-      assert.strictEqual(view.agentTrayLine({ ...base, items: [a], running: [{ ...run(a, ["in_progress"]), paused: true }] }), "Reviewing #911 (paused)");
-      assert.strictEqual(view.agentTrayLine({ ...base, runsToday: 30, items: [vItem({ prId: "Q", state: "queued" })] }), "Daily limit reached (30) · 1 queued");
-      assert.strictEqual(view.agentTrayLine({ ...base, items: [a, b], running: [run(a, []), run(b, [])] }), "Reviewing #911 +1");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: [a], running: [run(a, ["completed", "completed", "in_progress", "pending"])] }), "Drafting review #911 · 3/4", "the step it is on — as the popover shows it");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: [a], running: [{ ...run(a, ["in_progress"]), paused: true }] }), "Drafting review #911 (paused)");
+      assert.strictEqual(view.agentTrayLine({ ...base, runsToday: 30, items: [vItem({ prId: "Q", state: "queued" })] }), "Daily limit reached (30) · 1 in line");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: [a, b], running: [run(a, []), run(b, [])] }), "Drafting review #911 +1");
       const toSend = { event: "COMMENT", body: "b", comments: [], replies: [], resolves: 0, escalations: [] };
       const waiting = [vItem({ prId: "C", state: "needsYou", plan: toSend }), vItem({ prId: "D", state: "error" }), vItem({ prId: "E", state: "needsYou" })];
       assert.strictEqual(view.agentTrayLine({ ...base, items: waiting }), "Idle · 2 ready for you", "a result that asks nothing isn't counted");
       assert.strictEqual(view.agentTrayLine({ ...base, paused: true, items: [a], running: [run(a, [])] }), "Paused");
       const queued = [vItem({ prId: "F", state: "queued" })];
-      assert.strictEqual(view.agentTrayLine({ ...base, quietUntil: "08:00", items: queued }), "Quiet hours until 08:00 · 1 queued");
-      assert.strictEqual(view.agentTrayLine({ ...base, items: queued }), "1 queued");
+      assert.strictEqual(view.agentTrayLine({ ...base, quietUntil: "08:00", items: queued }), "Quiet hours until 08:00 · 1 in line");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: queued }), "1 in line");
       assert.match(view.agentTrayLine({ ...base, heldUntil: new Date(2026, 10, 5, 14, 5).toISOString() }), /^Usage limit — waits until 14:05$/);
     });
 

@@ -1,103 +1,113 @@
 import { useContext } from "react";
 
-// Node-free (see AGENTS.md): which item a PR's card shows, and its run.
-import { resultCard } from "../../../shared/agent-result";
-import { itemForPr, runFor, todayKey } from "../../../shared/agent-view";
-import { currentStep } from "../../../shared/agent-stream";
+// Node-free (see AGENTS.md): where the PR stands on the Board, in the Board's words.
+import { boardStage, COLUMN_TITLES, inLine, queueOrder, runFor, stageLine, stepLabel, todayKey, workLine, type BoardColumn, type BoardStage } from "../../../shared/agent-view";
 import type { AgentItem, PullRequest } from "../../../shared/types";
 import { cn } from "../format";
 import { AgentContext } from "./agent-context";
 
-// The agent's status where the PR already is: a line under a Roomy card, a
-// cell in the Cozy table, a glyph on a Compact tile. All three read the same
-// item (`itemForPr`), so the views can't disagree about what the agent does.
+// The agent's word on a PR where the PR already is: a line under a Roomy card,
+// a cell in the Cozy table, a glyph on a Compact tile. All three read the PR's
+// place on the Board (`boardStage`) and say it as its column does — "Your
+// move: Send review", "Agent on it: drafting your review · 3/6", "With the
+// author" — so no view can disagree with the Board, the chip or the tray.
 
-export const AGENT_STATE_DOT: Record<AgentItem["state"], string> = {
-  queued: "bg-zinc-400 dark:bg-zinc-500",
-  working: "bg-sky-500",
-  needsYou: "bg-amber-500",
-  error: "bg-red-500",
+const COLUMN_DOT: Record<BoardColumn, string> = {
+  you: "bg-amber-500",
+  agent: "bg-sky-500",
+  waiting: "bg-zinc-400 dark:bg-zinc-500",
   done: "bg-emerald-500",
 };
 
-export const AGENT_STATE_TEXT: Record<AgentItem["state"], string> = {
-  queued: "Queued",
-  working: "Working",
-  needsYou: "Needs you",
-  error: "Error",
-  done: "Done",
-};
-
-const STATE_TONE: Record<AgentItem["state"], string> = {
-  queued: "text-fg-subtle",
-  working: "text-sky-700 dark:text-sky-300",
-  needsYou: "text-amber-700 dark:text-amber-300",
-  error: "text-red-700 dark:text-red-300",
+const COLUMN_TONE: Record<BoardColumn, string> = {
+  you: "text-amber-700 dark:text-amber-300",
+  agent: "text-sky-700 dark:text-sky-300",
+  waiting: "text-fg-subtle",
   done: "text-emerald-700 dark:text-emerald-300",
 };
 
-/** The PR's item and, while it runs, what it is doing right now (and whether that run is paused). */
-export function useAgentItem(pr: Pick<PullRequest, "id">): { item: AgentItem | null; live: string | null; paused: boolean } {
+interface AgentWord {
+  stage: BoardStage;
+  item: AgentItem;
+  /** The column's name in the PR's lane: "Your move", "With the author". */
+  column: string;
+  /** What it says there: the button and what goes out, the work and its step, the agent's last word. */
+  text: string;
+  /** Short, for a table cell: the button, the work, else the column. */
+  short: string;
+  dot: string;
+  tone: string;
+}
+
+/**
+ * The PR on the Board, when the agent has something to say about it — a run
+ * on it, a move it prepared, its last word today. Null otherwise, and while
+ * the agent is off: a card then carries no agent line at all.
+ */
+export function useAgentWord(pr: PullRequest): AgentWord | null {
   const { state } = useContext(AgentContext);
-  if (!state?.enabled) return { item: null, live: null, paused: false };
-  const item = itemForPr(state.items, pr.id, todayKey(new Date()));
-  if (!item) return { item: null, live: null, paused: false };
-  const run = item.state === "working" ? runFor(state, item.runId) : null;
-  const step = run ? currentStep(run.progress) : null;
-  const live = run ? [step?.subject, run.progress.activity].filter(Boolean).join(" · ") || null : null;
-  return { item, live, paused: run?.paused ?? false };
+  if (!state?.enabled) return null;
+  const stage = boardStage(
+    pr,
+    state.items.filter((i) => i.prId === pr.id),
+    { today: todayKey(new Date()), idle: state.idle },
+  );
+  if (!stage?.item) return null;
+  const item = stage.item;
+  const column = COLUMN_TITLES[stage.lane][stage.column];
+  let text: string;
+  let short: string;
+  if (stage.column === "agent") {
+    const run = item.state === "working" ? runFor(state, item.runId) : null;
+    const place = item.state === "queued" ? queueOrder(state.items.filter((i) => i.state === "queued")).findIndex((i) => i.runId === item.runId) + 1 : 0;
+    const step = run ? stepLabel(run.progress.steps) : "";
+    const where = run?.paused ? "paused" : item.state === "queued" ? inLine(place) : step;
+    text = `${workLine(item)}${where ? ` · ${where}` : ""}`;
+    short = text;
+  } else if (stage.column === "you" && stage.ready && stage.action) {
+    const line = stageLine(stage, pr);
+    // "Your call: …" already says what the button would.
+    text = line.startsWith(stage.action.label) ? line : `${stage.action.label} — ${line}`;
+    short = stage.action.label;
+  } else {
+    text = stage.note ?? stageLine(stage, pr);
+    short = column;
+  }
+  const failed = stage.action?.kind === "fix";
+  return {
+    stage,
+    item,
+    column,
+    text,
+    short,
+    dot: failed ? "bg-red-500" : COLUMN_DOT[stage.column],
+    tone: failed ? "text-red-700 dark:text-red-300" : COLUMN_TONE[stage.column],
+  };
 }
 
-/** A headline without the words its label already says ("Queued: review" under "Queued" → "review"). */
-function withoutLabel(text: string, label: string): string {
-  const lower = text.toLowerCase();
-  const l = label.toLowerCase();
-  if (!lower.startsWith(l)) return text;
-  const rest = text.slice(label.length).replace(/^\s*[:—–-]\s*/, "");
-  return rest || text;
-}
-
-/** The line under a Roomy card. Nothing at all while the agent has nothing on this PR. */
+/** The line under a Roomy card. Nothing at all while the agent has nothing to say about this PR. */
 export function AgentStatusLine({ pr }: { pr: PullRequest }) {
-  const { item, live, paused } = useAgentItem(pr);
+  const word = useAgentWord(pr);
   const { state, openCompanion, focusItem } = useContext(AgentContext);
-  if (!item) return null;
-  // Waiting for you: what it asks, else what it found — the headline only says the state.
-  const card = item.state === "needsYou" ? resultCard(item) : null;
-  const ask = card?.asks[0];
-  const label =
-    item.state === "working"
-      ? paused
-        ? "Paused"
-        : AGENT_STATE_TEXT.working
-      : item.state !== "needsYou"
-        ? AGENT_STATE_TEXT[item.state]
-        : ask
-          ? "Asks you"
-          : item.scenario === "merge"
-            ? "Ready to merge"
-            : item.scenario === "drive" && item.drive?.commits.length && !item.pushed
-              ? "Would push"
-              : item.plan && !item.published
-                ? "Would post"
-                : AGENT_STATE_TEXT[item.state];
-  const text = live ?? (ask ? ask.question : card?.summary || withoutLabel(item.headline, label));
+  if (!word) return null;
+  const { item, stage } = word;
+  const watch = item.state === "working" && state?.headerChip;
   return (
     <div className="mt-2 flex items-center gap-2 border-t border-line pt-2 text-xs">
-      <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", AGENT_STATE_DOT[item.state])} />
-      <span className={cn("shrink-0 font-medium", paused ? "text-amber-700 dark:text-amber-300" : STATE_TONE[item.state])}>{label}</span>
-      <span className="min-w-0 flex-1 truncate text-fg-muted" title={text}>
-        {text}
+      <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", word.dot)} />
+      <span className={cn("shrink-0 font-medium", word.tone)}>{word.column}</span>
+      <span className="min-w-0 flex-1 truncate text-fg-muted" title={word.text}>
+        {word.text}
       </span>
-      {(item.state === "working" || item.state === "needsYou" || item.state === "error") && (
+      {(stage.column === "you" || stage.column === "agent") && (
         <button
           type="button"
-          // A result waits on the Board, at its card; a run is watched in the popover —
+          // A move waits on the Board, at its card; a run is watched in the popover —
           // or on the Board too, when the header chip (and with it the popover) is off.
-          onClick={() => (item.state === "working" && state?.headerChip ? openCompanion(item.runId) : focusItem(item.runId))}
+          onClick={() => (watch ? openCompanion(item.runId) : focusItem(item.runId))}
           className="shrink-0 rounded-md border border-line-strong px-2 py-0.5 text-xs text-fg-secondary hover:bg-elevated"
         >
-          {item.state === "working" ? "Watch" : "Open"}
+          {watch ? "Watch" : "Open"}
         </button>
       )}
     </div>
@@ -106,27 +116,26 @@ export function AgentStatusLine({ pr }: { pr: PullRequest }) {
 
 /** The Cozy table's Agent cell. */
 export function AgentCell({ pr }: { pr: PullRequest }) {
-  const { item, live } = useAgentItem(pr);
-  if (!item) return <span className="text-xs text-fg-faint">—</span>;
-  const text = live ?? item.headline;
+  const word = useAgentWord(pr);
+  if (!word) return <span className="text-xs text-fg-faint">—</span>;
   return (
-    <span className="flex min-w-0 items-center gap-1.5 text-xs" title={`${AGENT_STATE_TEXT[item.state]} — ${text}`}>
-      <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", AGENT_STATE_DOT[item.state])} />
-      <span className="truncate text-fg-muted">{text}</span>
+    <span className="flex min-w-0 items-center gap-1.5 text-xs" title={`${word.column}: ${word.text}`}>
+      <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", word.dot)} />
+      <span className={cn("truncate", word.stage.column === "you" ? word.tone : "text-fg-muted")}>{word.short}</span>
     </span>
   );
 }
 
-/** A Compact tile's glyph: the state as a dot, the words in its title. */
+/** A Compact tile's glyph: where it stands as a dot, the words in its title. */
 export function AgentGlyph({ pr }: { pr: PullRequest }) {
-  const { item, live } = useAgentItem(pr);
-  if (!item) return null;
+  const word = useAgentWord(pr);
+  if (!word) return null;
   return (
     <span
       role="img"
-      aria-label={`Agent: ${AGENT_STATE_TEXT[item.state]}`}
-      title={`Agent — ${AGENT_STATE_TEXT[item.state]}: ${live ?? item.headline}`}
-      className={cn("inline-block size-2 shrink-0 rounded-full ring-2 ring-surface", AGENT_STATE_DOT[item.state])}
+      aria-label={`Agent: ${word.column}`}
+      title={`Agent — ${word.column}: ${word.text}`}
+      className={cn("inline-block size-2 shrink-0 rounded-full ring-2 ring-surface", word.dot)}
     />
   );
 }

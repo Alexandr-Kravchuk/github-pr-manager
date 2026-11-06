@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 // Node-free (see AGENTS.md).
 import { currentStep, type PlanStep, type RunProgress } from "../../../shared/agent-stream";
 import { resultCard } from "../../../shared/agent-result";
-import { agentSummary, itemVerb, queueOrder, readyItems, stepLabel } from "../../../shared/agent-view";
+import { agentSummary, itemVerb, laneOfScenario, queueOrder, readyItems, resultAction, stepLabel } from "../../../shared/agent-view";
 import type { AgentItem, AgentRunState } from "../../../shared/types";
 import { cn } from "../format";
 import { AgentContext } from "./agent-context";
@@ -159,7 +159,7 @@ export function AgentCompanion({
           </StepRing>
           {waiting > 0 && (
             <span
-              title={`${waiting} decision${waiting > 1 ? "s" : ""} wait for you`}
+              title={`${waiting} ready for you`}
               className="absolute -right-1 -top-1 min-w-4 rounded-full bg-amber-500 px-1 text-center text-[10px] font-semibold leading-4 text-white ring-2 ring-surface"
             >
               {waiting}
@@ -191,12 +191,12 @@ export function AgentCompanion({
                   ? "Paused"
                   : sum.queued > 0
                     ? sum.blockText
-                      ? `${sum.blockText} · ${sum.queued} queued`
-                      : `${sum.queued} queued`
+                      ? `${sum.blockText} · ${sum.queued} in line`
+                      : `${sum.queued} in line`
                     : sum.blockText && sum.block !== "daily"
                       ? sum.blockText
                       : waiting > 0
-                        ? `${waiting} wait for you`
+                        ? `${waiting} ready for you`
                         : "Nothing to do"}
             </span>
           )}
@@ -288,7 +288,7 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
                   : sum.block === "usage"
                     ? `Claude's ${sum.blockText?.toLowerCase()}.`
                     : sum.block === "daily"
-                      ? `${sum.blockText} — ${sum.queued > 0 ? `${sum.queued} queued wait` : "new runs wait"} until tomorrow.`
+                      ? `${sum.blockText} — ${sum.queued > 0 ? `${sum.queued} in line wait` : "new runs wait"} until tomorrow.`
                       : sum.queued > 0
                         ? "The next one starts in a moment."
                         : "It starts on its own when a PR needs it."}
@@ -309,7 +309,7 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
               </button>
             );
           })}
-          {queued.length > 0 && <div className="px-1 py-1 text-[11px] text-fg-subtle">Next: {queued.map((i) => `#${i.prNumber}`).join(", ")}</div>}
+          {queued.length > 0 && <div className="px-1 py-1 text-[11px] text-fg-subtle">In line: {queued.map((i) => `#${i.prNumber}`).join(", ")}</div>}
         </div>
       )}
 
@@ -318,7 +318,7 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
           <div className="flex items-center gap-2 px-1">
             <span className="size-1.5 rounded-full bg-amber-500" aria-hidden />
             <span className="text-fg-secondary">
-              {waiting} decision{waiting > 1 ? "s" : ""} wait for you
+              {waiting} ready for you
             </span>
             <span className="flex-1" />
             <button type="button" onClick={() => go(waitingItems[0]?.runId)} className="text-sky-700 hover:underline dark:text-sky-300">
@@ -335,6 +335,7 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
                 className="mt-1 flex w-full items-baseline gap-2 rounded-md px-1 py-0.5 text-left hover:bg-amber-500/10"
               >
                 <span className="shrink-0 font-medium text-fg-secondary">#{it.prNumber}</span>
+                <span className="shrink-0 font-medium text-amber-800 dark:text-amber-300">{resultAction(it, laneOfScenario(it.scenario))?.label}</span>
                 <span className="min-w-0 flex-1 truncate text-fg-subtle">{card?.asks[0]?.question ?? card?.summary ?? it.headline}</span>
               </button>
             );

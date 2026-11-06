@@ -5,6 +5,8 @@ import {
   agentSummary,
   BOARD_COLUMNS,
   BOARD_LANES,
+  COLUMN_TITLES,
+  inLine,
   queueOrder,
   runFor,
   stageColumns,
@@ -31,10 +33,6 @@ import { AgentContext } from "./agent-context";
 
 const LANE_TITLE: Record<BoardLane, string> = { mine: "Your PRs", review: "PRs you review" };
 const LANE_DOT: Record<BoardLane, string> = { mine: "bg-violet-500", review: "bg-sky-500" };
-const COLUMN_TITLE: Record<BoardLane, Record<BoardColumn, string>> = {
-  mine: { you: "Your move", agent: "Agent on it", waiting: "With reviewers", done: "Merged today" },
-  review: { you: "Your move", agent: "Agent on it", waiting: "With the author", done: "Done today" },
-};
 const COLUMN_EMPTY: Record<BoardLane, Record<BoardColumn, string>> = {
   mine: { you: "Nothing waits for you", agent: "Nothing for the agent", waiting: "None waits on reviewers", done: "Nothing merged yet today" },
   review: { you: "Nothing waits for you", agent: "Nothing for the agent", waiting: "None waits on its author", done: "Nothing finished yet today" },
@@ -52,14 +50,6 @@ type Run = (a: AgentAction) => Promise<boolean>;
 
 function shortRepo(repo: string): string {
   return repo.split("/")[1] ?? repo;
-}
-
-/** A queued run's place in the agent's one queue, as the card says it. */
-function inLine(n: number): string {
-  if (n <= 1) return "Up next";
-  const tens = n % 100;
-  const suffix = tens >= 11 && tens <= 13 ? "th" : n % 10 === 1 ? "st" : n % 10 === 2 ? "nd" : n % 10 === 3 ? "rd" : "th";
-  return `${n}${suffix} in line`;
 }
 
 function openUrl(url: string): void {
@@ -181,7 +171,7 @@ export function PrBoard({
               {BOARD_COLUMNS.map((col) => (
                 <Column
                   key={col}
-                  title={COLUMN_TITLE[lane][col]}
+                  title={COLUMN_TITLES[lane][col]}
                   count={cols[col].length}
                   dot={COLUMN_DOT[col]}
                   className={col === "you" ? "min-w-[15rem] flex-[1.6] border-amber-500/50 bg-amber-500/[0.05]" : "min-w-[11rem] flex-1"}

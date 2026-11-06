@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
-import { agentTakesToast, agentTrayLine } from "../shared/agent-view";
+import { agentNoticeTitle, agentTakesToast, agentTrayLine } from "../shared/agent-view";
 import { ConfigError, defaultSettings, getGhStatus, pickAppId, resolveGhToken, toHostConfigs, toPublicConfig } from "../shared/config";
 import { closePullRequest, fetchPullRequest } from "../shared/github";
 import { planPolling } from "../shared/idle-gate";
@@ -277,9 +277,7 @@ function handleAgentNotice({ kind, item }: AgentNotice): void {
   try {
     const s = loadSettings();
     if (!s.agent.notifications[kind] || !Notification.isSupported()) return;
-    const title =
-      kind === "failed" ? "A PR agent run failed" : kind === "finished" ? "The PR agent finished" : item.scenario === "merge" ? "Ready to merge" : "The PR agent needs you";
-    showOsNotification(title, `#${item.prNumber} ${item.title}\n${item.headline}`, !s.notifications.sound, () => {
+    showOsNotification(agentNoticeTitle(kind, item), `${item.title}\n${item.headline}`, !s.notifications.sound, () => {
       focusMainWindow();
       sendToRenderer("agent-show-board", item.runId);
     });
