@@ -10568,6 +10568,41 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: a run cut short on a head that has moved isn't resumed — what you asked for starts over on the new head, with no automatic one beside it", async () => {
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", state: "working", headline: "h", queuedAt: "2026-11-05T00:00:00Z", scenario: "review" };
+      for (const asked of [false, true]) {
+        const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+        const runId = "00000000-0000-4000-8000-0000000000e1";
+        const st = agentStore.emptyStore("2026-11-05");
+        // Its session and folder are still there: before, it would have resumed on the old head.
+        // Beside it, what the agent queued on its own for the new head before the app closed.
+        const auto = "00000000-0000-4000-8000-0000000000e2";
+        st.items = [
+          { ...base, runId, key: `PR_R|review|old000${asked ? "|asked" : ""}`, sessionId: "11111111-1111-4111-8111-111111111111", worktree: home },
+          { ...base, runId: auto, key: "PR_R|review|aaa111", state: "queued", queuedAt: "2026-11-05T00:01:00Z" },
+        ];
+        agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
+        const g = agentFixture({ home, script: keepWorking });
+        try {
+          g.agent.onSnapshot(g.snapshot);
+          const want = `PR_R|review|aaa111${asked ? "|asked" : ""}`;
+          await until(() => g.children.length === 1);
+          const old = only(g).find((i) => i.runId === runId);
+          assert.strictEqual(old.headline, asked ? view.AGENT_CLOSED.rerun : view.AGENT_CLOSED.superseded, `asked=${asked}`);
+          // Asked: yours goes first, the automatic one leaves. Found by the agent: the queued one simply runs.
+          assert.strictEqual(only(g).find((i) => i.runId === auto).state, asked ? "done" : "working", `asked=${asked}`);
+          assert.ok(g.children[0].args.includes("--session-id") && !g.children[0].args.includes("--resume"), "a new session on the new head");
+          assert.deepStrictEqual(only(g).filter((i) => i.state === "queued" || i.state === "working").map((i) => i.key), [want], `asked=${asked}: one run, on the new head`);
+          g.agent.onSnapshot(g.snapshot);
+          assert.strictEqual(only(g).filter((i) => i.state === "queued" || i.state === "working").length, 1, "the next plan adds no automatic review of the head you asked about");
+          const line = readLog(g).find((l) => l.event === "not-resumed");
+          assert.deepStrictEqual([line.runId, line.headOid, line.data.was], [runId, "aaa111", "old000"]);
+        } finally {
+          g.agent.stop();
+        }
+      }
+    });
+
     await atest("agent: switched on in Settings, it plans at once — the poller reports a snapshot only when PRs change", async () => {
       let pushes = 0;
       const f = agentFixture({ enabled: false, script: keepWorking, onChange: () => pushes++ });

@@ -554,9 +554,31 @@ export function createAgent(deps: AgentDeps): Agent {
   function recoverInterrupted(snapshot: DashboardResponse, s: AgentSettings): void {
     for (const item of store.data.items) {
       if (item.state !== "needsYou" || !item.interrupted) continue;
-      const busy = store.data.items.some((i) => i.prId === item.prId && i !== item && (i.state === "queued" || i.state === "working"));
       const dir = item.worktree ?? (item.scenario === "afterMerge" ? path.join(deps.dir, "runs", item.runId, "cwd") : null);
-      if (!busy && item.scenario !== "drive" && item.sessionId && dir && fs.existsSync(dir)) {
+      // Someone pushed while the app was closed: the session's folder holds the
+      // old head, and what it would finish isn't about the PR any more (a review
+      // of it couldn't even be sent). What you asked for starts over on the new
+      // head; what the agent found itself is the plan's to decide again.
+      const now = snapshot.pullRequests.find((p) => p.id === item.prId);
+      const was = keyHead(item.key);
+      const moved = Boolean(now?.headOid && was && now.headOid !== was);
+      if (moved && !item.key.endsWith("|asked")) {
+        logRun(item, "not-resumed", { detail: "the PR has a new head", headOid: now?.headOid, data: { was } });
+        void closeAs(item, AGENT_CLOSED.superseded);
+        continue;
+      }
+      if (moved) {
+        logRun(item, "not-resumed", { detail: "the PR has a new head — asked again on it", headOid: now?.headOid, data: { was } });
+        // Your ask goes first: a review or brief the agent queued on its own
+        // for the new head would only replace what you asked for.
+        if (FRESH_REVIEW.has(item.scenario)) {
+          for (const other of store.data.items) {
+            if (other.prId === item.prId && other.state === "queued" && FRESH_REVIEW.has(other.scenario) && !other.key.endsWith("|asked")) void closeAs(other, AGENT_CLOSED.superseded);
+          }
+        }
+      }
+      const busy = store.data.items.some((i) => i.prId === item.prId && i !== item && (i.state === "queued" || i.state === "working"));
+      if (!moved && !busy && item.scenario !== "drive" && item.sessionId && dir && fs.existsSync(dir)) {
         item.state = "queued";
         item.interrupted = undefined;
         item.resumeSession = true;
@@ -574,6 +596,14 @@ export function createAgent(deps: AgentDeps): Agent {
       const queued = enqueueAsked(pr, s, item.scenario, found && found.length === 0 ? ["self"] : (found ?? item.reasons));
       void closeAs(item, queued.ok ? AGENT_CLOSED.rerun : item.headline);
     }
+  }
+
+  /** A review or brief the plan wants on a head you already asked the agent to review or brief — whatever came of it. */
+  const FRESH_REVIEW: ReadonlySet<AgentScenario> = new Set(["review", "brief"]);
+  function askedOfHead(job: Pick<AgentJob, "prId" | "key" | "scenario">): boolean {
+    if (!FRESH_REVIEW.has(job.scenario)) return false;
+    const head = keyHead(job.key);
+    return store.data.items.some((i) => i.prId === job.prId && FRESH_REVIEW.has(i.scenario) && i.key.endsWith("|asked") && keyHead(i.key) === head);
   }
 
   /** The PR as the dashboard last saw it (merged ones drop out of the snapshot; their after-merge run still needs a name). */
@@ -689,6 +719,12 @@ export function createAgent(deps: AgentDeps): Agent {
         continue;
       }
       if (store.data.items.some((i) => i.key === job.key && (i.state === "queued" || i.state === "working"))) continue;
+      // You asked for a review or a brief of this very head: the agent doesn't
+      // draft another of it on its own — run after yours, it would replace it.
+      if (askedOfHead(job)) {
+        idle[job.prId] = "You asked the agent about this head yourself";
+        continue;
+      }
       supersede(newItem(job, byId.get(job.prId)!, queuedHeadline(job)));
       dirty = true;
     }
@@ -1442,6 +1478,9 @@ export function createAgent(deps: AgentDeps): Agent {
       lastSweep = now().getTime();
       sweepWorktrees();
     }
+    // Runs the app's closing cut short are sorted out by the next plan first
+    // (`recoverInterrupted`): a run queued beside one could otherwise take its PR.
+    if (store.data.items.some((i) => i.state === "needsYou" && i.interrupted)) return;
     // Your order first (dragged, or "Run next"), then the oldest.
     const queued = queueOrder(store.data.items.filter((i) => i.state === "queued"));
     // Paused: nothing starts, whoever asked.
