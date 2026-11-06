@@ -1,5 +1,6 @@
 import type { NotifyEventKind } from "./notify";
 import type { PlanStep } from "./agent-stream";
+import { isReviewDue } from "./pr-filter";
 import type { AgentItem, AgentRunState, AgentSettings, AgentState, PullRequest } from "./types";
 
 // How the agent's state reads on the dashboard: which of a PR's items its card
@@ -384,4 +385,300 @@ export function boardLanes(cols: BoardColumns): Record<BoardLane, BoardColumns> 
     doneRuns: cols.doneRuns,
   });
   return { mine: lane("mine"), review: lane("review") };
+}
+
+// ---------------------------------------------------------------------------
+// The Board by whose move it is. A column is not the state of an agent run but
+// who has to act next on the PR — you, the agent, the people you wait on — or
+// that its journey (or your part in it) ended today. One pure function decides
+// it for every surface, so the Board, the header chip, the tray and a card's
+// status line can't disagree; the Board holds one card per PR because the
+// column is a function of the PR.
+
+/** Your move · Agent on it · With reviewers / With the author · Done today / Merged today. */
+export type BoardColumn = "you" | "agent" | "waiting" | "done";
+export const BOARD_COLUMNS: readonly BoardColumn[] = ["you", "agent", "waiting", "done"];
+
+/**
+ * What a card asks of you, as its one button. The first six are moves the
+ * agent prepared ("ready for you"); the next four are GitHub's say-so with the
+ * agent not on it; `updateJira` is the quiet offer on a merged PR.
+ */
+export type StageActionKind =
+  | "send"
+  | "push"
+  | "decide"
+  | "merge"
+  | "draftReview"
+  | "fix"
+  | "review"
+  | "rereview"
+  | "fixYourself"
+  | "draft"
+  | "updateJira";
+
+export interface StageAction {
+  kind: StageActionKind;
+  /** The button's words: a verb and what goes out — "Send review", "Push 2 fixes". */
+  label: string;
+}
+
+/** An SDLC orchestrator run that drives your PR: the badge its card wears instead of the agent's buttons. */
+export interface SdlcBadge {
+  /** The Jira key of the run, "ENG-93412". */
+  key: string;
+  /** The run's current stage as the orchestrator names it; null when it names none. */
+  stage: string | null;
+}
+
+export interface BoardStage {
+  lane: BoardLane;
+  column: BoardColumn;
+  /** The one thing to do; null where nothing waits on you. */
+  action: StageAction | null;
+  /** The agent prepared this move — it counts in "N ready for you". */
+  ready: boolean;
+  /** The item the card reads: the live run, else the result for you, else today's latest. */
+  item: AgentItem | null;
+  /** The agent's last word on the PR when that isn't what placed the card: "Published: …", "Stopped by you". */
+  note: string | null;
+  /** Why the agent isn't on it, for a card GitHub alone placed in Your move. */
+  why: string | null;
+  sdlc: SdlcBadge | null;
+  /** An approval of yours from an earlier day: counted as "+N earlier" under Done today, not a card. */
+  earlier: boolean;
+  /** When the PR came to this column, as near as is known: the age a card shows and the order in a column. */
+  since: string;
+}
+
+export interface StageContext {
+  /** The local day (`todayKey`) "today" means. */
+  today: string;
+  /** Why the agent isn't on a PR, by PR id (`AgentState.idle`). */
+  idle?: Readonly<Record<string, string>>;
+  /** The SDLC runs that drive your PRs, by PR id. */
+  orchestrated?: Readonly<Record<string, SdlcBadge>>;
+}
+
+/** A PR's items, as the card reads them: the live run, the result waiting on you, today's latest. */
+function stageItems(items: readonly AgentItem[], today: string): { live: AgentItem | null; result: AgentItem | null; last: AgentItem | null } {
+  let live: AgentItem | null = null;
+  let result: AgentItem | null = null;
+  let last: AgentItem | null = null;
+  const later = (a: AgentItem, b: AgentItem) => (a.finishedAt ?? a.queuedAt) > (b.finishedAt ?? b.queuedAt);
+  for (const i of items) {
+    if (i.state === "working" || i.state === "queued") {
+      if (!live || (live.state === "queued" && i.state === "working") || (live.state === i.state && queueRank(i) < queueRank(live))) live = i;
+    } else if (i.state === "needsYou" || i.state === "error") {
+      if (!result || later(i, result)) result = i;
+    } else if (!isQuiet(i) && finishedOn(i, today)) {
+      if (!last || later(i, last)) last = i;
+    }
+  }
+  return { live, result, last };
+}
+
+/**
+ * What a result waiting on you asks you to do — or null when it asks nothing
+ * (stopped, taken over in a terminal, timed out, nothing to post, cut short by
+ * a restart): such a run is a line on its card, not a decision.
+ */
+export function resultAction(item: AgentItem, lane: BoardLane): StageAction | null {
+  const fix = (): StageAction => ({ kind: "fix", label: lane === "mine" && item.sessionId ? "Open in Claude" : "Try again" });
+  // The Jira run follows a merge: its PR is gone, there's nothing to try again.
+  if (item.state === "error") return item.scenario === "afterMerge" ? null : fix();
+  if (item.state !== "needsYou" || item.interrupted) return null;
+  switch (item.scenario) {
+    case "merge":
+      return { kind: "merge", label: "Merge" };
+    case "brief":
+      return item.output ? { kind: "draftReview", label: "Draft a review" } : null;
+    case "afterMerge":
+      return item.sessionId ? { kind: "updateJira", label: "Update Jira…" } : null;
+    case "review":
+    case "rereview":
+      if (!item.plan || item.published) return null;
+      return { kind: "send", label: item.plan.event === "APPROVE" ? "Approve" : item.scenario === "rereview" ? "Send re-review" : "Send review" };
+    case "drive": {
+      if ((item.result?.asks.length ?? 0) > 0) return { kind: "decide", label: "Your call" };
+      const n = item.drive?.commits.length ?? 0;
+      if (n > 0 && !item.pushed) {
+        const replies = item.plan && !item.published ? item.plan.replies.length : 0;
+        return { kind: "push", label: replies > 0 ? "Push & reply" : `Push ${n} fix${n === 1 ? "" : "es"}` };
+      }
+      // It ran to the end and has nothing to push: it couldn't do it.
+      return item.drive ? fix() : null;
+    }
+  }
+}
+
+/** Your PR is ready to merge as GitHub sees it. */
+function githubReady(pr: PullRequest): boolean {
+  return !pr.isDraft && pr.canBeMerged && !pr.awaitingReview && pr.ciState !== "failure" && !pr.hasConflicts;
+}
+
+/** Your PR has something wrong the agent would drive: red CI, a conflict, reviewers waiting on an answer. */
+function needsWork(pr: PullRequest): boolean {
+  return pr.ciState === "failure" || pr.hasConflicts || pr.hasUnaddressedChangeRequest || pr.hasUnaddressedComments;
+}
+
+/**
+ * The column a PR's card sits in, and the one thing it asks of you. `pr` is
+ * null for a PR that has left the dashboard (merged, closed) — then only the
+ * agent's items place it. `items` are the PR's own. Null: no card at all.
+ *
+ * The rules, first that applies:
+ * 1. The agent is on it (queued, working) → Agent on it.
+ * 2. The agent prepared your move → Your move, its one button; a run that asks
+ *    nothing goes on to rule 3 with its line as the card's note.
+ * 3. GitHub: your PR — an SDLC run's work is that run's (Agent on it, no
+ *    buttons), a draft or something broken is yours, ready is Merge, else With
+ *    reviewers; a PR you review — asked of you is yours, approved by you is
+ *    done (today's) or "+N earlier", else With the author.
+ * 4. Gone from the dashboard, and the agent did something on it today → Done today.
+ */
+export function boardStage(pr: PullRequest | null, items: readonly AgentItem[], ctx: StageContext): BoardStage | null {
+  const { live, result, last } = stageItems(items, ctx.today);
+  const first = live ?? result ?? last;
+  const lane: BoardLane | null = pr ? laneOfPr(pr) : first ? laneOfScenario(first.scenario) : null;
+  if (!lane) return null;
+  const sdlc = pr ? (ctx.orchestrated?.[pr.id] ?? null) : null;
+  const base = { lane, action: null, ready: false, note: null, why: null, sdlc, earlier: false };
+  const at = (i: AgentItem) => i.finishedAt ?? i.startedAt ?? i.queuedAt;
+
+  // 1. The agent is on it.
+  if (live) return { ...base, column: "agent", item: live, since: live.startedAt ?? live.queuedAt };
+
+  // 2. The agent prepared your move.
+  if (result) {
+    const action = resultAction(result, lane);
+    if (action?.kind === "updateJira") return { ...base, column: "done", action, item: result, note: result.headline, since: at(result) };
+    if (action) return { ...base, column: "you", action, ready: true, item: result, since: at(result) };
+  }
+  const item = result ?? last;
+  const note = item?.headline ?? null;
+
+  // 4. Gone from the dashboard: merged or closed, as far as the agent knows.
+  if (!pr) return item ? { ...base, column: "done", item, note, since: at(item) } : null;
+
+  // 3. GitHub says whose move it is.
+  const card = (column: BoardColumn, since: string, action: StageAction | null = null, extra: Partial<BoardStage> = {}): BoardStage => ({
+    ...base,
+    column,
+    action,
+    item,
+    note,
+    since,
+    why: column === "you" ? (ctx.idle?.[pr.id] ?? null) : null,
+    ...extra,
+  });
+  // What the agent just posted or pushed isn't in the snapshot yet: the move it made is not yours again.
+  if (last && !result && (last.published || last.pushed) && at(last) >= pr.updatedAt) return card("waiting", at(last));
+  const waitedSince = lane === "mine" ? (pr.lastCommitPushedAt ?? pr.createdAt) : (pr.viewerReviewedAt ?? pr.updatedAt);
+
+  if (lane === "mine") {
+    if (sdlc) {
+      // The orchestrator waits for someone to merge; everything else is its run's work.
+      if (githubReady(pr)) return card("you", pr.updatedAt, { kind: "merge", label: "Merge" });
+      if (pr.isDraft || needsWork(pr)) return card("agent", pr.updatedAt);
+      return card("waiting", waitedSince);
+    }
+    if (pr.isDraft) return card("you", pr.createdAt, { kind: "draft", label: "Open on GitHub" });
+    if (needsWork(pr)) return card("you", pr.updatedAt, { kind: "fixYourself", label: "Open on GitHub" });
+    if (githubReady(pr)) return card("you", pr.updatedAt, { kind: "merge", label: "Merge on GitHub" });
+    return card("waiting", waitedSince);
+  }
+
+  if (isReviewDue(pr)) {
+    const again = pr.viewerHasReviewed || pr.myReReviewDue;
+    return card("you", pr.updatedAt, { kind: again ? "rereview" : "review", label: "Open on GitHub" });
+  }
+  if (pr.viewerApproved) {
+    const on = pr.viewerReviewedAt ?? pr.updatedAt;
+    return card("done", on, null, { earlier: todayKey(new Date(on)) !== ctx.today });
+  }
+  return card("waiting", waitedSince);
+}
+
+/** A card on the Board: its PR (null once the PR has left the dashboard) and where it stands. */
+export interface StageCard {
+  prId: string;
+  pr: PullRequest | null;
+  stage: BoardStage;
+}
+
+export type LaneColumns = Record<BoardColumn, StageCard[]> & {
+  /** Approvals of yours from earlier days, under Done today as "+N earlier". */
+  earlier: number;
+};
+
+export interface StageBoard {
+  mine: LaneColumns;
+  review: LaneColumns;
+  /** Moves the agent prepared on PRs the dashboard's filters hide. */
+  hiddenReady: number;
+}
+
+/** Your move, cheapest and readiest first; what is yours without the agent next; drafts last. */
+const YOU_ORDER: Record<StageActionKind, number> = {
+  merge: 0,
+  send: 1,
+  push: 1,
+  draftReview: 1,
+  decide: 2,
+  fix: 3,
+  review: 4,
+  rereview: 4,
+  fixYourself: 4,
+  updateJira: 5,
+  draft: 9,
+};
+
+function laneColumns(): LaneColumns {
+  return { you: [], agent: [], waiting: [], done: [], earlier: 0 };
+}
+
+/**
+ * The Board. `shown` are the PRs the dashboard's filters let through, `all`
+ * every PR in the snapshot; a PR missing from both has left the dashboard and
+ * is placed by the agent's items alone. Your move: readiest first, drafts last.
+ * Agent on it: running, then the queue in its order. Waiting: longest first —
+ * the one to nudge. Done today: newest first.
+ */
+export function stageColumns(shown: readonly PullRequest[], all: readonly PullRequest[], state: Pick<AgentState, "items">, ctx: StageContext): StageBoard {
+  const board: StageBoard = { mine: laneColumns(), review: laneColumns(), hiddenReady: 0 };
+  const byPr = new Map<string, AgentItem[]>();
+  for (const item of state.items) {
+    const list = byPr.get(item.prId);
+    if (list) list.push(item);
+    else byPr.set(item.prId, [item]);
+  }
+  const place = (prId: string, pr: PullRequest | null) => {
+    const stage = boardStage(pr, byPr.get(prId) ?? [], ctx);
+    if (!stage) return;
+    const lane = board[stage.lane];
+    if (stage.earlier) lane.earlier++;
+    else lane[stage.column].push({ prId, pr, stage });
+  };
+  const shownIds = new Set(shown.map((p) => p.id));
+  const allIds = new Set(all.map((p) => p.id));
+  for (const pr of shown) place(pr.id, pr);
+  for (const pr of all) {
+    if (!shownIds.has(pr.id) && boardStage(pr, byPr.get(pr.id) ?? [], ctx)?.ready) board.hiddenReady++;
+  }
+  for (const prId of byPr.keys()) if (!allIds.has(prId) && !shownIds.has(prId)) place(prId, null);
+
+  const live = (c: StageCard) => (c.stage.item?.state === "working" ? 0 : c.stage.item?.state === "queued" ? 1 : 2);
+  for (const lane of [board.mine, board.review]) {
+    lane.you.sort((a, b) => YOU_ORDER[a.stage.action!.kind] - YOU_ORDER[b.stage.action!.kind] || a.stage.since.localeCompare(b.stage.since));
+    lane.agent.sort(
+      (a, b) =>
+        live(a) - live(b) ||
+        (live(a) === 1 ? queueRank(a.stage.item!) - queueRank(b.stage.item!) : 0) ||
+        a.stage.since.localeCompare(b.stage.since),
+    );
+    lane.waiting.sort((a, b) => a.stage.since.localeCompare(b.stage.since));
+    lane.done.sort((a, b) => b.stage.since.localeCompare(a.stage.since));
+  }
+  return board;
 }

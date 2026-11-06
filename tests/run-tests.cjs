@@ -8846,6 +8846,162 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       queuedAt: "2026-11-05T08:00:00.000Z",
       ...o,
     });
+    // --- boardStage: the column is whose move it is -------------------------------
+    const sNow = Date.now();
+    const sAgo = (min) => new Date(sNow - min * 60_000).toISOString();
+    const sToday = view.todayKey(new Date(sNow));
+    const sPr = (o = {}) => ({
+      id: "P",
+      number: 1,
+      repo: "a/b",
+      roles: ["author"],
+      isDraft: false,
+      canBeMerged: false,
+      awaitingReview: true,
+      ciState: "success",
+      hasConflicts: false,
+      hasUnaddressedChangeRequest: false,
+      hasUnaddressedComments: false,
+      myReReviewDue: false,
+      viewerHasReviewed: false,
+      viewerApproved: false,
+      viewerReviewedAt: null,
+      createdAt: sAgo(3000),
+      updatedAt: sAgo(120),
+      lastCommitPushedAt: sAgo(240),
+      ...o,
+    });
+    const rPr = (o = {}) => sPr({ roles: ["reviewer"], ...o });
+    const sIt = (o) => vItem({ prId: "P", finishedAt: o.state === "queued" || o.state === "working" ? undefined : sAgo(5), ...o });
+    const plan = (event = "REQUEST_CHANGES", replies = 0) => ({ event, body: "b", comments: [{ path: "x.ts", line: 1, body: "c" }], replies: Array.from({ length: replies }, (_, i) => ({ replyTo: i + 1, body: "r" })), resolves: 0, escalations: [] });
+    const drive = (n) => ({ base: "a", head: "b", reasons: ["self"], commits: Array.from({ length: n }, (_, i) => ({ oid: `c${i}`, subject: `fix ${i}` })), stat: "", patch: "" });
+    const stage = (pr, items = [], ctx = {}) => view.boardStage(pr, items, { today: sToday, ...ctx });
+    const where = (s) => (s ? [s.lane, s.column, s.action?.kind ?? null, s.action?.label ?? null, s.ready] : null);
+
+    test("boardStage: your PR without an orchestrator — each step of the journey in its column, with one button", () => {
+      const rows = [
+        ["a draft is yours, quietly", sPr({ isDraft: true }), [], ["mine", "you", "draft", "Open on GitHub", false]],
+        ["the self-review runs", sPr(), [sIt({ scenario: "drive", reasons: ["self"], state: "working", startedAt: sAgo(2) })], ["mine", "agent", null, null, false]],
+        ["a clean self-review: waiting on reviewers", sPr(), [sIt({ scenario: "drive", reasons: ["self"], state: "done", headline: "Self-review: clean" })], ["mine", "waiting", null, null, false]],
+        ["fixes ready to push", sPr(), [sIt({ scenario: "drive", reasons: ["self"], state: "needsYou", drive: drive(2) })], ["mine", "you", "push", "Push 2 fixes", true]],
+        ["one fix", sPr(), [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(1) })], ["mine", "you", "push", "Push 1 fix", true]],
+        ["fixes and answers to reviewers", sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(2), plan: plan("COMMENT", 1) })], ["mine", "you", "push", "Push & reply", true]],
+        ["a product decision", sPr(), [sIt({ scenario: "drive", state: "needsYou", drive: drive(1), result: { summary: "s", asks: [{ question: "q", options: [] }], findings: [], authorQuestions: [], structured: true } })], ["mine", "you", "decide", "Your call", true]],
+        ["waiting on reviewers", sPr(), [], ["mine", "waiting", null, null, false]],
+        ["reviewer comments, the agent queued", sPr({ hasUnaddressedComments: true }), [sIt({ scenario: "drive", reasons: ["comments"], state: "queued" })], ["mine", "agent", null, null, false]],
+        ["it couldn't: no commits", sPr({ ciState: "failure" }), [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(0), sessionId: "s" })], ["mine", "you", "fix", "Open in Claude", true]],
+        ["it failed", sPr({ ciState: "failure" }), [sIt({ scenario: "drive", state: "error" })], ["mine", "you", "fix", "Try again", true]],
+        ["red CI with the agent not on it", sPr({ ciState: "failure" }), [], ["mine", "you", "fixYourself", "Open on GitHub", false]],
+        ["a conflict with the agent not on it", sPr({ hasConflicts: true }), [], ["mine", "you", "fixYourself", "Open on GitHub", false]],
+        ["the agent offers the merge", sPr({ canBeMerged: true, awaitingReview: false }), [sIt({ scenario: "merge", state: "needsYou" })], ["mine", "you", "merge", "Merge", true]],
+        ["ready on GitHub, no offer", sPr({ canBeMerged: true, awaitingReview: false }), [], ["mine", "you", "merge", "Merge on GitHub", false]],
+        ["ready but waits for the PR below", sPr({ canBeMerged: false, awaitingReview: false, blockedByStack: true }), [], ["mine", "waiting", null, null, false]],
+        ["merged by the agent, gone from the dashboard", null, [sIt({ scenario: "merge", state: "done", headline: "Merged (squash)" })], ["mine", "done", null, null, false]],
+        ["merged, the Jira dry run waits", null, [sIt({ scenario: "afterMerge", state: "needsYou", sessionId: "s" })], ["mine", "done", "updateJira", "Update Jira…", false]],
+      ];
+      for (const [name, pr, items, want] of rows) assert.deepStrictEqual(where(stage(pr, items)), want, name);
+    });
+
+    test("boardStage: a PR you review — requested, drafted, sent, answered, re-reviewed, approved", () => {
+      const sent = sIt({ state: "done", headline: "Published: request changes, 2 inline comments", published: true });
+      const rows = [
+        ["the agent drafts it", rPr(), [sIt({ state: "working", startedAt: sAgo(3) })], ["review", "agent", null, null, false]],
+        ["asked of you, the agent not on it", rPr(), [], ["review", "you", "review", "Open on GitHub", false]],
+        ["the draft is ready", rPr(), [sIt({ state: "needsYou", plan: plan() })], ["review", "you", "send", "Send review", true]],
+        ["a big PR's brief", rPr(), [sIt({ scenario: "brief", state: "needsYou", output: "brief" })], ["review", "you", "draftReview", "Draft a review", true]],
+        ["sent: the author's move", rPr({ roles: ["reviewed"], viewerHasReviewed: true, viewerReviewedAt: sAgo(4), updatedAt: sAgo(4) }), [sent], ["review", "waiting", null, null, false]],
+        ["sent, the snapshot not caught up yet", rPr({ updatedAt: sAgo(60) }), [sent], ["review", "waiting", null, null, false]],
+        ["the author answered, the agent queued", rPr({ roles: ["reviewed"], myReReviewDue: true, viewerHasReviewed: true }), [sIt({ scenario: "rereview", state: "queued" })], ["review", "agent", null, null, false]],
+        ["the re-review is ready", rPr({ roles: ["reviewed"], myReReviewDue: true }), [sIt({ scenario: "rereview", state: "needsYou", plan: plan("COMMENT") })], ["review", "you", "send", "Send re-review", true]],
+        ["everything fixed: approve", rPr({ roles: ["reviewed"], myReReviewDue: true }), [sIt({ scenario: "rereview", state: "needsYou", plan: plan("APPROVE") })], ["review", "you", "send", "Approve", true]],
+        ["the author answered, the agent not on it", rPr({ roles: ["reviewed"], myReReviewDue: true, viewerHasReviewed: true }), [], ["review", "you", "rereview", "Open on GitHub", false]],
+        ["asked again after your review", rPr({ viewerHasReviewed: true }), [], ["review", "you", "rereview", "Open on GitHub", false]],
+        ["a draft you were asked on: still the author's", rPr({ isDraft: true }), [], ["review", "waiting", null, null, false]],
+        ["you approved today", rPr({ roles: ["reviewed"], viewerApproved: true, viewerHasReviewed: true, viewerReviewedAt: sAgo(30) }), [], ["review", "done", null, null, false]],
+        ["it failed", rPr(), [sIt({ state: "error" })], ["review", "you", "fix", "Try again", true]],
+        ["gone from the dashboard after the agent's review today", null, [sent], ["review", "done", null, null, false]],
+      ];
+      for (const [name, pr, items, want] of rows) assert.deepStrictEqual(where(stage(pr, items)), want, name);
+      const old = stage(rPr({ roles: ["reviewed"], viewerApproved: true, viewerReviewedAt: "2026-01-02T10:00:00Z" }));
+      assert.deepStrictEqual([old.column, old.earlier], ["done", true], "an approval from an earlier day folds into +N earlier");
+    });
+
+    test("boardStage: a run that asks nothing is a note on its card, not a decision", () => {
+      for (const headline of ["Stopped by you", "You took it over in your terminal", "Stopped after 30 min", "Review ready — nothing to post"]) {
+        const s = stage(rPr(), [sIt({ state: "needsYou", headline })]);
+        assert.deepStrictEqual([s.column, s.action.kind, s.ready, s.note], ["you", "review", false, headline], headline);
+      }
+      const cut = stage(sPr(), [sIt({ scenario: "drive", state: "needsYou", interrupted: true, drive: drive(2), headline: "Interrupted — the app closed while it ran" })]);
+      assert.deepStrictEqual([cut.column, cut.ready, cut.note], ["waiting", false, "Interrupted — the app closed while it ran"]);
+      const published = stage(rPr(), [sIt({ state: "needsYou", plan: plan(), published: true })]);
+      assert.strictEqual(published.ready, false, "a plan already sent asks nothing");
+      // Housekeeping and yesterday say nothing.
+      assert.strictEqual(stage(sPr(), [sIt({ state: "done", headline: view.AGENT_CLOSED.superseded })]).note, null);
+      assert.strictEqual(stage(sPr(), [sIt({ state: "done", headline: "Pushed 2 commits", finishedAt: "2026-01-02T10:00:00Z" })]).note, null);
+      assert.strictEqual(stage(null, [sIt({ state: "done", headline: view.AGENT_CLOSED.offDashboard })]), null, "a PR that left with nothing done today has no card");
+      assert.strictEqual(stage(null, []), null);
+    });
+
+    test("boardStage: live work comes first; the agent's own why and the SDLC run's badge ride on the card", () => {
+      const both = stage(rPr(), [sIt({ state: "needsYou", plan: plan(), finishedAt: sAgo(10) }), sIt({ scenario: "rereview", state: "queued" })]);
+      assert.deepStrictEqual([both.column, both.item.state], ["agent", "queued"]);
+      const two = stage(sPr(), [sIt({ scenario: "drive", state: "queued", rank: 5 }), sIt({ scenario: "drive", state: "working", startedAt: sAgo(1) })]);
+      assert.strictEqual(two.item.state, "working");
+      assert.strictEqual(stage(sPr({ ciState: "failure" }), [], { idle: { P: "Your Claude session is on it" } }).why, "Your Claude session is on it");
+      assert.strictEqual(stage(sPr(), [], { idle: { P: "Yours — waiting for reviewers" } }).why, null, "only a card in Your move says why");
+      const sdlc = { P: { key: "ENG-93412", stage: "fixing review" } };
+      const rows = [
+        ["the run's work", sPr({ hasUnaddressedChangeRequest: true }), ["mine", "agent", null, null, false]],
+        ["a draft the run builds", sPr({ isDraft: true }), ["mine", "agent", null, null, false]],
+        ["with reviewers", sPr(), ["mine", "waiting", null, null, false]],
+        ["ready: the run waits for someone to merge", sPr({ canBeMerged: true, awaitingReview: false }), ["mine", "you", "merge", "Merge", false]],
+      ];
+      for (const [name, pr, want] of rows) {
+        const s = stage(pr, [], { orchestrated: sdlc });
+        assert.deepStrictEqual(where(s), want, name);
+        assert.deepStrictEqual(s.sdlc, sdlc.P, name);
+      }
+    });
+
+    test("stageColumns: one card per PR, in its lane and column; filters hide cards but not the count of what's ready", () => {
+      const prs = [
+        sPr({ id: "D", isDraft: true }),
+        sPr({ id: "M", canBeMerged: true, awaitingReview: false }),
+        sPr({ id: "W1", lastCommitPushedAt: sAgo(600) }),
+        sPr({ id: "W2", lastCommitPushedAt: sAgo(6000) }),
+        rPr({ id: "R1" }),
+        rPr({ id: "R2" }),
+        rPr({ id: "R3" }),
+        rPr({ id: "A1", roles: ["reviewed"], viewerApproved: true, viewerReviewedAt: sAgo(10) }),
+        rPr({ id: "A0", roles: ["reviewed"], viewerApproved: true, viewerReviewedAt: "2026-01-02T10:00:00Z" }),
+        rPr({ id: "H", roles: ["reviewer"] }),
+      ];
+      const items = [
+        sIt({ prId: "M", scenario: "merge", state: "needsYou" }),
+        sIt({ prId: "R1", state: "needsYou", plan: plan() }),
+        sIt({ prId: "R2", state: "queued", rank: 2 }),
+        sIt({ prId: "R3", state: "queued", rank: 1 }),
+        sIt({ prId: "R3", state: "done", headline: "Published: comment", published: true, finishedAt: sAgo(300) }),
+        sIt({ prId: "H", state: "needsYou", plan: plan() }),
+        sIt({ prId: "GONE", scenario: "merge", state: "done", headline: "Merged (squash)", finishedAt: sAgo(1) }),
+        sIt({ prId: "GONE2", state: "done", headline: "Published: approve", finishedAt: sAgo(50) }),
+      ];
+      const shown = prs.filter((p) => p.id !== "H");
+      const b = view.stageColumns(shown, prs, { items }, { today: sToday });
+      const ids = (cards) => cards.map((c) => c.prId);
+      assert.deepStrictEqual(ids(b.mine.you), ["M", "D"], "the merge first, the draft last");
+      assert.deepStrictEqual(ids(b.mine.waiting), ["W2", "W1"], "the longest wait first");
+      assert.deepStrictEqual(ids(b.mine.done), ["GONE"]);
+      assert.deepStrictEqual(ids(b.review.you), ["R1"]);
+      assert.deepStrictEqual(ids(b.review.agent), ["R3", "R2"], "the queue in its order");
+      assert.deepStrictEqual(ids(b.review.done), ["A1", "GONE2"], "newest first");
+      assert.strictEqual(b.review.earlier, 1);
+      assert.strictEqual(b.hiddenReady, 1, "H's draft review is hidden by the filters, and said so");
+      const every = [b.mine, b.review].flatMap((l) => view.BOARD_COLUMNS.flatMap((c) => ids(l[c])));
+      assert.strictEqual(new Set(every).size, every.length, "a PR is in one column only");
+      assert.ok(!every.includes("H"));
+    });
+
     test("agent view: todayKey is the local day, and finishedOn compares on it", () => {
       // Built from local parts, so the answer is the same in every time zone.
       const lateEvening = new Date(2026, 10, 5, 23, 30);
