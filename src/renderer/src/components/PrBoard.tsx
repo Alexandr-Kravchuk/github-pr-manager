@@ -721,7 +721,8 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
   const card = resultCard(item);
   const asks = card?.asks ?? [];
   const findings = card?.findings ?? [];
-  const canAnswer = item.scenario !== "afterMerge" && Boolean(item.sessionId) && !error;
+  // Only a run on your own PR asks you; on a PR you review you are the one asking.
+  const canAnswer = item.scenario === "drive" && Boolean(item.sessionId) && !error;
   const hasSession = Boolean(item.sessionId && (item.worktree || item.scenario === "afterMerge"));
   const toggle = (what: "plan" | "drive" | "report") => setOpen((v) => (v === what ? null : what));
   const doing = async (label: string, action: AgentAction) => {
@@ -742,8 +743,18 @@ function NeedsYouCard({ item, onTitle, run }: { item: AgentItem; onTitle: () => 
       <div className={cn("mt-1 text-xs", error ? "text-red-700 dark:text-red-300" : "text-fg-muted")}>{item.headline}</div>
       {error && item.error && <div className="mt-0.5 line-clamp-3 font-mono text-[11px] text-fg-subtle" title={item.error}>{item.error}</div>}
       {card?.summary && <p className="mt-1.5 line-clamp-4 text-[13px] leading-snug text-fg">{card.summary}</p>}
-      {findings.length > 0 && <FindingsList findings={findings} />}
+      {/* A review's findings are its comments (below); shown apart only where nothing would be posted. */}
+      {findings.length > 0 && !plan && <FindingsList findings={findings} />}
       {asks.length > 0 && <AsksBox item={item} asks={asks} canAnswer={canAnswer} run={run} />}
+      {(card?.authorQuestions.length ?? 0) > 0 && (
+        <div className="mt-2 rounded-md border border-line bg-elevated/40 p-2 text-xs">
+          <div className="font-medium text-fg">Questions for the author</div>
+          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-fg-secondary">
+            {card?.authorQuestions.map((q, i) => <li key={i}>{q}</li>)}
+          </ul>
+          {item.scenario === "brief" && <div className="mt-1 text-[11px] text-fg-faint">Draft a review puts them in it, as comments.</div>}
+        </div>
+      )}
       {/* A review's verdict and comments, in the card: what Publish would post. */}
       {plan && <PlanDigest plan={plan} />}
 

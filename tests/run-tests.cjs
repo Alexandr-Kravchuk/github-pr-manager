@@ -10378,35 +10378,81 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(agentResult.resultCard({ output: "Plain words." }).summary, "Plain words.", "a result from before the block still has a summary");
       assert.strictEqual(agentResult.resultCard({}), null);
       for (const [scenario, mode] of [["review", "shadow"], ["brief", "on"], ["drive", "shadow"], ["afterMerge", "on"], ["rereview", "on"]]) {
-        assert.ok(agentCore.agentRules(scenario, mode).endsWith(agentResult.RESULT_RULE), `${scenario} sessions are told how to end`);
+        assert.ok(agentCore.agentRules(scenario, mode).endsWith(agentResult.resultRuleFor(scenario)), `${scenario} sessions are told how to end`);
       }
     });
 
-    await atest("agent answer: a run that asks you waits with its question; your answer goes on in the same session; Done closes it", async () => {
-      const text = "Prose.\n\n```prd-result\n" + JSON.stringify({ summary: "One thread is disputed.", asks: [{ question: "Keep your finding?", options: ["Keep", "Drop"] }], findings: [] }) + "\n```";
-      const f = agentFixture({ script: succeed(text) });
+    await atest("agent answer: a run on your PR that asks you waits with its question; your answer goes on in the same session; Done closes it", async () => {
+      const text = "Prose.\n\n```prd-result\n" + JSON.stringify({ summary: "One finding is a product decision.", asks: [{ question: "Make the threshold configurable?", options: ["Yes", "No"] }], findings: [] }) + "\n```";
+      const mine = { ...reviewPr({ role: "author", headOid: "abcdef1234567" }), awaitingReview: true };
+      const common = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(common, "config"), "[core]\n");
+      const gitImpl = async (all) => {
+        let i = 0;
+        for (;;) {
+          if (all[i] === "-c") i += 2;
+          else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+          else break;
+        }
+        const args = all.slice(i);
+        if (args[0] === "config") return `file:${common}/config\0core.bare\0`;
+        if (args[0] === "rev-parse") return `${common}\n`;
+        if (args[0] === "remote") return "https://github.com/a/b.git\n";
+        return "";
+      };
+      const f = agentFixture({ pr: mine, script: succeed(text), git: gitImpl });
       try {
         f.agent.onSnapshot(f.snapshot);
         await until(() => only(f).some((i) => i.state === "needsYou"));
         const item = only(f)[0];
-        assert.deepStrictEqual([item.result.summary, item.result.asks[0].question, item.output], ["One thread is disputed.", "Keep your finding?", "Prose."]);
+        assert.deepStrictEqual([item.result.summary, item.result.asks[0].question, item.output], ["One finding is a product decision.", "Make the threshold configurable?", "Prose."]);
         assert.strictEqual(view.primaryActionLabel(item), "Answer");
         nfsA.mkdirSync(item.worktree, { recursive: true });
-        assert.deepStrictEqual(await f.agent.act({ type: "answer", runId: item.runId, text: "Q: Keep your finding?\nA: Keep" }), { ok: true });
+        assert.deepStrictEqual(await f.agent.act({ type: "answer", runId: item.runId, text: "Q: Make the threshold configurable?\nA: No" }), { ok: true });
         await until(() => f.children.length === 2);
         const c = f.children[1];
         assert.strictEqual(c.args[c.args.indexOf("--resume") + 1], item.sessionId, "the same session");
         assert.strictEqual(c.cwd, item.worktree);
         await until(() => only(f)[0].state === "needsYou");
-        assert.match(c.written, /The user answered from the app: Q: Keep your finding\?\\nA: Keep/);
+        assert.match(c.written, /The user answered from the app: Q: Make the threshold configurable\?\\nA: No/);
         assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"answered"/);
         assert.strictEqual(only(f)[0].answer, undefined, "the answer is used once");
         // Done: it moves to Done today with its own headline.
         assert.deepStrictEqual(await f.agent.act({ type: "ack", runId: item.runId }), { ok: true });
         assert.strictEqual(only(f)[0].state, "done");
-        const board = view.boardColumns([], f.agent.getState(), view.todayKey(new Date()));
-        assert.ok(board.done.some((i) => i.runId === item.runId), "it shows in Done today");
         assert.strictEqual((await f.agent.act({ type: "answer", runId: item.runId, text: "late" })).ok, false, "a closed result can't be answered");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("agent result: on a PR you review nothing is asked of you — questions are the author's; a brief's go into the review it drafts", () => {
+      const block = (o) => "Text.\n\n```prd-result\n" + JSON.stringify(o) + "\n```";
+      const r = agentResult.parseRunResult(block({ summary: "s", asks: [{ question: "Is the retry unbounded on purpose?", options: ["Yes"] }], findings: [], authorQuestions: ["Why a new endpoint?"] }), "review");
+      assert.deepStrictEqual([r.card.asks, r.card.authorQuestions], [[], ["Why a new endpoint?", "Is the retry unbounded on purpose?"]]);
+      const own = agentResult.parseRunResult(block({ summary: "s", asks: [{ question: "Configurable?", options: [] }], findings: [] }), "drive");
+      assert.strictEqual(own.card.asks.length, 1, "your own PR may ask you");
+      assert.match(agentResult.resultRuleFor("review"), /never ask them anything/);
+      assert.match(agentResult.resultRuleFor("brief"), /authorQuestions/);
+      assert.strictEqual(agentResult.resultRuleFor("drive"), agentResult.RESULT_RULE);
+      // A result stored before the rule reads the same way.
+      const old = agentResult.resultCard({ scenario: "rereview", result: { summary: "s", asks: [{ question: "Keep it?", options: [] }], findings: [], structured: true } });
+      assert.deepStrictEqual([old.asks, old.authorQuestions], [[], ["Keep it?"]]);
+      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "brief", output: "b", result: { summary: "s", asks: [], findings: [], authorQuestions: ["q"], structured: true } })), "Review anyway");
+    });
+
+    await atest("agent brief: Review anyway carries the brief's questions for the author into the review it drafts", async () => {
+      const big = reviewPr({ additions: 5000 });
+      const text = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: ["Why drop the cache?"], asks: [] }) + "\n```";
+      const f = agentFixture({ pr: big, script: succeed(text) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.scenario === "brief" && i.state === "needsYou"));
+        const brief = only(f).find((i) => i.scenario === "brief");
+        assert.deepStrictEqual(brief.result.authorQuestions, ["Why drop the cache?"]);
+        assert.deepStrictEqual(await f.agent.act({ type: "reviewAnyway", runId: brief.runId }), { ok: true });
+        await until(() => f.children.length === 2);
+        assert.match(f.children[1].written, /questions for its author[\s\S]*Why drop the cache\?/);
       } finally {
         f.agent.stop();
       }

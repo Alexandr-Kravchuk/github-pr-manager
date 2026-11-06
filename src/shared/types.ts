@@ -831,6 +831,8 @@ export interface AgentItem {
   result?: import("./agent-result").RunResultCard;
   /** Your answer to its question, queued: the next run continues the session with it. */
   answer?: string;
+  /** A brief's questions for the author, carried into the review "Draft a review" queues. */
+  carry?: string[];
   error?: string;
   /** Put aside with "Later": still waiting, out of the way. */
   later?: boolean;

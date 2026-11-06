@@ -7,7 +7,7 @@ import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPromp
 import { describePlan, gitBashPath, readPlanLines, summarizePlan } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
-import { answerMessage, parseRunResult, RESULT_RULE } from "../../shared/agent-result";
+import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
 import { AGENT_CLOSED, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
@@ -202,7 +202,7 @@ export function agentRules(
   folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null = null,
   pr: { repo: string; number: number; baseRef?: string; reasons?: readonly string[] } | null = null,
 ): string {
-  return `${scenarioRules(scenario, mode, folder, pr)} ${RESULT_RULE}`;
+  return `${scenarioRules(scenario, mode, folder, pr)} ${resultRuleFor(scenario)}`;
 }
 
 /** What a run on your own PR is for, on top of the drive rules. */
@@ -720,7 +720,15 @@ export function createAgent(deps: AgentDeps): Agent {
         sessionId,
         ...(resume ? { resume: true } : {}),
         kind,
-        prompt: resume ? (answer ? answerMessage(answer, Boolean(folder)) : folder ? RESUME_PROMPT_WRAPPER : RESUME_PROMPT) : mine.prompt,
+        prompt: resume
+          ? answer
+            ? answerMessage(answer, Boolean(folder))
+            : folder
+              ? RESUME_PROMPT_WRAPPER
+              : RESUME_PROMPT
+          : item.carry?.length
+            ? `${mine.prompt}\n\nA brief of this PR raised these questions for its author — ask the ones that still hold in your review, as comments:\n${item.carry.map((q) => `- ${q}`).join("\n")}`
+            : mine.prompt,
         appendSystemPrompt: agentRules(item.scenario, item.mode, folder, {
           repo: item.repo,
           number: item.prNumber,
@@ -795,7 +803,7 @@ export function createAgent(deps: AgentDeps): Agent {
     } else if (result && !result.isError && result.subtype === "success") {
       item.state = "needsYou";
       // The card's summary, questions and findings; the rest is the full report.
-      const read = parseRunResult(result.text);
+      const read = parseRunResult(result.text, item.scenario);
       item.output = read.body;
       item.result = read.card;
       store.data.ledger[item.key].state = "prepared";
@@ -1256,7 +1264,7 @@ export function createAgent(deps: AgentDeps): Agent {
   }
 
   /** Puts a PR in the queue on your say-so; its key is its own, so the ledger of the automatic one doesn't stop it. */
-  function enqueueAsked(pr: PullRequest, s: AgentSettings, scenario: AgentScenario, reasons?: string[], before?: string | null): AgentActionResult {
+  function enqueueAsked(pr: PullRequest, s: AgentSettings, scenario: AgentScenario, reasons?: string[], before?: string | null, carry?: string[]): AgentActionResult {
     if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
       return { ok: false, error: "The agent is already on this PR." };
     }
@@ -1285,6 +1293,7 @@ export function createAgent(deps: AgentDeps): Agent {
       const rank = rankBefore(others, before);
       if (rank !== undefined) item.rank = rank;
     }
+    if (carry?.length) item.carry = carry;
     supersede(item);
     void store.save();
     changed();
@@ -1476,7 +1485,8 @@ export function createAgent(deps: AgentDeps): Agent {
         if (item.scenario !== "brief") return { ok: false, error: "Only a brief can be turned into a review." };
         const pr = snapshot?.pullRequests.find((p) => p.id === item.prId);
         if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
-        const queued = enqueueAsked(pr, all.agent, "review");
+        // The brief's questions for the author go into the review it drafts.
+        const queued = enqueueAsked(pr, all.agent, "review", undefined, undefined, item.result?.authorQuestions);
         if (queued.ok) await closeAs(item, AGENT_CLOSED.reviewed);
         return queued;
       }

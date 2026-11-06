@@ -26,11 +26,20 @@ export interface RunFinding {
 
 export interface RunResultCard {
   summary: string;
+  /** Questions only YOU can answer — about your own PR. Never on a PR you review. */
   asks: RunAsk[];
   findings: RunFinding[];
+  /**
+   * Questions the PR raises for its author — a brief's, to carry into the
+   * review it drafts. Shown, never answered by you: you are the reviewer.
+   */
+  authorQuestions: string[];
   /** Read from the session's own block, not guessed from its prose. */
   structured: boolean;
 }
+
+/** The scenarios of a PR you review: their questions are for the author, not for you. */
+const REVIEWING: ReadonlySet<string> = new Set(["review", "rereview", "brief"]);
 
 /** The rule every session gets: how to end its final message so the card can show it. */
 export const RESULT_RULE =
@@ -39,6 +48,26 @@ export const RESULT_RULE =
   '"asks": the questions only the user can answer before this moves on, each {"question": one or two sentences, "options": up to 4 short answers, or [] for a free answer}, ' +
   '"findings": the issues worth the user\'s attention, most severe first, each {"severity": "blocker" | "major" | "minor" | "note", "text": one line, "where": "path:line" or ""}}. ' +
   "Use [] where there is nothing; keep the rest of your message above the block as usual.";
+
+/**
+ * The rule for a run's kind. On a PR the user reviews, the user is the
+ * reviewer: the agent never asks them anything — a question for the author is
+ * a comment in the review; a brief lists the author questions the review it
+ * drafts will carry.
+ */
+export function resultRuleFor(scenario: string): string {
+  if (!REVIEWING.has(scenario)) return RESULT_RULE;
+  return (
+    "Finish your final message with a block the app reads for the user's card: a fenced code block whose language is prd-result, holding one JSON object — " +
+    '{"summary": one sentence (under 200 characters) on what the PR does and how it stands, ' +
+    '"findings": the issues worth the reviewer\'s attention, most severe first, each {"severity": "blocker" | "major" | "minor" | "note", "text": one line, "where": "path:line" or ""}, ' +
+    (scenario === "brief"
+      ? '"authorQuestions": the questions this PR raises for its author, one sentence each — the review will ask them, '
+      : "") +
+    '"asks": []}. The user is the reviewer here: never ask them anything — a question for the author belongs in the review as a comment. ' +
+    "Use [] where there is nothing; keep the rest of your message above the block as usual."
+  );
+}
 
 const SEVERITIES: readonly FindingSeverity[] = ["blocker", "major", "minor", "note"];
 const MAX = { summary: 300, asks: 5, question: 500, options: 4, option: 80, findings: 20, text: 300, where: 200 };
@@ -100,7 +129,7 @@ function splitBlock(text: string): { json: string | null; body: string } {
  * Reads a run's final message. The block's values are held to their shapes and
  * lengths — it is the model's text, shown as text, never trusted further.
  */
-export function parseRunResult(text: string): { card: RunResultCard; body: string } {
+export function parseRunResult(text: string, scenario?: string): { card: RunResultCard; body: string } {
   const { json, body } = splitBlock(text ?? "");
   let raw: Record<string, unknown> | null = null;
   if (json !== null) {
@@ -111,7 +140,7 @@ export function parseRunResult(text: string): { card: RunResultCard; body: strin
       raw = null;
     }
   }
-  if (!raw) return { card: { summary: summarizeOutput(body), asks: [], findings: [], structured: false }, body };
+  if (!raw) return { card: { summary: summarizeOutput(body), asks: [], findings: [], authorQuestions: [], structured: false }, body };
   const asks: RunAsk[] = (Array.isArray(raw.asks) ? raw.asks : [])
     .map((a): RunAsk | null => {
       if (!a || typeof a !== "object") return null;
@@ -139,14 +168,29 @@ export function parseRunResult(text: string): { card: RunResultCard; body: strin
     .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity))
     .slice(0, MAX.findings);
   const summary = clip(raw.summary, MAX.summary) || summarizeOutput(body);
-  return { card: { summary, asks, findings, structured: true }, body };
+  const authorQuestions = (Array.isArray(raw.authorQuestions) ? raw.authorQuestions : [])
+    .map((q) => clip(q, MAX.question))
+    .filter(Boolean)
+    .slice(0, 8);
+  // On a PR you review nothing is asked of you: a question the session asked
+  // anyway is one for the author.
+  if (scenario && REVIEWING.has(scenario)) {
+    return { card: { summary, asks: [], findings, authorQuestions: [...authorQuestions, ...asks.map((a) => a.question)].slice(0, 8), structured: true }, body };
+  }
+  return { card: { summary, asks, findings, authorQuestions, structured: true }, body };
 }
 
 /** The card of an item: what main stored, else read from its output now (results from before the block). */
-export function resultCard(item: { result?: RunResultCard; output?: string }): RunResultCard | null {
-  if (item.result) return item.result;
+export function resultCard(item: { result?: RunResultCard; output?: string; scenario?: string }): RunResultCard | null {
+  if (item.result) {
+    // A result stored before the rule: asks on a PR you review are the author's.
+    if (item.scenario && REVIEWING.has(item.scenario) && item.result.asks.length > 0) {
+      return { ...item.result, asks: [], authorQuestions: [...(item.result.authorQuestions ?? []), ...item.result.asks.map((a) => a.question)] };
+    }
+    return { ...item.result, authorQuestions: item.result.authorQuestions ?? [] };
+  }
   if (!item.output) return null;
-  return parseRunResult(item.output).card;
+  return parseRunResult(item.output, item.scenario).card;
 }
 
 /** What the session hears when you answer one of its questions from the card. */

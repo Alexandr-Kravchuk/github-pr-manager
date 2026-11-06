@@ -491,10 +491,8 @@ function mockAgentState(): AgentState {
       state: "needsYou",
       result: {
         summary: "Retries every sync operation with a bounded budget; the retry itself has no overall time limit.",
-        asks: [
-          { question: "Is an unbounded total retry time acceptable for sync-schemas?", options: ["Yes", "No — cap it"] },
-          { question: "The public contract of sync-schemas changed. Agreed with its consumers?", options: ["Agreed", "Not yet"] },
-        ],
+        asks: [],
+        authorQuestions: ["Is an unbounded total retry time acceptable for sync-schemas?", "The public contract of sync-schemas changed — is it agreed with its consumers?"],
         findings: [{ severity: "major", text: "No overall time limit on the retry loop", where: "src/sync/retry.ts:41" }],
         structured: true,
       },
@@ -518,6 +516,7 @@ function mockAgentState(): AgentState {
           { severity: "note", text: "AC-1 and AC-3 are covered by the new tests", where: "" },
           { severity: "note", text: "No Jira task found for the follow-up refactoring", where: "" },
         ],
+        authorQuestions: [],
         structured: true,
       },
       finishedAt: iso(5 * 60_000),
@@ -540,8 +539,9 @@ function mockAgentState(): AgentState {
       state: "needsYou",
       result: {
         summary: "The author fixed 2 of your 3 threads; on the third they argue the null check belongs to the caller.",
-        asks: [{ question: "Keep your finding that load() must handle a null config, or accept the author's point that the caller does?", options: ["Keep it", "Accept the author's point"] }],
+        asks: [],
         findings: [{ severity: "major", text: "load() still dereferences a null config", where: "src/config/loader.ts:57" }],
+        authorQuestions: [],
         structured: true,
       },
       headline: "Would post: comment, 1 resolve, 1 dispute for you",
