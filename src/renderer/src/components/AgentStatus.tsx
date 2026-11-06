@@ -50,14 +50,14 @@ export function useAgentWord(pr: PullRequest): AgentWord | null {
   const stage = boardStage(
     pr,
     state.items.filter((i) => i.prId === pr.id),
-    { today: todayKey(new Date()), idle: state.idle },
+    { today: todayKey(new Date()), idle: state.idle, orchestrated: state.orchestrated },
   );
   if (!stage?.item) return null;
   const item = stage.item;
   const column = COLUMN_TITLES[stage.lane][stage.column];
   let text: string;
   let short: string;
-  if (stage.column === "agent") {
+  if (stage.column === "agent" && (item.state === "working" || item.state === "queued")) {
     const run = item.state === "working" ? runFor(state, item.runId) : null;
     const place = item.state === "queued" ? queueOrder(state.items.filter((i) => i.state === "queued")).findIndex((i) => i.runId === item.runId) + 1 : 0;
     const step = run ? stepLabel(run.progress.steps) : "";

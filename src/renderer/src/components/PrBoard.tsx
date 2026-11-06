@@ -92,7 +92,7 @@ export function PrBoard({
   if (!state) {
     return <div className="rounded-lg border border-line bg-surface/40 p-8 text-center text-sm text-fg-subtle">The PR agent isn&apos;t available here.</div>;
   }
-  const board = stageColumns(prs, all, state, { today: todayKey(new Date()), idle: state.idle });
+  const board = stageColumns(prs, all, state, { today: todayKey(new Date()), idle: state.idle, orchestrated: state.orchestrated });
   const sum = agentSummary(state);
   // The queue is one queue: a card's place in it, whichever lane shows it.
   const queue = queueOrder(state.items.filter((i) => i.state === "queued"));
@@ -234,7 +234,8 @@ function menuFor(card: StageCard, state: AgentState, first: string | null, run: 
   const hand = (label: string, title: string) => {
     if (state.enabled && pr && !stage.sdlc) out.push({ label, title, action: () => run({ type: "enqueue", prId: pr.id }) });
   };
-  if (stage.column === "agent" && item) {
+  if (stage.column === "agent") {
+    if (!item || (item.state !== "working" && item.state !== "queued")) return out;
     if (item.state === "working") {
       if (state.headerChip) out.push({ label: "Watch", title: "The plan, the log, a note to the agent", action: () => openCompanion(item.runId) });
       out.push({ label: "Stop", title: "Stop the run; it comes back as a note on the card", action: () => run({ type: "stop", runId: item.runId }) });
@@ -366,7 +367,7 @@ function BoardCard({
       </button>
       <div className={cn("mt-1 text-xs", stage.column === "you" ? "font-semibold text-fg" : "text-fg-muted", kind === "fix" && "text-red-700 dark:text-red-300")}>{line}</div>
 
-      {stage.column === "agent" && item && <AgentProgress item={item} state={state} place={place.get(item.runId) ?? 0} />}
+      {stage.column === "agent" && item && (item.state === "working" || item.state === "queued") && <AgentProgress item={item} state={state} place={place.get(item.runId) ?? 0} />}
 
       {stage.column === "you" && item && (
         <YouDetails item={item} kind={kind} open={open} setOpen={setOpen} run={run} summary={result?.summary ?? null} />

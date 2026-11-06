@@ -140,6 +140,21 @@ function wantsFirstReview(pr: PullRequest, s: AgentSettings): string | null {
   return null;
 }
 
+/** A Merge button offered on your ready PR: no session, the merge itself only on your click. */
+function mergeJob(pr: PullRequest): AgentJob {
+  return {
+    key: jobKey(pr, "merge"),
+    prId: pr.id,
+    prNumber: pr.number,
+    repo: pr.repo,
+    url: pr.url,
+    scenario: "merge",
+    kind: "afterMerge",
+    mode: "on",
+    createdAt: pr.createdAt,
+  };
+}
+
 export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: PlanContext): PlanResult {
   const jobs: AgentJob[] = [];
   const merges: AgentJob[] = [];
@@ -162,6 +177,12 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
       // An SDLC orchestrator run has it: everything a run here would do is that run's job.
       const orchestrated = ctx.orchestrated?.(pr) ?? null;
       if (orchestrated) {
+        // Its run waits for someone to merge it: once it is ready, the Merge
+        // button is yours as on any PR of yours — an offer starts no session.
+        if (s.scenarios.merge.mode !== "off" && !mergeBlocker(pr, s)) {
+          merges.push(mergeJob(pr));
+          continue;
+        }
         skip(`Yours — ${orchestrated}`);
         continue;
       }
@@ -230,17 +251,7 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
         skip("Yours — ready; merge offers are off");
         continue;
       }
-      merges.push({
-        key: jobKey(pr, "merge"),
-        prId: pr.id,
-        prNumber: pr.number,
-        repo: pr.repo,
-        url: pr.url,
-        scenario: "merge",
-        kind: "afterMerge",
-        mode: "on",
-        createdAt: pr.createdAt,
-      });
+      merges.push(mergeJob(pr));
       continue;
     }
     // Reviewed before: a re-review once the author answers — a push, a reply in

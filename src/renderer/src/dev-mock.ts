@@ -707,6 +707,10 @@ function mockAgentState(): AgentState {
     quietUntil: null,
     acceptedUnchanged: 4,
     suggestOn: false,
+    // Your PR an SDLC orchestrator run drives: its card wears the run's badge.
+    orchestrated: Object.fromEntries(
+      [byNumber(139)].filter((p): p is PullRequest => Boolean(p)).map((p) => [p.id, { key: "ENG-93412", stage: "fixing review" }]),
+    ),
   };
 }
 

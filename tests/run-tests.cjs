@@ -8668,6 +8668,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     // --- stage 3: what you can do with a run, and how the dashboard shows it ---
     const view = require(path.join(__dirname, "../dist/main/shared/agent-view.js"));
+    /** The words of a result's one button on its Board card; null when it asks nothing. */
+    const actionLabel = (item) => view.resultAction(item, view.laneOfScenario(item.scenario))?.label ?? null;
     const succeed = (text) => (c) => {
       emit(c, { type: "system", subtype: "init", session_id: "s" });
       emit(c, { type: "result", subtype: "success", is_error: false, result: text });
@@ -8753,7 +8755,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: again.runId }), { ok: true });
         assert.strictEqual(only(f)[1].headline, view.AGENT_CLOSED.dismissed);
         assert.ok(f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"), "a dismissed result drops its worktree");
-        assert.strictEqual(view.itemForPr(only(f), f.snapshot.pullRequests[0].id, view.todayKey(new Date())), null, "the card shows nothing once it's all closed");
+        assert.strictEqual(view.boardStage(f.snapshot.pullRequests[0], only(f), { today: view.todayKey(new Date()) }).item, null, "the card shows nothing of the agent once it's all closed");
         assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: "00000000-0000-4000-8000-000000000999" }), { ok: false, error: "That run is gone." });
       } finally {
         f.agent.stop();
@@ -8767,7 +8769,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await until(() => only(f).some((i) => i.state === "needsYou"));
         const brief = only(f)[0];
         assert.strictEqual(brief.scenario, "brief");
-        assert.strictEqual(view.primaryActionLabel(brief), "Review anyway");
+        assert.strictEqual(actionLabel(brief), "Draft a review");
         assert.deepStrictEqual(await f.agent.act({ type: "reviewAnyway", runId: brief.runId }), { ok: true });
         await until(() => only(f).length === 2 && only(f)[1].state === "done");
         assert.strictEqual(only(f)[1].headline, "Reviewed — nothing to post", "nothing captured to post: a note, not a decision");
@@ -8995,6 +8997,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(line(rPr({ requestedOfMe: false }), []), "Review requested of your team");
       assert.strictEqual(view.workLine({ scenario: "drive", reasons: ["ci", "comments"] }), "Fixing CI · Answering reviewers' comments");
       assert.strictEqual(view.workLine({ scenario: "rereview" }), "Re-reviewing — the author answered");
+      const run = sPr({ hasUnaddressedChangeRequest: true });
+      assert.strictEqual(view.stageLine(stage(run, [sIt({ scenario: "drive", reasons: ["comments"], state: "done", headline: "Stopped by you" })], { orchestrated: { P: { key: "ENG-1", stage: null } } }), run), "The SDLC run is on it", "not the agent: its last run is over");
     });
 
     test("one vocabulary: the tray's verb, a place in line and a notification's title say what the Board says", () => {
@@ -9073,30 +9077,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.finishedOn({}, "2026-11-05"), false);
       assert.strictEqual(view.finishedOn({ finishedAt: "not a date" }, "2026-11-05"), false);
     });
-    test("agent view: a card shows live work before what waits for you; housekeeping and older days never", () => {
-      const today = view.todayKey(new Date());
-      const now = new Date().toISOString();
-      const yesterday = new Date(Date.now() - 2 * 86_400_000).toISOString();
-      const done = vItem({ prId: "P", state: "done", headline: "Reviewed", finishedAt: now });
-      const waiting = vItem({ prId: "P", state: "needsYou", finishedAt: now });
-      const working = vItem({ prId: "P", state: "working" });
-      assert.strictEqual(view.itemForPr([done, waiting, working], "P", today), working);
-      assert.strictEqual(view.itemForPr([done, waiting], "P", today), waiting);
-      assert.strictEqual(view.itemForPr([done], "P", today), done);
-      assert.strictEqual(view.itemForPr([{ ...done, finishedAt: yesterday }], "P", today), null, "yesterday's done is not today's");
-      for (const h of Object.values(view.AGENT_CLOSED)) {
-        assert.strictEqual(view.itemForPr([{ ...done, headline: h }], "P", today), null, h);
-      }
-      assert.strictEqual(view.itemForPr([working], "other", today), null);
-    });
-    test("agent view: the first button names what an item asks of you", () => {
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "error" })), "Run again");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "brief", output: "x" })), "Review anyway");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", sessionId: "s" })), "Done", "nothing left for you: acknowledge it");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou" })), "Done");
+    test("agent view: the one button names what a result asks of you; a result that asks nothing has none", () => {
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "error" })), "Try again");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "error", scenario: "drive", sessionId: "s" })), "Open in Claude", "your PR: carry on in the session");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "brief", output: "x" })), "Draft a review");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", sessionId: "s" })), null, "a review with nothing to send");
       const asks = { summary: "s", asks: [{ question: "q?", options: [] }], findings: [], structured: true };
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", sessionId: "s", result: asks })), "Answer", "a question waits");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "working", sessionId: "s" })), null);
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", sessionId: "s", result: asks })), "Your call", "a question on your PR");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "working", sessionId: "s" })), null);
     });
 
     // --- stage 4: the publish wrapper, the app's own posting, merge, notifications ---
@@ -9504,7 +9492,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await until(() => only(f).some((i) => i.state === "needsYou"));
         const item = only(f)[0];
         assert.strictEqual(item.headline, "Would post: request changes, 1 inline comment");
-        assert.strictEqual(view.primaryActionLabel(item), "Publish");
+        assert.strictEqual(actionLabel(item), "Send review");
         assert.strictEqual(posted.length, 0, "Shadow posts nothing by itself");
         assert.deepStrictEqual(notices, [["needsYou", item.headline]]);
         const args = f.children[0].args;
@@ -9587,7 +9575,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await until(() => only(f).some((i) => i.scenario === "afterMerge" && i.state === "needsYou"));
         const dry = only(f).find((i) => i.scenario === "afterMerge");
         assert.strictEqual(dry.headline, "Jira dry run ready — apply it in a session");
-        assert.strictEqual(view.primaryActionLabel(dry), "Apply in session");
+        assert.strictEqual(actionLabel(dry), "Update Jira…");
         const settingsFile = f.children[0].args[f.children[0].args.indexOf("--settings") + 1];
         assert.match(nfsA.readFileSync(settingsFile, "utf8"), /hook\.js[\s\S]*afterMerge/, "the dry run runs under the read-only guard");
         assert.match(f.children[0].args[f.children[0].args.indexOf("--append-system-prompt") + 1], /change nothing in Jira/);
@@ -9630,9 +9618,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
 
     test("agent view: the first button of a prepared review is Publish, of an offer Merge", () => {
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, sessionId: "s" })), "Publish");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, published: true, sessionId: "s" })), "Done");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "merge" })), "Merge");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, sessionId: "s" })), "Send review");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, published: true, sessionId: "s" })), null, "sent: nothing left to do");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "merge" })), "Merge");
     });
 
     // --- stage 5: re-review (threads, escalations) and drive (commits, the app's push) ---
@@ -9759,14 +9747,18 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(policy.planJobs([mine({ ciState: "failure" })], s, noSessions).jobs[0].reasons[0], "ci", "broken comes first: a drive, not a self-review");
     });
 
-    test("agent policy A: your PR an SDLC orchestrator run drives is left alone — no self-review, no drive, no merge offer", () => {
+    test("agent policy A: your PR an SDLC orchestrator run drives is left alone — no self-review, no drive; once ready, only a Merge button", () => {
       const mine = (o = {}) => ({ ...reviewPr({ role: "author" }), ...o });
       const ctx = { ...noSessions, orchestrated: () => "the SDLC orchestrator runs ENG-1 (stage review) — the agent leaves it to it" };
-      for (const pr of [mine(), mine({ ciState: "failure" }), mine({ hasUnaddressedComments: true })]) {
+      for (const pr of [mine({ awaitingReview: true }), mine({ ciState: "failure" }), mine({ hasUnaddressedComments: true, awaitingReview: true })]) {
         const r = policy.planJobs([pr], agentOn(), ctx);
         assert.deepStrictEqual([r.jobs, r.merges], [[], []]);
         assert.strictEqual(r.idle.get("PR_R"), "Yours — the SDLC orchestrator runs ENG-1 (stage review) — the agent leaves it to it");
       }
+      // The run waits for someone to merge: a ready PR gets the offer — no session, the merge on your click.
+      const ready = policy.planJobs([mine()], agentOn(), ctx);
+      assert.deepStrictEqual([ready.jobs.length, ready.merges.map((m) => m.scenario)], [0, ["merge"]]);
+      assert.deepStrictEqual(policy.planJobs([mine()], agentOn({ scenarios: { merge: { mode: "off" } } }), ctx).merges, [], "offers off: none");
       // C: someone else's PR is reviewed whoever drives it.
       assert.strictEqual(policy.planJobs([reviewPr()], agentOn(), ctx).jobs[0].scenario, "review");
     });
@@ -9782,10 +9774,6 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const rules = agentCore.agentRules("drive", "shadow", null, { repo: "a/b", number: 7, reasons: ["self"] });
       assert.match(rules, /self-review of the user's own PR[\s\S]*dryRun: true — it must post nothing/);
       assert.match(agentCore.agentRules("drive", "shadow", null, { repo: "a/b", number: 7, reasons: ["comments"] }), /business, product or design decision/);
-      assert.deepStrictEqual(
-        [view.itemKind({ scenario: "drive", reasons: ["self"] }), view.itemKind({ scenario: "drive", reasons: ["comments"] }), view.itemKind({ scenario: "drive", reasons: ["ci"] }), view.itemKind({ scenario: "rereview" })],
-        ["Self-review", "Comments", "Drive", "Re-review"],
-      );
       assert.strictEqual(view.itemVerb({ scenario: "drive", reasons: ["self"] }), "Self-reviewing");
     });
 
@@ -9820,8 +9808,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(sdlc.orchestratorRunFor(roots, memberPr).key, "ENG-4", "found at the metarepo's home");
     });
 
-    await atest("agent: your PR an orchestrator run published gets no run, says why on the Board, and refuses a hand-over", async () => {
-      const mine = { ...reviewPr({ role: "author" }) };
+    await atest("agent: your PR an orchestrator run published gets no run, says why on the Board, wears its badge, and refuses a hand-over", async () => {
+      const mine = { ...reviewPr({ role: "author" }), awaitingReview: true };
       const f = agentFixture({ pr: mine, script: succeed("done") });
       try {
         // The fixture's checkout carries the orchestrator's state for this very PR.
@@ -9832,6 +9820,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await tickOnce();
         assert.strictEqual(f.children.length, 0);
         assert.match(f.agent.getState().idle[mine.id], /SDLC orchestrator runs ENG-5/);
+        assert.deepStrictEqual(f.agent.getState().orchestrated, { [mine.id]: { key: "ENG-5", stage: "review" } }, "the badge, as data");
         assert.match((await f.agent.act({ type: "enqueue", prId: mine.id })).error, /SDLC orchestrator runs ENG-5/);
       } finally {
         f.agent.stop();
@@ -10060,7 +10049,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await until(() => only(f).some((i) => i.state === "needsYou"));
         const item = only(f)[0];
         assert.deepStrictEqual([item.scenario, item.reasons, item.headline], ["drive", ["ci"], "Would push 2 commits: fix: the failing test"]);
-        assert.strictEqual(view.primaryActionLabel(item), "Push");
+        assert.strictEqual(actionLabel(item), "Push 2 fixes");
         assert.deepStrictEqual(item.drive.commits.map((c) => c.subject), ["fix: the failing test", "test: cover it"].reverse());
         assert.strictEqual(pushes.length, 0, "Shadow pushes nothing by itself");
         const c = f.children[0];
@@ -10165,12 +10154,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
-    test("ipc and view: Push names a run; a drive's first button is Push", () => {
+    test("ipc and view: Push names a run; a drive's one button pushes its fixes", () => {
       const RID = "00000000-0000-4000-8000-000000000001";
       assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "push", runId: RID }), { type: "push", runId: RID });
       const drive = { base: "a".repeat(40), reasons: ["ci"], commits: [{ oid: "b".repeat(40), subject: "fix" }], stat: "", patch: "" };
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", drive, sessionId: "s" })), "Push");
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", drive: { ...drive, commits: [] }, sessionId: "s" })), "Done");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", drive, sessionId: "s" })), "Push 1 fix");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", drive: { ...drive, commits: [] }, sessionId: "s" })), "Open in Claude", "nothing to push: it couldn't");
     });
 
     test("main.js wiring: the agent's state is pulled and acted on over IPC, and pushed only to a visible window", () => {
@@ -10313,7 +10302,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await until(() => only(f).some((i) => i.state === "needsYou"));
         assert.strictEqual(posted.length, 0, "paused, nothing goes out on its own");
         assert.match(only(f)[0].headline, /^Would post: .* — held: the agent is paused$/);
-        assert.strictEqual(view.primaryActionLabel(only(f)[0]), "Publish");
+        assert.strictEqual(actionLabel(only(f)[0]), "Send review");
       } finally {
         f.agent.stop();
       }
@@ -10531,7 +10520,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await until(() => only(f).some((i) => i.state === "needsYou"));
         const item = only(f)[0];
         assert.deepStrictEqual([item.result.summary, item.result.asks[0].question, item.output], ["One finding is a product decision.", "Make the threshold configurable?", "Prose."]);
-        assert.strictEqual(view.primaryActionLabel(item), "Answer");
+        assert.strictEqual(actionLabel(item), "Your call");
         nfsA.mkdirSync(item.worktree, { recursive: true });
         assert.deepStrictEqual(await f.agent.act({ type: "answer", runId: item.runId, text: "Q: Make the threshold configurable?\nA: No" }), { ok: true });
         await until(() => f.children.length === 2);
@@ -10563,7 +10552,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // A result stored before the rule reads the same way.
       const old = agentResult.resultCard({ scenario: "rereview", result: { summary: "s", asks: [{ question: "Keep it?", options: [] }], findings: [], structured: true } });
       assert.deepStrictEqual([old.asks, old.authorQuestions], [[], ["Keep it?"]]);
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "needsYou", scenario: "brief", output: "b", result: { summary: "s", asks: [], findings: [], authorQuestions: ["q"], structured: true } })), "Review anyway");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "brief", output: "b", result: { summary: "s", asks: [], findings: [], authorQuestions: ["q"], structured: true } })), "Draft a review");
     });
 
     await atest("agent brief: Review anyway carries the brief's questions for the author into the review it drafts", async () => {
@@ -10858,7 +10847,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual([view.agentSummary({ ...base, paused: true }).block, view.agentSummary({ ...base, quietUntil: "08:00" }).blockText], ["paused", "Quiet hours until 08:00"]);
       assert.strictEqual(view.agentSummary({ ...base, runsToday: 30 }).blockText, "Daily limit reached (30)");
       assert.deepStrictEqual([view.stepLabel([]), view.stepLabel([{ status: "completed" }, { status: "pending" }]), view.stepLabel([{ status: "completed" }])], ["", "2/2", "1/1"]);
-      assert.strictEqual(view.primaryActionLabel(vItem({ prId: "P", state: "error", scenario: "afterMerge" })), "Done", "the Jira run after a merge can't run again");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "error", scenario: "afterMerge" })), null, "the Jira run after a merge can't run again: a note");
     });
 
     test("main.js wiring: a clicked agent notification names its item; the focus flash is a finite animation", () => {

@@ -3,12 +3,10 @@ import type { PlanStep } from "./agent-stream";
 import { isReviewDue } from "./pr-filter";
 import type { AgentItem, AgentRunState, AgentSettings, AgentState, PullRequest } from "./types";
 
-// How the agent's state reads on the dashboard: which of a PR's items its card
-// shows, and how the Board lays the PRs out. Node-free (the renderer
-// value-imports it) and pure, so the rules are unit-tested without a DOM.
-
-/** The order a card prefers a PR's items in: what is happening, then what waits for you. */
-const RANK: Record<AgentItem["state"], number> = { working: 0, needsYou: 1, error: 2, queued: 3, done: 4 };
+// How the agent's state reads on the dashboard: where each PR stands on the
+// Board and what its card, the chip, the tray and a notification say about
+// it. Node-free (the renderer value-imports it) and pure, so the rules are
+// unit-tested without a DOM.
 
 /**
  * The headlines main gives an item it closes as housekeeping — the PR no longer
@@ -33,23 +31,6 @@ function isQuiet(item: AgentItem): boolean {
   return item.state === "done" && CLOSED_HEADLINES.has(item.headline);
 }
 
-/** The item a PR's card shows, or null. Done items count only on the day they finished. */
-export function itemForPr(items: readonly AgentItem[], prId: string, today: string): AgentItem | null {
-  let best: AgentItem | null = null;
-  for (const item of items) {
-    if (item.prId !== prId || isQuiet(item)) continue;
-    if (item.state === "done" && !finishedOn(item, today)) continue;
-    if (
-      !best ||
-      RANK[item.state] < RANK[best.state] ||
-      (RANK[item.state] === RANK[best.state] && (item.finishedAt ?? item.queuedAt) > (best.finishedAt ?? best.queuedAt))
-    ) {
-      best = item;
-    }
-  }
-  return best;
-}
-
 export function runFor(state: Pick<AgentState, "running">, runId: string): AgentRunState | null {
   return state.running.find((r) => r.runId === runId) ?? null;
 }
@@ -70,38 +51,7 @@ export function finishedOn(item: Pick<AgentItem, "finishedAt">, today: string): 
   return !Number.isNaN(at.getTime()) && todayKey(at) === today;
 }
 
-/** What a needs-you item asks of you, as the words of its first button. */
-export function primaryActionLabel(item: AgentItem): string | null {
-  // The Jira dry run follows a merge: its PR is gone, so it can't run again — only be put away.
-  if (item.state === "error") return item.scenario === "afterMerge" ? "Done" : "Run again";
-  if (item.state !== "needsYou") return null;
-  // A drive starts over: its push is checked against what the app read
-  // before any session worked in that worktree.
-  if (item.interrupted) return item.scenario === "drive" || !item.sessionId ? "Run again" : "Resume";
-  if (item.scenario === "merge") return "Merge";
-  if (item.scenario === "drive" && item.drive && item.drive.commits.length > 0 && !item.pushed) return "Push";
-  if (item.plan && !item.published) return "Publish";
-  if (item.scenario === "brief" && item.output) return "Review anyway";
-  if (item.scenario === "afterMerge" && item.sessionId) return "Apply in session";
-  // A question waits: the card's answer box is the way on.
-  if ((item.result?.asks.length ?? 0) > 0) return "Answer";
-  // Nothing left for you: acknowledge it and it moves to Done today.
-  return "Done";
-}
-
-/**
- * An item's kind as the Board's chip says it: a run on your PR is a
- * self-review, an answer to reviewers' comments, or a drive (CI, a conflict).
- */
-export function itemKind(item: Pick<AgentItem, "scenario" | "reasons">): string {
-  if (item.scenario !== "drive") return SCENARIO_CHIP[item.scenario];
-  const r = item.reasons ?? [];
-  if (r.includes("self")) return "Self-review";
-  if (r.length > 0 && r.every((x) => x === "comments")) return "Comments";
-  return "Drive";
-}
-
-/** …and what it is doing, as the chip and the tray say it — "Drafting review #911", "Fixing CI on #142". */
+/** What a run is doing, as the chip and the tray say it — "Drafting review #911", "Fixing CI on #142". */
 export function itemVerb(item: Pick<AgentItem, "scenario" | "reasons">): string {
   if (item.scenario !== "drive") return SCENARIO_VERB[item.scenario];
   const r = item.reasons ?? [];
@@ -109,15 +59,6 @@ export function itemVerb(item: Pick<AgentItem, "scenario" | "reasons">): string 
   if (r.length === 1) return { comments: "Answering reviewers on", ci: "Fixing CI on", conflicts: "Resolving the conflict on" }[r[0]] ?? "Fixing";
   return "Fixing";
 }
-
-const SCENARIO_CHIP: Record<AgentItem["scenario"], string> = {
-  review: "Review",
-  brief: "Brief",
-  rereview: "Re-review",
-  drive: "Drive",
-  merge: "Merge",
-  afterMerge: "Jira",
-};
 
 /** What a run of each scenario is doing, as the chip and the tray say it. */
 export const SCENARIO_VERB: Record<AgentItem["scenario"], string> = {
@@ -680,7 +621,8 @@ export function workLine(item: Pick<AgentItem, "scenario" | "reasons">): string 
 export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
   const item = stage.item;
   if (stage.column === "agent") {
-    if (item) return workLine(item);
+    // On the agent only while a run of its is live; else an SDLC run has the PR.
+    if (item && (item.state === "working" || item.state === "queued")) return workLine(item);
     return "The SDLC run is on it";
   }
   const kind = stage.action?.kind;

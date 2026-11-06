@@ -141,13 +141,19 @@ Three layers:
   refusal that says so) and the PR agent's five: `agent-defaults.ts`
   (the Agent tab's defaults and bounds), `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
-  skill Workflow's phases — and current activity), `agent-view.ts` (which of
-  a PR's agent items its card, Cozy cell and tile show, the Board's columns,
-  the *local* day "Done today" and the daily run limit count on, quiet hours
-  (`quietUntil`, a span that may wrap past midnight), the tray's one line, and
-  which regular toasts the agent stands in for — `agentTakesToast`: a trigger
-  it took in On; `main.ts` hands it the snapshot before deciding the toasts) and
-  `agent-result.ts` (what a run's final message means for the Needs-you card:
+  skill Workflow's phases — and current activity), `agent-view.ts` (where a
+  PR stands — `boardStage`: the column is whose move it is, the agent's
+  (queued, working), yours (a move it prepared: Send review, Push N fixes,
+  Your call, Merge, Draft a review, a run that failed — or GitHub's say-so with
+  the agent not on it), the people you wait on, or done today; a run that asks
+  nothing, stopped or taken over, is a note on its card — and the words every
+  surface says it in: a card's line, the Cozy cell and tile, "ready for you"
+  (`readyItems`) on the chip and the tray, a notification's title; the *local*
+  day "Done today" and the daily run limit count on, quiet hours
+  (`quietUntil`, a span that may wrap past midnight), and which regular toasts
+  the agent stands in for — `agentTakesToast`: a trigger it took in On;
+  `main.ts` hands it the snapshot before deciding the toasts) and
+  `agent-result.ts` (what a run's final message means for its Your-move card:
   every session is told to end with a fenced `prd-result` JSON block — one
   summary sentence, the questions only you can answer, findings by severity —
   read here and held to its shapes; a message without it gets its first real

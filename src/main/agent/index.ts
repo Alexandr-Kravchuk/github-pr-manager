@@ -47,7 +47,7 @@ import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { openStore, type AgentItemRecord, type AgentStore, type LedgerEntry } from "./store";
-import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor } from "./sdlc";
+import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor, type OrchestratorRun } from "./sdlc";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
 
 // The PR agent's core in the main process. It reads each dashboard snapshot,
@@ -405,10 +405,15 @@ export function createAgent(deps: AgentDeps): Agent {
 
   /** Your PR an SDLC orchestrator run drives: why the agent leaves it alone, or null. */
   function orchestrated(pr: PullRequest, claude: ClaudeSettings | undefined): string | null {
-    if (!claude) return null;
-    const run = orchestratorRunFor(orchestratorRoots(deps.findCheckout(pr, claude), claude), pr.url);
+    const run = orchestratorRun(pr, claude);
     return run ? describeOrchestratorRun(run) : null;
   }
+  function orchestratorRun(pr: PullRequest, claude: ClaudeSettings | undefined): OrchestratorRun | null {
+    if (!claude) return null;
+    return orchestratorRunFor(orchestratorRoots(deps.findCheckout(pr, claude), claude), pr.url);
+  }
+  /** The badges of the last plan: your PRs an SDLC run drives. */
+  let sdlcBadges: Record<string, { key: string; stage: string | null }> = {};
 
   /** A newer run on a PR replaces what waited there in its lane: an older review, an older drive. */
   function supersede(fresh: AgentItemRecord): void {
@@ -542,6 +547,7 @@ export function createAgent(deps: AgentDeps): Agent {
     closeGone(snapshot, s);
     if (!s?.enabled) {
       idle = Object.fromEntries(snapshot.pullRequests.map((p) => [p.id, "The agent is off"]));
+      sdlcBadges = {};
       stopRunsForOff();
       return;
     }
@@ -562,6 +568,7 @@ export function createAgent(deps: AgentDeps): Agent {
       }
     }
     const claudeSettings = loadAll()?.claude;
+    const badges: Record<string, { key: string; stage: string | null }> = {};
     const plan = planJobs(snapshot.pullRequests, s, {
       hasOwnSession: (pr) => sessionsForPr(pr, sessions).length > 0,
       driveExhausted: (pr) => {
@@ -569,8 +576,14 @@ export function createAgent(deps: AgentDeps): Agent {
         return d && d.attempts >= s.scenarios.driveCi.maxAttempts ? `Yours — the agent tried ${d.attempts} time${d.attempts === 1 ? "" : "s"}; over to you` : null;
       },
       selfReviewed: (pr) => Boolean(store.data.ledger[jobKey(pr, "drive", "self")]) || (pr.headOid !== null && store.data.pushedHeads[pr.id] === pr.headOid),
-      orchestrated: (pr) => orchestrated(pr, claudeSettings),
+      orchestrated: (pr) => {
+        const run = orchestratorRun(pr, claudeSettings);
+        if (!run) return null;
+        badges[pr.id] = { key: run.key, stage: run.stage ? run.stage.replace(/_/g, " ") : null };
+        return describeOrchestratorRun(run);
+      },
     });
+    sdlcBadges = badges;
     idle = Object.fromEntries(plan.idle);
     sweepWorktrees();
     const byId = new Map(snapshot.pullRequests.map((p) => [p.id, p]));
@@ -1553,6 +1566,7 @@ export function createAgent(deps: AgentDeps): Agent {
         quietUntil: s ? quietUntil(now(), s.limits.quietHours) : null,
         acceptedUnchanged: store.data.acceptedUnchanged,
         suggestOn: s?.scenarios.review.mode === "shadow" && store.data.acceptedUnchanged >= s.limits.promoteAfter,
+        orchestrated: sdlcBadges,
       };
     },
     ownSessionIds: () => new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!)),

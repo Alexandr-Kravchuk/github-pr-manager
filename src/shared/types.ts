@@ -932,6 +932,11 @@ export interface AgentState {
   acceptedUnchanged: number;
   /** Reviews are in Shadow and you've published enough of them unchanged to consider On. */
   suggestOn: boolean;
+  /**
+   * Your PRs an SDLC orchestrator run drives, by PR id: its Jira key and the
+   * stage it is at — the badge their cards wear instead of the agent's work.
+   */
+  orchestrated?: Record<string, { key: string; stage: string | null }>;
 }
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
