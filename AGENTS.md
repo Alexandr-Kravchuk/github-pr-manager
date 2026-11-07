@@ -107,7 +107,11 @@ Three layers:
   searches the wrong code. Each
   prompt starts with `groupMarker(kind, key)`: the session scanner records it
   as the session's `groups` instead of binding the session to every PR it
-  lists — also once Desktop pauses it, through `groupsSeen` — and the
+  lists (a marker line counts even with no PR link, since a custom template
+  need not list any; and a group session never holds a card through its
+  folder's branch) — also once Desktop pauses it, through `groupsSeen`, which
+  is kept in `userData/claude-group-sessions.json` so a dashboard restart
+  does not hand a paused group session every PR Desktop bound to it — and the
   heading's button then shows that session's status in its kind's words
   (`GROUP_STATUS_TEXT`) and switches to it, like a card's button),
   `claude-sessions.ts` (which running Claude Code session works on which PR:

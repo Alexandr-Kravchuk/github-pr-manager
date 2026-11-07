@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { normalizeRemote, type GroupLaunchKind } from "../shared/claude-launch";
+import { JIRA_KEY_RE, normalizeRemote, type GroupLaunchKind } from "../shared/claude-launch";
 import { claudeDesktopSessionUrl, focusTtyScript, promptLinks, prUrlKey } from "../shared/claude-sessions";
 import type { ClaudeSessionInfo, FocusClaudeSessionResult } from "../shared/types";
 import { expandHome, parseRemoteUrls } from "./claude-launch";
@@ -382,6 +382,12 @@ export function createClaudeSessionScanner(
     desktopDir?: string;
     isAlive?: (pid: number) => boolean;
     now?: () => number;
+    /**
+     * Where the group sessions seen are kept across app runs (a function, so
+     * main can ask Electron for its userData folder only once a scan runs).
+     * Without it they live for this app run only.
+     */
+    groupsFile?: () => string;
   } = {},
 ) {
   const alive = opts.isAlive ?? isAlive;
@@ -391,15 +397,56 @@ export function createClaudeSessionScanner(
   /** Paused Desktop sessions of the last scan: session id → Desktop's id. */
   let paused = new Map<string, string>();
   /**
-   * The group launches of every group session seen running this app run, by
-   * session id. A transcript's state goes when its process does, but Desktop
-   * pauses an idle session — and a finished overview is idle — so without
-   * this a paused one would leave its group heading.
+   * The group launches of every group session seen running, by session id. A
+   * transcript's state goes when its process does, but Desktop pauses an idle
+   * session — and a finished overview is idle — so without this a paused one
+   * would leave its group heading. Kept in `groupsFile` too: after a restart a
+   * paused group session would otherwise be listed by the PRs Desktop bound to
+   * it, holding every card of its group for as long as Desktop keeps it.
    */
-  const groupsSeen = new Map<string, Array<{ kind: GroupLaunchKind; key: string }>>();
+  let groupsSeen: Map<string, Array<{ kind: GroupLaunchKind; key: string }>> | null = null;
+  let groupsJson = "";
+  function loadGroupsSeen(): Map<string, Array<{ kind: GroupLaunchKind; key: string }>> {
+    if (groupsSeen) return groupsSeen;
+    groupsSeen = new Map();
+    try {
+      const raw: unknown = opts.groupsFile ? JSON.parse(fs.readFileSync(opts.groupsFile(), "utf8")) : null;
+      if (raw && typeof raw === "object") {
+        for (const [id, list] of Object.entries(raw as Record<string, unknown>)) {
+          if (!SESSION_ID_RE.test(id) || !Array.isArray(list)) continue;
+          const groups = list.filter(
+            (g): g is { kind: GroupLaunchKind; key: string } =>
+              !!g &&
+              typeof g === "object" &&
+              (g.kind === "explain" || g.kind === "review") &&
+              typeof g.key === "string" &&
+              JIRA_KEY_RE.test(g.key),
+          );
+          if (groups.length > 0) groupsSeen.set(id, groups);
+        }
+      }
+    } catch {
+      // Missing or unreadable — start empty; the next save rewrites it.
+    }
+    groupsJson = JSON.stringify(Object.fromEntries(groupsSeen));
+    return groupsSeen;
+  }
+  /** Writes `groupsSeen` when it changed, keeping only sessions that still exist. */
+  function saveGroupsSeen(seen: Map<string, unknown>, keep: Set<string>): void {
+    for (const id of [...seen.keys()]) if (!keep.has(id)) seen.delete(id);
+    const json = JSON.stringify(Object.fromEntries(seen));
+    if (json === groupsJson || !opts.groupsFile) return;
+    groupsJson = json;
+    try {
+      fs.writeFileSync(opts.groupsFile(), json);
+    } catch {
+      // Best effort: the heading still works for this app run.
+    }
+  }
   let inFlight: Promise<ClaudeSessionInfo[]> | null = null;
 
   async function scanOnce(): Promise<ClaudeSessionInfo[]> {
+    const seen = loadGroupsSeen();
     const configDir = opts.configDir ?? claudeConfigDir();
     const registryDir = path.join(configDir, "sessions");
     let files: string[];
@@ -447,8 +494,8 @@ export function createClaudeSessionScanner(
       if (!state.file) state.file = findTranscript(projectsDir, entry);
       await readTranscript(state);
       const git = gitInfo(entry.cwd);
-      if (state.groups.size > 0) groupsSeen.set(entry.sessionId, [...state.groups.values()]);
-      const groups = groupsSeen.get(entry.sessionId);
+      if (state.groups.size > 0) seen.set(entry.sessionId, [...state.groups.values()]);
+      const groups = seen.get(entry.sessionId);
       // A routine's run touches many PRs; it counts only by what it was sent.
       // A group session holds none of the PRs it lists, whatever Desktop bound.
       const desktopPrs = record && !record.scheduled && !groups ? record.prKeys : [];
@@ -475,7 +522,7 @@ export function createClaudeSessionScanner(
       if (r.isArchived || r.scheduled || liveHosts.has(r.sessionId)) continue;
       const id = r.cliSessionId ?? r.sessionId.slice("local_".length);
       if (!SESSION_ID_RE.test(id) || live.has(id)) continue;
-      const groups = groupsSeen.get(id);
+      const groups = seen.get(id);
       if (!groups && r.prKeys.length === 0) continue;
       nextPaused.set(id, r.sessionId);
       const info: ClaudeSessionInfo = {
@@ -492,6 +539,10 @@ export function createClaudeSessionScanner(
       sessions.push(info);
     }
     paused = nextPaused;
+    // Desktop lists the last 14 days of sessions; one gone from both lists is gone.
+    const keep = new Set<string>(live.keys());
+    for (const r of records) keep.add(r.cliSessionId ?? r.sessionId.slice("local_".length));
+    saveGroupsSeen(seen, keep);
     return sessions.sort((a, b) => a.id.localeCompare(b.id));
   }
 

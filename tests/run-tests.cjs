@@ -7590,6 +7590,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
       const custom = cl.renderGroupPrompt({ explainGroup: "/overview {key} {urls}" }, "explain", "ENG-1", prs);
       assert.strictEqual(custom, "[PR Dashboard overview of ENG-1] /overview ENG-1 https://github.com/a/b/pull/1 https://github.com/a/b/pull/2");
+      // MAX_GROUP_PRS exists for cmd.exe's 8191-character command line: a full
+      // group of long GHE links behind the longest key must still fit, with
+      // room for `cmd /c start "" /D "<dir>" cmd /k claude "…"` around it.
+      const full = Array.from({ length: cl.MAX_GROUP_PRS }, (_, i) => ({
+        url: `https://creatio.ghe.com/engineering/creatio-playwright-testkit-extended/pull/${100000 + i}`,
+      }));
+      const longest = cl.renderGroupPrompt({}, "explain", "ENG-123456789", full);
+      assert.ok(longest.length + 400 < 8191, `a ${cl.MAX_GROUP_PRS}-PR overview is ${longest.length} characters`);
       const c = cfg.validateClaude({});
       assert.strictEqual(c.prompts.explainGroup, cl.DEFAULT_CLAUDE_PROMPTS.explainGroup);
       assert.strictEqual(c.prompts.reviewGroup, cl.DEFAULT_CLAUDE_PROMPTS.reviewGroup);
@@ -7629,6 +7637,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       try {
         const prs = [at("acme/core", 1), at("acme/ui", 2), at("acme/ui", 3)];
         assert.strictEqual(launcher.overviewCheckout(prs, settings), path.join(root, "ui"));
+        const asked = [];
+        launcher.overviewCheckout(prs, settings, (pr, s) => { asked.push(pr.repo); return launcher.findCheckout(pr, s); });
+        assert.deepStrictEqual(asked, ["acme/ui"], "the lookup is asked per repository, majority first, until one is found");
         assert.strictEqual(
           launcher.overviewCheckout([at("acme/none", 1), at("acme/none", 2), at("acme/core", 3)], settings),
           path.join(root, "core"),
@@ -7701,6 +7712,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(cs.promptPrKeys(promptLine(explain)), []);
       assert.deepStrictEqual(cs.promptLinks(promptLine(explain)), { prKeys: [], group: { kind: "explain", key: "ENG-1" } });
       assert.deepStrictEqual(cs.promptLinks(promptLine(review)), { prKeys: [], group: { kind: "review", key: "ENG-1" } });
+      const noLinks = cl.renderGroupPrompt({ explainGroup: "/my-overview {key}" }, "explain", "ENG-1", urls);
+      assert.ok(!noLinks.includes("/pull/"), noLinks);
+      assert.deepStrictEqual(
+        cs.promptLinks(promptLine(noLinks)),
+        { prKeys: [], group: { kind: "explain", key: "ENG-1" } },
+        "a custom template with no PR links still names its group",
+      );
       assert.deepStrictEqual(cs.promptPrKeys(promptLine(`now fix https://github.com/a/b/pull/1`)), ["github.com/a/b/pull/1"], "a later prompt in it still counts");
       const quoted = JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", content: explain }] }, origin: { kind: "human" } });
       assert.deepStrictEqual(cs.promptLinks(quoted), { prKeys: [], group: null }, "a quoted group prompt starts nothing");
@@ -7717,6 +7735,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(cs.sessionsForGroup("ENG-1", list).map((x) => x.id), ["wait", "idle"]);
       assert.deepStrictEqual(cs.sessionsForGroup("ENG-3", list), []);
       assert.strictEqual(cs.groupKindOf(list[0], "ENG-1"), "explain");
+      const onBranch = { id: "g", name: "g", status: "busy", where: "desktop", prKeys: [], repoKeys: ["github.com/acme/widgets"], branch: "feature/x" };
+      const pr = { url: "https://github.com/acme/widgets/pull/7", repo: "acme/widgets", headRefName: "feature/x" };
+      assert.deepStrictEqual(cs.sessionsForPr(pr, [onBranch]).map((x) => x.id), ["g"], "a plain session on the PR's branch holds it");
+      assert.deepStrictEqual(
+        cs.sessionsForPr(pr, [{ ...onBranch, groups: [{ kind: "review", key: "ENG-1" }] }]),
+        [],
+        "a group session in a checkout on one of its PRs' branches holds none of them",
+      );
       assert.strictEqual(cs.groupKindOf(list[2], "ENG-1"), "review");
       // A heading's words are its kind's, not the card's: "Needs you" there
       // would read as "these reviews need you".
@@ -8053,6 +8079,53 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         [ov] = await sc.scan();
         assert.deepStrictEqual({ status: ov.status, groups: ov.groups, prKeys: ov.prKeys }, { status: "paused", groups: [{ kind: "review", key: "ENG-9" }], prKeys: [] }, "nor a paused one");
         assert.deepStrictEqual(cs.sessionsForGroup("ENG-9", [ov]).map((x) => x.id), [SID]);
+      } finally {
+        nfs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // The dashboard restarts (an update, a reboot) while a group session is
+    // paused: the session must come back under its heading, not bound to every
+    // PR Desktop recorded for it.
+    await atest("claude sessions: a paused group session survives a dashboard restart", async () => {
+      const root = nfs.mkdtempSync(path.join(os.tmpdir(), "prd-restart-"));
+      try {
+        const configDir = path.join(root, "claude");
+        const desktopDir = path.join(root, "desktop");
+        const org = path.join(desktopDir, "claude-code-sessions", "acct", "org");
+        nfs.mkdirSync(org, { recursive: true });
+        nfs.mkdirSync(path.join(configDir, "sessions"), { recursive: true });
+        const groupsFile = path.join(root, "claude-group-sessions.json");
+        const pr7 = "https://github.com/acme/widgets/pull/7";
+        nfs.writeFileSync(path.join(org, "local_ov.json"), JSON.stringify({ sessionId: "local_ov", cliSessionId: SID, isArchived: false, title: "Review", prs: [{ url: pr7 }] }));
+        nfs.writeFileSync(path.join(configDir, "sessions", "401.json"), JSON.stringify({
+          pid: 401, sessionId: SID, cwd: root, entrypoint: "claude-desktop", hostSessionId: "local_ov", status: "idle",
+        }));
+        const tdir = path.join(configDir, "projects", scanner.projectDirName(root));
+        nfs.mkdirSync(tdir, { recursive: true });
+        const cl = require(path.join(__dirname, "../dist/main/shared/claude-launch.js"));
+        nfs.writeFileSync(path.join(tdir, `${SID}.jsonl`), promptLine(cl.renderGroupPrompt({}, "review", "ENG-9", [{ url: pr7 }])) + "\n");
+
+        await scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => true, groupsFile: () => groupsFile }).scan();
+        assert.deepStrictEqual(JSON.parse(nfs.readFileSync(groupsFile, "utf8")), { [SID]: [{ kind: "review", key: "ENG-9" }] });
+
+        // A new app run, the session paused meanwhile.
+        const [ov] = await scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => false, groupsFile: () => groupsFile }).scan();
+        assert.deepStrictEqual(
+          { status: ov.status, groups: ov.groups, prKeys: ov.prKeys },
+          { status: "paused", groups: [{ kind: "review", key: "ENG-9" }], prKeys: [] },
+        );
+
+        // Archived in Desktop: gone from the file on the next save.
+        nfs.writeFileSync(path.join(org, "local_ov.json"), JSON.stringify({ sessionId: "local_ov", cliSessionId: SID, isArchived: true, title: "Review" }));
+        nfs.writeFileSync(path.join(org, "local_other.json"), JSON.stringify({ sessionId: "local_other", cliSessionId: SID2, isArchived: false, title: "Other", prs: [{ url: pr7 }] }));
+        nfs.rmSync(path.join(org, "local_ov.json"));
+        await scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => false, groupsFile: () => groupsFile }).scan();
+        assert.deepStrictEqual(JSON.parse(nfs.readFileSync(groupsFile, "utf8")), {}, "a session Desktop no longer lists is dropped");
+
+        nfs.writeFileSync(groupsFile, "{not json");
+        const list = await scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => false, groupsFile: () => groupsFile }).scan();
+        assert.ok(Array.isArray(list), "a broken file starts empty instead of failing the scan");
       } finally {
         nfs.rmSync(root, { recursive: true, force: true });
       }

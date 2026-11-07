@@ -216,6 +216,7 @@ export async function launchClaude(
 export function overviewCheckout(
   prs: readonly Pick<PullRequest, "url" | "repo">[],
   settings: Pick<ClaudeSettings, "projectsRoot" | "repoPaths">,
+  find: typeof findCheckout = findCheckout,
 ): string | null {
   const byRepo = new Map<string, { pr: Pick<PullRequest, "url" | "repo">; count: number }>();
   for (const pr of prs) {
@@ -226,7 +227,7 @@ export function overviewCheckout(
   }
   // A stable sort keeps first-listed order among equal counts.
   for (const { pr } of [...byRepo.values()].sort((a, b) => b.count - a.count)) {
-    const dir = findCheckout(pr, settings);
+    const dir = find(pr, settings);
     if (dir) return dir;
   }
   return null;
@@ -263,7 +264,15 @@ export async function launchGroup(
           : "None of these PRs waits for your review any more.",
     };
   }
-  const dir = overviewCheckout(prs, settings);
+  // One projects-root scan per repository, not one per PR: up to 30 PRs, and
+  // each scan reads every subfolder's .git/config on the main process.
+  const checkouts = new Map<string, string | null>();
+  const find: typeof findCheckout = (pr, s) => {
+    const repoKey = prRemoteKey(pr) ?? pr.repo;
+    if (!checkouts.has(repoKey)) checkouts.set(repoKey, findCheckout(pr, s));
+    return checkouts.get(repoKey) ?? null;
+  };
+  const dir = overviewCheckout(prs, settings, find);
   if (!dir) {
     const repos = [...new Set(prs.map((p) => p.repo))].join(", ");
     return {
@@ -276,7 +285,7 @@ export async function launchGroup(
   const folders =
     kind === "review"
       ? prs.map((pr) => {
-          const own = findCheckout(pr, settings);
+          const own = find(pr, settings);
           return own && own !== dir ? own : null;
         })
       : [];

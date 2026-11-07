@@ -365,7 +365,9 @@ function applyPreferences(settings: Settings): void {
 // pulls the list again when it is shown.
 
 const CLAUDE_SESSIONS_INTERVAL_MS = 5_000;
-const claudeSessionScanner = createClaudeSessionScanner();
+const claudeSessionScanner = createClaudeSessionScanner({
+  groupsFile: () => path.join(app.getPath("userData"), "claude-group-sessions.json"),
+});
 let claudeSessionsOn = false;
 let claudeSessions: ClaudeSessionInfo[] = [];
 let claudeSessionsJson = "[]";

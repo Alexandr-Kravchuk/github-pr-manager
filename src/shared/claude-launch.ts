@@ -92,12 +92,20 @@ export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
  * hand each of those cards' Claude button to it.
  */
 export function groupMarker(kind: GroupLaunchKind, key: string): string {
-  return `[PR Dashboard ${kind === "explain" ? "overview" : "review"} of ${key}]`;
+  return `${GROUP_MARKER_PREFIX}${kind === "explain" ? "overview" : "review"} of ${key}]`;
 }
+
+/** How every `groupMarker` starts — what the scanner's cheap pre-filter looks for. */
+export const GROUP_MARKER_PREFIX = "[PR Dashboard ";
+
+/** A Jira issue key, unanchored: the one pattern `JIRA_KEY_RE` and the marker parser share. */
+const JIRA_KEY_PATTERN = "[A-Z][A-Z0-9_]{0,19}-\\d{1,9}";
+
+const GROUP_MARKER_RE = new RegExp(`\\[PR Dashboard (overview|review) of (${JIRA_KEY_PATTERN})\\]`);
 
 /** The kind and Jira key in a prompt's `groupMarker`, or null when the prompt has none. */
 export function groupMarkerOf(text: string): { kind: GroupLaunchKind; key: string } | null {
-  const m = /\[PR Dashboard (overview|review) of ([A-Z][A-Z0-9_]{0,19}-\d{1,9})\]/.exec(text);
+  const m = GROUP_MARKER_RE.exec(text);
   return m ? { kind: m[1] === "overview" ? "explain" : "review", key: m[2] } : null;
 }
 
@@ -138,7 +146,7 @@ export function renderGroupPrompt(
 }
 
 /** A Jira issue key — the only group key a group launch accepts, since it reaches the shell. */
-export const JIRA_KEY_RE = /^[A-Z][A-Z0-9_]{0,19}-\d{1,9}$/;
+export const JIRA_KEY_RE = new RegExp(`^${JIRA_KEY_PATTERN}$`);
 
 /**
  * The PRs a group launch takes, or null when the heading offers it none. Only

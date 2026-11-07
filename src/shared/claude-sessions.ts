@@ -1,4 +1,4 @@
-import { appleScriptString, groupMarkerOf, prRemoteKey, type GroupLaunchKind } from "./claude-launch";
+import { GROUP_MARKER_PREFIX, appleScriptString, groupMarkerOf, prRemoteKey, type GroupLaunchKind } from "./claude-launch";
 import type { ClaudeSessionInfo, PullRequest } from "./types";
 
 // Which running Claude Code session works on which PR, and what the card says
@@ -45,8 +45,9 @@ export function promptLinks(line: string): {
   group: { kind: GroupLaunchKind; key: string } | null;
 } {
   const none = { prKeys: [], group: null };
-  // Most lines are tool traffic megabytes long — skip them before parsing.
-  if (!line.includes('"type":"user"') || !line.includes("/pull/")) return none;
+  // Most lines are tool traffic megabytes long — skip them before parsing. A
+  // group prompt counts without a PR link: a custom template need not list any.
+  if (!line.includes('"type":"user"') || (!line.includes("/pull/") && !line.includes(GROUP_MARKER_PREFIX))) return none;
   let entry: unknown;
   try {
     entry = JSON.parse(line);
@@ -86,7 +87,9 @@ const STATUS_RANK: Record<ClaudeSessionInfo["status"], number> = { waiting: 0, b
  * counts when the user sent it the PR's link or Claude Desktop bound the PR to
  * it, or when its folder is a checkout of the PR's repository on the PR's head
  * branch — the last catches a session started from a Jira key that later
- * opened the PR.
+ * opened the PR. A group session never counts by its branch: it runs in a
+ * shared checkout that may well sit on one of its PRs' branches, and it works
+ * on none of them.
  */
 export function sessionsForPr(
   pr: Pick<PullRequest, "url" | "repo" | "headRefName">,
@@ -98,7 +101,11 @@ export function sessionsForPr(
     .filter(
       (s) =>
         (key !== null && s.prKeys.includes(key)) ||
-        (repo !== null && s.branch !== null && s.branch === pr.headRefName && s.repoKeys.includes(repo)),
+        (repo !== null &&
+          !s.groups?.length &&
+          s.branch !== null &&
+          s.branch === pr.headRefName &&
+          s.repoKeys.includes(repo)),
     )
     .sort(bySessionNeed);
 }
