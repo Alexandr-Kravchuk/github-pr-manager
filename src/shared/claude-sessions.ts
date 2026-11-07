@@ -1,4 +1,4 @@
-import { appleScriptString, prRemoteKey } from "./claude-launch";
+import { GROUP_MARKER_PREFIX, appleScriptString, groupMarkerOf, prRemoteKey, type GroupLaunchKind } from "./claude-launch";
 import type { ClaudeSessionInfo, PullRequest } from "./types";
 
 // Which running Claude Code session works on which PR, and what the card says
@@ -30,38 +30,52 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * The PR keys in one transcript line, when the line is a prompt the user sent;
- * empty for anything else. Tool results, skill bodies (`isMeta`), subagent
+ * What one transcript line binds the session to, when the line is a prompt
+ * the user sent; nothing for anything else. Tool results, skill bodies (`isMeta`), subagent
  * turns, messages from other sessions (`origin.kind` "peer") and task
  * notifications quote PR links the user never asked this session about — a
  * routine's report alone lists dozens. Transcripts written before Claude Code
  * recorded `origin` are judged by the content alone. System reminders the app
- * adds to a prompt are dropped too, for the same reason.
+ * adds to a prompt are dropped too, for the same reason. A prompt a group
+ * heading started (`groupMarker`) gives its kind and Jira key instead of PR
+ * keys: it lists every PR of the group but works on none of them itself.
  */
-export function promptPrKeys(line: string): string[] {
-  // Most lines are tool traffic megabytes long — skip them before parsing.
-  if (!line.includes('"type":"user"') || !line.includes("/pull/")) return [];
+export function promptLinks(line: string): {
+  prKeys: string[];
+  group: { kind: GroupLaunchKind; key: string } | null;
+} {
+  const none = { prKeys: [], group: null };
+  // Most lines are tool traffic megabytes long — skip them before parsing. A
+  // group prompt counts without a PR link: a custom template need not list any.
+  if (!line.includes('"type":"user"') || (!line.includes("/pull/") && !line.includes(GROUP_MARKER_PREFIX))) return none;
   let entry: unknown;
   try {
     entry = JSON.parse(line);
   } catch {
-    return [];
+    return none;
   }
-  if (!isRecord(entry) || entry.type !== "user" || entry.isMeta === true || entry.isSidechain === true) return [];
-  if (isRecord(entry.origin) && entry.origin.kind !== "human") return [];
+  if (!isRecord(entry) || entry.type !== "user" || entry.isMeta === true || entry.isSidechain === true) return none;
+  if (isRecord(entry.origin) && entry.origin.kind !== "human") return none;
   const message = entry.message;
-  if (!isRecord(message) || message.role !== "user") return [];
+  if (!isRecord(message) || message.role !== "user") return none;
   const texts: string[] = [];
   if (typeof message.content === "string") {
     texts.push(message.content);
   } else if (Array.isArray(message.content)) {
     for (const block of message.content) {
       if (!isRecord(block)) continue;
-      if (block.type === "tool_result") return [];
+      if (block.type === "tool_result") return none;
       if (block.type === "text" && typeof block.text === "string") texts.push(block.text);
     }
   }
-  return extractPrKeys(texts.join("\n").replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ""));
+  const text = texts.join("\n").replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "");
+  const group = groupMarkerOf(text);
+  return group ? { prKeys: [], group } : { prKeys: extractPrKeys(text), group: null };
+}
+
+/** The PR keys one transcript line binds the session to (`promptLinks`). */
+export function promptPrKeys(line: string): string[] {
+  return promptLinks(line).prKeys;
 }
 
 const STATUS_RANK: Record<ClaudeSessionInfo["status"], number> = { waiting: 0, busy: 1, idle: 2, paused: 3 };
@@ -73,7 +87,9 @@ const STATUS_RANK: Record<ClaudeSessionInfo["status"], number> = { waiting: 0, b
  * counts when the user sent it the PR's link or Claude Desktop bound the PR to
  * it, or when its folder is a checkout of the PR's repository on the PR's head
  * branch — the last catches a session started from a Jira key that later
- * opened the PR.
+ * opened the PR. A group session never counts by its branch: it runs in a
+ * shared checkout that may well sit on one of its PRs' branches, and it works
+ * on none of them.
  */
 export function sessionsForPr(
   pr: Pick<PullRequest, "url" | "repo" | "headRefName">,
@@ -85,15 +101,33 @@ export function sessionsForPr(
     .filter(
       (s) =>
         (key !== null && s.prKeys.includes(key)) ||
-        (repo !== null && s.branch !== null && s.branch === pr.headRefName && s.repoKeys.includes(repo)),
+        (repo !== null &&
+          !s.groups?.length &&
+          s.branch !== null &&
+          s.branch === pr.headRefName &&
+          s.repoKeys.includes(repo)),
     )
-    .sort(
-      (a, b) =>
-        STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
-        Number(a.where === "background") - Number(b.where === "background") ||
-        (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) ||
-        a.name.localeCompare(b.name),
-    );
+    .sort(bySessionNeed);
+}
+
+/** The order `sessionsForPr` and `sessionsForGroup` give: the one that most needs the user first. */
+function bySessionNeed(a: ClaudeSessionInfo, b: ClaudeSessionInfo): number {
+  return (
+    STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
+    Number(a.where === "background") - Number(b.where === "background") ||
+    (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) ||
+    a.name.localeCompare(b.name)
+  );
+}
+
+/** The sessions a group heading's Jira key started, either kind, in `sessionsForPr`'s order. */
+export function sessionsForGroup(key: string, sessions: readonly ClaudeSessionInfo[]): ClaudeSessionInfo[] {
+  return sessions.filter((s) => s.groups?.some((g) => g.key === key)).sort(bySessionNeed);
+}
+
+/** Which kind of group session `session` is for `key` — "Review all" when it was started for both. */
+export function groupKindOf(session: ClaudeSessionInfo, key: string): GroupLaunchKind {
+  return session.groups?.some((g) => g.key === key && g.kind === "review") ? "review" : "explain";
 }
 
 /**
@@ -118,6 +152,28 @@ export const SESSION_STATUS_TEXT: Record<ClaudeSessionInfo["status"], string> = 
   waiting: "Needs you",
   idle: "Idle",
   paused: "Paused",
+};
+
+/**
+ * What a group heading's button says while one of its sessions runs. Not the
+ * card's words: on a heading "Needs you" read as "these reviews need you", and
+ * a finished overview — its result there to read — would say only "Idle". A
+ * "Review all" parent is idle both while its nested reviews run and once it
+ * has summed them up, so its idle word claims neither.
+ */
+export const GROUP_STATUS_TEXT: Record<GroupLaunchKind, Record<ClaudeSessionInfo["status"], string>> = {
+  explain: {
+    busy: "Explaining…",
+    waiting: "Overview asks you",
+    idle: "Overview ready",
+    paused: "Overview paused",
+  },
+  review: {
+    busy: "Reviewing…",
+    waiting: "Review asks you",
+    idle: "Review idle",
+    paused: "Review paused",
+  },
 };
 
 const SESSION_STATUS_PHRASE: Record<ClaudeSessionInfo["status"], string> = {

@@ -91,7 +91,29 @@ Three layers:
   review, own mergeable → close, else the bare link — plus the shell quoting;
   the renderer imports it for the tooltip, while finding the checkout by git
   remote and opening the terminal live in `main/claude-launch.ts`, and the
-  renderer sends only the PR id so nothing it supplies reaches the shell),
+  renderer sends only the PR id so nothing it supplies reaches the shell; a
+  Jira-key group heading also has a split Claude button beside its PR count
+  with two group launches — "Explain all" (one session that explains the
+  group's open PRs together, no letter) and "Review all" (a parent session
+  that starts one nested session per PR awaiting your review through Claude
+  Desktop's `start_session` tool and sums their reports up; nesting only
+  exists in Desktop, so with a terminal the item is disabled and says why).
+  Both send only the kind, the key and the PR ids; main picks the PRs again
+  (`groupLaunchPrs` — review takes `isReviewDue` only, so never your own PR)
+  and runs in the checkout of the repository most of them belong to; Review
+  all also names, for each PR from another repository, that PR's own
+  checkout (`in <folder>:`, started through `start_session`'s `cwd`), since a
+  review in a foreign folder loads that folder's CLAUDE.md as its rules and
+  searches the wrong code. Each
+  prompt starts with `groupMarker(kind, key)`: the session scanner records it
+  as the session's `groups` instead of binding the session to every PR it
+  lists (a marker line counts even with no PR link, since a custom template
+  need not list any; and a group session never holds a card through its
+  folder's branch) — also once Desktop pauses it, through `groupsSeen`, which
+  is kept in `userData/claude-group-sessions.json` so a dashboard restart
+  does not hand a paused group session every PR Desktop bound to it — and the
+  heading's button then shows that session's status in its kind's words
+  (`GROUP_STATUS_TEXT`) and switches to it, like a card's button),
   `claude-sessions.ts` (which running Claude Code session works on which PR:
   a session counts when the user sent it the PR's link — only human prompts,
   never tool results, peer messages or task notifications, which quote PRs the

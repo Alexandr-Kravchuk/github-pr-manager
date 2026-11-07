@@ -3,8 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { normalizeRemote } from "../shared/claude-launch";
-import { claudeDesktopSessionUrl, focusTtyScript, promptPrKeys, prUrlKey } from "../shared/claude-sessions";
+import { JIRA_KEY_RE, normalizeRemote, type GroupLaunchKind } from "../shared/claude-launch";
+import { claudeDesktopSessionUrl, focusTtyScript, promptLinks, prUrlKey } from "../shared/claude-sessions";
 import type { ClaudeSessionInfo, FocusClaudeSessionResult } from "../shared/types";
 import { expandHome, parseRemoteUrls } from "./claude-launch";
 
@@ -147,6 +147,8 @@ interface TranscriptState {
   offset: number;
   carry: Buffer;
   prKeys: Set<string>;
+  /** The group launches its prompts named, by `kind:key`. */
+  groups: Map<string, { kind: GroupLaunchKind; key: string }>;
 }
 
 /** Reads what was appended to the transcript since the last scan. */
@@ -165,6 +167,7 @@ async function readTranscript(state: TranscriptState): Promise<void> {
       state.offset = 0;
       state.carry = Buffer.alloc(0);
       state.prKeys.clear();
+      state.groups.clear();
     }
     while (state.offset < size) {
       const buf = Buffer.alloc(Math.min(CHUNK_BYTES, size - state.offset));
@@ -181,7 +184,9 @@ async function readTranscript(state: TranscriptState): Promise<void> {
       }
       state.carry = Buffer.from(data.subarray(end + 1));
       for (const line of data.toString("utf8", 0, end).split("\n")) {
-        for (const key of promptPrKeys(line)) state.prKeys.add(key);
+        const links = promptLinks(line);
+        for (const key of links.prKeys) state.prKeys.add(key);
+        if (links.group) state.groups.set(`${links.group.kind}:${links.group.key}`, links.group);
       }
     }
   } finally {
@@ -377,6 +382,12 @@ export function createClaudeSessionScanner(
     desktopDir?: string;
     isAlive?: (pid: number) => boolean;
     now?: () => number;
+    /**
+     * Where the group sessions seen are kept across app runs (a function, so
+     * main can ask Electron for its userData folder only once a scan runs).
+     * Without it they live for this app run only.
+     */
+    groupsFile?: () => string;
   } = {},
 ) {
   const alive = opts.isAlive ?? isAlive;
@@ -385,9 +396,57 @@ export function createClaudeSessionScanner(
   let entries = new Map<string, RegistryEntry>();
   /** Paused Desktop sessions of the last scan: session id → Desktop's id. */
   let paused = new Map<string, string>();
+  /**
+   * The group launches of every group session seen running, by session id. A
+   * transcript's state goes when its process does, but Desktop pauses an idle
+   * session — and a finished overview is idle — so without this a paused one
+   * would leave its group heading. Kept in `groupsFile` too: after a restart a
+   * paused group session would otherwise be listed by the PRs Desktop bound to
+   * it, holding every card of its group for as long as Desktop keeps it.
+   */
+  let groupsSeen: Map<string, Array<{ kind: GroupLaunchKind; key: string }>> | null = null;
+  let groupsJson = "";
+  function loadGroupsSeen(): Map<string, Array<{ kind: GroupLaunchKind; key: string }>> {
+    if (groupsSeen) return groupsSeen;
+    groupsSeen = new Map();
+    try {
+      const raw: unknown = opts.groupsFile ? JSON.parse(fs.readFileSync(opts.groupsFile(), "utf8")) : null;
+      if (raw && typeof raw === "object") {
+        for (const [id, list] of Object.entries(raw as Record<string, unknown>)) {
+          if (!SESSION_ID_RE.test(id) || !Array.isArray(list)) continue;
+          const groups = list.filter(
+            (g): g is { kind: GroupLaunchKind; key: string } =>
+              !!g &&
+              typeof g === "object" &&
+              (g.kind === "explain" || g.kind === "review") &&
+              typeof g.key === "string" &&
+              JIRA_KEY_RE.test(g.key),
+          );
+          if (groups.length > 0) groupsSeen.set(id, groups);
+        }
+      }
+    } catch {
+      // Missing or unreadable — start empty; the next save rewrites it.
+    }
+    groupsJson = JSON.stringify(Object.fromEntries(groupsSeen));
+    return groupsSeen;
+  }
+  /** Writes `groupsSeen` when it changed, keeping only sessions that still exist. */
+  function saveGroupsSeen(seen: Map<string, unknown>, keep: Set<string>): void {
+    for (const id of [...seen.keys()]) if (!keep.has(id)) seen.delete(id);
+    const json = JSON.stringify(Object.fromEntries(seen));
+    if (json === groupsJson || !opts.groupsFile) return;
+    groupsJson = json;
+    try {
+      fs.writeFileSync(opts.groupsFile(), json);
+    } catch {
+      // Best effort: the heading still works for this app run.
+    }
+  }
   let inFlight: Promise<ClaudeSessionInfo[]> | null = null;
 
   async function scanOnce(): Promise<ClaudeSessionInfo[]> {
+    const seen = loadGroupsSeen();
     const configDir = opts.configDir ?? claudeConfigDir();
     const registryDir = path.join(configDir, "sessions");
     let files: string[];
@@ -428,15 +487,18 @@ export function createClaudeSessionScanner(
       if (record?.isArchived) continue;
       let state = transcripts.get(entry.sessionId);
       if (!state) {
-        state = { file: null, offset: 0, carry: Buffer.alloc(0), prKeys: new Set() };
+        state = { file: null, offset: 0, carry: Buffer.alloc(0), prKeys: new Set(), groups: new Map() };
         transcripts.set(entry.sessionId, state);
       }
       // A new session writes its transcript only after the first prompt.
       if (!state.file) state.file = findTranscript(projectsDir, entry);
       await readTranscript(state);
       const git = gitInfo(entry.cwd);
+      if (state.groups.size > 0) seen.set(entry.sessionId, [...state.groups.values()]);
+      const groups = seen.get(entry.sessionId);
       // A routine's run touches many PRs; it counts only by what it was sent.
-      const desktopPrs = record && !record.scheduled ? record.prKeys : [];
+      // A group session holds none of the PRs it lists, whatever Desktop bound.
+      const desktopPrs = record && !record.scheduled && !groups ? record.prKeys : [];
       const info: ClaudeSessionInfo = {
         id: entry.sessionId,
         name: record?.title ?? entry.name,
@@ -446,31 +508,41 @@ export function createClaudeSessionScanner(
         repoKeys: [...new Set(git.remotes.map(normalizeRemote).filter((k): k is string => k !== null))].sort(),
         branch: git.branch,
       };
+      if (groups) info.groups = groups;
       if (entry.waitingFor) info.waitingFor = entry.waitingFor;
       sessions.push(info);
     }
 
     // Paused: in Desktop, not archived, no process. Matched by the PRs Desktop
     // bound to them only — their folder is often a shared checkout whose
-    // branch has moved on since, so a branch match would be a guess.
+    // branch has moved on since, so a branch match would be a guess — or, for
+    // an overview seen running earlier, by its group key.
     const nextPaused = new Map<string, string>();
     for (const r of records) {
-      if (r.isArchived || r.scheduled || liveHosts.has(r.sessionId) || r.prKeys.length === 0) continue;
+      if (r.isArchived || r.scheduled || liveHosts.has(r.sessionId)) continue;
       const id = r.cliSessionId ?? r.sessionId.slice("local_".length);
       if (!SESSION_ID_RE.test(id) || live.has(id)) continue;
+      const groups = seen.get(id);
+      if (!groups && r.prKeys.length === 0) continue;
       nextPaused.set(id, r.sessionId);
-      sessions.push({
+      const info: ClaudeSessionInfo = {
         id,
         name: r.title,
         status: "paused",
         where: "desktop",
-        prKeys: r.prKeys,
+        prKeys: groups ? [] : r.prKeys,
         repoKeys: [],
         branch: null,
         lastActivityAt: r.lastActivityAt,
-      });
+      };
+      if (groups) info.groups = groups;
+      sessions.push(info);
     }
     paused = nextPaused;
+    // Desktop lists the last 14 days of sessions; one gone from both lists is gone.
+    const keep = new Set<string>(live.keys());
+    for (const r of records) keep.add(r.cliSessionId ?? r.sessionId.slice("local_".length));
+    saveGroupsSeen(seen, keep);
     return sessions.sort((a, b) => a.id.localeCompare(b.id));
   }
 
