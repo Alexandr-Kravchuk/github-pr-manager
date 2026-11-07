@@ -91,6 +91,7 @@ export type SignalPr = Pick<
   | "reviewDecision"
   | "ciState"
   | "blockedByStack"
+  | "requiredReviewPending"
 >;
 
 /** The PR fields the filters read — a structural subset, so tests can use light fixtures. */
@@ -564,6 +565,8 @@ export type PrSignal = "blocked" | "myReview" | "waiting" | "attention" | "appro
  *    approved yet (ball in their court) — nothing required from you. Any open
  *    thread on your own PR is caught by `blocked` above before reaching this
  *    branch, so by the time a PR gets here it genuinely has none.
+ *  - waiting also covers your PR that is approved yet still `requiredReviewPending`
+ *    (branch protection wants another reviewer, typically a code owner).
  *  - approved (green): at least one human approval, CI isn't failing or
  *    running, and there are no open threads. A single human approve is enough —
  *    even if other reviewers are still pending, and even if the PR has no checks
@@ -615,11 +618,18 @@ export function prSignal(pr: SignalPr, { trackComments }: { trackComments: boole
   if (pr.roles.includes("reviewer") || pr.returnedToMe || pr.myReReviewDue) {
     return "myReview";
   }
-  if (isAuthor && pr.awaitingReview && !pr.hasNewActivity && !pr.hasHumanApproval) {
+  // An approval that does not satisfy branch protection (a code owner's is still
+  // missing) leaves the ball with the reviewers just as no approval does.
+  if (
+    isAuthor &&
+    !pr.hasNewActivity &&
+    ((pr.awaitingReview && !pr.hasHumanApproval) || pr.requiredReviewPending)
+  ) {
     return "waiting";
   }
   if (
     pr.hasHumanApproval &&
+    !pr.requiredReviewPending &&
     pr.reviewDecision !== "CHANGES_REQUESTED" &&
     pr.ciState !== "failure" &&
     pr.ciState !== "pending" &&

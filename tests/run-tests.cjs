@@ -1851,6 +1851,34 @@ test("mapPr.canBeMerged: failing CI blocks readiness", () =>
   assert.strictEqual(canMerge({ commits: failingRollup }), false));
 test("mapPr.canBeMerged: still-running CI blocks readiness", () =>
   assert.strictEqual(canMerge({ commits: pendingRollup }), false));
+// engineering/creatio-playwright-testkit#463 as GHE returned it: a team-member
+// approval is in, but the code owners (a requested team) have not approved, so
+// GitHub keeps REVIEW_REQUIRED and refuses the merge with BLOCKED.
+test("mapPr: an approval that does not satisfy a required code-owner review is not ready", () => {
+  for (const roles of [["author"], ["reviewed"]]) {
+    const pr = github.mapPr(
+      rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED" }),
+      "GHE",
+      roles,
+      roles[0] === "author" ? "auth" : "rev",
+    );
+    assert.strictEqual(pr.hasHumanApproval, true);
+    assert.strictEqual(pr.requiredReviewPending, true);
+    assert.strictEqual(pr.canBeMerged, false);
+    for (const trackComments of [true, false]) {
+      assert.notStrictEqual(prFilter.prSignal(pr, { trackComments }), "approved", roles[0]);
+    }
+  }
+  const own = github.mapPr(rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED" }), "GHE", ["author"], "auth");
+  assert.strictEqual(prFilter.prSignal(own, { trackComments: true }), "waiting");
+});
+test("mapPr: REVIEW_REQUIRED without a BLOCKED merge state still counts as ready", () => {
+  for (const mergeStateStatus of ["CLEAN", "HAS_HOOKS", "UNSTABLE", undefined]) {
+    const pr = github.mapPr(rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus }), "GH", ["author"], "auth");
+    assert.strictEqual(pr.requiredReviewPending, false, String(mergeStateStatus));
+    assert.strictEqual(pr.canBeMerged, true, String(mergeStateStatus));
+  }
+});
 
 // --- github: mapPr hasConflicts (merge-conflict flag) ------------------------
 // Keys strictly off GitHub's CONFLICTING verdict. UNKNOWN (recomputing right
@@ -3769,6 +3797,7 @@ test("activeFilterCount: every narrowing control at once", () =>
         ["not author: behind base", sigPr({ isBehindBase: true, roles: ["reviewed"], awaitingReview: false, hasHumanApproval: true })],
         ["blocked: merge conflict", sigPr({ hasConflicts: true })],
         ["attention: approved but waits for a lower PR of its stack", sigPr({ hasHumanApproval: true, awaitingReview: false, blockedByStack: true })],
+        ["waiting: approved but a required code-owner review is pending", sigPr({ hasHumanApproval: true, awaitingReview: false, requiredReviewPending: true })],
         [
           "blocked: unresolved thread on your own PR",
           sigPr({ awaitingReview: false, unresolvedThreads: 2 }),

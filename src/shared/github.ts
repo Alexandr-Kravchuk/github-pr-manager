@@ -679,7 +679,10 @@ export function mapPr(
   // `hasUnaddressedChangeRequest` deliberately misses: a second reviewer's
   // change request that was re-requested (so the ball looks like it's on them)
   // still gates the merge under branch protection. It's a disqualifier, not a
-  // requirement — null/REVIEW_REQUIRED (unprotected repos) still pass.
+  // requirement — null/REVIEW_REQUIRED (unprotected repos) still pass, unless
+  // GitHub also reports the merge BLOCKED (`requiredReviewPending`): then the
+  // approval in hand is not the one the rules ask for, e.g. a code owner's.
+  const requiredReviewPending = pr.reviewDecision === "REVIEW_REQUIRED" && pr.mergeStateStatus === "BLOCKED";
   const canBeMerged =
     !pr.isDraft &&
     pr.mergeable === "MERGEABLE" &&
@@ -690,6 +693,7 @@ export function mapPr(
     !hasUnaddressedReviewFeedback &&
     unresolvedThreads === 0 &&
     pr.reviewDecision !== "CHANGES_REQUESTED" &&
+    !requiredReviewPending &&
     failingChecks.length === 0 &&
     pendingChecks.length === 0;
 
@@ -710,6 +714,7 @@ export function mapPr(
     baseIsDefaultBranch,
     stack,
     blockedByStack,
+    requiredReviewPending,
     author: pr.author,
     createdAt: pr.createdAt,
     updatedAt: pr.updatedAt,

@@ -29,6 +29,7 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     baseIsDefaultBranch: true,
     stack: null,
     blockedByStack: false,
+    requiredReviewPending: false,
     author: { login: "octocat", avatarUrl: "https://avatars.githubusercontent.com/u/583231?v=4" },
     createdAt: new Date(Date.now() - 864e5).toISOString(),
     updatedAt: new Date(Date.now() - 36e5).toISOString(),
