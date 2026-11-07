@@ -1872,6 +1872,16 @@ test("mapPr: an approval that does not satisfy a required code-owner review is n
   const own = github.mapPr(rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED" }), "GHE", ["author"], "auth");
   assert.strictEqual(prFilter.prSignal(own, { trackComments: true }), "waiting");
 });
+test("mapPr: REVIEW_REQUIRED + BLOCKED without any approval is plain awaiting review", () => {
+  const pr = github.mapPr(
+    rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED", latestOpinionatedReviews: { nodes: [] } }),
+    "GHE",
+    ["author"],
+    "auth",
+  );
+  assert.strictEqual(pr.requiredReviewPending, false);
+  assert.strictEqual(pr.canBeMerged, false);
+});
 test("mapPr: REVIEW_REQUIRED without a BLOCKED merge state still counts as ready", () => {
   for (const mergeStateStatus of ["CLEAN", "HAS_HOOKS", "UNSTABLE", undefined]) {
     const pr = github.mapPr(rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus }), "GH", ["author"], "auth");

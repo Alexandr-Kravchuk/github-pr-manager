@@ -682,7 +682,8 @@ export function mapPr(
   // requirement — null/REVIEW_REQUIRED (unprotected repos) still pass, unless
   // GitHub also reports the merge BLOCKED (`requiredReviewPending`): then the
   // approval in hand is not the one the rules ask for, e.g. a code owner's.
-  const requiredReviewPending = pr.reviewDecision === "REVIEW_REQUIRED" && pr.mergeStateStatus === "BLOCKED";
+  const requiredReviewPending =
+    hasHumanApproval && pr.reviewDecision === "REVIEW_REQUIRED" && pr.mergeStateStatus === "BLOCKED";
   const canBeMerged =
     !pr.isDraft &&
     pr.mergeable === "MERGEABLE" &&

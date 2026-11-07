@@ -351,6 +351,8 @@ export interface PullRequest {
    * `mergeStateStatus: BLOCKED`; an approval from someone who does not satisfy
    * the rule leaves both as they are, so `hasHumanApproval` alone cannot tell.
    * `REVIEW_REQUIRED` without `BLOCKED` does not count: nothing gates the merge.
+   * Without any human approval it stays false — such a PR is simply awaiting
+   * review, and the card keeps its plain "Review required" pill.
    */
   requiredReviewPending: boolean;
   author: { login: string; avatarUrl: string } | null;
