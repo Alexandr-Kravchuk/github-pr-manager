@@ -1851,7 +1851,7 @@ test("mapPr.canBeMerged: failing CI blocks readiness", () =>
   assert.strictEqual(canMerge({ commits: failingRollup }), false));
 test("mapPr.canBeMerged: still-running CI blocks readiness", () =>
   assert.strictEqual(canMerge({ commits: pendingRollup }), false));
-// engineering/creatio-playwright-testkit#463 as GHE returned it: a team-member
+// The shape a GitHub Enterprise host returned for a real PR: a team-member
 // approval is in, but the code owners (a requested team) have not approved, so
 // GitHub keeps REVIEW_REQUIRED and refuses the merge with BLOCKED.
 test("mapPr: an approval that does not satisfy a required code-owner review is not ready", () => {

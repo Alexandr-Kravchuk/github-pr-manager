@@ -186,11 +186,11 @@ const FIXTURES: Record<string, PullRequest[]> = {
     // Approved by a teammate, but branch protection still wants the code
     // owners: GitHub reports REVIEW_REQUIRED + BLOCKED, so it is not ready.
     pr({
-      title: "Add CrtExpansionPanel.collapse() and the designer tools category",
-      repo: "acme/playwright-testkit",
+      title: "Add a collapse() helper to the panel page object",
+      repo: "acme/testkit",
       number: 463,
-      issueKey: "ENG-105420",
-      headRefName: "feature/eng-105420-collapse",
+      issueKey: "ENG-90463",
+      headRefName: "feature/eng-90463-collapse",
       reviewDecision: "REVIEW_REQUIRED",
       requiredReviewPending: true,
       hasHumanApproval: true,
