@@ -17,8 +17,8 @@ const TIMELINE_QUERY = `query($id: ID!) {
       timelineItems(last: 100, itemTypes: [PULL_REQUEST_REVIEW, REVIEW_DISMISSED_EVENT]) {
         nodes {
           __typename
-          ... on PullRequestReview { author { login } state submittedAt commit { oid } }
-          ... on ReviewDismissedEvent { previousReviewState review { author { login } commit { oid } } }
+          ... on PullRequestReview { id author { login } state submittedAt commit { oid } }
+          ... on ReviewDismissedEvent { previousReviewState review { id author { login } commit { oid } } }
         }
       }
     }

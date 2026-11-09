@@ -10117,34 +10117,51 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     // --- re-approve: approvals a base-only push dismissed ---
     const ra = require(path.join(__dirname, "../dist/main/shared/agent-reapprove.js"));
-    const review = (login, state, at, oid) => ({ __typename: "PullRequestReview", author: { login }, state, submittedAt: at, commit: { oid } });
-    const dismissal = (login, previousReviewState, oid) => ({ __typename: "ReviewDismissedEvent", previousReviewState, review: { author: { login }, commit: { oid } } });
+    // A review's id is its author and submission time here; a dismissal names the review it dismissed by that id.
+    const review = (login, state, at, oid) => ({ __typename: "PullRequestReview", id: `R:${login}:${at}`, author: { login }, state, submittedAt: at, commit: { oid } });
+    const dismissal = (login, previousReviewState, at, oid) => ({ __typename: "ReviewDismissedEvent", previousReviewState, review: { id: `R:${login}:${at}`, author: { login }, commit: { oid } } });
     const diffOf = (hunk, index = "index 111..222 100644") => `diff --git a/src/x.ts b/src/x.ts\n${index}\n--- a/src/x.ts\n+++ b/src/x.ts\n${hunk}`;
 
     test("agent re-approve: a dismissed approval is told from a dismissed change request, a later word and the current head", () => {
       const t = [
         review("Anna", "DISMISSED", "2026-11-01T10:00:00Z", "old111"),
-        dismissal("anna", "APPROVED", "old111"),
+        dismissal("Anna", "APPROVED", "2026-11-01T10:00:00Z", "old111"),
         review("ivan", "DISMISSED", "2026-11-01T11:00:00Z", "old111"),
-        dismissal("ivan", "CHANGES_REQUESTED", "old111"),
+        dismissal("ivan", "CHANGES_REQUESTED", "2026-11-01T11:00:00Z", "old111"),
+        // An approval dismissed, then a change request on the same commit, dismissed too:
+        // the latest is the change request — author and commit alone would match the approval.
+        review("zoe", "DISMISSED", "2026-11-01T08:00:00Z", "old111"),
+        dismissal("zoe", "APPROVED", "2026-11-01T08:00:00Z", "old111"),
+        review("zoe", "DISMISSED", "2026-11-01T12:00:00Z", "old111"),
+        dismissal("zoe", "CHANGES_REQUESTED", "2026-11-01T12:00:00Z", "old111"),
         review("olga", "DISMISSED", "2026-11-01T09:00:00Z", "old111"),
-        dismissal("olga", "APPROVED", "old111"),
+        dismissal("olga", "APPROVED", "2026-11-01T09:00:00Z", "old111"),
         review("olga", "COMMENTED", "2026-11-02T09:00:00Z", "new222"),
         review("petr", "DISMISSED", "2026-11-01T09:00:00Z", "new222"),
-        dismissal("petr", "APPROVED", "new222"),
+        dismissal("petr", "APPROVED", "2026-11-01T09:00:00Z", "new222"),
         review("author1", "DISMISSED", "2026-11-01T09:00:00Z", "old111"),
-        dismissal("author1", "APPROVED", "old111"),
-        { __typename: "PullRequestReview", author: { login: "draft" }, state: "PENDING", submittedAt: null, commit: { oid: "old111" } },
+        dismissal("author1", "APPROVED", "2026-11-01T09:00:00Z", "old111"),
+        { __typename: "PullRequestReview", id: "R:draft", author: { login: "draft" }, state: "PENDING", submittedAt: null, commit: { oid: "old111" } },
       ];
-      assert.deepStrictEqual(ra.dismissedApprovals(t, "new222", ["AUTHOR1"]), [{ login: "Anna", head: "old111" }], "ivan's was a change request, olga spoke since, petr's was on this head, the author is out");
+      assert.deepStrictEqual(
+        ra.dismissedApprovals(t, "new222", ["AUTHOR1"]),
+        [{ login: "Anna", head: "old111" }],
+        "ivan's and zoe's latest were change requests, olga spoke since, petr's was on this head, the author is out",
+      );
       assert.deepStrictEqual(ra.dismissedApprovals([], "new222"), []);
     });
 
-    test("agent re-approve: the PR's own changes compare without context, line numbers or blob ids — a binary file stays strict", () => {
+    test("agent re-approve: the PR's own changes compare with their context but no line numbers or blob ids — and nothing hides as a header", () => {
       const before = diffOf("@@ -1,3 +1,4 @@\n ctx\n+added line\n ctx2\n");
-      const after = diffOf("@@ -40,3 +44,4 @@\n other context from the base\n+added line\n moved ctx\n", "index 999..222 100644");
-      assert.ok(ra.sameChanges(before, after), "the base moved the lines around it, nothing of the PR");
+      const after = diffOf("@@ -40,3 +44,4 @@ function moved() {\n ctx\n+added line\n ctx2\n", "index 999..222 100644");
+      assert.ok(ra.sameChanges(before, after), "the base changed elsewhere in the file: only the numbers moved");
       assert.ok(ra.sameChanges(before.replace(/\n/g, "\r\n"), after));
+      assert.ok(!ra.sameChanges(before, diffOf("@@ -1,3 +1,4 @@\n ctx from the base\n+added line\n ctx2\n")), "the base changed right next to it: the safe side");
+      assert.ok(!ra.sameChanges(before, diffOf("@@ -1,3 +1,3 @@\n ctx\n ctx2\n@@ -30,2 +30,3 @@\n far\n+added line\n")), "the PR's line moved elsewhere");
+      // Past the first @@, "--- " and "+++ " are lines of the change: a removed SQL comment, an added "++ x".
+      const sqlBefore = diffOf("@@ -1,3 +1,2 @@\n select 1;\n--- grant to all\n+++ b\n");
+      assert.ok(!ra.sameChanges(sqlBefore, diffOf("@@ -1,3 +1,2 @@\n select 1;\n--- revoke from all\n+++ b\n")), "a removed «-- comment» line changed");
+      assert.ok(!ra.sameChanges(sqlBefore, diffOf("@@ -1,3 +1,2 @@\n select 1;\n--- grant to all\n+++ c\n")), "an added «++ x» line changed");
       assert.ok(!ra.sameChanges(before, diffOf("@@ -1,3 +1,4 @@\n ctx\n+added line, changed\n ctx2\n")), "a line of the PR changed");
       assert.ok(!ra.sameChanges(before, `${after}diff --git a/b.ts b/b.ts\n--- a/b.ts\n+++ b/b.ts\n@@ -1 +1 @@\n-a\n+b\n`), "a file more");
       const bin = (index) => `diff --git a/i.png b/i.png\n${index}\nBinary files a/i.png and b/i.png differ\n`;
@@ -10181,9 +10198,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     await atest("agent re-approve: the check reads the timeline once and two diffs, and passes on whatever isn't a base-only push", async () => {
       const md = require(path.join(__dirname, "../dist/main/main/agent/reapprove.js"));
-      const timeline = [review("me", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("me", "APPROVED", "old111")];
+      const timeline = [review("me", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("me", "APPROVED", "2026-11-01T10:00:00Z", "old111")];
       const before = diffOf("@@ -1,3 +1,4 @@\n ctx\n+added\n ctx2\n");
-      const sameNow = diffOf("@@ -9,3 +9,4 @@\n x\n+added\n y\n");
+      const sameNow = diffOf("@@ -9,3 +9,4 @@\n ctx\n+added\n ctx2\n");
       const fake = (o = {}) => {
         const calls = [];
         const gh = async (args, opts) => {
@@ -11255,7 +11272,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       st.posted.push({ endpoint: args[1], body: JSON.parse(opts.input) });
       return { code: 0, stdout: "{}", stderr: "" };
     };
-    const myDismissal = [review("me", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("me", "APPROVED", "old111")];
+    const myDismissal = [review("me", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("me", "APPROVED", "2026-11-01T10:00:00Z", "old111")];
 
     await atest("agent re-approve: a base-only push that dismissed your approval is offered back, and given on your click — signed, on the new head", async () => {
       const st = { timeline: myDismissal, posted: [] };
@@ -11330,7 +11347,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
 
       // Your PR: the reviewer whose approval went is asked again.
-      const mine = { author: "me", timeline: [review("anna", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("anna", "APPROVED", "old111")], posted: [] };
+      const mine = { author: "me", timeline: [review("anna", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("anna", "APPROVED", "2026-11-01T10:00:00Z", "old111")], posted: [] };
       const off = { mode: "off" };
       const unapproved = () => ({ ...reviewPr({ role: "author" }), hasHumanApproval: false, reviewers: [] });
       const h = agentFixture({

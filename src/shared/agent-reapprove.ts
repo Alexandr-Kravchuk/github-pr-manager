@@ -21,80 +21,93 @@ export interface DismissedApproval {
 export interface ReviewTimelineNode {
   __typename: string;
   /** PullRequestReview */
+  id?: string | null;
   author?: { login?: string | null } | null;
   state?: string | null;
   submittedAt?: string | null;
   commit?: { oid?: string | null } | null;
   /** ReviewDismissedEvent */
   previousReviewState?: string | null;
-  review?: { author?: { login?: string | null } | null; commit?: { oid?: string | null } | null } | null;
+  review?: { id?: string | null; author?: { login?: string | null } | null; commit?: { oid?: string | null } | null } | null;
 }
 
 /**
  * The approvals standing dismissed on a PR, per reviewer: their latest review
- * is DISMISSED, a dismissal event says it was an approval, and it was given on
- * another head than `head`. A dismissed change request is never one — nothing
- * here turns it into an approval — and a review left after the dismissal (even
- * a plain comment) means the reviewer has spoken since: theirs to repeat.
- * `exclude` drops logins (the author, on your own PR), any case.
+ * is DISMISSED, the dismissal event of that very review (by its id — not its
+ * author and commit, which an earlier dismissed approval may share) says it was
+ * an approval, and it was given on another head than `head`. A dismissed change
+ * request is never one, and a review left after the dismissal (even a plain
+ * comment) means the reviewer has spoken since: theirs to repeat. `exclude`
+ * drops logins (the author, on your own PR), any case.
  */
 export function dismissedApprovals(nodes: readonly ReviewTimelineNode[], head: string, exclude: readonly string[] = []): DismissedApproval[] {
-  const latest = new Map<string, { login: string; state: string; at: string; head: string }>();
-  const wasApproval = new Set<string>();
+  const latest = new Map<string, { login: string; id: string; state: string; at: string; head: string }>();
+  const dismissedApprovalIds = new Set<string>();
   for (const n of nodes) {
     if (n.__typename === "PullRequestReview") {
       const login = n.author?.login;
       const at = n.submittedAt;
       // A pending review has no submission time: it isn't on the PR yet.
-      if (!login || !at || !n.state) continue;
+      if (!login || !at || !n.state || !n.id) continue;
       const key = login.toLowerCase();
       const prev = latest.get(key);
-      if (!prev || at >= prev.at) latest.set(key, { login, state: n.state, at, head: n.commit?.oid ?? "" });
+      if (!prev || at >= prev.at) latest.set(key, { login, id: n.id, state: n.state, at, head: n.commit?.oid ?? "" });
     } else if (n.__typename === "ReviewDismissedEvent") {
-      const login = n.review?.author?.login;
-      const oid = n.review?.commit?.oid;
-      if (login && oid && n.previousReviewState === "APPROVED") wasApproval.add(`${login.toLowerCase()}|${oid}`);
+      if (n.previousReviewState === "APPROVED" && n.review?.id) dismissedApprovalIds.add(n.review.id);
     }
   }
   const skip = new Set(exclude.map((l) => l.toLowerCase()));
   const out: DismissedApproval[] = [];
   for (const [key, r] of latest) {
     if (skip.has(key) || r.state !== "DISMISSED" || !r.head || r.head === head) continue;
-    if (wasApproval.has(`${key}|${r.head}`)) out.push({ login: r.login, head: r.head });
+    if (dismissedApprovalIds.has(r.id)) out.push({ login: r.login, head: r.head });
   }
   return out.sort((a, b) => a.login.localeCompare(b.login));
 }
 
 /**
  * What a PR changes, whatever its base: per file, its path, how it changed
- * (new, deleted, renamed, mode) and its added and removed lines in order — no
- * context lines, line numbers or blob ids, all of which move when only the
- * base does. A binary file keeps its index line, since its content can't be
- * compared any other way: a base change under it reads as a change, the safe
- * side. The same lines moved elsewhere in a file would read the same — only
- * a conflict resolution inside the merge could do that, and it changes no line
- * the reviewer approved.
+ * (new, deleted, renamed, mode) and each hunk's lines with their context —
+ * only no line numbers, hunk headings or blob ids, which move when the base
+ * changes somewhere else in the file. A base change next to the PR's lines
+ * changes their context, and so reads as a change: the safe side, as is a
+ * line of the PR moved elsewhere. A file's header ends at its first `@@`;
+ * past it a line starting `--- ` or `+++ ` is content (a removed `-- comment`,
+ * an added `++ x`), never skipped. A binary file keeps its index line, since
+ * its content can't be compared any other way.
  */
 export function diffFingerprint(diff: string): string {
-  const files: Array<{ path: string; lines: string[]; index: string }> = [];
-  let cur: { path: string; lines: string[]; index: string } | null = null;
+  type File = { path: string; meta: string[]; index: string; hunks: string[][] };
+  const files: File[] = [];
+  let cur: File | null = null;
+  let hunk: string[] | null = null;
   for (const raw of diff.split("\n")) {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    // Never a hunk line: each of those starts with " ", "+", "-" or "\".
     const header = /^diff --git a\/.+? b\/(.+)$/.exec(line);
     if (header) {
-      cur = { path: header[1], lines: [], index: "" };
+      cur = { path: header[1], meta: [], index: "", hunks: [] };
       files.push(cur);
+      hunk = null;
       continue;
     }
     if (!cur) continue;
-    if (line.startsWith("index ")) cur.index = line;
-    else if (/^(new file mode|deleted file mode|old mode|new mode|rename from|rename to|copy from|copy to) /.test(line)) cur.lines.push(line);
-    else if (line.startsWith("Binary files ") || line === "GIT binary patch") cur.lines.push(line, cur.index);
-    else if (line.startsWith("+++ ") || line.startsWith("--- ") || line.startsWith("@@") || line.startsWith("similarity index ")) continue;
-    else if (line.startsWith("+") || line.startsWith("-") || line.startsWith("\\")) cur.lines.push(line);
+    if (line.startsWith("@@")) {
+      hunk = [];
+      cur.hunks.push(hunk);
+      continue;
+    }
+    if (hunk === null) {
+      // The file's header. "--- a/…", "+++ b/…" and "similarity index" say nothing the lines here don't.
+      if (line.startsWith("index ")) cur.index = line;
+      else if (/^(new file mode|deleted file mode|old mode|new mode|rename from|rename to|copy from|copy to) /.test(line)) cur.meta.push(line);
+      else if (line.startsWith("Binary files ") || line === "GIT binary patch") cur.meta.push(line, cur.index);
+      continue;
+    }
+    if (line.startsWith(" ") || line.startsWith("+") || line.startsWith("-") || line.startsWith("\\")) hunk.push(line);
   }
   files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  return files.map((f) => `${f.path}\n${f.lines.join("\n")}`).join("\n\u0000\n");
+  return files.map((f) => [f.path, ...f.meta, ...f.hunks.map((h) => `@@\n${h.join("\n")}`)].join("\n")).join("\n\u0000\n");
 }
 
 /** The same changes at both heads — and some at all: two empty diffs say nothing. */

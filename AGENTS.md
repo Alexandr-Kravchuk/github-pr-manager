@@ -220,12 +220,17 @@ Three layers:
   holds someone's PR (no review of its head starts) until main has read it:
   once per head (`ReapproveMark`s in `state.json`, by ledger key),
   `main/agent/reapprove.ts` reads the PR's timeline — a reviewer's latest
-  review DISMISSED and a `ReviewDismissedEvent` saying it was APPROVED, so a
-  dismissed change request never becomes an approval and any later word of
-  theirs wins — and compares the PR's own changes at the dismissed head
-  (`compare/<base>...<old head>`) and now by `diffFingerprint`: per file only
-  the +/- lines, no context, line numbers or blob ids, a binary file kept
-  strict. A diff too big to compare, or one `runGh` may have cut, passes.
+  review DISMISSED and the `ReviewDismissedEvent` of that very review, matched
+  by review id (author and commit can match an earlier dismissed approval),
+  saying it was APPROVED, so a dismissed change request never becomes an
+  approval and any later word of theirs wins — and compares the PR's own
+  changes at the dismissed head (`compare/<base>...<old head>`) and now by
+  `diffFingerprint`: each hunk's lines with their context, only no line
+  numbers, hunk headings or blob ids, so a base change next to the PR's lines
+  or a PR line moved elsewhere reads as a change; a file's header ends at its
+  first `@@` (past it a `--- `/`+++ ` line is content — a removed SQL comment
+  once hid there), and a binary file stays strict. A diff too big to compare,
+  or one `runGh` may have cut, passes.
   Shadow offers it, On gives it at once; the PR is read again before anything
   goes out, the approval carries one line and the signature, and turning an
   offer down hands the head back to the other rules).
