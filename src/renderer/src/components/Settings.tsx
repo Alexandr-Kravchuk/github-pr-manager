@@ -271,8 +271,14 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   }
 
   const labelCls = "block text-xs font-medium text-fg-muted";
-  const inputCls =
-    "mt-1 w-full rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none";
+  // `cn` only joins, it does not resolve Tailwind conflicts: a width or margin
+  // added on top of `inputCls` competes with its `w-full` / `mt-1` and the
+  // stylesheet order picks the winner (it was `w-full`, which squeezed the
+  // Repository folders' Folder field down to a bare square). Inputs that set
+  // their own width or margin build on `fieldCls` instead.
+  const fieldCls =
+    "rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none";
+  const inputCls = cn("mt-1 w-full", fieldCls);
 
   const sectionContent: Record<SettingsSectionId, ReactNode> = {
     appearance: (
@@ -299,7 +305,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               min={10}
               value={pollIntervalSeconds}
               onChange={(e) => setPollIntervalSeconds(Math.max(10, Number(e.target.value) || 10))}
-              className={cn(inputCls.replace("w-full", "w-24"), "mt-0")}
+              className={cn(fieldCls, "w-24")}
             />
             seconds
           </span>
@@ -839,14 +845,14 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                         placeholder="owner/name"
                         aria-label="Repository"
                         onChange={(e) => updateRepoFolder(i, { repo: e.target.value })}
-                        className={cn(inputCls, "mt-0 w-56 shrink-0")}
+                        className={cn(fieldCls, "w-56 shrink-0")}
                       />
                       <input
                         value={row.path}
                         placeholder="~/Projects/name"
                         aria-label="Folder"
                         onChange={(e) => updateRepoFolder(i, { path: e.target.value })}
-                        className={cn(inputCls, "mt-0")}
+                        className={cn(fieldCls, "min-w-0 flex-1")}
                       />
                       <button
                         type="button"
@@ -941,7 +947,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           }}
           placeholder="Search settings"
           aria-label="Search settings"
-          className={cn(inputCls, "mt-0 min-w-[12rem] flex-1")}
+          className={cn(fieldCls, "min-w-[12rem] flex-1")}
         />
       </div>
 
