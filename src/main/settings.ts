@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
 
-import { ConfigError, defaultSettings, validateSettings } from "../shared/config";
+import { ConfigError, defaultSettings, toStoredSettings, validateSettings } from "../shared/config";
 import type { Settings } from "../shared/types";
 
 /** Path of the persisted settings file under the OS userData directory. */
@@ -71,6 +71,6 @@ export function persistSettings(raw: unknown): Settings {
   const settings = validateSettings(raw);
   const file = settingsPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(settings, null, 2), "utf8");
+  fs.writeFileSync(file, JSON.stringify(toStoredSettings(settings), null, 2), "utf8");
   return settings;
 }

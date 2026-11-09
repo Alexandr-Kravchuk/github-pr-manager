@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 
-import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "./claude-launch";
+import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS, PREVIOUS_DEFAULT_PROMPTS } from "./claude-launch";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "./notify";
 import type {
   ClaudeSettings,
@@ -238,7 +238,13 @@ export function validateClaude(raw: unknown): ClaudeSettings {
     string,
     unknown
   >;
-  const prompt = (k: keyof typeof DEFAULT_CLAUDE_PROMPTS): string => str(rawPrompts[k]) || DEFAULT_CLAUDE_PROMPTS[k];
+  // An empty prompt, or a saved copy of a default it has since replaced, is the
+  // current default: a copy saved verbatim would otherwise hide every later
+  // change to that default from the user.
+  const prompt = (k: keyof typeof DEFAULT_CLAUDE_PROMPTS): string => {
+    const saved = str(rawPrompts[k]);
+    return !saved || PREVIOUS_DEFAULT_PROMPTS[k]?.includes(saved) ? DEFAULT_CLAUDE_PROMPTS[k] : saved;
+  };
   return {
     enabled: typeof obj.enabled === "boolean" ? obj.enabled : d.enabled,
     projectsRoot: str(obj.projectsRoot),
@@ -273,6 +279,20 @@ function validateJira(raw: unknown): JiraSettings | undefined {
   const baseUrl = normalizeJiraBaseUrl(rawUrl);
   if (!baseUrl) throw new ConfigError(`settings: jira.baseUrl is not a valid URL: ${rawUrl}`);
   return { baseUrl, email };
+}
+
+/**
+ * What `persistSettings` writes: the settings with every Claude prompt that is
+ * still its default stored empty. An empty prompt reads back as the default,
+ * so a later release that changes a default reaches every user who never
+ * edited it — a verbatim copy would keep the old text in force.
+ */
+export function toStoredSettings(settings: Settings): Settings {
+  const prompts = { ...settings.claude.prompts };
+  for (const k of Object.keys(prompts) as (keyof typeof prompts)[]) {
+    if (prompts[k] === DEFAULT_CLAUDE_PROMPTS[k]) prompts[k] = "";
+  }
+  return { ...settings, claude: { ...settings.claude, prompts } };
 }
 
 /**
