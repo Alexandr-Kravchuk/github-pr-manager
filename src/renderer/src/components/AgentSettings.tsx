@@ -301,6 +301,27 @@ function ScenariosSection({ agent, setAgent, inputCls, onEditPrompts }: SectionP
               or a conflict as well, your «PR is blocked» prompt runs instead.
             </p>
           </Scenario>
+
+          <Scenario
+            title="A push that only brought in the base dismissed an approval"
+            prompt={<span className="text-fg-faint">No model call — the PR&apos;s timeline and two diffs</span>}
+            mode={sc.reapprove.mode}
+            modes={["off", "shadow", "on"]}
+            onMode={(mode) => patch("reapprove", { mode })}
+          >
+            <p className="text-xs text-fg-faint">
+              Your approval is given again — signed — when the PR&apos;s own changes are line for line the ones you approved; anything else is a review as before. A
+              dismissed change request is never turned into an approval.
+            </p>
+            <div className="mt-2">
+              <Check
+                checked={sc.reapprove.askReviewers}
+                onChange={(askReviewers) => patch("reapprove", { askReviewers })}
+                title="On your PRs, ask the reviewers whose approvals were dismissed again"
+                hint="The same check first: only when your push changed nothing they approved."
+              />
+            </div>
+          </Scenario>
           <Locked>
             A PR of yours that an SDLC orchestrator run drives (its .sdlc/state names the PR) is left to that run: it reviews, fixes, answers the reviewers and merges itself.
           </Locked>

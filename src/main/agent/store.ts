@@ -49,6 +49,20 @@ export interface AgentStoreData {
    * was closed is logged as one move. Absent until the journal's first look.
    */
   board?: Record<string, BoardMark>;
+  /**
+   * Re-approve / re-ask: what the check found for each PR head it looked at
+   * (`reapprove.ts`), by ledger key — so a head is read once, across a
+   * restart. Dropped once its PR leaves the dashboard.
+   */
+  reapprove?: Record<string, ReapproveMark>;
+}
+
+export interface ReapproveMark {
+  verdict: "same" | "pass";
+  logins?: string[];
+  oldHead?: string;
+  note: string;
+  at: string;
 }
 
 export function emptyStore(day: string): AgentStoreData {
@@ -75,6 +89,7 @@ export function readStore(file: string, day: string): AgentStoreData {
       pushedHeads: typeof raw.pushedHeads === "object" && raw.pushedHeads !== null ? raw.pushedHeads : {},
       paused: raw.paused === true,
       ...(typeof raw.board === "object" && raw.board !== null && !Array.isArray(raw.board) ? { board: raw.board } : {}),
+      ...(typeof raw.reapprove === "object" && raw.reapprove !== null && !Array.isArray(raw.reapprove) ? { reapprove: raw.reapprove } : {}),
     };
   } catch {
     return emptyStore(day);

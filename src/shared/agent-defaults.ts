@@ -176,6 +176,7 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
     selfReview: { mode: "shadow" },
     driveCi: { mode: "shadow", maxAttempts: 2 },
     driveComments: { mode: "shadow" },
+    reapprove: { mode: "shadow", askReviewers: true },
   },
   limits: {
     parallel: 2,

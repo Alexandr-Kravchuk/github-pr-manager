@@ -299,6 +299,12 @@ export interface AgentSettings {
     driveCi: { mode: AgentMode; maxAttempts: number };
     /** Reviewers commented on your PR. */
     driveComments: { mode: AgentMode };
+    /**
+     * An approval dismissed by a push that only brought in the base branch
+     * (`shared/agent-reapprove.ts`): yours on someone's PR is given again; on
+     * your PR, the reviewers whose approvals went are asked again.
+     */
+    reapprove: { mode: AgentMode; askReviewers: boolean };
   };
   limits: {
     parallel: number;
@@ -836,7 +842,7 @@ export type FocusClaudeSessionResult = { ok: true } | { ok: false; error: string
  * run — a button), or the Jira dry run after you merged one. Re-review and
  * drive land in a later stage.
  */
-export type AgentScenario = "review" | "brief" | "rereview" | "drive" | "merge" | "afterMerge";
+export type AgentScenario = "review" | "brief" | "rereview" | "drive" | "merge" | "afterMerge" | "reapprove" | "reask";
 
 export type AgentItemState = "queued" | "working" | "needsYou" | "done" | "error";
 
@@ -898,6 +904,11 @@ export interface AgentItem {
   cuts?: number;
   /** Diagrams of the change, drawn after the run (Settings › Agent › Diagrams). */
   diagrams?: AgentItemDiagrams;
+  /**
+   * Re-approve / re-ask: the approvals a base-only push dismissed — whose, and
+   * the head they were given on. The PR's own changes are the same at both.
+   */
+  reapproval?: { logins: string[]; oldHead: string };
   /** The next run continues `sessionId` instead of starting a session: after a restart, or with your answer. */
   resumeSession?: boolean;
   /**
@@ -997,7 +1008,7 @@ export interface AgentState {
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
 export type AgentAction =
-  | { type: "skip" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish" | "push"; runId: string }
+  | { type: "skip" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish" | "push" | "reapprove"; runId: string }
 
   // The whole agent — two members, so a check for both narrows the rest.
   | { type: "pauseAgent" }

@@ -325,6 +325,7 @@ export function validateAgent(raw: unknown): AgentSettings {
   const selfReview = o(sc.selfReview);
   const driveCi = o(sc.driveCi);
   const driveComments = o(sc.driveComments);
+  const reapprove = o(sc.reapprove);
   const limits = o(obj.limits);
   const quiet = o(limits.quietHours);
   const permissions = o(obj.permissions);
@@ -378,6 +379,10 @@ export function validateAgent(raw: unknown): AgentSettings {
         maxAttempts: num(driveCi.maxAttempts, "maxAttempts", d.scenarios.driveCi.maxAttempts),
       },
       driveComments: { mode: oneOf(driveComments.mode, MODES, d.scenarios.driveComments.mode) },
+      reapprove: {
+        mode: oneOf(reapprove.mode, MODES, d.scenarios.reapprove.mode),
+        askReviewers: bool(reapprove.askReviewers, d.scenarios.reapprove.askReviewers),
+      },
     },
     limits: {
       parallel: num(limits.parallel, "parallel", d.limits.parallel),

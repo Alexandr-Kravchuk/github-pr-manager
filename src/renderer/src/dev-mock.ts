@@ -303,6 +303,19 @@ const FIXTURES: Record<string, PullRequest[]> = {
       canBeMerged: true,
       reviewers: [{ login: "me", avatarUrl: "", reviewState: "approved" }],
     }),
+    // The author merged master in: the branch rule dismissed my approval, and
+    // nothing of the PR changed — the agent offers it back.
+    pr({
+      title: "ENG-93390: Retry the schema sync on a transient 503",
+      repo: "acme/clio",
+      number: 940,
+      issueKey: "ENG-93390",
+      roles: ["reviewed"],
+      author: { login: "teammate", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4" },
+      viewerHasReviewed: false,
+      reviewDecision: "REVIEW_REQUIRED",
+      hasNoReviews: true,
+    }),
     pr({
       title: "Chore: bump deps (nobody has looked yet)",
       repo: "acme/gadgets",
@@ -668,6 +681,14 @@ function mockAgentState(): AgentState {
     }),
     // A review the agent sent a moment ago: the author's move now, the snapshot not caught up yet.
     item(603, { state: "done", headline: "Published: request changes, 2 inline comments", published: true, finishedAt: iso(40 * 60_000) }),
+    item(940, {
+      key: `${byNumber(940)?.id}|reapprove|${byNumber(940)?.headOid}`,
+      scenario: "reapprove",
+      state: "needsYou",
+      headline: "Only the base changed — approve again",
+      reapproval: { logins: ["me"], oldHead: "4f1c2e9a7b3d5e6f" },
+      finishedAt: iso(2 * 60_000),
+    }),
   ].filter((i): i is AgentItem => i !== null);
   // A PR the agent merged this morning: gone from the dashboard, done today.
   items.push({
@@ -854,6 +875,14 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
       case "merge":
         Object.assign(it, { state: "done", headline: `Merged (${action.method ?? it.mergeMethod ?? "squash"}), branch deleted`, finishedAt: at });
         items.push({ ...it, runId: crypto.randomUUID(), key: `${it.prId}|afterMerge|x`, scenario: "afterMerge", state: "queued", headline: "Queued: the Jira dry run", queuedAt: at });
+        break;
+      case "reapprove":
+        Object.assign(it, {
+          state: "done",
+          published: true,
+          headline: it.scenario === "reask" ? `Asked ${it.reapproval?.logins.join(", ")} again — only the base changed` : `Approved again — only the base changed since ${it.reapproval?.oldHead.slice(0, 7)}`,
+          finishedAt: at,
+        });
         break;
     }
   }

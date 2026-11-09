@@ -216,6 +216,11 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       "validate",
       "orchestrator",
       "sdlc",
+      "re-approve",
+      "dismissed approval",
+      "stale approval",
+      "base branch",
+      "ask again",
     ],
   },
   {

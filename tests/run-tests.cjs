@@ -105,6 +105,7 @@ for (const mod of [
   "agent-publish.js",
   "agent-result.js",
   "agent-diagrams.js",
+  "agent-reapprove.js",
   "stale.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
@@ -8929,8 +8930,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const snapshot = { pullRequests: [pr], errors: [], rateLimits: [], fetchedAt: "", version: "" };
       const gitCalls = [];
       const children = [];
-      // Diagrams off unless a test asks: drawing spawns a run and calls gh of its own.
-      let settings = cfg.validateSettings({ hosts: [], agent: { enabled, diagrams: { enabled: false }, ...agentOver } });
+      // Diagrams and re-approve off unless a test asks: both call gh of their own.
+      const quiet = (over) => ({ diagrams: { enabled: false }, ...over, scenarios: { reapprove: { mode: "off", askReviewers: true }, ...(over.scenarios ?? {}) } });
+      let settings = cfg.validateSettings({ hosts: [], agent: quiet({ enabled, ...agentOver }) });
       const agent = agentCore.createAgent({
         onChange,
         openResume,
@@ -8964,7 +8966,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       });
       // Settings › Agent saved anew.
       const setAgent = (over) => {
-        settings = cfg.validateSettings({ hosts: [], agent: { diagrams: { enabled: false }, ...over } });
+        settings = cfg.validateSettings({ hosts: [], agent: quiet(over) });
       };
       return { agent, snapshot, gitCalls, children, dir, setAgent };
     };
@@ -10113,6 +10115,105 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(pubM.readPlanLines(JSON.stringify(steps[0])), [], "the plan file never yields one");
     });
 
+    // --- re-approve: approvals a base-only push dismissed ---
+    const ra = require(path.join(__dirname, "../dist/main/shared/agent-reapprove.js"));
+    const review = (login, state, at, oid) => ({ __typename: "PullRequestReview", author: { login }, state, submittedAt: at, commit: { oid } });
+    const dismissal = (login, previousReviewState, oid) => ({ __typename: "ReviewDismissedEvent", previousReviewState, review: { author: { login }, commit: { oid } } });
+    const diffOf = (hunk, index = "index 111..222 100644") => `diff --git a/src/x.ts b/src/x.ts\n${index}\n--- a/src/x.ts\n+++ b/src/x.ts\n${hunk}`;
+
+    test("agent re-approve: a dismissed approval is told from a dismissed change request, a later word and the current head", () => {
+      const t = [
+        review("Anna", "DISMISSED", "2026-11-01T10:00:00Z", "old111"),
+        dismissal("anna", "APPROVED", "old111"),
+        review("ivan", "DISMISSED", "2026-11-01T11:00:00Z", "old111"),
+        dismissal("ivan", "CHANGES_REQUESTED", "old111"),
+        review("olga", "DISMISSED", "2026-11-01T09:00:00Z", "old111"),
+        dismissal("olga", "APPROVED", "old111"),
+        review("olga", "COMMENTED", "2026-11-02T09:00:00Z", "new222"),
+        review("petr", "DISMISSED", "2026-11-01T09:00:00Z", "new222"),
+        dismissal("petr", "APPROVED", "new222"),
+        review("author1", "DISMISSED", "2026-11-01T09:00:00Z", "old111"),
+        dismissal("author1", "APPROVED", "old111"),
+        { __typename: "PullRequestReview", author: { login: "draft" }, state: "PENDING", submittedAt: null, commit: { oid: "old111" } },
+      ];
+      assert.deepStrictEqual(ra.dismissedApprovals(t, "new222", ["AUTHOR1"]), [{ login: "Anna", head: "old111" }], "ivan's was a change request, olga spoke since, petr's was on this head, the author is out");
+      assert.deepStrictEqual(ra.dismissedApprovals([], "new222"), []);
+    });
+
+    test("agent re-approve: the PR's own changes compare without context, line numbers or blob ids — a binary file stays strict", () => {
+      const before = diffOf("@@ -1,3 +1,4 @@\n ctx\n+added line\n ctx2\n");
+      const after = diffOf("@@ -40,3 +44,4 @@\n other context from the base\n+added line\n moved ctx\n", "index 999..222 100644");
+      assert.ok(ra.sameChanges(before, after), "the base moved the lines around it, nothing of the PR");
+      assert.ok(ra.sameChanges(before.replace(/\n/g, "\r\n"), after));
+      assert.ok(!ra.sameChanges(before, diffOf("@@ -1,3 +1,4 @@\n ctx\n+added line, changed\n ctx2\n")), "a line of the PR changed");
+      assert.ok(!ra.sameChanges(before, `${after}diff --git a/b.ts b/b.ts\n--- a/b.ts\n+++ b/b.ts\n@@ -1 +1 @@\n-a\n+b\n`), "a file more");
+      const bin = (index) => `diff --git a/i.png b/i.png\n${index}\nBinary files a/i.png and b/i.png differ\n`;
+      assert.ok(ra.sameChanges(bin("index aaa..bbb 100644"), bin("index aaa..bbb 100644")));
+      assert.ok(!ra.sameChanges(bin("index aaa..bbb 100644"), bin("index ccc..bbb 100644")), "a binary under a moved base can't be told: the safe side");
+      assert.ok(!ra.sameChanges("", ""), "two empty diffs say nothing");
+      assert.strictEqual(ra.reapprovalBody("0123456789abcdef"), "Re-approved: only the base branch changed since my approval at `0123456` — the PR's own changes are the same.");
+    });
+
+    test("agent re-approve: the policy holds someone's PR while its head is checked, and re-asks beside driving your own", () => {
+      const s = agentOn();
+      assert.deepStrictEqual(s.scenarios.reapprove, { mode: "shadow", askReviewers: true }, "a scenario that posts starts in Shadow");
+      const theirs = reviewPr({ role: "reviewed" });
+      const at = (state) => policy.planJobs([theirs], s, { ...noSessions, reapproveState: () => state });
+      let r = at("unchecked");
+      assert.deepStrictEqual(r.reapprovals.map((j) => [j.scenario, j.key, j.mode]), [["reapprove", "PR_R|reapprove|aaa111", "shadow"]]);
+      assert.strictEqual(r.idle.get("PR_R"), "Checking whether only the base changed since your approval");
+      assert.strictEqual(at("same").idle.get("PR_R"), "Only the base changed since your approval");
+      r = at("pass");
+      assert.deepStrictEqual(r.reapprovals, []);
+      assert.notStrictEqual(r.idle.get("PR_R"), "Only the base changed since your approval", "the other rules decide");
+      assert.deepStrictEqual(policy.planJobs([theirs], s, noSessions).reapprovals, [], "no hook: pass");
+      assert.deepStrictEqual(policy.planJobs([{ ...theirs, viewerHasReviewed: true }], s, { ...noSessions, reapproveState: () => "unchecked" }).reapprovals, [], "your approval stands");
+      assert.deepStrictEqual(policy.planJobs([theirs], agentOn({ scenarios: { reapprove: { mode: "off" } } }), { ...noSessions, reapproveState: () => "unchecked" }).reapprovals, []);
+
+      // The fixture's PR carries an approval; the base took it away.
+      const mine = { ...reviewPr({ role: "author" }), hasHumanApproval: false };
+      r = policy.planJobs([mine], s, { ...noSessions, reapproveState: () => "unchecked" });
+      assert.deepStrictEqual(r.reapprovals.map((j) => j.scenario), ["reask"]);
+      assert.strictEqual(r.jobs.length + r.merges.length + (r.idle.has("PR_R") ? 1 : 0) > 0, true, "your PR still goes through its own rules");
+      assert.deepStrictEqual(policy.planJobs([mine], agentOn({ scenarios: { reapprove: { mode: "shadow", askReviewers: false } } }), { ...noSessions, reapproveState: () => "unchecked" }).reapprovals, []);
+      assert.deepStrictEqual(policy.planJobs([{ ...mine, hasHumanApproval: true }], s, { ...noSessions, reapproveState: () => "unchecked" }).reapprovals, [], "an approval stands");
+    });
+
+    await atest("agent re-approve: the check reads the timeline once and two diffs, and passes on whatever isn't a base-only push", async () => {
+      const md = require(path.join(__dirname, "../dist/main/main/agent/reapprove.js"));
+      const timeline = [review("me", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("me", "APPROVED", "old111")];
+      const before = diffOf("@@ -1,3 +1,4 @@\n ctx\n+added\n ctx2\n");
+      const sameNow = diffOf("@@ -9,3 +9,4 @@\n x\n+added\n y\n");
+      const fake = (o = {}) => {
+        const calls = [];
+        const gh = async (args, opts) => {
+          calls.push(args);
+          if (args[1] === "graphql") {
+            assert.match(JSON.parse(opts.input).query, /REVIEW_DISMISSED_EVENT/);
+            return { code: 0, stdout: JSON.stringify({ data: { viewer: { login: "me" }, node: { state: o.state ?? "OPEN", headRefOid: o.head ?? "aaa111", baseRefName: "release/8.3", author: { login: "author1" }, timelineItems: { nodes: o.timeline ?? timeline } } } }), stderr: "" };
+          }
+          if (o.tooBig) return { code: 1, stdout: "", stderr: "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)" };
+          return { code: 0, stdout: args[1].includes("/compare/") ? before : (o.now ?? sameNow), stderr: "" };
+        };
+        return { gh, calls };
+      };
+      const target = { id: "PR_R", url: "https://github.com/a/b/pull/7", repo: "a/b", number: 7, headOid: "aaa111" };
+      const ok = fake();
+      assert.deepStrictEqual(await md.checkReapproval(ok.gh, target, "reapprove"), { verdict: "same", logins: ["me"], oldHead: "old111", note: "only the base changed since old111" });
+      assert.deepStrictEqual(ok.calls.map((a) => a[1]), ["graphql", "repos/a/b/pulls/7", "repos/a/b/compare/release/8.3...old111"], "three reads, the base's slash kept");
+      assert.strictEqual((await md.checkReapproval(fake({ now: diffOf("@@ -1,3 +1,4 @@\n ctx\n+other\n ctx2\n") }).gh, target, "reapprove")).note, "the PR's own changes differ since the approval");
+      assert.strictEqual((await md.checkReapproval(fake().gh, target, "reask")).note, "no dismissed approvals", "on your PR, your own approval is no reviewer's");
+      assert.strictEqual((await md.checkReapproval(fake({ state: "MERGED" }).gh, target, "reapprove")).verdict, "pass");
+      assert.strictEqual((await md.checkReapproval(fake({ tooBig: true }).gh, target, "reapprove")).note, "too big to compare");
+      await assert.rejects(md.checkReapproval(fake({ head: "bbb222" }).gh, target, "reapprove"), /newer head/, "the dashboard is behind: checked again later");
+      assert.deepStrictEqual(md.reapproveRequest("a/b", 7, "aaa111", "old111", "— sig"), {
+        label: "approval",
+        endpoint: "repos/a/b/pulls/7/reviews",
+        body: { event: "APPROVE", commit_id: "aaa111", body: `${ra.reapprovalBody("old111")}\n\n— sig` },
+      });
+      assert.deepStrictEqual(md.reaskRequest("a/b", 7, ["anna"]).body, { reviewers: ["anna"] });
+    });
+
     test("agent plugins: your own skills a prompt names are mounted as a plugin of the run's own", () => {
       const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-skills-"));
       const skills = path.join(home, "skills");
@@ -10841,6 +10942,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(iv.validateDiagramsChecked(id, [true, false]), { requestId: id, results: [true, false] });
       assert.throws(() => iv.validateDiagramsChecked(id, ["flowchart LR"]), /yes\/no/, "never text");
       assert.throws(() => iv.validateDiagramsChecked("x", [true]), /request's id/);
+      assert.deepStrictEqual(iv.validateAgentAction({ type: "reapprove", runId: id }), { type: "reapprove", runId: id });
     });
 
     test("main.js wiring: the agent hears every snapshot, keeps hidden polling alive and stops on quit", () => {
@@ -11134,6 +11236,120 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(readLog(blind).find((l) => l.event === "diagrams-held").detail, /not checked/);
       } finally {
         blind.agent.stop();
+      }
+    });
+
+    // GitHub as the re-approve check and its writes see it.
+    const reapproveGh = (st) => async (args, opts) => {
+      if (args[1] === "graphql") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ data: { viewer: { login: "me" }, node: { state: "OPEN", headRefOid: "aaa111", baseRefName: "master", author: { login: st.author ?? "author1" }, timelineItems: { nodes: st.timeline } } } }),
+          stderr: "",
+        };
+      }
+      if (args.includes("Accept: application/vnd.github.v3.diff")) {
+        const before = "diff --git a/src/x.ts b/src/x.ts\n--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,3 +1,4 @@\n ctx\n+added\n ctx2\n";
+        return { code: 0, stdout: args[1].includes("/compare/") ? before : (st.now ?? before.replace("@@ -1,3 +1,4 @@", "@@ -7,3 +7,4 @@")), stderr: "" };
+      }
+      st.posted.push({ endpoint: args[1], body: JSON.parse(opts.input) });
+      return { code: 0, stdout: "{}", stderr: "" };
+    };
+    const myDismissal = [review("me", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("me", "APPROVED", "old111")];
+
+    await atest("agent re-approve: a base-only push that dismissed your approval is offered back, and given on your click — signed, on the new head", async () => {
+      const st = { timeline: myDismissal, posted: [] };
+      const notices = [];
+      const f = agentFixture({
+        pr: reviewPr({ role: "reviewed" }),
+        agent: { scenarios: { reapprove: { mode: "shadow", askReviewers: true } } },
+        script: keepWorking,
+        gh: reapproveGh(st),
+        fetchPr: async () => ({ pr: reviewPr({ role: "reviewed" }), state: "OPEN", viewer: "me" }),
+        notify: (n) => notices.push([n.kind, n.item.scenario]),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.scenario === "reapprove"));
+        const item = only(f).find((i) => i.scenario === "reapprove");
+        assert.deepStrictEqual([item.state, item.headline, item.reapproval], ["needsYou", "Only the base changed — approve again", { logins: ["me"], oldHead: "old111" }]);
+        assert.strictEqual(actionLabel(item), "Re-approve");
+        assert.strictEqual(f.children.length, 0, "no session: a review of this head would only repeat the approval");
+        assert.deepStrictEqual(st.posted, [], "Shadow gives nothing by itself");
+        assert.deepStrictEqual(notices, [["needsYou", "reapprove"]]);
+        await until(() => readLog(f).some((l) => l.event === "reapprove-check"));
+        assert.strictEqual(readLog(f).find((l) => l.event === "reapprove-check").data.verdict, "same");
+
+        assert.deepStrictEqual(await f.agent.act({ type: "reapprove", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(st.posted.map((p) => [p.endpoint, p.body.event, p.body.commit_id]), [["repos/a/b/pulls/7/reviews", "APPROVE", "aaa111"]]);
+        assert.ok(st.posted[0].body.body.startsWith(ra.reapprovalBody("old111")) && st.posted[0].body.body.endsWith(ad.DEFAULT_AGENT_SIGNATURE));
+        assert.deepStrictEqual([only(f)[0].state, only(f)[0].published], ["done", true]);
+        assert.strictEqual((await f.agent.act({ type: "reapprove", runId: item.runId })).ok, false, "never twice");
+        await until(() => readLog(f).some((l) => l.event === "reapproved"));
+        // The head is read once: planning again starts no second check.
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.strictEqual(readLog(f).filter((l) => l.event === "reapprove-check").length, 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent re-approve: On gives it at once; changed lines leave the head to the other rules; on your PR the reviewers are asked again", async () => {
+      // On: no click.
+      const on = { timeline: myDismissal, posted: [] };
+      const f = agentFixture({
+        pr: reviewPr({ role: "reviewed" }),
+        agent: { scenarios: { reapprove: { mode: "on", askReviewers: true } } },
+        script: keepWorking,
+        gh: reapproveGh(on),
+        fetchPr: async () => ({ pr: reviewPr({ role: "reviewed" }), state: "OPEN", viewer: "me" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => on.posted.length === 1 && only(f)[0]?.state === "done");
+        assert.strictEqual(on.posted[0].body.event, "APPROVE");
+        assert.match(only(f)[0].headline, /^Approved again — only the base changed since old111/);
+        assert.strictEqual(view.agentNoticeTitle("finished", only(f)[0]), "Approved again: #7", "not «Review sent»");
+        assert.strictEqual(view.agentNoticeTitle("needsYou", { ...only(f)[0], state: "needsYou", published: undefined }), "Only the base changed — approve again: #7");
+      } finally {
+        f.agent.stop();
+      }
+
+      // A line of the PR changed: nothing is offered.
+      const changed = { timeline: myDismissal, posted: [], now: "diff --git a/src/x.ts b/src/x.ts\n--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,3 +1,4 @@\n ctx\n+other\n ctx2\n" };
+      const g = agentFixture({ pr: reviewPr({ role: "reviewed" }), agent: { scenarios: { reapprove: { mode: "on", askReviewers: true } } }, script: keepWorking, gh: reapproveGh(changed) });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => readLog(g).some((l) => l.event === "reapprove-check"));
+        await tickOnce();
+        assert.deepStrictEqual([only(g).length, changed.posted.length], [0, 0]);
+        assert.notStrictEqual(g.agent.getState().idle.PR_R, "Checking whether only the base changed since your approval", "the other rules decide again");
+      } finally {
+        g.agent.stop();
+      }
+
+      // Your PR: the reviewer whose approval went is asked again.
+      const mine = { author: "me", timeline: [review("anna", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("anna", "APPROVED", "old111")], posted: [] };
+      const off = { mode: "off" };
+      const unapproved = () => ({ ...reviewPr({ role: "author" }), hasHumanApproval: false, reviewers: [] });
+      const h = agentFixture({
+        pr: unapproved(),
+        agent: { scenarios: { reapprove: { mode: "shadow", askReviewers: true }, selfReview: off, driveCi: { mode: "off", maxAttempts: 2 }, driveComments: off, merge: { mode: "off" } } },
+        script: keepWorking,
+        gh: reapproveGh(mine),
+        fetchPr: async () => ({ pr: unapproved(), state: "OPEN", viewer: "me" }),
+      });
+      try {
+        h.agent.onSnapshot(h.snapshot);
+        await until(() => only(h).some((i) => i.scenario === "reask"));
+        const item = only(h).find((i) => i.scenario === "reask");
+        assert.deepStrictEqual([item.headline, actionLabel(item), view.laneOfScenario(item.scenario)], ["Only the base changed — ask anna again", "Ask again", "mine"]);
+        assert.deepStrictEqual(await h.agent.act({ type: "reapprove", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(mine.posted, [{ endpoint: "repos/a/b/pulls/7/requested_reviewers", body: { reviewers: ["anna"] } }]);
+        assert.strictEqual(only(h).find((i) => i.scenario === "reask").headline, "Asked anna again — only the base changed");
+      } finally {
+        h.agent.stop();
       }
     });
 

@@ -272,6 +272,11 @@ function menuFor(card: StageCard, state: AgentState, first: string | null, run: 
     case "merge":
       if (item && pr) out.push({ label: "Open on GitHub", action: () => openUrl(pr.url) });
       break;
+    case "reapprove":
+    case "reask":
+      if (pr) out.push({ label: "Open on GitHub", action: () => openUrl(pr.url) });
+      discard(stage.action.kind === "reapprove" ? "I'll look myself" : "Don't ask", "Turn the offer down — the agent leaves this head to the other rules");
+      break;
     case "draftReview":
       discard("I'll review myself", "Drop the brief — the agent leaves this head alone");
       break;
@@ -387,6 +392,10 @@ function BoardCard({
             <button type="button" className={BTN_PRIMARY} disabled={busy} onClick={() => void doing({ type: "push", runId: item.runId })}>
               {busy ? "Pushing…" : stage.action.label}
             </button>
+          ) : (kind === "reapprove" || kind === "reask") && item ? (
+            <button type="button" className={BTN_PRIMARY} disabled={busy} onClick={() => void doing({ type: "reapprove", runId: item.runId })}>
+              {busy ? (kind === "reapprove" ? "Approving…" : "Asking…") : stage.action.label}
+            </button>
           ) : kind === "draftReview" && item ? (
             <button type="button" className={BTN_PRIMARY} disabled={busy} onClick={() => void doing({ type: "reviewAnyway", runId: item.runId })}>
               {stage.action.label}
@@ -409,6 +418,10 @@ function BoardCard({
       {stage.ready && item?.mode === "shadow" && kind === "send" && <div className="mt-1.5 text-[11px] text-fg-faint">Nothing is on GitHub until you send it. It goes out with the agent&apos;s signature.</div>}
       {stage.ready && item?.mode === "shadow" && kind === "push" && <div className="mt-1.5 text-[11px] text-fg-faint">Nothing is on the branch until you push. Fast-forward only, and only while nobody else pushed.</div>}
       {kind === "merge" && item && <div className="mt-1.5 text-[11px] text-fg-faint">Merges only the commit shown here — GitHub refuses it if anyone pushes first.</div>}
+      {kind === "reapprove" && item && (
+        <div className="mt-1.5 text-[11px] text-fg-faint">A push brought in only the base: the PR&apos;s own changes are line for line the ones you approved. Goes out signed by the agent.</div>
+      )}
+      {kind === "reask" && item && <div className="mt-1.5 text-[11px] text-fg-faint">Your push brought in only the base and changed nothing they approved. GitHub notifies them; nothing is written in the PR.</div>}
 
       {more && menu.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5 rounded-md border border-line bg-elevated/40 p-1.5">

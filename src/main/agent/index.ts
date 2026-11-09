@@ -29,6 +29,7 @@ import type {
 import { chooseMergeMethod, mergeArgs } from "./merge";
 import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
 import {
+  ghApiArgs,
   ghError,
   planHash,
   prepareRunFolder,
@@ -47,9 +48,10 @@ import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { cutShort, hookCommand, NO_PUSH_ENV, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
+import { checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
 import { diagramComment, wantsDiagrams } from "../../shared/agent-diagrams";
 import { actionArgs, boardNow, clip, diffBoard, diffIdle, diffItems, itemFields, runStats, settingsDiff, type ItemMark } from "./journal";
-import { openStore, type AgentItemRecord, type AgentLogEntry, type AgentStore, type LedgerEntry } from "./store";
+import { openStore, type AgentItemRecord, type AgentLogEntry, type AgentStore, type LedgerEntry, type ReapproveMark } from "./store";
 import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor, type OrchestratorRun } from "./sdlc";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
 
@@ -616,6 +618,9 @@ export function createAgent(deps: AgentDeps): Agent {
     return store.data.items.some((i) => i.prId === job.prId && FRESH_REVIEW.has(i.scenario) && i.key.endsWith("|asked") && keyHead(i.key) === head);
   }
 
+  /** Scenarios that are offers with a button, never a session. */
+  const OFFERS: ReadonlySet<AgentScenario> = new Set(["merge", "reapprove", "reask"]);
+
   /** The PR as the dashboard last saw it (merged ones drop out of the snapshot; their after-merge run still needs a name). */
   const snapshotPr = (prId: string) => deps.getSnapshot()?.pullRequests.find((p) => p.id === prId) ?? null;
 
@@ -637,8 +642,8 @@ export function createAgent(deps: AgentDeps): Agent {
       ...(job.reasons ? { reasons: job.reasons } : {}),
     };
     store.data.items.push(item);
-    // A merge offer is never queued: it waits for your click from the start.
-    logRun(item, job.scenario === "merge" ? "offered" : "queued", {
+    // An offer (a merge, an approval to give again) is never queued: it waits for your click from the start.
+    logRun(item, OFFERS.has(job.scenario) ? "offered" : "queued", {
       headOid: pr.headOid,
       detail: clip(headline),
       data: {
@@ -660,6 +665,142 @@ export function createAgent(deps: AgentDeps): Agent {
       if (r.offStop) continue;
       r.offStop = true;
       r.handle.stop();
+    }
+  }
+
+  /** Heads being read for dismissed approvals right now, and those to read again later after a failed read. */
+  const reapproveChecks = new Set<string>();
+  const reapproveRetry = new Map<string, number>();
+  /** Offers being given right now — a second click waits for the first. */
+  const reapproving = new Set<string>();
+
+  /** Where a PR's head stands for re-approve / re-ask — the policy's `reapproveState`. */
+  function reapproveState(pr: PullRequest, scenario: "reapprove" | "reask"): "unchecked" | "checking" | "same" | "pass" {
+    const key = jobKey(pr, scenario);
+    if (reapproveChecks.has(key) || (reapproveRetry.get(key) ?? 0) > now().getTime()) return "checking";
+    const mark = store.data.reapprove?.[key];
+    if (!mark) return "unchecked";
+    if (mark.verdict !== "same") return "pass";
+    // You turned the offer down: the other rules decide again.
+    if (store.data.items.some((i) => i.key === key && i.state === "done" && i.headline === AGENT_CLOSED.dismissed)) return "pass";
+    return "same";
+  }
+
+  /**
+   * Reads the PR's dismissed approvals and diffs for this head (`./reapprove.ts`),
+   * writes down what it found, and plans again with it. A failed read is tried
+   * again ten minutes later; meanwhile nothing else starts on someone's PR.
+   */
+  function startReapprovalCheck(job: AgentJob, pr: PullRequest): void {
+    if (reapproveChecks.has(job.key)) return;
+    reapproveChecks.add(job.key);
+    const fields = { prId: pr.id, prNumber: pr.number, repo: pr.repo, scenario: job.scenario, ...(pr.headOid ? { headOid: pr.headOid } : {}) };
+    void (async () => {
+      try {
+        const found = await checkReapproval(gh, { id: pr.id, url: pr.url, repo: pr.repo, number: pr.number, headOid: pr.headOid }, job.scenario === "reask" ? "reask" : "reapprove");
+        if (stopped) return;
+        const mark: ReapproveMark = {
+          verdict: found.verdict,
+          ...(found.logins.length > 0 ? { logins: found.logins } : {}),
+          ...(found.oldHead ? { oldHead: found.oldHead } : {}),
+          note: found.note,
+          at: stamp(),
+        };
+        store.data.reapprove = { ...(store.data.reapprove ?? {}), [job.key]: mark };
+        reapproveRetry.delete(job.key);
+        store.log({ at: stamp(), kind: "plan", event: "reapprove-check", ...fields, detail: clip(found.note), data: { verdict: found.verdict, ...(found.logins.length > 0 ? { logins: found.logins } : {}) } });
+      } catch (e) {
+        reapproveRetry.set(job.key, now().getTime() + 10 * 60_000);
+        store.log({ at: stamp(), kind: "plan", event: "reapprove-check", ...fields, detail: clip(`couldn't check: ${(e as Error).message}`), data: { verdict: "error" } });
+      } finally {
+        reapproveChecks.delete(job.key);
+      }
+      if (stopped) return;
+      void store.save();
+      const snapshot = deps.getSnapshot();
+      if (snapshot) onSnapshot(snapshot);
+      changed();
+    })();
+  }
+
+  /** The offer for a head found "same" — once; true when it was made now. In On, it is given at once. */
+  function offerReapproval(job: AgentJob, pr: PullRequest, mark: ReapproveMark): boolean {
+    // Offered, given or turned down already; one that only lapsed comes back.
+    if (store.data.items.some((i) => i.key === job.key && !(i.state === "done" && i.headline === AGENT_CLOSED.gone))) return false;
+    const logins = mark.logins ?? [];
+    const item = newItem(job, pr, job.scenario === "reask" ? `Only the base changed — ask ${logins.join(", ")} again` : "Only the base changed — approve again");
+    item.reapproval = { logins, oldHead: mark.oldHead ?? "" };
+    item.state = "needsYou";
+    item.finishedAt = stamp();
+    if (job.mode === "on") void giveAgain(item, false);
+    else announce(item, "needsYou");
+    return true;
+  }
+
+  /**
+   * Gives a dismissed approval again (`reapprove`) or asks your reviewers again
+   * (`reask`) — on your click, or in On right after the check. The PR is read
+   * again first: closed, pushed to since, or already approved / asked, and
+   * nothing goes out.
+   */
+  async function giveAgain(item: AgentItemRecord, byYou: boolean): Promise<AgentActionResult> {
+    const all = loadAll();
+    const head = keyHead(item.key);
+    const r = item.reapproval;
+    if (!all || !head || !r?.oldHead) return { ok: false, error: "This offer has nothing to give again." };
+    const again = item.scenario === "reapprove";
+    reapproving.add(item.runId);
+    const refuse = (error: string): AgentActionResult => {
+      logRun(item, again ? "not-reapproved" : "not-reasked", { headOid: head, detail: clip(error), data: { byYou } });
+      item.headline = `Not ${again ? "approved again" : "asked again"} — ${error}`;
+      void store.save();
+      changed();
+      if (!byYou) announce(item, "failed");
+      return { ok: false, error };
+    };
+    try {
+      const read = await fresh(item, snapshotPr(item.prId)?.roles ?? [again ? "reviewed" : "author"]);
+      if (!read.ok) return refuse(read.error);
+      const { pr, state } = read.fresh;
+      if (state !== "OPEN") {
+        await closeAs(item, AGENT_CLOSED.gone);
+        return { ok: false, error: `The PR was ${state.toLowerCase()} already.` };
+      }
+      if (pr.headOid !== head) return refuse("there are new commits since — the new head is checked on its own");
+      let req;
+      let logins: string[] = [];
+      if (again) {
+        if (pr.viewerApproved) {
+          await closeAs(item, "You approved it again yourself");
+          return { ok: true };
+        }
+        req = reapproveRequest(item.repo, item.prNumber, head, r.oldHead, all.agent.policy.signature);
+      } else {
+        // Not who approved since, or is asked already.
+        const settled = new Set(pr.reviewers.filter((x) => x.reviewState !== "changes_requested").map((x) => x.login.toLowerCase()));
+        logins = r.logins.filter((l) => !settled.has(l.toLowerCase()));
+        if (logins.length === 0) {
+          await closeAs(item, "Your reviewers are asked again already");
+          return { ok: true };
+        }
+        req = reaskRequest(item.repo, item.prNumber, logins);
+      }
+      item.headline = again ? "Approving again…" : "Asking again…";
+      changed();
+      const res = await gh(ghApiArgs(req, item.url), { input: JSON.stringify(req.body) });
+      if (res.code !== 0) return refuse(`GitHub refused it: ${ghError(res)}`);
+      item.state = "done";
+      item.published = true;
+      item.finishedAt = stamp();
+      item.headline = again ? `Approved again — only the base changed since ${r.oldHead.slice(0, 7)}` : `Asked ${logins.join(", ")} again — only the base changed`;
+      store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
+      logRun(item, again ? "reapproved" : "reasked", { headOid: head, detail: item.headline, data: { byYou, mode: item.mode, oldHead: r.oldHead, ...(again ? {} : { logins }) } });
+      void store.save();
+      changed();
+      if (!byYou) announce(item, "finished");
+      return { ok: true };
+    } finally {
+      reapproving.delete(item.runId);
     }
   }
 
@@ -709,6 +850,7 @@ export function createAgent(deps: AgentDeps): Agent {
         return d && d.attempts >= s.scenarios.driveCi.maxAttempts ? `Yours — the agent tried ${d.attempts} time${d.attempts === 1 ? "" : "s"}; over to you` : null;
       },
       selfReviewed: (pr) => Boolean(store.data.ledger[jobKey(pr, "drive", "self")]) || (pr.headOid !== null && store.data.pushedHeads[pr.id] === pr.headOid),
+      reapproveState,
       orchestrated: (pr) => {
         const run = orchestratorRun(pr, claudeSettings);
         if (!run) return null;
@@ -771,6 +913,32 @@ export function createAgent(deps: AgentDeps): Agent {
         item.headline = AGENT_CLOSED.gone;
         item.finishedAt = stamp();
         dirty = true;
+      }
+    }
+    // Approvals a base-only push dismissed: read once per head, then offered
+    // (Shadow) or given again (On). An offer the plan no longer points at — you
+    // approved yourself, someone pushed — leaves quietly.
+    const reoffered = new Set(plan.reapprovals.map((j) => j.key));
+    for (const job of plan.reapprovals) {
+      const pr = byId.get(job.prId)!;
+      const mark = store.data.reapprove?.[job.key];
+      if (!mark) startReapprovalCheck(job, pr);
+      else if (mark.verdict === "same" && offerReapproval(job, pr, mark)) dirty = true;
+    }
+    for (const item of store.data.items) {
+      if ((item.scenario === "reapprove" || item.scenario === "reask") && item.state === "needsYou" && !reoffered.has(item.key) && !reapproving.has(item.runId)) {
+        item.state = "done";
+        item.headline = AGENT_CLOSED.gone;
+        item.finishedAt = stamp();
+        dirty = true;
+      }
+    }
+    if (store.data.reapprove) {
+      for (const key of Object.keys(store.data.reapprove)) {
+        if (!byId.has(key.split("|")[0])) {
+          delete store.data.reapprove[key];
+          dirty = true;
+        }
       }
     }
     // Why the agent leaves each PR alone, where that changed since the last plan.
@@ -1806,6 +1974,11 @@ export function createAgent(deps: AgentDeps): Agent {
         if (item.state !== "needsYou" || item.scenario !== "drive") return { ok: false, error: "Only a drive's commits can be pushed." };
         return pushItem(item, all);
       }
+      case "reapprove": {
+        if ((item.scenario !== "reapprove" && item.scenario !== "reask") || item.state !== "needsYou") return { ok: false, error: "There is nothing to give again here." };
+        if (reapproving.has(item.runId)) return { ok: false, error: "It is on its way already." };
+        return giveAgain(item, true);
+      }
       case "merge": {
         if (item.scenario !== "merge" || item.state !== "needsYou") return { ok: false, error: "There is nothing to merge here." };
         if (merging.has(item.runId)) return { ok: false, error: "It is being merged already." };
@@ -1839,6 +2012,7 @@ export function createAgent(deps: AgentDeps): Agent {
       case "retry": {
         if (r || item.state === "queued") return { ok: false, error: "It is already running." };
         if (item.scenario === "merge") return { ok: false, error: "A merge offer isn't a run — it comes back on its own once the PR is ready." };
+        if (item.scenario === "reapprove" || item.scenario === "reask") return { ok: false, error: "An offer to give an approval again isn't a run — it is checked again on the next head." };
         const pr = snapshot?.pullRequests.find((p) => p.id === item.prId);
         if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
         // A drive goes again for what the PR needs now, not what it needed then.

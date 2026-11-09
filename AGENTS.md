@@ -165,7 +165,7 @@ Three layers:
   only the PR id and its choices, the PR is closed first and the task second,
   and a missing Jira token stops it before anything changes. Jira writes need a
   token with write scope — the read-only one the Jira section recommends gets a
-  refusal that says so) and the PR agent's six: `agent-defaults.ts`
+  refusal that says so) and the PR agent's seven: `agent-defaults.ts`
   (the Agent tab's defaults and bounds), `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (where a
@@ -209,15 +209,34 @@ Three layers:
   has a Mermaid comment, whoever drew it (the creatio-pr-watch reviewer draws
   the same kind, with the same three colours). The card renders them with the
   renderer's own mermaid, loaded on first use, labels as SVG text and the SVG
-  sanitized again to SVG only — HTML in a `<foreignObject>` came out empty).
+  sanitized again to SVG only — HTML in a `<foreignObject>` came out empty) and
+  `agent-reapprove.ts` (approvals a base-only push dismissed — a branch rule
+  that dismisses approvals on every push takes them away when the base is
+  merged in, though nothing of the PR changed. Two offers with a button, like
+  a merge offer, never a session: `reapprove` gives your approval again on
+  someone's PR, `reask` asks your PR's reviewers again. The policy points at a
+  PR from its state alone — someone's PR you reviewed with no approval or
+  change request of yours standing, or your PR with no approval left — and
+  holds someone's PR (no review of its head starts) until main has read it:
+  once per head (`ReapproveMark`s in `state.json`, by ledger key),
+  `main/agent/reapprove.ts` reads the PR's timeline — a reviewer's latest
+  review DISMISSED and a `ReviewDismissedEvent` saying it was APPROVED, so a
+  dismissed change request never becomes an approval and any later word of
+  theirs wins — and compares the PR's own changes at the dismissed head
+  (`compare/<base>...<old head>`) and now by `diffFingerprint`: per file only
+  the +/- lines, no context, line numbers or blob ids, a binary file kept
+  strict. A diff too big to compare, or one `runGh` may have cut, passes.
+  Shadow offers it, On gives it at once; the PR is read again before anything
+  goes out, the approval carries one line and the signature, and turning an
+  offer down hands the head back to the other rules).
   Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
-  `agent-stream.js`, `agent-result.js`, `agent-view.js` and `agent-diagrams.js`
-  stay free of `node:` builtin references, so the
+  `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`
+  and `agent-reapprove.js` stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
@@ -362,11 +381,14 @@ Three layers:
   in `data`. Kinds: `run` (a run's own steps — `queued` with mode, reasons and
   PR size; `started` with its folder, model and queue wait; its end,
   `needsYou`/`done`/`failed`, with time, turns, cost, tokens, tool calls,
-  refused tools and stderr's tail; `published`/`pushed`/`merged` and their
-  `not-*` refusals; `notice`), `item` (every state change of an item), `board`
+  refused tools and stderr's tail; `interrupted` when its process was ended
+  under it; `diagrams`; `published`/`pushed`/`merged`/`reapproved`/`reasked`
+  and their `not-*` refusals; `offered` for an offer; `notice`), `item` (every
+  state change of an item), `board`
   (a card's column or button changed: `seen` on the first look, `move`,
-  `action`, `left`), `plan` (why the agent leaves a PR alone — `idle` — and
-  what holds the queue — `held`/`released`), `action` (each `act`, i.e. each
+  `action`, `left`), `plan` (why the agent leaves a PR alone — `idle` — what
+  holds the queue — `held`/`released` — and what a head's re-approve check
+  found, `reapprove-check`), `action` (each `act`, i.e. each
   click, with its result) and `agent` (start, stop, `on`/`off`, `settings`
   path by path). State changes are found by diffing in `main/agent/journal.ts`,
   run before every save (`openStore`'s `beforeSave`) and after every plan, so a

@@ -68,6 +68,8 @@ export const SCENARIO_VERB: Record<AgentItem["scenario"], string> = {
   drive: "Driving",
   merge: "Merging",
   afterMerge: "Checking Jira for",
+  reapprove: "Approving again",
+  reask: "Asking reviewers again on",
 };
 
 /** "HH:MM" → minutes after midnight; null for anything else. */
@@ -241,9 +243,9 @@ export function rankBefore(queue: readonly AgentItem[], beforeRunId: string | nu
 export type BoardLane = "mine" | "review";
 export const BOARD_LANES: readonly BoardLane[] = ["mine", "review"];
 
-/** Your PR's work (drive, a merge, the Jira run after it) — or a review of someone else's (review, brief, re-review). */
+/** Your PR's work (drive, a merge, the Jira run after it, re-asking reviewers) — or a review of someone else's (review, brief, re-review, re-approve). */
 export function laneOfScenario(scenario: AgentItem["scenario"]): BoardLane {
-  return scenario === "drive" || scenario === "merge" || scenario === "afterMerge" ? "mine" : "review";
+  return scenario === "drive" || scenario === "merge" || scenario === "afterMerge" || scenario === "reask" ? "mine" : "review";
 }
 
 /** An idle PR's lane: yours if you wrote it. */
@@ -288,6 +290,8 @@ export type StageActionKind =
   | "push"
   | "decide"
   | "merge"
+  | "reapprove"
+  | "reask"
   | "draftReview"
   | "fix"
   | "review"
@@ -370,6 +374,12 @@ export function resultAction(item: AgentItem, lane: BoardLane): StageAction | nu
   switch (item.scenario) {
     case "merge":
       return { kind: "merge", label: "Merge" };
+    case "reapprove":
+      return { kind: "reapprove", label: "Re-approve" };
+    case "reask": {
+      const n = item.reapproval?.logins.length ?? 0;
+      return { kind: "reask", label: n > 1 ? `Ask ${n} again` : "Ask again" };
+    }
     case "brief":
       return item.output ? { kind: "draftReview", label: "Draft a review" } : null;
     case "afterMerge":
@@ -524,6 +534,8 @@ export interface StageBoard {
 /** Your move, cheapest and readiest first; what is yours without the agent next; drafts last. */
 const YOU_ORDER: Record<StageActionKind, number> = {
   merge: 0,
+  reapprove: 0,
+  reask: 1,
   send: 1,
   push: 1,
   draftReview: 1,
@@ -604,6 +616,10 @@ export function workLine(item: Pick<AgentItem, "scenario" | "reasons">): string 
       return "Re-reviewing — the author answered";
     case "merge":
       return "Merging";
+    case "reapprove":
+      return "Approving again — only the base changed";
+    case "reask":
+      return "Asking your reviewers again";
     case "afterMerge":
       return "Checking Jira after the merge";
     case "drive": {
@@ -660,6 +676,8 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
     const ci = pr.ciState === "success" ? "CI green" : null;
     return [approved.length > 0 ? `Approved by ${approved.join(", ")}` : "Ready to merge", ci].filter(Boolean).join(" · ");
   }
+  if (kind === "reapprove" && item?.reapproval) return `Only the base changed since your approval at ${item.reapproval.oldHead.slice(0, 7)}`;
+  if (kind === "reask" && item?.reapproval) return `Only the base changed — approvals of ${item.reapproval.logins.join(", ")} dismissed`;
   if (kind === "updateJira") return "Merged — Jira changes to apply";
   if (pr && stage.column === "you") {
     if (kind === "review") return pr.requestedOfMe ? "Review requested" : "Review requested of your team";
@@ -701,6 +719,9 @@ export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item:
   const pr = `#${item.prNumber}`;
   if (kind === "failed") return `The agent couldn't finish ${pr}`;
   if (kind === "finished") {
+    // Before `published`: what an offer gives is marked published too.
+    if (item.scenario === "reapprove") return `Approved again: ${pr}`;
+    if (item.scenario === "reask") return `Reviewers asked again: ${pr}`;
     if (item.published) return `${item.scenario === "rereview" ? "Re-review" : "Review"} sent: ${pr}`;
     if (item.pushed) return `Fixes pushed: ${pr}`;
     if (item.scenario === "merge") return `Merged: ${pr}`;
@@ -716,6 +737,10 @@ export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item:
     }
     case "merge":
       return `Ready to merge: ${pr}`;
+    case "reapprove":
+      return `Only the base changed — approve again: ${pr}`;
+    case "reask":
+      return `Approvals dismissed by a base update: ${pr}`;
     case "decide":
       return `Your call on ${pr}`;
     case "draftReview":

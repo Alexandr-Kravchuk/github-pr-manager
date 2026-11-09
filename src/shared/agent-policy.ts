@@ -46,6 +46,13 @@ export interface PlanContext {
    * reviewers and watches CI itself.
    */
   orchestrated?: (pr: PullRequest) => string | null;
+  /**
+   * Re-approve / re-ask, for this head (`agent-reapprove.ts`): "unchecked" —
+   * main hasn't read the PR's dismissals yet; "checking"; "same" — only the
+   * base changed, an offer is (or was) made; "pass" — nothing to give again,
+   * the other rules decide. Absent: "pass".
+   */
+  reapproveState?: (pr: PullRequest, scenario: "reapprove" | "reask") => "unchecked" | "checking" | "same" | "pass";
 }
 
 /** Why your PR gets no self-review now, or null when it should get one. */
@@ -62,6 +69,11 @@ export interface PlanResult {
   jobs: AgentJob[];
   /** Your PRs ready to merge: an offer with a button, never a run. */
   merges: AgentJob[];
+  /**
+   * Approvals a base-only push may have dismissed — never a run either: those
+   * main still has to check, and those it found the same (their offers stand).
+   */
+  reapprovals: AgentJob[];
   /** Why each PR the agent leaves alone is idle — shown on the Board's Idle column. */
   idle: Map<string, string>;
 }
@@ -140,6 +152,34 @@ function wantsFirstReview(pr: PullRequest, s: AgentSettings): string | null {
   return null;
 }
 
+/**
+ * A PR where a base-only push may have dismissed an approval, from its state
+ * alone: someone's PR you reviewed with no approval or change request of yours
+ * standing — or your own PR with no approval left. Main reads the timeline once
+ * per head to tell a dismissed approval from a plain comment.
+ */
+function mayHaveDismissed(pr: PullRequest, s: AgentSettings): "reapprove" | "reask" | null {
+  const r = s.scenarios.reapprove;
+  if (r.mode === "off" || pr.isDraft || !pr.headOid) return null;
+  if (pr.roles.includes("author")) return r.askReviewers && !pr.hasHumanApproval ? "reask" : null;
+  return pr.roles.includes("reviewed") && !pr.viewerHasReviewed ? "reapprove" : null;
+}
+
+function reapproveJob(pr: PullRequest, scenario: "reapprove" | "reask", s: AgentSettings): AgentJob {
+  return {
+    key: jobKey(pr, scenario),
+    prId: pr.id,
+    prNumber: pr.number,
+    repo: pr.repo,
+    url: pr.url,
+    scenario,
+    // Never run as a session: what it posts is the app's own, a line and a signature.
+    kind: "review",
+    mode: s.scenarios.reapprove.mode === "on" ? "on" : "shadow",
+    createdAt: pr.createdAt,
+  };
+}
+
 /** A Merge button offered on your ready PR: no session, the merge itself only on your click. */
 function mergeJob(pr: PullRequest): AgentJob {
   return {
@@ -158,10 +198,11 @@ function mergeJob(pr: PullRequest): AgentJob {
 export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: PlanContext): PlanResult {
   const jobs: AgentJob[] = [];
   const merges: AgentJob[] = [];
+  const reapprovals: AgentJob[] = [];
   const idle = new Map<string, string>();
   if (!s.enabled) {
     for (const pr of prs) idle.set(pr.id, "The agent is off");
-    return { jobs, merges, idle };
+    return { jobs, merges, reapprovals, idle };
   }
   for (const pr of prs) {
     const skip = (reason: string) => idle.set(pr.id, reason);
@@ -171,6 +212,16 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     }
     if (s.repos.length > 0 && !s.repos.some((r) => r.toLowerCase() === pr.repo.toLowerCase())) {
       skip("Not one of the agent's repositories");
+      continue;
+    }
+    const dismissed = mayHaveDismissed(pr, s);
+    const dismissedState = dismissed ? (ctx.reapproveState?.(pr, dismissed) ?? "pass") : "pass";
+    if (dismissed && dismissedState !== "pass") reapprovals.push(reapproveJob(pr, dismissed, s));
+    // Someone's PR: while that is open, a review of its head would only repeat
+    // the approval the base took away. Your PR goes on below — re-asking your
+    // reviewers stands beside driving it.
+    if (dismissed === "reapprove" && dismissedState !== "pass") {
+      skip(dismissedState === "same" ? "Only the base changed since your approval" : "Checking whether only the base changed since your approval");
       continue;
     }
     if (pr.roles.includes("author")) {
@@ -319,7 +370,7 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     });
   }
   jobs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  return { jobs, merges, idle };
+  return { jobs, merges, reapprovals, idle };
 }
 
 /** `{url}` filled in; an empty template falls back to the given default. */
