@@ -287,7 +287,7 @@ function scenarioRules(
       // In a stack the layer's rules (in `plan`) say what to do about a conflict instead: nothing — the stack needs a rebase.
       (stack ? "" : `Resolve a conflict by merging the base branch in — it is fetched for you as ${pr?.baseRef ?? "<remote>/<base>"}; this session's git has no network — never by rebasing. `) +
       `CI runs once the app pushes, so don't wait for it. ` +
-      (w ? `To answer a reviewer in a thread, write the reply to a file under ${out}/ and run \`${w} reply ${target} <comment-id> <file>\`; the app posts it after the push. ` : "") +
+      (w ? `To answer a reviewer in a thread, write the reply to a file under ${out}/ and run \`${w} reply ${target} <comment-id> <file>\`; the app posts it after the push — or, when you commit nothing, on its own once the user sends it. ` : "") +
       `Find what to fix with gh, which already points at this PR's host and repository: the failing checks with \`gh pr checks ${pr?.number ?? "<number>"}\` and \`gh run view <run-id> --log-failed\`, the review threads with \`gh api repos/${pr?.repo ?? "<owner/repo>"}/pulls/${pr?.number ?? "<number>"}/comments\`. ` +
       `Leave .git, .github, .claude, .husky, .npmrc and git attributes alone. End with what you changed and why. ${never}`
     );
@@ -1400,7 +1400,18 @@ export function createAgent(deps: AgentDeps): Agent {
           fail("Couldn't read the run's commits", read.error);
         } else if (read.drive.commits.length === 0) {
           item.drive = read.drive;
-          item.headline = "No commits — see what it found";
+          if (steps.length > 0) {
+            // Nothing to fix in the code, yet answers for the reviewers — a
+            // decision, a "not a defect": with no push to ride on, they go out
+            // by themselves, on your Send (in On right away, unless it asks you
+            // something first — the answers may hang on that).
+            item.plan = summarizePlan(steps);
+            item.planHash = planHash(planText);
+            item.headline = `Would post: ${describePlan(item.plan)}`;
+            publishNow = item.mode === "on" && (item.result?.asks.length ?? 0) === 0;
+          } else {
+            item.headline = "No commits — see what it found";
+          }
         } else if (!read.fastForward) {
           fail("The run rewrote the branch's history — nothing to push", "The app pushes fast-forwards only; run it again.");
         } else if (read.merges > 0 && pr?.stack) {
@@ -1637,12 +1648,14 @@ export function createAgent(deps: AgentDeps): Agent {
     };
     if (!item.runFolder || !item.plan) return { ok: false, error: "Nothing prepared to publish." };
     if (item.published) return { ok: false, error: "It is published already." };
-    const read = await fresh(item, snapshotPr(item.prId)?.roles ?? ["reviewer"]);
+    // A drive here has nothing to push, only its answers to your reviewers (see `act`).
+    const drive = item.scenario === "drive";
+    const read = await fresh(item, snapshotPr(item.prId)?.roles ?? [drive ? "author" : "reviewer"]);
     if (!read.ok) return refuse(read.error);
     const { pr, state, viewer } = read.fresh;
     if (state !== "OPEN") return refuse(`the PR was ${state.toLowerCase()} since`);
     const head = item.plan.commitId ?? keyHead(item.key);
-    if (head && pr.headOid && pr.headOid !== head) return refuse("there are new commits since this review — run it again");
+    if (head && pr.headOid && pr.headOid !== head) return refuse(`there are new commits since this ${drive ? "run" : "review"} — run it again`);
     const me = viewer?.toLowerCase();
     const holdApprove =
       all.agent.scenarios.review.holdApproveOnChangeRequest && pr.reviewers.some((r) => r.reviewState === "changes_requested" && r.login.toLowerCase() !== me);
@@ -1666,8 +1679,9 @@ export function createAgent(deps: AgentDeps): Agent {
         holdApprove,
         ...(rr ? { allowResolve: rr.resolve, allowApprove: rr.approve } : {}),
       },
-      // A review answers and resolves only in threads you opened.
-      { viewer, mine: true },
+      // A review answers and resolves only in threads you opened; your own PR's
+      // drive answers reviewers in theirs and resolves nothing, as after a push.
+      { viewer, mine: !drive },
       gh,
       item.planHash,
       extra,
@@ -2139,7 +2153,11 @@ export function createAgent(deps: AgentDeps): Agent {
       }
       case "publish": {
         if (r) return { ok: false, error: "It is still running." };
-        if (item.state !== "needsYou" || (item.scenario !== "review" && item.scenario !== "rereview")) return { ok: false, error: "Only a prepared review can be published." };
+        // A drive's replies go out with its push; only with nothing to push are they sent by themselves.
+        const repliesOnly = item.scenario === "drive" && (item.drive?.commits.length ?? 0) === 0;
+        if (item.state !== "needsYou" || (item.scenario !== "review" && item.scenario !== "rereview" && !repliesOnly)) {
+          return { ok: false, error: "Only a prepared review, or a drive's replies with nothing to push, can be published." };
+        }
         return publishItem(item, all, true);
       }
       case "push": {

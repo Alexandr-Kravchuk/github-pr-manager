@@ -233,6 +233,24 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
     const plan = read.plan;
     switch (kind) {
       case "send": {
+        if (item?.scenario === "drive") {
+          // Your own PR, nothing to push: only its answers to the reviewers wait to go out.
+          const replies = plan?.replies.length ?? 0;
+          now = `The agent answered the reviewers without changing the code: ${plural(replies, "reply", "replies")}, nothing to push.`;
+          ask = "Read the replies, then send them — or discard them.";
+          choices = [
+            {
+              label: stage.action?.label ?? "Send",
+              primary: true,
+              does: `Posts ${replies === 1 ? "the reply" : "the replies"} in the reviewers' threads under your name, signed by the agent. Nothing is pushed.`,
+              act: { type: "publish", runId },
+            },
+            ...(item.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them.", act: { type: "continue", runId } } as BoardChoice] : []),
+            { label: "Discard", does: "Drops the replies; the agent leaves this commit to you.", act: { type: "skip", runId } },
+          ];
+          next = "The reviewers read your answers; when they comment again, the agent picks it up.";
+          break;
+        }
         const n = plan?.comments.length ?? 0;
         const approve = plan?.event === "APPROVE";
         const replies = plan?.replies.length ?? 0;
@@ -326,8 +344,13 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         now = `The agent needs your decision${read.asks.length > 1 ? ` on ${read.asks.length} questions` : q ? `: ${q.question}` : ""}.`;
         ask = "Answer below — only you can decide this.";
         const n = item?.drive && !item.pushed ? item.drive.commits.length : 0;
+        // Nothing to push but answers for the reviewers: they can go out as they are, too.
+        const replies = item?.scenario === "drive" && n === 0 && plan && !item.published ? plan.replies.length : 0;
         choices = [
           ...(n > 0 ? [{ label: `Push ${plural(n, "fix", "fixes")} as they are`, does: "Pushes what it has without answering.", act: { type: "push", runId } } as BoardChoice] : []),
+          ...(replies > 0
+            ? [{ label: `Send ${plural(replies, "reply", "replies")} as ${replies === 1 ? "it is" : "they are"}`, does: "Posts them in the reviewers' threads without answering.", act: { type: "publish", runId } } as BoardChoice]
+            : []),
           ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Answers it in the session instead.", act: { type: "continue", runId } } as BoardChoice] : []),
           { label: "Discard", does: "Drops it; the agent leaves this commit to you.", act: { type: "skip", runId } },
         ];

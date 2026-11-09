@@ -288,9 +288,11 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
   const plan = r.plan;
   const sends = kind === "send" && plan;
   const commits = (kind === "push" || kind === "decide") && item?.drive && item.drive.commits.length > 0;
+  // A question on your PR with nothing to push: the answers it drafted, which "as they are" sends.
+  const answers = kind === "decide" && !commits && item?.scenario === "drive" && plan && plan.replies.length > 0;
   const brief = kind === "draftReview";
   const report = (brief || kind === "fix") && r.report;
-  const any = r.summary || r.findings.length > 0 || sends || commits || r.error || r.questions.length > 0 || report || item?.diagrams;
+  const any = r.summary || r.findings.length > 0 || sends || commits || answers || r.error || r.questions.length > 0 || report || item?.diagrams;
   if (!any) return null;
   return (
     <Row label="Read this">
@@ -310,7 +312,7 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
             <div className="mt-1 text-[11px] text-fg-faint">Draft a review puts them in it, as comments.</div>
           </div>
         )}
-        {sends && (
+        {(sends || answers) && plan && (
           <div>
             <div className="text-xs font-medium text-fg">What goes out on GitHub</div>
             <PlanView plan={plan} />

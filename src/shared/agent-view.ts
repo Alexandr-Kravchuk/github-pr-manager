@@ -393,10 +393,12 @@ export function resultAction(item: AgentItem, lane: BoardLane): StageAction | nu
     case "drive": {
       if ((item.result?.asks.length ?? 0) > 0) return { kind: "decide", label: "Your call" };
       const n = item.drive?.commits.length ?? 0;
+      const replies = item.plan && !item.published ? item.plan.replies.length : 0;
       if (n > 0 && !item.pushed) {
-        const replies = item.plan && !item.published ? item.plan.replies.length : 0;
         return { kind: "push", label: replies > 0 ? "Push & reply" : `Push ${n} fix${n === 1 ? "" : "es"}` };
       }
+      // Nothing to push, yet answers for the reviewers: they go out by themselves.
+      if (n === 0 && replies > 0) return { kind: "send", label: replies === 1 ? "Send reply" : `Send ${replies} replies` };
       // It ran to the end and has nothing to push: it couldn't do it.
       return item.drive ? fix() : null;
     }
@@ -659,6 +661,10 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
   }
   const kind = stage.action?.kind;
   if (stage.column === "you" && item) {
+    if (kind === "send" && item.plan && item.scenario === "drive") {
+      const what = (item.reasons ?? []).map((x) => REASON_NAME[x] ?? x).join(" + ") || "The agent";
+      return `${what}: ${count(item.plan.replies.length, "reply", "replies")} ready to send, nothing to push`;
+    }
     if (kind === "send" && item.plan) {
       const p = item.plan;
       return [
@@ -740,7 +746,7 @@ export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item:
     // Before `published`: what an offer gives is marked published too.
     if (item.scenario === "reapprove") return `Approved again: ${pr}`;
     if (item.scenario === "reask") return `Reviewers asked again: ${pr}`;
-    if (item.published) return `${item.scenario === "rereview" ? "Re-review" : "Review"} sent: ${pr}`;
+    if (item.published) return `${item.scenario === "drive" ? "Replies" : item.scenario === "rereview" ? "Re-review" : "Review"} sent: ${pr}`;
     if (item.pushed) return `Fixes pushed: ${pr}`;
     if (item.scenario === "merge") return `Merged: ${pr}`;
     return `The agent finished ${pr}`;
@@ -748,6 +754,7 @@ export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item:
   const action = resultAction(item, laneOfScenario(item.scenario));
   switch (action?.kind) {
     case "send":
+      if (item.scenario === "drive") return `${action.label === "Send reply" ? "Reply" : "Replies"} to reviewers ready to send: ${pr}`;
       return `${action.label === "Approve" ? "Approval" : item.scenario === "rereview" ? "Re-review" : "Review"} ready to send: ${pr}`;
     case "push": {
       const n = item.drive?.commits.length ?? 0;

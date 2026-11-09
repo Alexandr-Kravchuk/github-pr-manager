@@ -9387,6 +9387,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const sIt = (o) => vItem({ prId: "P", finishedAt: o.state === "queued" || o.state === "working" ? undefined : sAgo(5), ...o });
     const plan = (event = "REQUEST_CHANGES", replies = 0) => ({ event, body: "b", comments: [{ path: "x.ts", line: 1, body: "c" }], replies: Array.from({ length: replies }, (_, i) => ({ replyTo: i + 1, body: "r" })), resolves: 0, escalations: [] });
     const drive = (n) => ({ base: "a", head: "b", reasons: ["self"], commits: Array.from({ length: n }, (_, i) => ({ oid: `c${i}`, subject: `fix ${i}` })), stat: "", patch: "" });
+    /** A drive's plan: only its answers to the reviewers, no review of its own. */
+    const answers = (n) => ({ event: null, body: "", comments: [], replies: Array.from({ length: n }, (_, i) => ({ replyTo: i + 1, body: "r" })), resolves: 0, escalations: [] });
     const stage = (pr, items = [], ctx = {}) => view.boardStage(pr, items, { today: sToday, ...ctx });
     const where = (s) => (s ? [s.lane, s.column, s.action?.kind ?? null, s.action?.label ?? null, s.ready] : null);
 
@@ -9446,6 +9448,23 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(rc.now, "The agent drafted a review that requests changes: 1 inline comment.");
       assert.match(rc.choices[0].does, /Posts the review with 1 comment/);
       assert.match(rc.next, /re-review/);
+    });
+
+    test("agent board words: your reviewers' answers with nothing to push go out by themselves — or as they are, next to a question", () => {
+      const mine = xPr();
+      const e = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(2), sessionId: "s", worktree: "/w" })]);
+      assert.deepStrictEqual([e.owner, e.now], ["you", "The agent answered the reviewers without changing the code: 2 replies, nothing to push."]);
+      assert.deepStrictEqual(e.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
+        ["Send 2 replies", "publish", true],
+        ["Open in Claude", "continue", false],
+        ["Discard", "skip", false],
+      ]);
+      assert.match(e.choices[0].does, /in the reviewers' threads under your name, signed by the agent\. Nothing is pushed\.$/);
+      const ask = { summary: "", asks: [{ question: "Retarget?", options: [] }], findings: [], authorQuestions: [], structured: true };
+      const d = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(1), result: ask })]);
+      assert.deepStrictEqual(d.choices.map((c) => [c.label, c.act?.type]), [["Send 1 reply as it is", "publish"], ["Discard", "skip"]], "answering is the question's own form");
+      const noAnswers = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), result: ask })]);
+      assert.deepStrictEqual(noAnswers.choices.map((c) => c.label), ["Discard"]);
     });
 
     test("agent board words: a review nobody started is the agent's to start — unless the agent is off", () => {
@@ -9565,6 +9584,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ["fixes ready to push", sPr(), [sIt({ scenario: "drive", reasons: ["self"], state: "needsYou", drive: drive(2) })], ["mine", "you", "push", "Push 2 fixes", true]],
         ["one fix", sPr(), [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(1) })], ["mine", "you", "push", "Push 1 fix", true]],
         ["fixes and answers to reviewers", sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(2), plan: plan("COMMENT", 1) })], ["mine", "you", "push", "Push & reply", true]],
+        ["answers to reviewers, nothing to push", sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(2), sessionId: "s" })], ["mine", "you", "send", "Send 2 replies", true]],
+        ["one answer, nothing to push", sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(1) })], ["mine", "you", "send", "Send reply", true]],
         ["a product decision", sPr(), [sIt({ scenario: "drive", state: "needsYou", drive: drive(1), result: { summary: "s", asks: [{ question: "q", options: [] }], findings: [], authorQuestions: [], structured: true } })], ["mine", "you", "decide", "Your call", true]],
         ["waiting on reviewers", sPr(), [], ["mine", "waiting", null, null, false]],
         ["reviewer comments, the agent queued", sPr({ hasUnaddressedComments: true }), [sIt({ scenario: "drive", reasons: ["comments"], state: "queued" })], ["mine", "agent", null, null, false]],
@@ -9651,6 +9672,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         line(sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(1), plan: plan("COMMENT", 2) })]),
         "Reviewers' comments: 1 fix and 2 answers ready to push",
       );
+      assert.strictEqual(
+        line(sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(2) })]),
+        "Reviewers' comments: 2 replies ready to send, nothing to push",
+      );
       const asks = [{ question: "Configurable?", options: [] }, { question: "Rename it?", options: [] }];
       assert.strictEqual(line(sPr(), [sIt({ scenario: "drive", state: "needsYou", drive: drive(0), result: { summary: "", asks, findings: [], authorQuestions: [], structured: true } })]), "Your call: Configurable? (+1 more)");
       const reviewers = [{ login: "anna", avatarUrl: "", reviewState: "approved" }, { login: "ivan", avatarUrl: "", reviewState: "pending" }];
@@ -9688,6 +9713,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(t("needsYou", { state: "needsYou", plan: plan("APPROVE") }), "Approval ready to send: #929");
       assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(2) }), "2 fixes ready to push: #929");
       assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(1), plan: plan("COMMENT", 1) }), "Fixes and replies ready to push: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(0), plan: answers(2) }), "Replies to reviewers ready to send: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(0), plan: answers(1) }), "Reply to reviewers ready to send: #929");
+      assert.strictEqual(t("finished", { state: "done", scenario: "drive", drive: drive(0), plan: answers(2), published: true }), "Replies sent: #929");
       assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "merge" }), "Ready to merge: #929");
       const ask = { summary: "", asks: [{ question: "q", options: [] }], findings: [], authorQuestions: [], structured: true };
       assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(0), result: ask }), "Your call on #929");
@@ -11192,6 +11220,134 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       } finally {
         f.agent.stop();
       }
+    });
+
+    // A drive session that finds nothing to fix in the code and answers the reviewers instead — through the run's wrapper.
+    const answerThreads = (ids) => (c) => {
+      const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+      const runDir = path.dirname(outDir);
+      const run = JSON.parse(nfsA.readFileSync(path.join(runDir, "run.json"), "utf8"));
+      for (const id of ids) {
+        const file = path.join(outDir, `reply-${id}.md`);
+        nfsA.writeFileSync(file, `Answer to ${id}.`);
+        const r = spawnSync(process.execPath, [captureJs, runDir, "reply", run.repo, String(run.number), String(id), file], { encoding: "utf8" });
+        if (r.status !== 0) throw new Error(r.stderr);
+      }
+      emit(c, { type: "system", subtype: "init", session_id: "s" });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "Answered the threads; nothing to change in the code." });
+      setImmediate(() => c.emit("exit", 0));
+    };
+    const noCommitsGit = (commonDir, head) => async (all) => {
+      let i = 0;
+      for (;;) {
+        if (all[i] === "-c") i += 2;
+        else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+        else break;
+      }
+      const args = all.slice(i);
+      if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+      if (args[0] === "rev-parse") return args.includes("HEAD") ? `${head}\n` : `${commonDir}\n`;
+      if (args[0] === "remote") return "https://github.com/a/b.git\n";
+      // `git log base..HEAD`: nothing on top of the head.
+      return "";
+    };
+
+    await atest("agent drive: answers to reviewers with nothing to commit wait for your Send, then go out in their threads — signed, once, at the head it saw", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      let freshHead = A;
+      const posted = [];
+      const checked = [];
+      const f = agentFixture({
+        pr: mine,
+        script: answerThreads([101, 102]),
+        captureScript: captureJs,
+        git: noCommitsGit(commonDir, A),
+        fetchPr: async () => ({ pr: { ...mine, headOid: freshHead }, state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => {
+          if (!opts) {
+            // Whose comment it is: a colleague's thread on this PR — a drive answers reviewers in theirs.
+            checked.push(args[1]);
+            return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "colleague" }, in_reply_to_id: null }), stderr: "" };
+          }
+          posted.push({ args, body: JSON.parse(opts.input) });
+          return { code: 0, stdout: "{}", stderr: "" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.deepStrictEqual([item.scenario, item.drive.commits.length, item.headline], ["drive", 0, "Would post: 2 replies"]);
+        assert.deepStrictEqual(item.plan.replies.map((r) => r.replyTo), [101, 102]);
+        assert.strictEqual(actionLabel(item), "Send 2 replies", "not \"see what it found\": there is something to send");
+        assert.strictEqual(posted.length, 0, "Shadow posts nothing by itself");
+        const rules = f.children[0].args[f.children[0].args.indexOf("--append-system-prompt") + 1];
+        assert.match(rules, /posts it after the push — or, when you commit nothing, on its own once the user sends it/);
+        freshHead = "b".repeat(40);
+        assert.match((await f.agent.act({ type: "publish", runId: item.runId })).error, /new commits since this run/);
+        assert.strictEqual(posted.length, 0);
+        freshHead = A;
+        only(f)[0].state = "needsYou";
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(checked, ["repos/a/b/pulls/comments/101", "repos/a/b/pulls/comments/102"], "each comment is checked to be this PR's first");
+        assert.deepStrictEqual(
+          posted.map((p) => p.args[1]),
+          ["repos/a/b/pulls/7/comments/101/replies", "repos/a/b/pulls/7/comments/102/replies"],
+        );
+        assert.ok(posted.every((p) => p.body.body.startsWith("Answer to ") && p.body.body.endsWith(ad.DEFAULT_AGENT_SIGNATURE)), "signed by the app");
+        assert.deepStrictEqual([only(f)[0].state, only(f)[0].published, only(f)[0].headline], ["done", true, "Published: 2 replies"]);
+        assert.strictEqual((await f.agent.act({ type: "publish", runId: item.runId })).ok, false, "never twice");
+        assert.strictEqual(posted.length, 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent drive: in On, answers with nothing to commit go out right after the run — but not while it asks you something", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const run = async (resultExtra, settled) => {
+        const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+        nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+        const posted = [];
+        const f = agentFixture({
+          pr: mine,
+          agent: { scenarios: { driveCi: { mode: "on" } } },
+          script: (c) => {
+            const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+            const runDir = path.dirname(outDir);
+            const file = path.join(outDir, "reply.md");
+            nfsA.writeFileSync(file, "Not a defect: by design.");
+            const r = spawnSync(process.execPath, [captureJs, runDir, "reply", "a/b", "7", "101", file], { encoding: "utf8" });
+            if (r.status !== 0) throw new Error(r.stderr);
+            emit(c, { type: "system", subtype: "init", session_id: "s" });
+            emit(c, { type: "result", subtype: "success", is_error: false, result: resultExtra });
+            setImmediate(() => c.emit("exit", 0));
+          },
+          captureScript: captureJs,
+          git: noCommitsGit(commonDir, A),
+          fetchPr: async () => ({ pr: mine, state: "OPEN", viewer: "me" }),
+          gh: async (args, opts) => {
+            if (!opts) return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "colleague" } }), stderr: "" };
+            posted.push(args[1]);
+            return { code: 0, stdout: "{}", stderr: "" };
+          },
+        });
+        try {
+          f.agent.onSnapshot(f.snapshot);
+          await until(() => only(f).some((i) => i.state === settled));
+          return { item: only(f)[0], posted };
+        } finally {
+          f.agent.stop();
+        }
+      };
+      const sent = await run("Answered.", "done");
+      assert.deepStrictEqual([sent.item.mode, sent.posted, sent.item.state, sent.item.published], ["on", ["repos/a/b/pulls/7/comments/101/replies"], "done", true]);
+      const asking = await run('Done.\n\n```prd-result\n{"summary":"s","asks":[{"question":"Retarget the PR?","options":["Yes","No"]}],"findings":[]}\n```', "needsYou");
+      assert.deepStrictEqual([asking.posted, asking.item.state, actionLabel(asking.item)], [[], "needsYou", "Your call"], "the answers may hang on the question: they wait");
     });
 
     test("ipc and view: Push names a run; a drive's one button pushes its fixes", () => {
