@@ -132,7 +132,8 @@ the dashboard shows a **Sign in with twg** button that opens a terminal running
 The token is encrypted by your OS keychain and kept out of `settings.json`.
 Atlassian API tokens expire; when Jira starts rejecting the token the dashboard
 says so in a banner (and once as a desktop notification) with a link to create a
-new one, and stops sending the rejected token until you replace it. Issue keys
+new one, and stops sending the rejected token until you replace it or correct the
+account email or site. Issue keys
 are parsed from PR titles/branches; if grouping stays empty the dashboard shows
 why (the account can't read the issues, or the PRs aren't subtasks).
 

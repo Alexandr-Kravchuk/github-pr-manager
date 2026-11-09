@@ -240,7 +240,11 @@ export interface TwgStatus {
 
 /** Jira setup state for the UI, from the main process. */
 export interface JiraStatus {
-  /** true when the site URL is set AND a source can sign in: twg is signed in, or an API token is stored. */
+  /**
+   * true when the site URL is set AND a source is set up: twg is installed (in
+   * any sign-in state), or an API token and the account email are stored. Not
+   * "works right now" — see `jiraConfigured`; the `auth` health reports that.
+   */
   configured: boolean;
   /** The `twg` CLI, tried before the API token. */
   twg: TwgStatus;

@@ -7,14 +7,18 @@
  * The order:
  *  1. twg. Not installed → silently on to the token. Signed out or failing →
  *     remembered, then on to the token; reported only if the token can't run.
- *     A twg that hung or failed for another reason is skipped for
- *     `TWG_BACKOFF_MS`, so it can't cost every tick its timeout; a signed-out
- *     one is not — it fails in under a second, and retrying is how a
- *     `twg login` done in a terminal gets picked up.
- *  2. The API token, when there is one and the account email is set. A token
- *     Jira rejected is not sent again until it changes: retrying cannot fix it,
- *     only adds failed sign-ins on the account, and the `auth` health from the
- *     rejection stays up meanwhile.
+ *     A twg that hung or failed for another reason is skipped for the next
+ *     `TWG_BACKOFF_PASSES` passes, so it can't cost every tick its timeout.
+ *     Counted in passes, not time: the next tick starts a full poll interval
+ *     after this one ends, so any wall-clock window shorter than the interval
+ *     would always have expired by then. A signed-out twg is not skipped — it
+ *     fails in under a second, and retrying is how a `twg login` done in a
+ *     terminal gets picked up.
+ *  2. The API token, when there is one and the account email is set. A
+ *     credential Jira rejected is not sent again until it changes — the token,
+ *     the account email or the site: retrying cannot fix it, only adds failed
+ *     sign-ins on the account, and the `auth` health from the rejection stays
+ *     up meanwhile.
  * When both are rejected, twg's sign-in is what the health reports: it is the
  * primary source, and signing in there fixes it for good.
  */
@@ -42,16 +46,18 @@ export interface JiraPassDeps {
   readToken: () => string | null;
   /** Debug sink. */
   debug?: (line: string) => void;
-  /** Clock, for the twg backoff; defaults to `Date.now`. */
-  now?: () => number;
 }
 
-/** How long a twg that hung or failed (not signed out) is skipped. */
-export const TWG_BACKOFF_MS = 60_000;
+/** How many passes a twg that hung or failed (not signed out) is skipped for. */
+export const TWG_BACKOFF_PASSES = 5;
 
-/** Fingerprint of a token, so a rejected one is recognised without being kept in memory. */
-function fingerprint(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
+/**
+ * Fingerprint of the whole credential — site, email and token — so a rejected
+ * one is recognised without being kept in memory, and a corrected email or
+ * site counts as a new credential.
+ */
+function fingerprint(baseUrl: string, email: string, token: string): string {
+  return createHash("sha256").update(`${baseUrl}\n${email}\n${token}`).digest("hex");
 }
 
 /**
@@ -62,9 +68,8 @@ export function createJiraPass(
   deps: JiraPassDeps,
 ): (jira: JiraSettings, keys: string[]) => Promise<JiraPassResult | undefined> {
   let rejected: { fingerprint: string; health: JiraHealth } | null = null;
-  let twgBackoff: { until: number; health: JiraHealth } | null = null;
+  let twgBackoff: { passesLeft: number; health: JiraHealth } | null = null;
   const debug = deps.debug ?? (() => {});
-  const now = deps.now ?? Date.now;
 
   async function run(lookup: JiraLookup, source: JiraSource, keys: string[]): Promise<JiraPassResult> {
     const issues = await resolveIssues(lookup, keys);
@@ -76,9 +81,10 @@ export function createJiraPass(
     const empty = (health: JiraHealth): JiraPassResult => ({ health, issues: new Map(), tasks: new Map() });
 
     let twgProblem: JiraHealth | null = null;
-    if (twgBackoff && now() < twgBackoff.until) {
+    if (twgBackoff && twgBackoff.passesLeft > 0) {
+      twgBackoff.passesLeft--;
       twgProblem = twgBackoff.health;
-      debug("twg in backoff after a failure — API token fallback");
+      debug(`twg in backoff after a failure (${twgBackoff.passesLeft} more passes) — API token fallback`);
     } else {
       twgBackoff = null;
       try {
@@ -89,7 +95,7 @@ export function createJiraPass(
         if (e instanceof TwgNotInstalledError) debug("twg not installed — API token fallback");
         else {
           twgProblem = healthFromError(keys.length, e, "twg");
-          if (twgProblem.state !== "auth") twgBackoff = { until: now() + TWG_BACKOFF_MS, health: twgProblem };
+          if (twgProblem.state !== "auth") twgBackoff = { passesLeft: TWG_BACKOFF_PASSES, health: twgProblem };
           debug(`twg failed (${twgProblem.state}): ${twgProblem.message} — API token fallback`);
         }
       }
@@ -102,9 +108,9 @@ export function createJiraPass(
     const token = canUseToken(jira, deps.hasToken()) ? deps.readToken() : null;
     if (!token || !canUseToken(jira, true)) return twgProblem ? empty(twgProblem) : undefined;
 
-    const print = fingerprint(token);
+    const print = fingerprint(jira.baseUrl, jira.email, token);
     if (rejected?.fingerprint === print) {
-      debug("API token was rejected and has not changed — not sending it again");
+      debug("API token was rejected and neither it, the email nor the site has changed — not sending it again");
       return reportTokenFailure(rejected.health);
     }
     try {

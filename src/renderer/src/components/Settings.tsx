@@ -651,10 +651,12 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-fg-secondary">Jira (optional)</h2>
-          {jira?.configured ? (
-            <span className="text-xs text-emerald-700 dark:text-emerald-400">
-              connected via {jira.twg.state === "signed-in" ? "twg" : "API token"} ✓
-            </span>
+          {/* Named after the source that can sign in now, not after `configured`,
+              which stays true for a signed-out twg so a saved grouping survives. */}
+          {jira?.hasConfig && jira.twg.state === "signed-in" ? (
+            <span className="text-xs text-emerald-700 dark:text-emerald-400">connected via twg ✓</span>
+          ) : jira?.hasConfig && jira.hasToken && jira.hasEmail ? (
+            <span className="text-xs text-emerald-700 dark:text-emerald-400">connected via API token ✓</span>
           ) : jira?.hasConfig ? (
             <span className="text-xs text-amber-700 dark:text-amber-400">sign-in needed</span>
           ) : (

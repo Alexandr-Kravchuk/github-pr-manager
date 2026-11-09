@@ -6284,6 +6284,39 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
   });
 
+  await atest("getJiraStatus: maps the twg state, the token and the email onto the setup status", async () => {
+    await withMockedElectron(async (store) => {
+      const site = { jira: { baseUrl: "https://org.atlassian.net" } };
+      const status = (settings, twg) => store.getJiraStatus(() => settings, { readTwgStatus: async () => twg });
+
+      assert.strictEqual(store.setJiraToken("").ok, true);
+      let s = await status(site, { state: "signed-in", account: "Ann" });
+      assert.deepStrictEqual(
+        { configured: s.configured, twg: s.twg, hasConfig: s.hasConfig, hasEmail: s.hasEmail, hasToken: s.hasToken, baseUrl: s.baseUrl },
+        { configured: true, twg: { state: "signed-in", account: "Ann" }, hasConfig: true, hasEmail: false, hasToken: false, baseUrl: "https://org.atlassian.net" },
+      );
+      // A signed-out twg stays configured (the saved grouping survives).
+      assert.strictEqual((await status(site, { state: "signed-out" })).configured, true);
+      // No twg and no token: nothing is set up.
+      assert.strictEqual((await status(site, { state: "not-installed" })).configured, false);
+      // No twg, but a token with its email: set up through the fallback.
+      assert.strictEqual(store.setJiraToken("tok").ok, true);
+      s = await status({ jira: JIRA_CFG }, { state: "not-installed" });
+      assert.strictEqual(s.configured, true);
+      assert.strictEqual(s.hasEmail, true);
+      assert.strictEqual(s.hasToken, true);
+      // A broken settings file fails closed.
+      s = await store.getJiraStatus(
+        () => {
+          throw new Error("bad settings");
+        },
+        { readTwgStatus: async () => ({ state: "signed-in" }) },
+      );
+      assert.strictEqual(s.configured, false);
+      assert.strictEqual(s.hasConfig, false);
+    });
+  });
+
   // --- the twg source and how a pass picks between twg and the API token ----
   // twg prints the issue fields flat on the issue (the REST search nests them
   // under `fields`) and reports failures as `{ ok: false, error: { code } }`.
@@ -6447,6 +6480,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.strictEqual(third.issues.get("ENG-56").parentKey, "ENG-50");
   });
 
+  await atest("createJiraPass: a corrected email or site retries the same rejected token", async () => {
+    // A wrong account email is one of the causes the rejection message names;
+    // fixing it in Settings must not leave the stale rejection in force.
+    for (const fix of [{ email: "right@x.com" }, { baseUrl: "https://other.atlassian.net" }]) {
+      jira.clearJiraCaches();
+      let searches = 0;
+      global.fetch = async (url) => {
+        if (isTenant(url)) return tenantOk();
+        searches++;
+        return url === GATEWAY ? errRes(401) : anonymousSite();
+      };
+      const pass = jiraPass.createJiraPass(passDeps({ readToken: () => "same-token" }));
+      assert.strictEqual((await pass(JIRA_CFG, ["ENG-61"])).health.state, "auth");
+      const sent = searches;
+      await pass(JIRA_CFG, ["ENG-61"]);
+      assert.strictEqual(searches, sent, "unchanged credential: not resent");
+      await pass({ ...JIRA_CFG, ...fix }, ["ENG-61"]);
+      assert.ok(searches > sent, `changed ${Object.keys(fix)[0]}: the token is sent again`);
+    }
+  });
+
   await atest("createJiraPass: both sources rejected -> the health names twg, the primary fix", async () => {
     jira.clearJiraCaches();
     global.fetch = async (url) => (isTenant(url) ? tenantOk() : url === GATEWAY ? errRes(401) : anonymousSite());
@@ -6459,28 +6513,42 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     }
   });
 
-  await atest("createJiraPass: a hung twg is skipped for the backoff; a signed-out one is retried every pass", async () => {
+  await atest("createJiraPass: a hung twg is skipped for the next passes, however far apart they are", async () => {
+    // The backoff is counted in passes: the next tick starts a whole poll
+    // interval after this one ends, so a wall-clock window would already have
+    // run out and the hung twg would cost every tick its timeout again.
     jira.clearJiraCaches();
     global.fetch = jiraAnswers({ "ENG-59": { summary: "S" } });
-    let clock = 1_000_000;
     let runs = 0;
-    let answer = { stdout: "", stderr: "", code: null }; // killed on timeout
+    let hung = true;
     const pass = jiraPass.createJiraPass(
-      passDeps({ runTwg: async () => (runs++, answer), now: () => clock }),
+      passDeps({
+        runTwg: async () => (runs++, hung ? { stdout: "", stderr: "", code: null } : twgOk([{ key: "ENG-59", summary: "S" }])),
+      }),
     );
     await pass(JIRA_CFG, ["ENG-59"]);
-    await pass(JIRA_CFG, ["ENG-59"]);
-    assert.strictEqual(runs, 1, "a timed-out twg must not be run again inside the backoff");
-    clock += jiraPass.TWG_BACKOFF_MS;
-    await pass(JIRA_CFG, ["ENG-59"]);
+    assert.strictEqual(runs, 1);
+    for (let i = 0; i < jiraPass.TWG_BACKOFF_PASSES; i++) {
+      const skipped = await pass(JIRA_CFG, ["ENG-59"]);
+      assert.strictEqual(skipped.health.source, "token", "the token answers while twg is skipped");
+    }
+    assert.strictEqual(runs, 1, "a timed-out twg must not run again inside the backoff");
+    hung = false;
+    const after = await pass(JIRA_CFG, ["ENG-59"]);
     assert.strictEqual(runs, 2, "after the backoff twg is tried again");
-    // Signed out: no backoff, so a terminal sign-in is picked up on the next pass.
-    answer = twgErr("AUTH_REQUIRED", "sign in");
-    runs = 0;
-    clock += jiraPass.TWG_BACKOFF_MS;
-    await pass(JIRA_CFG, ["ENG-59"]);
-    await pass(JIRA_CFG, ["ENG-59"]);
-    assert.strictEqual(runs, 2);
+    assert.strictEqual(after.health.source, "twg");
+  });
+
+  await atest("createJiraPass: a signed-out twg is retried every pass (no backoff)", async () => {
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({ "ENG-60": { summary: "S" } });
+    let runs = 0;
+    const pass = jiraPass.createJiraPass(
+      passDeps({ runTwg: async () => (runs++, twgErr("AUTH_REQUIRED", "sign in")) }),
+    );
+    await pass(JIRA_CFG, ["ENG-60"]);
+    await pass(JIRA_CFG, ["ENG-60"]);
+    assert.strictEqual(runs, 2, "a terminal sign-in must be picked up on the next pass");
   });
 
   await atest("createJiraPass: per-source caches — the token's negative entry doesn't hide a key from twg", async () => {
@@ -8100,6 +8168,34 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     test("main.js wiring: claude:launchGroup validates, then reads the PRs from the snapshot", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
       assert.match(src, /"claude:launchGroup"[\s\S]{0,300}validateGroupLaunchArgs[\s\S]{0,200}getSnapshot\(\)/);
+    });
+  }
+
+  // --- Jira auth wiring in the main process -----------------------------------
+  // The decisions are pure and tested above (shouldNotifyJiraAuth, createJiraPass,
+  // getJiraStatus); these pin that main.js actually routes through them.
+  {
+    const readDist = (rel) => require("node:fs").readFileSync(path.join(__dirname, "../dist/main", rel), "utf8");
+
+    test("main.js wiring: every snapshot feeds the Jira auth notification", () => {
+      assert.match(readDist("main/main.js"), /onSnapshot:[\s\S]{0,1500}handleJiraAuthNotification\(snapshot\.jiraHealth\)/);
+    });
+    test("main.js wiring: the Jira auth notification fires on the transition, under the notification switches", () => {
+      const src = readDist("main/main.js");
+      const fn = src.slice(src.indexOf("function handleJiraAuthNotification"));
+      assert.match(fn, /shouldNotifyJiraAuth\)?\(prevJiraHealth, health\)/);
+      assert.match(fn, /notifications\.enabled[\s\S]{0,80}notifications\.native[\s\S]{0,80}isSupported\(\)/);
+    });
+    test("main.js wiring: jira:twgLogin opens the sign-in and reports a failure instead of throwing", () => {
+      assert.match(
+        readDist("main/main.js"),
+        /"jira:twgLogin"[\s\S]{0,200}openTwgLogin\)?\(\)[\s\S]{0,120}ok: true[\s\S]{0,120}ok: false, error:/,
+      );
+    });
+    test("twg.js: the sign-in terminal goes through the shared launcher, not its own spawn", () => {
+      const src = readDist("main/twg.js");
+      assert.match(src, /openTerminalWith\)?\(/);
+      assert.doesNotMatch(src, /cmd\.exe|osascript|\bspawn\b/);
     });
   }
 

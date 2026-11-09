@@ -1,13 +1,16 @@
 /**
  * Runs the Atlassian `twg` CLI — the primary Jira source — and starts its
  * interactive sign-in. What the runs mean (arguments, output, failures) lives in
- * the pure `shared/jira-twg.ts`; this module only owns the processes.
+ * the pure `shared/jira-twg.ts`; this module only owns the processes. The
+ * sign-in terminal is opened through `openTerminalWith` in `claude-launch.ts`,
+ * the app's one terminal launcher.
  */
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 
 import { classifyTwgRun, parseTwgAccount, twgWhoamiArgs, type TwgRunResult } from "../shared/jira-twg";
-import { launcherEnv, terminalScript } from "../shared/claude-launch";
+import { launcherEnv } from "../shared/claude-launch";
 import type { TwgStatus } from "../shared/types";
+import { openTerminalWith } from "./claude-launch";
 
 /**
  * A query of up to 50 keys answers in about 1.5 s; this only bounds a hung
@@ -75,25 +78,9 @@ const LOGIN_COMMAND = "twg login --force";
  * site to use and finishes in the browser, so it needs a terminal the user can
  * type into; the app picks the result up on its next poll.
  */
-export async function openTwgLogin(): Promise<void> {
-  if (process.platform === "darwin") {
-    const lines = terminalScript("terminal", LOGIN_COMMAND);
-    await new Promise<void>((resolve, reject) => {
-      execFile("osascript", lines.flatMap((l) => ["-e", l]), { timeout: 15_000, env: launcherEnv(twgEnv()) }, (err) =>
-        err ? reject(err) : resolve(),
-      );
-    });
-    return;
-  }
-  if (process.platform === "win32") {
-    const child = spawn("cmd.exe", ["/c", "start", '""', "cmd", "/k", LOGIN_COMMAND], {
-      detached: true,
-      stdio: "ignore",
-      env: launcherEnv(twgEnv()),
-      windowsVerbatimArguments: true,
-    });
-    child.unref();
-    return;
-  }
-  throw new Error(`Run \`${LOGIN_COMMAND}\` in a terminal to sign in.`);
+export function openTwgLogin(): Promise<void> {
+  return openTerminalWith(
+    { posix: LOGIN_COMMAND, windows: ["cmd", "/k", LOGIN_COMMAND] },
+    { env: launcherEnv(twgEnv()), unsupported: `Run \`${LOGIN_COMMAND}\` in a terminal to sign in.` },
+  );
 }

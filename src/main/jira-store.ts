@@ -16,7 +16,7 @@ import { clearJiraCaches } from "../shared/jira";
 import { createJiraPass } from "../shared/jira-pass";
 import type { TwgRunner } from "../shared/jira-twg";
 import { getTwgStatus, runTwg } from "./twg";
-import type { JiraHealth, JiraStatus, PullRequest, Settings } from "../shared/types";
+import type { JiraHealth, JiraStatus, PullRequest, Settings, TwgStatus } from "../shared/types";
 
 function jiraTokenPath(): string {
   return path.join(app.getPath("userData"), "jira-token.enc");
@@ -80,7 +80,10 @@ export function getJiraToken(): string | null {
 }
 
 /** Setup state for the settings UI and the grouping gate. */
-export async function getJiraStatus(loadSettings: () => Settings): Promise<JiraStatus> {
+export async function getJiraStatus(
+  loadSettings: () => Settings,
+  opts: { readTwgStatus?: () => Promise<TwgStatus> } = {},
+): Promise<JiraStatus> {
   // Both settings-derived fields come from `jiraSiteState`, which is pure and
   // therefore unit-tested — including its fail-closed branch, which is what
   // makes a broken settings file degrade to "no Jira" instead of a broken badge.
@@ -92,7 +95,8 @@ export async function getJiraStatus(loadSettings: () => Settings): Promise<JiraS
     jira = undefined;
   }
   const hasToken = hasJiraToken();
-  const twg = await getTwgStatus();
+  // Injectable so tests don't run the machine's real `twg whoami`.
+  const twg = await (opts.readTwgStatus ?? getTwgStatus)();
   return {
     configured: jiraConfigured(jira, twg, hasToken),
     twg,

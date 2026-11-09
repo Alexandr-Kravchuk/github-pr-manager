@@ -258,9 +258,13 @@ Three layers:
   the `gh` model again: twg signs in with OAuth and refreshes itself, so there
   is nothing to expire. `shared/jira-pass.ts` picks the source per pass (twg
   not installed → token silently; twg signed out → token, reported only when
-  the token can't run) and is unit-tested with an injected twg runner;
+  the token can't run) and is unit-tested with an injected twg runner. A twg
+  that hung or failed is skipped for a number of *passes*, not seconds: the
+  next tick starts a full poll interval after this one ends, so any time
+  window shorter than that interval has always expired by then.
   `main/twg.ts` owns the processes, `shared/jira-twg.ts` the arguments, output
-  parsing and failure classes. Every twg run passes `--mode user --output json
+  parsing and failure classes. The sign-in terminal opens through
+  `openTerminalWith` in `main/claude-launch.ts`, the one terminal launcher. Every twg run passes `--mode user --output json
   --output-summary none`, or an inherited `TWG_AGENT_DEFAULTS` swaps the JSON
   for a YAML envelope. Tests must inject a runner (`buildJiraEnricher(…, {
   runTwg })`): the default spawns the machine's real twg. The issue caches are
@@ -273,7 +277,10 @@ Three layers:
   answer, the anonymous 200 would pin the site base, write a negative entry per
   key and show as "no parent tasks resolved". The `auth` health drives a banner in every grouping, one OS
   notification on the transition into it, and the pass stops sending that
-  token until it changes. Atlassian has no API that creates a user's API
+  credential until the token, the account email or the site changes. The
+  Settings header names the source that can sign in now (twg signed in, or a
+  token with its email), never `configured`, which stays true for a
+  signed-out twg so the saved grouping survives. Atlassian has no API that creates a user's API
   token, so the banner can only link to id.atlassian.com (or start
   `twg login --force` in a terminal).
 - Window size/position persist in `userData/window-state.json`
