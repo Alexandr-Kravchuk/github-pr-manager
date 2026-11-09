@@ -8,13 +8,19 @@ import {
   CLAUDE_BUTTON_TEXT,
   CLAUDE_LAUNCH_LABEL,
   claudeKindsFor,
+  groupLaunchPrs,
+  MAX_GROUP_PRS,
   pickClaudeLaunch,
   type ClaudeLaunchKind,
+  type GroupLaunchKind,
 } from "../../../shared/claude-launch";
 import {
   describeSession,
+  GROUP_STATUS_TEXT,
+  groupKindOf,
   SESSION_STATUS_TEXT,
   sessionGlow,
+  sessionsForGroup,
   sessionsForPr,
   shownSession,
 } from "../../../shared/claude-sessions";
@@ -59,38 +65,10 @@ export function ClaudeButton({
   const enabled = useContext(ClaudeEnabledContext);
   const allSessions = useContext(ClaudeSessionsContext);
   const sessions = useMemo(() => sessionsForPr(pr, allSessions), [pr, allSessions]);
-  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [state, run] = useLaunchState();
   const menu = useAnchoredMenu(sessions.length > 0 ? SESSIONS_MENU_WIDTH_PX : MENU_WIDTH_PX);
   // Without `kind` main picks from the PR's state, exactly as the button shows.
-  const launch = useCallback(
-    (kind?: ClaudeLaunchKind) => {
-      setState("busy");
-      window.api
-        .launchClaude(pr.id, kind)
-        .then((res) => {
-          if (res.ok) {
-            setState("done");
-            setTimeout(() => setState("idle"), 1500);
-          } else {
-            setState("idle");
-            window.alert(res.error);
-          }
-        })
-        .catch((e: unknown) => {
-          setState("idle");
-          window.alert((e as Error).message);
-        });
-    },
-    [pr.id],
-  );
-  const focus = useCallback((sessionId: string) => {
-    window.api
-      .focusClaudeSession(sessionId)
-      .then((res) => {
-        if (!res.ok) window.alert(res.error);
-      })
-      .catch((e: unknown) => window.alert((e as Error).message));
-  }, []);
+  const launch = useCallback((kind?: ClaudeLaunchKind) => run(() => window.api.launchClaude(pr.id, kind)), [run, pr.id]);
 
   if (!enabled) return null;
   const kind = pickClaudeLaunch(pr, { trackComments });
@@ -113,7 +91,7 @@ export function ClaudeButton({
     <span className={cn("inline-flex shrink-0 whitespace-nowrap", className)}>
       <button
         type="button"
-        onClick={() => (current ? focus(current.id) : launch())}
+        onClick={() => (current ? focusSession(current.id) : launch())}
         disabled={state === "busy"}
         title={iconOnly ? `${text} — ${label}` : label}
         aria-label={label}
@@ -163,7 +141,7 @@ export function ClaudeButton({
                     session={s}
                     onSwitch={() => {
                       menu.close();
-                      focus(s.id);
+                      focusSession(s.id);
                     }}
                   />
                 ))}
@@ -216,6 +194,45 @@ export function ClaudeGlow({ pr }: { pr: PullRequest }) {
       className={cn("claude-glow pointer-events-none absolute inset-0 -z-10", `claude-glow-${glow}`)}
     />
   );
+}
+
+/**
+ * A launch button's state — idle, waiting for main, or "Started" for a
+ * moment — and `run`, which starts a launch and shows its refusal.
+ */
+function useLaunchState(): [
+  "idle" | "busy" | "done",
+  (start: () => Promise<{ ok: true } | { ok: false; error: string }>) => void,
+] {
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const run = useCallback((start: () => Promise<{ ok: true } | { ok: false; error: string }>) => {
+    setState("busy");
+    start()
+      .then((res) => {
+        if (res.ok) {
+          setState("done");
+          setTimeout(() => setState("idle"), 1500);
+        } else {
+          setState("idle");
+          window.alert(res.error);
+        }
+      })
+      .catch((e: unknown) => {
+        setState("idle");
+        window.alert((e as Error).message);
+      });
+  }, []);
+  return [state, run];
+}
+
+/** Brings a running session to the front; a refusal says why. */
+function focusSession(sessionId: string): void {
+  window.api
+    .focusClaudeSession(sessionId)
+    .then((res) => {
+      if (!res.ok) window.alert(res.error);
+    })
+    .catch((e: unknown) => window.alert((e as Error).message));
 }
 
 const MENU_HEADING = "px-3 pb-1 pt-1 text-xs font-semibold text-fg-subtle";
@@ -322,5 +339,164 @@ function ClaudeMark({ size }: { size: number }) {
         <circle cx="12" cy="12" r="2.2" />
       </g>
     </svg>
+  );
+}
+
+/**
+ * The Claude button beside a Jira group heading's PR count. Two actions, both
+ * sending only the kind, the key and the PR ids — main reads the PRs from its
+ * own snapshot and picks them again:
+ *  - "Explain all" — one session that explains the group's open PRs together
+ *    (the goal, how the changes fit, the order to read them in, where they
+ *    overlap), shown in the session, no letter;
+ *  - "Review all" — a parent session that starts one nested Claude Desktop
+ *    session per PR awaiting your review and sums their reports up. Offered
+ *    only with Claude Desktop, the one place a session can nest others; with a
+ *    terminal it stays in the menu, disabled, saying why.
+ *
+ * Split like the PR's own button: while a session of this key runs, the main
+ * part shows its status in that kind's words (`GROUP_STATUS_TEXT`) and a click
+ * switches to it; otherwise it starts "Explain all". The arrow lists the
+ * running sessions and both actions. Renders nothing while the integration is
+ * off or the group offers neither action (`groupLaunchPrs`).
+ */
+export function GroupClaudeButton({
+  groupKey,
+  prs,
+  desktop,
+}: {
+  groupKey: string;
+  prs: readonly PullRequest[];
+  /** Whether sessions open in Claude Desktop — "Review all" needs it. */
+  desktop: boolean;
+}) {
+  const enabled = useContext(ClaudeEnabledContext);
+  const allSessions = useContext(ClaudeSessionsContext);
+  const sessions = useMemo(() => sessionsForGroup(groupKey, allSessions), [groupKey, allSessions]);
+  const [state, run] = useLaunchState();
+  const menu = useAnchoredMenu(SESSIONS_MENU_WIDTH_PX);
+  const explainPrs = useMemo(() => groupLaunchPrs("explain", groupKey, prs), [groupKey, prs]);
+  const reviewPrs = useMemo(() => groupLaunchPrs("review", groupKey, prs), [groupKey, prs]);
+  const launch = useCallback(
+    (kind: GroupLaunchKind) => {
+      const picked = kind === "explain" ? explainPrs : reviewPrs;
+      if (picked) run(() => window.api.launchClaudeGroup(kind, groupKey, picked.map((p) => p.id)));
+    },
+    [run, groupKey, explainPrs, reviewPrs],
+  );
+
+  if (!enabled || (!explainPrs && !reviewPrs)) return null;
+  const drafts = prs.filter((p) => p.isDraft).length;
+  const explainLabel = explainPrs
+    ? `Start Claude to explain the ${explainPrs.length} open PRs of ${groupKey} together` +
+      (prs.length - drafts > MAX_GROUP_PRS ? ` (the first ${MAX_GROUP_PRS} shown)` : "") +
+      (drafts > 0 ? `; ${drafts} draft${drafts === 1 ? "" : "s"} left out` : "")
+    : `${groupKey} has fewer than two open PRs to explain together`;
+  const reviewLabel = !reviewPrs
+    ? `None of the PRs of ${groupKey} waits for your review`
+    : !desktop
+      ? "Review all starts one nested session per PR, which only Claude Desktop can do — choose Claude Desktop in Settings → Claude"
+      : `Start Claude Desktop to review the ${reviewPrs.length} PR${reviewPrs.length === 1 ? "" : "s"} of ${groupKey} ` +
+        "that wait for your review, one nested session per PR, and sum the reviews up";
+  const shown = shownSession(sessions);
+  const current = shown?.where === "background" ? undefined : shown;
+  const words = (s: ClaudeSessionInfo) => GROUP_STATUS_TEXT[groupKindOf(s, groupKey)][s.status];
+  const more = sessions.length > 1 ? ` ${sessions.length - 1} more in the menu.` : "";
+  // With no session the main part starts what the group offers, Explain first.
+  const mainKind: GroupLaunchKind = explainPrs ? "explain" : "review";
+  const mainDisabled = !current && mainKind === "review" && !desktop;
+  const label = current
+    ? `${words(current)}: ${describeSession(current)}. Click to switch to it.${more}`
+    : mainKind === "explain"
+      ? explainLabel
+      : reviewLabel;
+  const tone = state === "done" ? KIND_CLASS.done : current ? SESSION_CLASS[current.status] : KIND_CLASS[mainKind];
+  const text = state === "done" ? "Started" : current ? words(current) : mainKind === "explain" ? "Explain all" : "Review all";
+  const segment = cn(
+    "inline-flex items-center border py-0.5 text-[11px] font-medium transition-colors disabled:opacity-50",
+    tone,
+  );
+  const actions: Array<{ kind: GroupLaunchKind; text: string; title: string; disabled: boolean }> = [
+    { kind: "explain", text: "Explain all", title: explainLabel, disabled: !explainPrs },
+    {
+      kind: "review",
+      text: reviewPrs ? `Review all (${reviewPrs.length})` : "Review all",
+      title: reviewLabel,
+      disabled: !reviewPrs || !desktop,
+    },
+  ];
+  return (
+    <span className="inline-flex shrink-0 whitespace-nowrap">
+      <button
+        type="button"
+        onClick={() => (current ? focusSession(current.id) : launch(mainKind))}
+        disabled={state === "busy" || mainDisabled}
+        title={label}
+        aria-label={label}
+        className={cn(segment, "gap-1 rounded-l-md pl-1.5 pr-1")}
+      >
+        <ClaudeMark size={12} />
+        {shown && state !== "done" && <StatusDot status={shown.status} />}
+        {text}
+      </button>
+      <button
+        ref={menu.buttonRef}
+        type="button"
+        onClick={menu.toggle}
+        disabled={state === "busy"}
+        title="Claude on this group"
+        aria-label="Claude on this group"
+        aria-haspopup="menu"
+        aria-expanded={menu.open}
+        className={cn(segment, "-ml-px rounded-r-md px-0.5")}
+      >
+        <ChevronDown size={10} />
+      </button>
+      {menu.open &&
+        createPortal(
+          <div
+            ref={menu.menuRef}
+            role="menu"
+            aria-label="Claude on this group"
+            style={menu.style}
+            className="z-50 overflow-hidden rounded-lg border border-line bg-surface py-1 text-sm shadow-xl"
+          >
+            {sessions.length > 0 && (
+              <>
+                <div className={MENU_HEADING}>Running for {groupKey}</div>
+                {sessions.map((s) => (
+                  <SessionItem
+                    key={s.id}
+                    session={s}
+                    onSwitch={() => {
+                      menu.close();
+                      focusSession(s.id);
+                    }}
+                  />
+                ))}
+                <div className={cn(MENU_HEADING, "mt-1 border-t border-line pt-2")}>Start a new session</div>
+              </>
+            )}
+            {actions.map((a) => (
+              <button
+                key={a.kind}
+                type="button"
+                role="menuitem"
+                disabled={a.disabled}
+                onClick={() => {
+                  menu.close();
+                  launch(a.kind);
+                }}
+                title={a.title}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-elevated disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+              >
+                <span className={cn("h-2 w-2 shrink-0 rounded-full", KIND_DOT[a.kind])} aria-hidden />
+                <span className="flex-1 text-fg-secondary">{a.text}</span>
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
+    </span>
   );
 }

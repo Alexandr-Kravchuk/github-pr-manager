@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Buddy, type BuddyMood } from "./components/Buddy";
+import { GroupClaudeButton } from "./components/ClaudeButton";
 import { PrCard } from "./components/PrCard";
 import { PrTable } from "./components/PrTable";
 import { PrTile } from "./components/PrTile";
@@ -1306,33 +1307,43 @@ export function App() {
             const attention = g.prs.filter((p) => p.needsAttention).length;
             return (
               <section key={g.key} className={isCollapsed ? "mb-3" : "mb-8"}>
-                <button
-                  type="button"
-                  onClick={() => toggleGroup(g.key)}
-                  aria-expanded={!isCollapsed}
-                  className="flex w-full items-center gap-2 rounded-md py-2 text-left hover:bg-elevated/40"
-                >
-                  <ChevronIcon collapsed={isCollapsed} />
-                  {g.hostLabel && (
-                    <span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
-                      {g.hostLabel}
+                {/* "Explain all" sits right after the PR count but outside the
+                    toggle: a button inside a button is invalid and its click
+                    would fold the group too. The empty rest of the row still
+                    folds it, as the whole row did before. */}
+                <div className="flex items-center gap-2 rounded-md hover:bg-elevated/40">
+                  <button
+                    type="button"
+                    onClick={() => toggleGroup(g.key)}
+                    aria-expanded={!isCollapsed}
+                    className="flex min-w-0 items-center gap-2 py-2 text-left"
+                  >
+                    <ChevronIcon collapsed={isCollapsed} />
+                    {g.hostLabel && (
+                      <span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
+                        {g.hostLabel}
+                      </span>
+                    )}
+                    <h2 className="truncate text-sm font-semibold text-fg-secondary" title={g.label}>
+                      {g.label}
+                    </h2>
+                    <span className="rounded-full border border-line-strong px-2 py-0.5 text-xs text-fg-muted">
+                      {g.prs.length}
                     </span>
+                    {isCollapsed && attention > 0 && (
+                      <span
+                        className="rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-medium text-red-600 dark:text-red-300"
+                        title={`${attention} PR(s) need attention`}
+                      >
+                        ⚠ {attention}
+                      </span>
+                    )}
+                  </button>
+                  {groupBy !== "repo" && (
+                    <GroupClaudeButton groupKey={g.key} prs={g.prs} desktop={config?.claudeDesktop ?? false} />
                   )}
-                  <h2 className="truncate text-sm font-semibold text-fg-secondary" title={g.label}>
-                    {g.label}
-                  </h2>
-                  <span className="rounded-full border border-line-strong px-2 py-0.5 text-xs text-fg-muted">
-                    {g.prs.length}
-                  </span>
-                  {isCollapsed && attention > 0 && (
-                    <span
-                      className="rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-medium text-red-600 dark:text-red-300"
-                      title={`${attention} PR(s) need attention`}
-                    >
-                      ⚠ {attention}
-                    </span>
-                  )}
-                </button>
+                  <div aria-hidden className="flex-1 self-stretch" onClick={() => toggleGroup(g.key)} />
+                </div>
                 {!isCollapsed && (
                   <PrList
                     prs={g.prs}

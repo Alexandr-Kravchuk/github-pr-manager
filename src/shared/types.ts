@@ -141,8 +141,12 @@ export interface ClaudeSettings {
   projectsRoot: string;
   /** Explicit checkout per "owner/name" — wins over the search. */
   repoPaths: Record<string, string>;
-  /** Prompt template per launch kind; `{url}` is the PR URL. */
-  prompts: Record<"drive" | "review" | "close" | "explain" | "open", string>;
+  /**
+   * Prompt template per launch kind; `{url}` is the PR URL. `explainGroup` and
+   * `reviewGroup` are the group heading's "Explain all" and "Review all":
+   * `{key}`, `{count}`, `{urls}` and, for the review, `{prompts}`.
+   */
+  prompts: Record<"drive" | "review" | "close" | "explain" | "open" | "explainGroup" | "reviewGroup", string>;
   /**
    * Where the session opens. `auto` takes iTerm2 when it is installed, else
    * Terminal (macOS; a `cmd` window on Windows). The system's "default
@@ -261,6 +265,8 @@ export interface PublicConfig {
   trackComments: boolean;
   /** Mirror of `Settings.claude.enabled` — whether cards show the Claude button. */
   claudeEnabled: boolean;
+  /** Whether Claude sessions open in Claude Desktop — the only place "Review all" can nest its sessions. */
+  claudeDesktop: boolean;
 }
 
 /** State of an individual reviewer on a PR. */
@@ -614,6 +620,9 @@ export type ClaudeLaunchResult =
   | { ok: true; kind: "drive" | "review" | "close" | "explain" | "open"; dir: string }
   | { ok: false; error: string };
 
+/** Result of `launchClaudeGroup`: how many PRs went in and where it runs, or why not. */
+export type ClaudeGroupLaunchResult = { ok: true; count: number; dir: string } | { ok: false; error: string };
+
 /**
  * A Claude Code session running on this machine, as its registry file
  * (`~/.claude/sessions/<pid>.json`) and transcript describe it — the input the
@@ -640,6 +649,8 @@ export interface ClaudeSessionInfo {
   where: "desktop" | "terminal" | "background";
   /** `host/owner/repo/pull/N` of every PR link the user sent it. */
   prKeys: string[];
+  /** The group headings whose "Explain all" or "Review all" started it: kind and Jira key. */
+  groups?: Array<{ kind: "explain" | "review"; key: string }>;
   /** `host/owner/repo` of each git remote of its working folder. */
   repoKeys: string[];
   /** The branch checked out in its working folder; null when detached or not a git folder. */
@@ -699,6 +710,14 @@ export interface PrManagerApi {
    * from the button's menu. Refused while the integration is off.
    */
   launchClaude(prId: string, kind?: "drive" | "review" | "close" | "explain" | "open"): Promise<ClaudeLaunchResult>;
+  /**
+   * Start a group heading's Claude session: "Explain all" (one session that
+   * explains the group's PRs together) or "Review all" (a Claude Desktop
+   * session that starts one nested review session per PR awaiting your
+   * review). Only the kind, the Jira key and the PR ids cross over; main reads
+   * the PRs from its own snapshot. Refused while the integration is off.
+   */
+  launchClaudeGroup(kind: "explain" | "review", groupKey: string, prIds: string[]): Promise<ClaudeGroupLaunchResult>;
   /** The Claude Code sessions running now; empty while the integration is off. */
   getClaudeSessions(): Promise<ClaudeSessionInfo[]>;
   /**

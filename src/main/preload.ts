@@ -19,6 +19,7 @@ const api: PrManagerApi = {
   getWhatsNew: () => ipcRenderer.invoke("app:getWhatsNew"),
   dismissWhatsNew: () => ipcRenderer.invoke("app:dismissWhatsNew"),
   launchClaude: (prId, kind) => ipcRenderer.invoke("claude:launch", prId, kind),
+  launchClaudeGroup: (kind, groupKey, prIds) => ipcRenderer.invoke("claude:launchGroup", kind, groupKey, prIds),
   getClaudeSessions: () => ipcRenderer.invoke("claude:sessions"),
   focusClaudeSession: (sessionId) => ipcRenderer.invoke("claude:focusSession", sessionId),
   copyText: (text) => ipcRenderer.invoke("app:copyText", text),
