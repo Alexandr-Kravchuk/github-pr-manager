@@ -11710,25 +11710,44 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(await check(rebased), null, "the same layer on the new base");
       assert.strictEqual(await check(rebased, layer1), null, "taken against the base you reviewed it on, too");
 
-      // The check as main runs it: GitHub says whether the PR was retargeted since your review.
-      const ghFor = (retargeted) => async (args, opts) => {
-        const { query } = JSON.parse(opts.input);
+      // The check as main runs it: what GitHub records about the base since your review decides what it is taken against.
+      const reviewedAt = "2026-11-01T00:00:00Z";
+      const retarget = { __typename: "BaseRefChangedEvent", createdAt: "2026-11-02T00:00:00Z", previousRefName: "layer-1" };
+      const lowerMerged = { headRefOid: layer1, mergedAt: "2026-11-02T00:00:00Z", isCrossRepository: false, headRepository: { nameWithOwner: "a/b" } };
+      const ghWith = ({ events = [], hasNextPage = false, merged = [lowerMerged] } = {}) => async (args, opts) => {
+        const { query, variables } = JSON.parse(opts.input);
         if (query.includes("BaseRefChangedEvent")) {
-          return { code: 0, stderr: "", stdout: JSON.stringify({ data: { node: { state: "OPEN", headRefOid: g("rev-parse", "HEAD"), baseRefName: "master", timelineItems: { nodes: retargeted ? [{ createdAt: "2026-11-02T00:00:00Z", previousRefName: "layer-1" }, { createdAt: "2026-10-01T00:00:00Z", previousRefName: "older" }] : [] } } } }) };
+          assert.deepStrictEqual(variables, { id: "PR_2", since: reviewedAt }, "only what happened since your review");
+          return { code: 0, stderr: "", stdout: JSON.stringify({ data: { node: { state: "OPEN", headRefOid: g("rev-parse", "HEAD"), baseRefName: "master", timelineItems: { pageInfo: { hasNextPage }, nodes: events } } } }) };
         }
-        assert.deepStrictEqual(JSON.parse(opts.input).variables, { owner: "a", name: "b", ref: "layer-1" }, "the branch it had, by name");
-        return { code: 0, stderr: "", stdout: JSON.stringify({ data: { repository: { pullRequests: { nodes: [{ headRefOid: layer1 }] } } } }) };
+        assert.deepStrictEqual(variables, { owner: "a", name: "b", ref: "layer-1", base: "master" }, "PRs merged from the branch it had into the one it has");
+        return { code: 0, stderr: "", stdout: JSON.stringify({ data: { repository: { pullRequests: { nodes: merged } } } }) };
       };
-      const target = (head) => ({ id: "PR_2", url: "https://github.com/a/b/pull/2", repo: "a/b", number: 2, headOid: head, baseRefName: "master", viewerReviewedAt: "2026-11-01T00:00:00Z", viewerReviewedOid: reviewed });
-      assert.deepStrictEqual(await md.checkBaseOnly(ghFor(true), target(rebased), local), { verdict: "same", note: `only the base changed since ${reviewed.slice(0, 7)}`, baseRefName: "master" });
+      const target = (head) => ({ id: "PR_2", url: "https://github.com/a/b/pull/2", repo: "a/b", number: 2, headOid: head, baseRefName: "master", viewerReviewedAt: reviewedAt, viewerReviewedOid: reviewed });
+      const verdict = async (gh, head = rebased) => (await md.checkBaseOnly(gh, target(head), local)).verdict;
+      assert.deepStrictEqual(await md.checkBaseOnly(ghWith({ events: [retarget] }), target(rebased), local), { verdict: "same", note: `only the base changed since ${reviewed.slice(0, 7)}`, baseRefName: "master" });
+      // A force-push of the base: taken against the tip GitHub records from before it.
+      assert.strictEqual(await verdict(ghWith({ events: [{ __typename: "BaseRefForcePushedEvent", createdAt: "2026-11-02T00:00:00Z", beforeCommit: { oid: layer1 } }] })), "same");
+      // Whatever can't be told for sure is "changed".
+      for (const [why, gh] of [
+        ["a force-push GitHub names no commit for", ghWith({ events: [{ __typename: "BaseRefForcePushedEvent", createdAt: "2026-11-02T00:00:00Z", beforeCommit: null }] })],
+        ["two changes of the base", ghWith({ events: [retarget, { ...retarget, createdAt: "2026-11-03T00:00:00Z" }] })],
+        ["more than one page of them", ghWith({ events: [retarget], hasNextPage: true })],
+        ["a fork's PR from a branch of that name", ghWith({ events: [retarget], merged: [{ ...lowerMerged, isCrossRepository: true, headRepository: { nameWithOwner: "evil/b" } }] })],
+        ["two PRs it could be", ghWith({ events: [retarget], merged: [lowerMerged, { ...lowerMerged, headRefOid: reviewed }] })],
+        ["one merged before your review", ghWith({ events: [retarget], merged: [{ ...lowerMerged, mergedAt: "2026-10-01T00:00:00Z" }] })],
+        ["none merged", ghWith({ events: [retarget], merged: [] })],
+      ]) {
+        assert.strictEqual(await verdict(gh), "changed", why);
+      }
       g("checkout", "-B", "leak", leaked);
       pushPr();
-      assert.strictEqual((await md.checkBaseOnly(ghFor(true), target(leaked), local)).verdict, "changed", "retargeted onto master without layer 1: a re-review");
+      assert.strictEqual(await verdict(ghWith({ events: [retarget] }), leaked), "changed", "retargeted onto master without layer 1: a re-review");
       g("checkout", "-B", "rebased", rebased);
       pushPr();
-      await assert.rejects(md.checkBaseOnly(ghFor(true), { ...target(rebased), baseRefName: "layer-1" }, local), /moved on/, "the dashboard is behind GitHub");
-      assert.deepStrictEqual(await md.checkBaseOnly(ghFor(false), { ...target(rebased), viewerReviewedOid: null }, local), { verdict: "changed", note: "no review commit to compare with", baseRefName: "master" });
-      assert.strictEqual((await md.checkBaseOnly(ghFor(false), target(rebased), null)).note, "no clone of the repository to check the push in");
+      await assert.rejects(md.checkBaseOnly(ghWith(), { ...target(rebased), baseRefName: "layer-1" }, local), /moved on/, "the dashboard is behind GitHub");
+      assert.deepStrictEqual(await md.checkBaseOnly(ghWith(), { ...target(rebased), viewerReviewedOid: null }, local), { verdict: "changed", note: "no review commit to compare with", baseRefName: "master" });
+      assert.strictEqual((await md.checkBaseOnly(ghWith(), target(rebased), null)).note, "no clone of the repository to check the push in");
 
       write("d.txt", "more\n");
       g("add", ".");
@@ -11790,7 +11809,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const baseGh = async (args, opts) => {
         baseReads++;
         assert.match(JSON.parse(opts.input).query, /BaseRefChangedEvent/);
-        return { code: 0, stderr: "", stdout: JSON.stringify({ data: { node: { state: "OPEN", headRefOid: head, baseRefName: ghBase, timelineItems: { nodes: [] } } } }) };
+        return { code: 0, stderr: "", stdout: JSON.stringify({ data: { node: { state: "OPEN", headRefOid: head, baseRefName: ghBase, timelineItems: { pageInfo: { hasNextPage: false }, nodes: [] } } } }) };
       };
       const fakeGit = (tree) => async (args) => {
         const a = gitCmd(args);

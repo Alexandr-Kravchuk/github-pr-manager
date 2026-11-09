@@ -146,21 +146,33 @@ export async function sameChangeOnNewBase(
   });
 }
 
-const BASE_CHANGES_QUERY = `query($id: ID!) {
+/** What happened to the PR's base since your review: retargets, and force-pushes of the branch it targets. */
+const BASE_CHANGES_QUERY = `query($id: ID!, $since: DateTime!) {
   node(id: $id) {
     ... on PullRequest {
       state headRefOid baseRefName
-      timelineItems(last: 50, itemTypes: [BASE_REF_CHANGED_EVENT]) {
-        nodes { ... on BaseRefChangedEvent { createdAt previousRefName } }
+      timelineItems(since: $since, first: 25, itemTypes: [BASE_REF_CHANGED_EVENT, BASE_REF_FORCE_PUSHED_EVENT]) {
+        pageInfo { hasNextPage }
+        nodes {
+          __typename
+          ... on BaseRefChangedEvent { createdAt previousRefName }
+          ... on BaseRefForcePushedEvent { createdAt beforeCommit { oid } }
+        }
       }
     }
   }
 }`;
 
-/** The newest PR from a branch — a stack's lower layer, by its head branch; its head is kept after the branch is deleted. */
-const HEAD_BRANCH_QUERY = `query($owner: String!, $name: String!, $ref: String!) {
+/**
+ * The PRs merged from a branch into the PR's present base — a stack's lower
+ * layer that landed. GitHub keeps a merged PR's head as it was at the merge,
+ * whatever happens to the branch afterwards.
+ */
+const MERGED_FROM_QUERY = `query($owner: String!, $name: String!, $ref: String!, $base: String!) {
   repository(owner: $owner, name: $name) {
-    pullRequests(headRefName: $ref, last: 1) { nodes { headRefOid } }
+    pullRequests(headRefName: $ref, baseRefName: $base, states: [MERGED], last: 5) {
+      nodes { headRefOid mergedAt isCrossRepository headRepository { nameWithOwner } }
+    }
   }
 }`;
 
@@ -185,13 +197,21 @@ export interface BaseOnlyCheck {
 
 /**
  * Whether a reviewed PR's new head is the change you reviewed on a new base
- * (`sameChangeOnNewBase`). One GraphQL read tells whether the PR was
- * retargeted since your review — a stack's layer moves to the trunk when the
- * one below merges — and then the branch it had is found (the newest PR from
- * that branch, whose head GitHub keeps after the branch is deleted; else the
- * branch itself), so the change is taken against the base you saw. Throws on a
- * read that failed or a PR that moved on — the caller tries again later; no
- * clone, or a base that can't be found, is "changed": the re-review runs.
+ * (`sameChangeOnNewBase`) — failing closed: anything that can't be told for
+ * sure is "changed", and the re-review runs.
+ *
+ * One GraphQL read takes what happened to the base since your review — from
+ * GitHub's own records, never a branch tip, which whoever pushes to it
+ * chooses. Nothing: the base is the branch it is now, only moved forward. One
+ * force-push of that branch (a stack's lower layer GitHub rebased): the base
+ * you reviewed against is the tip GitHub records from before it. One retarget
+ * (a layer moved onto the trunk when the one below merged): it is that lower
+ * PR's head as GitHub kept it at the merge — a PR of this very repository
+ * (never a fork's), merged from the branch the PR had into the one it has
+ * now, after your review, and the only such PR. Two changes or more, more
+ * than one page of them, or a lower PR that isn't exactly that: "changed".
+ * Throws on a read that failed or a PR that moved on — the caller tries again
+ * later.
  */
 export async function checkBaseOnly(gh: GhRunner, pr: BaseOnlyTarget, local: LocalRepo | null): Promise<BaseOnlyCheck> {
   const changed = (note: string): BaseOnlyCheck => ({ verdict: "changed", note, baseRefName: pr.baseRefName });
@@ -202,27 +222,37 @@ export async function checkBaseOnly(gh: GhRunner, pr: BaseOnlyTarget, local: Loc
     if (r.code !== 0) throw new Error(`couldn't read the PR's base: ${ghError(r)}`);
     return JSON.parse(r.stdout) as { data?: Record<string, unknown> };
   };
-  type Node = { state?: string; headRefOid?: string; baseRefName?: string; timelineItems?: { nodes?: Array<{ createdAt?: string; previousRefName?: string } | null> } };
-  const node = (await read(BASE_CHANGES_QUERY, { id: pr.id })).data?.node as Node | null | undefined;
-  if (!node) throw new Error("couldn't read the PR's base");
+  const since = pr.viewerReviewedAt;
+  type Event = { __typename?: string; createdAt?: string; previousRefName?: string; beforeCommit?: { oid?: string } | null } | null;
+  type Node = { state?: string; headRefOid?: string; baseRefName?: string; timelineItems?: { pageInfo?: { hasNextPage?: boolean }; nodes?: Event[] } };
+  const node = (await read(BASE_CHANGES_QUERY, { id: pr.id, since })).data?.node as Node | null | undefined;
+  if (!node || !node.timelineItems) throw new Error("couldn't read the PR's base");
   if (node.state !== "OPEN") return changed("the PR is not open");
   if (node.headRefOid !== pr.headOid || node.baseRefName !== pr.baseRefName) throw new Error("the PR has moved on since the dashboard saw it");
-  const since = pr.viewerReviewedAt;
-  const retargets = (node.timelineItems?.nodes ?? [])
-    .filter((e): e is { createdAt: string; previousRefName?: string } => typeof e?.createdAt === "string" && e.createdAt > since)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  if (node.timelineItems.pageInfo?.hasNextPage !== false) return changed("more changes of the base since your review than one read holds");
+  const events = (node.timelineItems.nodes ?? []).filter((e): e is NonNullable<Event> => typeof e?.createdAt === "string" && e.createdAt >= since);
+  if (events.length > 1) return changed("the base changed more than once since your review");
   let reviewedOn: string | null = null;
-  if (retargets.length > 0) {
-    const was = retargets[0].previousRefName ?? "";
+  if (events[0]?.__typename === "BaseRefForcePushedEvent") {
+    // The branch it targets was rewritten under it — a stack's lower layer GitHub rebased: GitHub says what its tip was before.
+    reviewedOn = events[0].beforeCommit?.oid ?? null;
+    if (!reviewedOn) return changed("the base was force-pushed since your review, from a commit GitHub doesn't name");
+  } else if (events[0]?.__typename === "BaseRefChangedEvent") {
+    const was = events[0].previousRefName ?? "";
     if (!isPlainBranch(was)) return changed("the base the PR had at your review can't be read");
     const [owner, name] = pr.repo.split("/");
-    const found = (await read(HEAD_BRANCH_QUERY, { owner, name, ref: was })).data?.repository as { pullRequests?: { nodes?: Array<{ headRefOid?: string } | null> } } | null | undefined;
-    reviewedOn = found?.pullRequests?.nodes?.[0]?.headRefOid ?? null;
-    if (!reviewedOn) {
-      const tip = await withNoHooks(async (hooks) => lines(await local.git([...safeGit(hooks), "ls-remote", local.remote, `refs/heads/${was}`], local.checkout))[0]?.split(/\s+/)[0]);
-      reviewedOn = tip ?? null;
-    }
-    if (!reviewedOn) return changed(`the base the PR had at your review (${was}) is gone`);
+    type Merged = { headRefOid?: string; mergedAt?: string; isCrossRepository?: boolean; headRepository?: { nameWithOwner?: string } | null } | null;
+    const repo = (await read(MERGED_FROM_QUERY, { owner, name, ref: was, base: pr.baseRefName })).data?.repository as { pullRequests?: { nodes?: Merged[] } } | null | undefined;
+    const lower = (repo?.pullRequests?.nodes ?? []).filter(
+      (p): p is NonNullable<Merged> =>
+        p?.isCrossRepository === false &&
+        p.headRepository?.nameWithOwner?.toLowerCase() === pr.repo.toLowerCase() &&
+        typeof p.mergedAt === "string" &&
+        p.mergedAt >= since &&
+        typeof p.headRefOid === "string",
+    );
+    if (lower.length !== 1) return changed(`retargeted from ${was} since your review, with no single PR of it merged into ${pr.baseRefName}`);
+    reviewedOn = lower[0].headRefOid ?? null;
   }
   const why = await sameChangeOnNewBase(local, { number: pr.number, baseRefName: pr.baseRefName }, pr.viewerReviewedOid, pr.headOid, reviewedOn);
   if (why !== null) return changed(why);
