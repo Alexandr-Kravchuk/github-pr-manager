@@ -109,20 +109,32 @@ Electron · Vite + React 19 + Tailwind CSS v4 (renderer) · TypeScript · Node
 The **Group by parent task** view clusters your review PRs under the Jira issue
 they belong to (e.g. subtasks `ENG-1234`, `ENG-1235` sit under their parent task),
 and both grouped views title their headings with the issue's summary
-(`ENG-1234 · Retry transient network errors`) instead of the bare key. To enable
-it:
+(`ENG-1234 · Retry transient network errors`) instead of the bare key.
+
+**With the Atlassian `twg` CLI (recommended).** If `twg` is installed and signed
+in (`twg login`), open **Settings → Jira** and enter the **Site URL**
+(`https://your-org.atlassian.net`) — that's all. The dashboard reads Jira through
+twg the way it reads GitHub through `gh`: twg signs in with OAuth and renews its
+own session, so there is no token to create or replace. If twg's session ends,
+the dashboard shows a **Sign in with twg** button that opens a terminal running
+`twg login --force`.
+
+**With an API token (fallback).** Used when twg isn't installed or can't sign in:
 
 1. Create a **read-only API token** at
    [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens).
    A scoped token with just the **`read:jira-work`** scope is enough; a classic
    (unscoped) token also works. (Scoped tokens are routed through the
    `api.atlassian.com` gateway automatically; classic tokens use the site URL.)
-2. Open **Settings → Jira** and enter the **Site URL**
-   (`https://your-org.atlassian.net`), your **account email**, and the token.
+2. In **Settings → Jira**, enter the Site URL, your **account email**, and the
+   token.
 
-The token is encrypted by your OS keychain and kept out of `settings.json`. Issue
-keys are parsed from PR titles/branches; if grouping stays empty the dashboard
-shows why (the token can't read the issues, or the PRs aren't subtasks).
+The token is encrypted by your OS keychain and kept out of `settings.json`.
+Atlassian API tokens expire; when Jira starts rejecting the token the dashboard
+says so in a banner (and once as a desktop notification) with a link to create a
+new one, and stops sending the rejected token until you replace it. Issue keys
+are parsed from PR titles/branches; if grouping stays empty the dashboard shows
+why (the account can't read the issues, or the PRs aren't subtasks).
 
 ## Develop
 

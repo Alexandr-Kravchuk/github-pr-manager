@@ -16,9 +16,49 @@
  *     `<baseUrl>/rest/api/3`.
  * We try the gateway first and fall back to the site on a 401/403, then cache the
  * winner. A scoped token's recommended scope is just `read:jira-work`.
+ *
+ * The same lookup also runs through the `twg` CLI (`JiraLookup` kind "twg"),
+ * the primary source: it signs in with OAuth, so it has no token to expire.
+ * The API token is the fallback for users without twg.
  */
 import { makeDebug } from "./debug";
-import type { JiraSettings } from "./types";
+import {
+  classifyTwgRun,
+  issueFields,
+  parseTwgIssues,
+  twgQueryArgs,
+  type RawJiraIssue,
+  type TwgRunner,
+} from "./jira-twg";
+import type { JiraSettings, JiraSource } from "./types";
+
+/**
+ * Jira or twg rejected the credentials: an expired, revoked or mistyped API
+ * token, or a twg with no usable sign-in. Distinct from other failures because
+ * retrying cannot fix it — the user has to act, and `source` says where.
+ */
+export class JiraAuthError extends Error {
+  constructor(
+    message: string,
+    readonly source: JiraSource,
+  ) {
+    super(message);
+    this.name = "JiraAuthError";
+  }
+}
+
+/** No `twg` binary was found — not a failure, the cue to fall back to the API token. */
+export class TwgNotInstalledError extends Error {
+  constructor() {
+    super("twg is not installed");
+    this.name = "TwgNotInstalledError";
+  }
+}
+
+/** How a lookup reaches Jira. */
+export type JiraLookup =
+  | { kind: "token"; config: JiraSettings & { email: string }; token: string }
+  | { kind: "twg"; baseUrl: string; run: TwgRunner };
 
 /** What one issue key resolved to. */
 export interface JiraIssue {
@@ -45,8 +85,13 @@ interface CacheEntry {
   fetchedAt: number;
 }
 
-/** Issue lookups cached per key — summaries and parentage change rarely. */
-const issueCache = new Map<string, CacheEntry>();
+/**
+ * Issue lookups cached per key — summaries and parentage change rarely. One
+ * cache per source: the two can see different issues (a scoped token may see
+ * fewer), so a negative entry from one must not hide a key from the other, and
+ * a pass on one source must not count as fresh data for the other.
+ */
+const issueCaches: Record<JiraSource, Map<string, CacheEntry>> = { twg: new Map(), token: new Map() };
 const CACHE_TTL_MS = 10 * 60 * 1000;
 /** JQL `key in (...)` handles many keys per request; chunk defensively. */
 const CHUNK_SIZE = 50;
@@ -84,7 +129,7 @@ const NEGATIVE_CLOUDID_TTL_MS = 60_000;
 /**
  * The REST base that actually worked for a site, remembered after the first
  * success so later ticks don't re-probe the gateway (and pay its fallback cost).
- * Only a base whose token type is *settled* is cached (see `fetchChunk`) — a
+ * Only a base whose token type is *settled* is cached (see `fetchTokenChunk`) — a
  * site-only base chosen because the cloudId couldn't be resolved is left
  * uncached so a later tick can still discover the gateway.
  */
@@ -121,7 +166,8 @@ let cacheEpoch = 0;
 /** Clears all caches (tests / a config change) and invalidates in-flight passes. */
 export function clearJiraCaches(): void {
   cacheEpoch++;
-  issueCache.clear();
+  issueCaches.twg.clear();
+  issueCaches.token.clear();
   cloudIdCache.clear();
   apiBaseCache.clear();
   gatewayBackoff.clear();
@@ -198,7 +244,7 @@ async function resolveCloudId(baseUrl: string): Promise<string | null> {
  * The order matters: a scoped token on the site URL answers 200-but-empty, which
  * is indistinguishable from a genuine "no matches", so a scoped token must never
  * reach the site URL — whereas a classic token on the gateway answers a clean
- * 401, which `fetchChunk` uses as its fallback trigger.
+ * 401, which `fetchTokenChunk` uses as its fallback trigger.
  */
 async function apiBasesFor(
   config: JiraSettings,
@@ -248,19 +294,79 @@ function resultIsTrustworthy(bases: string[], cleanFallback: boolean, pinned: bo
 }
 
 interface RawSearchResponse {
-  issues?: Array<{
-    key: string;
-    fields?: {
-      summary?: string;
-      parent?: { key: string; fields?: { summary?: string } };
-      issuetype?: { subtask?: boolean; hierarchyLevel?: number };
-    };
-  }>;
+  issues?: RawJiraIssue[];
 }
 
-/** Queries one chunk of keys and populates the cache (including negatives). */
-async function fetchChunk(
-  config: JiraSettings,
+/**
+ * Whether Jira rejected the Basic credentials on a response it still answered.
+ * The site URL does not 401 a bad API token on `/search/jql`: it serves the
+ * request anonymously — 200 with no issues — and says so only in this header.
+ * Only the failure values are matched: a good token's response may omit the
+ * header altogether.
+ */
+function siteRejectedCredentials(res: Response): boolean {
+  const reason = res.headers?.get?.("x-seraph-loginreason") ?? "";
+  return /AUTHENTICATED_FAILED|AUTHENTICATION_DENIED/i.test(reason);
+}
+
+const TOKEN_REJECTED =
+  "Jira rejected the API token — it may have expired or been revoked, or the account email may be wrong";
+
+/**
+ * Writes one pass's issues into the source's cache. Keys the pass did not return
+ * get a negative entry only when `trusted` (see `resultIsTrustworthy`).
+ */
+function writeIssues(
+  source: JiraSource,
+  keys: string[],
+  issues: RawJiraIssue[],
+  now: number,
+  trusted: boolean,
+): void {
+  const cache = issueCaches[source];
+  const returned = new Set<string>();
+  for (const issue of issues) {
+    returned.add(issue.key);
+    const { summary, parent: p, issuetype: type } = issueFields(issue);
+    cache.set(issue.key, {
+      issue: {
+        summary: summary ?? null,
+        parentKey: p?.key ?? null,
+        parentSummary: p?.fields?.summary ?? null,
+        // `subtask` is the long-standing flag; team-managed projects' custom
+        // subtask types are recognised by their hierarchy level (-1) instead.
+        isSubtask: type?.subtask === true || (type?.hierarchyLevel ?? 0) < 0,
+      },
+      fetchedAt: now,
+    });
+  }
+  if (!trusted) return;
+  for (const key of keys) {
+    if (!returned.has(key)) cache.set(key, { issue: null, fetchedAt: now });
+  }
+}
+
+/**
+ * One chunk through `twg jira workitem query`. twg signs in as the user, so
+ * what it does not return is genuinely invisible or unknown: its negatives are
+ * always trusted.
+ */
+async function fetchTwgChunk(baseUrl: string, run: TwgRunner, keys: string[], now: number): Promise<void> {
+  const epoch = cacheEpoch;
+  const result = await run(twgQueryArgs(baseUrl, keys));
+  const failure = classifyTwgRun(result);
+  if (failure?.kind === "not-installed") throw new TwgNotInstalledError();
+  if (failure?.kind === "auth") throw new JiraAuthError(failure.message, "twg");
+  if (failure) throw new Error(failure.message);
+  const issues = parseTwgIssues(result.stdout);
+  debug(() => `twg -> ${issues.length} issues for ${keys.length} keys`);
+  if (epoch !== cacheEpoch) return;
+  writeIssues("twg", keys, issues, now, true);
+}
+
+/** Queries one chunk of keys with the API token and populates the cache (including negatives). */
+async function fetchTokenChunk(
+  config: JiraSettings & { email: string },
   token: string,
   keys: string[],
   now: number,
@@ -332,6 +438,13 @@ async function fetchChunk(
     if (lastError) throw lastError instanceof Error ? lastError : new Error(String(lastError));
     throw new Error("Jira: no reachable API base");
   }
+  // A rejected token must surface before anything below is cached: the site
+  // answers it with an anonymous 200-but-empty that would otherwise pin the site
+  // base and write a negative entry for every key — and a 401 on the last base
+  // (the pinned gateway of a scoped token) is the same verdict.
+  if (res.status === 401 || siteRejectedCredentials(res)) {
+    throw new JiraAuthError(TOKEN_REJECTED, "token");
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(
@@ -351,72 +464,60 @@ async function fetchChunk(
   const writable = epoch === cacheEpoch;
   if (winner && trusted && writable) apiBaseCache.set(config.baseUrl, winner);
   const json = (await res.json()) as RawSearchResponse;
-  const returned = new Set<string>();
-  for (const issue of json.issues ?? []) {
-    returned.add(issue.key);
-    const p = issue.fields?.parent;
-    const type = issue.fields?.issuetype;
-    if (!writable) continue;
-    issueCache.set(issue.key, {
-      issue: {
-        summary: issue.fields?.summary ?? null,
-        parentKey: p?.key ?? null,
-        parentSummary: p?.fields?.summary ?? null,
-        // `subtask` is the long-standing flag; team-managed projects' custom
-        // subtask types are recognised by their hierarchy level (-1) instead.
-        isSubtask: type?.subtask === true || (type?.hierarchyLevel ?? 0) < 0,
-      },
-      fetchedAt: now,
-    });
-  }
   // Keys Jira didn't return get a negative entry — but only from a trusted base.
   // A 200-but-empty reached via an unverified base (cloudId unresolved, or past a
   // thrown error) might be a scoped token that should have used the gateway;
   // caching those negatives for CACHE_TTL_MS would keep the banner "empty" for up
   // to 10 min after the gateway recovers. Skip them so the keys are re-queried on
   // the next tick, once the gateway is reachable again.
-  if (trusted && writable) {
-    for (const key of keys) {
-      if (!returned.has(key)) issueCache.set(key, { issue: null, fetchedAt: now });
-    }
-  }
+  if (writable) writeIssues("token", keys, json.issues ?? [], now, trusted);
 }
 
 /**
- * Resolves the given issue keys. Only keys not already fresh in the cache hit the
- * network. Returns a map of key → issue for every key Jira actually returned;
- * a key it didn't return (unknown, or invisible to this token) is simply absent,
- * while a key that exists but has no parent IS present, with `parentKey: null` —
- * its summary is still worth having for the by-issue heading. Throws on a
- * network / auth error — the caller treats it as best-effort.
+ * Resolves the given issue keys through `lookup`. Only keys not already fresh in
+ * that source's cache hit the network. Returns a map of key → issue for every
+ * key Jira actually returned; a key it didn't return (unknown, or invisible to
+ * this account) is simply absent, while a key that exists but has no parent IS
+ * present, with `parentKey: null` — its summary is still worth having for the
+ * by-issue heading. Throws on a network / auth error (`JiraAuthError` for
+ * rejected credentials, `TwgNotInstalledError` for a missing twg) — the caller
+ * treats it as best-effort.
  */
-export async function fetchIssues(
-  config: JiraSettings,
-  token: string,
-  keys: string[],
-): Promise<Map<string, JiraIssue>> {
+export async function resolveIssues(lookup: JiraLookup, keys: string[]): Promise<Map<string, JiraIssue>> {
+  const cache = issueCaches[lookup.kind];
   const now = Date.now();
   const unique = [...new Set(keys)];
   const stale = unique.filter((k) => {
-    const c = issueCache.get(k);
+    const c = cache.get(k);
     return !c || now - c.fetchedAt >= CACHE_TTL_MS;
   });
   for (let i = 0; i < stale.length; i += CHUNK_SIZE) {
-    await fetchChunk(config, token, stale.slice(i, i + CHUNK_SIZE), now);
+    const chunk = stale.slice(i, i + CHUNK_SIZE);
+    if (lookup.kind === "twg") await fetchTwgChunk(lookup.baseUrl, lookup.run, chunk, now);
+    else await fetchTokenChunk(lookup.config, lookup.token, chunk, now);
   }
   const result = new Map<string, JiraIssue>();
   for (const key of unique) {
-    const issue = issueCache.get(key)?.issue;
+    const issue = cache.get(key)?.issue;
     if (issue) result.set(key, issue);
   }
   return result;
+}
+
+/** `resolveIssues` with the API token. */
+export function fetchIssues(
+  config: JiraSettings & { email: string },
+  token: string,
+  keys: string[],
+): Promise<Map<string, JiraIssue>> {
+  return resolveIssues({ kind: "token", config, token }, keys);
 }
 
 /**
  * Resolves the tasks that the given subtasks belong to, so the caller can read
  * each task's own parent — the epic. One level only: a task's parent is
  * already the epic, and climbing past it would merge unrelated epics under a
- * shared initiative. The tasks go through `fetchIssues` and its cache, so a
+ * shared initiative. The tasks go through `resolveIssues` and its cache, so a
  * task that also has a PR of its own costs nothing extra.
  *
  * Best-effort on top of a pass that already succeeded: a failure here returns
@@ -424,15 +525,14 @@ export async function fetchIssues(
  * summaries and parents already resolved.
  */
 export async function fetchSubtaskParents(
-  config: JiraSettings,
-  token: string,
+  lookup: JiraLookup,
   issues: Iterable<JiraIssue>,
 ): Promise<Map<string, JiraIssue>> {
   const keys = new Set<string>();
   for (const issue of issues) if (issue.isSubtask && issue.parentKey) keys.add(issue.parentKey);
   if (keys.size === 0) return new Map();
   try {
-    return await fetchIssues(config, token, [...keys]);
+    return await resolveIssues(lookup, [...keys]);
   } catch (e) {
     debug(`subtask parents failed: ${(e as Error).message}`);
     return new Map();

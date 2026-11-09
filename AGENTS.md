@@ -254,6 +254,28 @@ Three layers:
   in-progress edit (a half-typed Jira token) was rejected instead.
 - Settings never contain tokens; tokens are resolved per host via `gh` at fetch
   time (`config.ts`).
+- Jira is read through the Atlassian `twg` CLI first, the API token second —
+  the `gh` model again: twg signs in with OAuth and refreshes itself, so there
+  is nothing to expire. `shared/jira-pass.ts` picks the source per pass (twg
+  not installed → token silently; twg signed out → token, reported only when
+  the token can't run) and is unit-tested with an injected twg runner;
+  `main/twg.ts` owns the processes, `shared/jira-twg.ts` the arguments, output
+  parsing and failure classes. Every twg run passes `--mode user --output json
+  --output-summary none`, or an inherited `TWG_AGENT_DEFAULTS` swaps the JSON
+  for a YAML envelope. Tests must inject a runner (`buildJiraEnricher(…, {
+  runTwg })`): the default spawns the machine's real twg. The issue caches are
+  per source, so one source's "not found" never hides a key from the other.
+- A rejected API token is NOT a 401 on the site URL: Jira serves it
+  anonymously as `200 {"issues":[]}` and says so only in
+  `X-Seraph-LoginReason: AUTHENTICATED_FAILED`. `fetchTokenChunk` checks that
+  header (failure values only) on every response, pinned base included, and
+  throws `JiraAuthError` before anything is cached — counted as a trusted
+  answer, the anonymous 200 would pin the site base, write a negative entry per
+  key and show as "no parent tasks resolved". The `auth` health drives a banner in every grouping, one OS
+  notification on the transition into it, and the pass stops sending that
+  token until it changes. Atlassian has no API that creates a user's API
+  token, so the banner can only link to id.atlassian.com (or start
+  `twg login --force` in a terminal).
 - Window size/position persist in `userData/window-state.json`
   (`main/window-state.ts`), **not** in `settings.json`: `loadSettings()` throws
   `ConfigError` on an unexpected shape and the poller surfaces that, so a stray

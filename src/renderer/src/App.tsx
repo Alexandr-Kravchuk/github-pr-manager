@@ -56,6 +56,7 @@ import type {
   ClaudeSessionInfo,
   DashboardResponse,
   HostError,
+  JiraSource,
   JiraStatus,
   PublicConfig,
   PullRequest,
@@ -378,6 +379,15 @@ export function App() {
     window.api.getWhatsNew().then(setWhatsNew).catch(() => {});
     window.api.getJiraStatus().then(setJiraStatus).catch(() => {});
   }, []);
+
+  // A sign-in done outside the app (`twg login` in a terminal) or a credential
+  // that stopped working changes which grouping options exist — re-read the
+  // setup state whenever a poll moves the Jira health to another state.
+  const jiraHealthState = data?.jiraHealth?.state;
+  useEffect(() => {
+    if (!jiraHealthState) return;
+    window.api.getJiraStatus().then(setJiraStatus).catch(() => {});
+  }, [jiraHealthState]);
 
   // Subscribe to live updates first (so we don't miss an early snapshot), then
   // do the initial paint. The poller in the main process pushes a fresh snapshot
@@ -1241,6 +1251,14 @@ export function App() {
         ),
       )}
 
+      {/* Rejected Jira credentials — shown in every grouping, since issue titles
+          and the issue grouping need Jira too, and only the user can fix it. */}
+      {data?.jiraHealth?.state === "auth" && (
+        <JiraAuthBanner
+          source={data.jiraHealth.source ?? "token"}
+          onOpenSettings={() => setView("settings")}
+        />
+      )}
       {/* Jira parent-enrichment health — explain a failed/empty pass rather than
           leaving "Group by parent task" silently empty. */}
       {data?.jiraHealth?.state === "error" && groupBy === "parent" && (
@@ -1252,7 +1270,14 @@ export function App() {
       {data?.jiraHealth?.state === "empty" && groupBy === "parent" && (
         <div className="mb-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-600/40 dark:bg-amber-950/30 dark:text-amber-200">
           <span className="font-semibold">Jira:</span> connected, but no parent tasks resolved for the current
-          PRs. Check the token has the <code>read:jira-work</code> scope, or these PRs may not be Jira subtasks.
+          PRs.{" "}
+          {data.jiraHealth.source === "twg" ? (
+            <>Your Atlassian account may not see these issues, or they may not be Jira subtasks.</>
+          ) : (
+            <>
+              Check the token has the <code>read:jira-work</code> scope, or these PRs may not be Jira subtasks.
+            </>
+          )}
         </div>
       )}
 
@@ -1494,6 +1519,68 @@ function PrList({
           onToggleIgnore={onToggleIgnore}
         />
       ))}
+    </div>
+  );
+}
+
+/** Where a new Atlassian API token is created. */
+const ATLASSIAN_API_TOKENS_URL = "https://id.atlassian.com/manage-profile/security/api-tokens";
+
+/**
+ * Says that Jira or twg rejected the credentials and offers the one action that
+ * fixes it: a new API token, or `twg login` in a terminal. The app cannot reissue
+ * either itself — Atlassian has no API that creates a user's API token, and the
+ * twg sign-in is interactive.
+ */
+function JiraAuthBanner({ source, onOpenSettings }: { source: JiraSource; onOpenSettings: () => void }) {
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginStarted, setLoginStarted] = useState(false);
+  const btn =
+    "ml-2 rounded-md border border-red-300 bg-white/60 px-2 py-0.5 text-xs font-medium hover:bg-white dark:border-red-600/50 dark:bg-transparent dark:hover:bg-red-900/40";
+  const signIn = () => {
+    setLoginError(null);
+    window.api
+      .twgLogin()
+      .then((r) => {
+        if (r.ok) setLoginStarted(true);
+        else setLoginError(r.error ?? "Could not open a terminal.");
+      })
+      .catch((e) => setLoginError((e as Error).message));
+  };
+  return (
+    <div className="mb-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/30 dark:text-red-200">
+      <span className="font-semibold">Jira:</span>{" "}
+      {source === "twg" ? (
+        <>
+          twg is not signed in to Atlassian, so issue titles and parent tasks can&apos;t be resolved.
+          <button type="button" className={btn} onClick={signIn}>
+            Sign in with twg
+          </button>
+          {loginStarted && !loginError && (
+            <span className="ml-2 text-xs">Finish the sign-in in the terminal — the dashboard picks it up on its next refresh.</span>
+          )}
+          {loginError && (
+            <span className="ml-2 text-xs">
+              {loginError} Run <code>twg login --force</code> in a terminal.
+            </span>
+          )}
+        </>
+      ) : (
+        <>
+          Jira rejected your API token — it may have expired or been revoked. Create a new one and paste it in
+          Settings.
+          <button
+            type="button"
+            className={btn}
+            onClick={() => window.api.openExternal(ATLASSIAN_API_TOKENS_URL).catch(() => {})}
+          >
+            Create a new token
+          </button>
+          <button type="button" className={btn} onClick={onOpenSettings}>
+            Open Settings
+          </button>
+        </>
+      )}
     </div>
   );
 }

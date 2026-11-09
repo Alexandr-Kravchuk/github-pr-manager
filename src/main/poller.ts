@@ -256,13 +256,18 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
     trackComments,
     // Include the message, not just the state: an "error" whose text changes
     // between ticks must still push a fresh snapshot so the banner isn't stale.
-    jira: { state: s.jiraHealth?.state, message: stableJiraMessage(s.jiraHealth?.message) },
+    // The source too: the banner for a rejected credential names which one.
+    jira: {
+      state: s.jiraHealth?.state,
+      message: stableJiraMessage(s.jiraHealth?.message),
+      source: s.jiraHealth?.source,
+    },
   });
 }
 
 /**
  * Change-detection view of the Jira health message. Jira HTTP errors append up
- * to 200 chars of response body after an " — " separator (see fetchChunk), and
+ * to 200 chars of response body after an " — " separator (see fetchTokenChunk), and
  * that body can vary per response (request ids, retry hints). Hashing the raw
  * text would re-emit a snapshot every tick and permanently reset the idle
  * backoff — Jira noise dictating the GitHub poll cadence. Keep the stable

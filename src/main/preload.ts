@@ -15,6 +15,7 @@ const api: PrManagerApi = {
   getGhStatus: () => ipcRenderer.invoke("gh:status"),
   getJiraStatus: () => ipcRenderer.invoke("jira:status"),
   setJiraToken: (token) => ipcRenderer.invoke("jira:setToken", token),
+  twgLogin: () => ipcRenderer.invoke("jira:twgLogin"),
   getAppVersion: () => ipcRenderer.invoke("app:getVersion"),
   getWhatsNew: () => ipcRenderer.invoke("app:getWhatsNew"),
   dismissWhatsNew: () => ipcRenderer.invoke("app:dismissWhatsNew"),

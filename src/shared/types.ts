@@ -93,8 +93,11 @@ export type ThemePreference = "system" | "light" | "dark";
 export interface JiraSettings {
   /** Site base URL, e.g. "https://your-org.atlassian.net". */
   baseUrl: string;
-  /** Atlassian account email — the username half of the API-token Basic auth. */
-  email: string;
+  /**
+   * Atlassian account email — the username half of the API-token Basic auth.
+   * Only the API-token fallback needs it; the `twg` CLI signs in on its own.
+   */
+  email?: string;
 }
 
 /** Which PR events raise a desktop notification. Each maps to a group agreed
@@ -219,10 +222,28 @@ export interface Settings {
   claude: ClaudeSettings;
 }
 
+/** Where Jira data comes from: the `twg` CLI's own sign-in, or the stored API token. */
+export type JiraSource = "twg" | "token";
+
+/** State of the Atlassian `twg` CLI, the primary Jira source. */
+export interface TwgStatus {
+  /**
+   * `signed-in`: `twg whoami` answered; `signed-out`: twg is installed but has
+   * no usable login; `not-installed`: no `twg` on PATH; `error`: anything else.
+   */
+  state: "signed-in" | "signed-out" | "not-installed" | "error";
+  /** Display name of the signed-in account. */
+  account?: string;
+  /** twg's own message for `signed-out` / `error`. */
+  message?: string;
+}
+
 /** Jira setup state for the UI, from the main process. */
 export interface JiraStatus {
-  /** true when baseUrl + email are set AND an encrypted token is stored. */
+  /** true when the site URL is set AND a source can sign in: twg is signed in, or an API token is stored. */
   configured: boolean;
+  /** The `twg` CLI, tried before the API token. */
+  twg: TwgStatus;
   /**
    * The configured Jira site origin, or null when none is set. Carried here
    * because the renderer needs it to link a PR's issue key to `/browse/<KEY>`,
@@ -230,8 +251,10 @@ export interface JiraStatus {
    * the email and the token stay in the main process.
    */
   baseUrl: string | null;
-  /** baseUrl + email are set (token may still be missing). */
+  /** The site URL is set (a source may still be missing). */
   hasConfig: boolean;
+  /** The account email the API token needs is set. */
+  hasEmail: boolean;
   /** An encrypted token is stored. */
   hasToken: boolean;
   /** false when the OS keychain / safeStorage is unavailable (can't store a token). */
@@ -245,10 +268,13 @@ export interface JiraStatus {
  */
 export interface JiraHealth {
   /** "ok" resolved ≥1 parent; "empty" the call succeeded but nothing resolved
-   * (token may not see the issues, or none are subtasks); "error" the call failed. */
-  state: "ok" | "empty" | "error";
-  /** Failure detail for `state: "error"`. */
+   * (the account may not see the issues, or none are subtasks); "error" the call
+   * failed; "auth" Jira or twg rejected the credentials — see `source`. */
+  state: "ok" | "empty" | "error" | "auth";
+  /** Failure detail for `state: "error"` / `"auth"`. */
   message?: string;
+  /** Which source the pass used, or — for `auth` — which one was rejected. */
+  source?: JiraSource;
   /** Diagnostics: issue keys queried and parents resolved this pass. */
   queried: number;
   resolved: number;
@@ -714,6 +740,11 @@ export interface PrManagerApi {
    * via the OS keychain. Returns whether it was persisted.
    */
   setJiraToken(token: string): Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Opens a terminal running `twg login --force`: the sign-in is interactive
+   * (site choice, browser consent), so the app can only start it, not finish it.
+   */
+  twgLogin(): Promise<{ ok: boolean; error?: string }>;
   /** The running app version. */
   getAppVersion(): Promise<string>;
   /**
