@@ -7642,6 +7642,22 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.ok(review.startsWith("[PR Dashboard review of ENG-7] "), review);
       assert.deepStrictEqual(cl.groupMarkerOf(review), { kind: "review", key: "ENG-7" });
       assert.match(review, /start_session/);
+      const defaultReview = cl.renderGroupPrompt({}, "review", "ENG-7", prs);
+      assert.match(defaultReview, /its prompt word for word/, "the parent must not paraphrase a session's prompt");
+      // A request from another session is not the user's consent to publish,
+      // so each review session gets the user's own words, quoted in full.
+      assert.ok(
+        defaultReview.includes(
+          "Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
+            "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.» " +
+            "Публікуй рев'ю на PR за цим дозволом.",
+        ),
+        "the publishing permission is quoted word for word",
+      );
+      assert.match(defaultReview, /APPROVE only on my separate word for that PR/);
+      assert.match(defaultReview, /low confidence is a ground for REQUEST_CHANGES only once it is checked/);
+      assert.match(defaultReview, /Start your report with the link to the review you published/);
+      assert.match(defaultReview, /for each PR the link to its review, its decision/);
       assert.match(review, /1\) \/my-review https:\/\/github\.com\/a\/b\/pull\/1 2\) \/my-review https:\/\/github\.com\/a\/b\/pull\/2/, "each PR's own review prompt");
       const placed = cl.renderGroupPrompt({}, "review", "ENG-7", prs, ["C:\\Projects\\core", null]);
       assert.match(placed, /start_session's cwd/);
@@ -7666,6 +7682,19 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const c = cfg.validateClaude({});
       assert.strictEqual(c.prompts.explainGroup, cl.DEFAULT_CLAUDE_PROMPTS.explainGroup);
       assert.strictEqual(c.prompts.reviewGroup, cl.DEFAULT_CLAUDE_PROMPTS.reviewGroup);
+      for (const old of cl.PREVIOUS_DEFAULT_PROMPTS.reviewGroup) {
+        assert.notStrictEqual(old, cl.DEFAULT_CLAUDE_PROMPTS.reviewGroup);
+        assert.strictEqual(
+          cfg.validateClaude({ prompts: { reviewGroup: old } }).prompts.reviewGroup,
+          cl.DEFAULT_CLAUDE_PROMPTS.reviewGroup,
+          "a saved copy of an old default reads as the current default",
+        );
+      }
+      assert.strictEqual(cfg.validateClaude({ prompts: { reviewGroup: "/mine {prompts}" } }).prompts.reviewGroup, "/mine {prompts}");
+      const stored = cfg.toStoredSettings(cfg.validateSettings({ claude: { prompts: { review: "/mine {url}" } } }));
+      assert.strictEqual(stored.claude.prompts.reviewGroup, "", "a default prompt is stored empty, so a later default reaches it");
+      assert.strictEqual(stored.claude.prompts.review, "/mine {url}", "an edited prompt is stored as is");
+      assert.strictEqual(cfg.validateSettings(stored).claude.prompts.reviewGroup, cl.DEFAULT_CLAUDE_PROMPTS.reviewGroup);
       assert.strictEqual(cfg.toPublicConfig(cfg.validateSettings({ claude: { ...c, terminal: "desktop" } })).claudeDesktop, true);
       assert.strictEqual(cfg.toPublicConfig(cfg.validateSettings({ claude: c })).claudeDesktop, false);
     });
