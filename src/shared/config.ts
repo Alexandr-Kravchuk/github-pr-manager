@@ -271,6 +271,8 @@ export function validateClaude(raw: unknown): ClaudeSettings {
       close: prompt("close"),
       explain: prompt("explain"),
       open: prompt("open"),
+      explainGroup: prompt("explainGroup"),
+      reviewGroup: prompt("reviewGroup"),
     },
     agentPrompts: {
       triage: agentPrompt("triage"),
@@ -474,6 +476,7 @@ export function toPublicConfig(settings: Settings): PublicConfig {
     hosts: settings.hosts.map((h) => ({ label: h.label, repos: h.repos })),
     trackComments: settings.trackComments,
     claudeEnabled: settings.claude.enabled,
+    claudeDesktop: settings.claude.terminal === "desktop",
   };
 }
 

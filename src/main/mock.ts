@@ -106,6 +106,7 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     baseIsDefaultBranch: true,
     stack: null,
     blockedByStack: false,
+    requiredReviewPending: false,
     author: { login: "me", avatarUrl: OCTOCAT },
     createdAt: new Date(Date.now() - 2 * 864e5).toISOString(),
     updatedAt: new Date(Date.now() - 36e5).toISOString(),

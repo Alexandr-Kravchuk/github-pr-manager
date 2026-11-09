@@ -306,6 +306,16 @@ function ReviewGlyph({ pr }: { pr: PullRequest }) {
       </span>
     );
   }
+  if (pr.requiredReviewPending) {
+    return (
+      <span
+        title="Approved, but branch protection still requires another review (e.g. a code owner) before it can merge"
+        className="shrink-0 text-amber-600 dark:text-amber-300"
+      >
+        ◐
+      </span>
+    );
+  }
   const tally = approvalTally(pr);
   if (!tally) {
     return pr.hasHumanApproval ? (

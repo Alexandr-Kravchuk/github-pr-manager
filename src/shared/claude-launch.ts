@@ -1,5 +1,5 @@
 import { DEFAULT_AGENT_PROMPTS } from "./agent-defaults";
-import { prSignal } from "./pr-filter";
+import { isReviewDue, prSignal } from "./pr-filter";
 import type { ClaudeSettings, PullRequest } from "./types";
 
 // "Start a Claude session on this PR": which prompt the session opens with, and
@@ -32,14 +32,142 @@ export function claudeKindsFor(pr: Pick<PullRequest, "roles">): ClaudeLaunchKind
   return CLAUDE_LAUNCH_KINDS.filter((k) => k !== "close" || pr.roles.includes("author"));
 }
 
-/** `{url}` is replaced with the PR's URL. */
-export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudeLaunchKind, string> = {
+/**
+ * What a group heading's Claude button starts for a Jira key:
+ *  - `explain` — "Explain all": one session that explains the group's open PRs
+ *    together, shown in the session;
+ *  - `review` — "Review all": a parent session that starts one nested Claude
+ *    Desktop session per PR awaiting your review and sums their reports up.
+ *    Nesting is something only a Desktop session can do (its `start_session`
+ *    tool) — a `claude://` link starts a top-level session — so it is offered
+ *    only while Settings → Claude opens sessions in Claude Desktop.
+ */
+export type GroupLaunchKind = "explain" | "review";
+
+export const GROUP_LAUNCH_KINDS: readonly GroupLaunchKind[] = ["explain", "review"];
+
+/** A prompt template's key: one per PR launch kind, plus one per group launch kind. */
+export type ClaudePromptKey = ClaudeLaunchKind | "explainGroup" | "reviewGroup";
+
+/** The template a group launch kind fills in. */
+export const GROUP_PROMPT_KEY: Record<GroupLaunchKind, "explainGroup" | "reviewGroup"> = {
+  explain: "explainGroup",
+  review: "reviewGroup",
+};
+
+/**
+ * `{url}` is replaced with the PR's URL. The group templates take `{key}` (the
+ * group's Jira key), `{count}` and `{urls}` (the links, space-separated);
+ * `reviewGroup` also takes `{prompts}` — each PR's own "Your review is due"
+ * prompt, numbered, for the sessions it starts, behind the folder of that PR's
+ * own checkout when it differs from the parent's (`in <folder>:`).
+ */
+export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
   drive: "/drive-pr-green {url}",
   review: "/creatio-code-review {url}",
   close: "/drive-pr-close {url}",
   explain: "/usercustom-dev:pr-first-look {url} — show the explanation here in the session; do not send a letter",
   open: "{url}",
+  explainGroup:
+    "Explain together the {count} open pull requests of {key}, so I get the big picture without reading each one: {urls} — " +
+    "read the Jira issue {key}, then each PR (one subagent per PR, so the diffs stay out of this context), and give: " +
+    "the goal they serve together, how the changes fit into one design, the order to read them in (a stack bottom-up), " +
+    "where they overlap or repeat each other, and which one to review first. " +
+    "Show the result here in the session; do not send a letter and post nothing on the PRs.",
+  reviewGroup:
+    "Review the {count} pull requests of {key} that wait for my review. Do not review them here: start one session per PR " +
+    "with the start_session tool (initiation user_asked, context fresh, use_worktree false), so each review runs in its own " +
+    "session nested under this one. A prompt that starts with a folder (in, the folder, a colon) is that PR's own repository: start its " +
+    "session there through start_session's cwd, so it reads that repository's rules and code; the others run in this folder. " +
+    "The prompts: {prompts}. " +
+    "When every session has reported, give me one summary: for each PR its decision and its Blocker and Major findings, " +
+    "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently.",
 };
+
+/**
+ * Starts every group prompt, whatever the template says:
+ * `[PR Dashboard overview of ENG-1]` or `[PR Dashboard review of ENG-1]`. The
+ * session scanner reads it two ways: the session belongs to that key's
+ * heading — its button shows it and switches to it — and it holds none of the
+ * PRs it lists, since it works on none of them itself and counting it would
+ * hand each of those cards' Claude button to it.
+ */
+export function groupMarker(kind: GroupLaunchKind, key: string): string {
+  return `${GROUP_MARKER_PREFIX}${kind === "explain" ? "overview" : "review"} of ${key}]`;
+}
+
+/** How every `groupMarker` starts — what the scanner's cheap pre-filter looks for. */
+export const GROUP_MARKER_PREFIX = "[PR Dashboard ";
+
+/** A Jira issue key, unanchored: the one pattern `JIRA_KEY_RE` and the marker parser share. */
+const JIRA_KEY_PATTERN = "[A-Z][A-Z0-9_]{0,19}-\\d{1,9}";
+
+const GROUP_MARKER_RE = new RegExp(`\\[PR Dashboard (overview|review) of (${JIRA_KEY_PATTERN})\\]`);
+
+/** The kind and Jira key in a prompt's `groupMarker`, or null when the prompt has none. */
+export function groupMarkerOf(text: string): { kind: GroupLaunchKind; key: string } | null {
+  const m = GROUP_MARKER_RE.exec(text);
+  return m ? { kind: m[1] === "overview" ? "explain" : "review", key: m[2] } : null;
+}
+
+/**
+ * At most this many PRs go into one group launch: past it an overview stops
+ * being high-level, and cmd.exe caps a command line at 8191 characters.
+ */
+export const MAX_GROUP_PRS = 30;
+
+/**
+ * A group launch's prompt: its template filled in, behind the marker.
+ * `folders[i]` is where the review of `prs[i]` should run — its repository's
+ * checkout — or null to run it in the parent's folder: a review started in
+ * another repository's folder loads that repository's CLAUDE.md as its own
+ * rules and searches the wrong code for callers and patterns.
+ */
+export function renderGroupPrompt(
+  prompts: Partial<Record<ClaudePromptKey, string>>,
+  kind: GroupLaunchKind,
+  key: string,
+  prs: readonly Pick<PullRequest, "url">[],
+  folders: readonly (string | null)[] = [],
+): string {
+  const templateKey = GROUP_PROMPT_KEY[kind];
+  const template = prompts[templateKey]?.trim() || DEFAULT_CLAUDE_PROMPTS[templateKey];
+  const fill = (text: string, token: string, value: string) => text.split(token).join(value);
+  let filled = fill(template, "{key}", key);
+  filled = fill(filled, "{count}", String(prs.length));
+  filled = fill(filled, "{urls}", prs.map((p) => p.url).join(" "));
+  filled = fill(
+    filled,
+    "{prompts}",
+    prs
+      .map((p, i) => `${i + 1}) ${folders[i] ? `in ${folders[i]}: ` : ""}${renderClaudePrompt(prompts, "review", p)}`)
+      .join(" "),
+  );
+  return `${groupMarker(kind, key)} ${filled}`;
+}
+
+/** A Jira issue key — the only group key a group launch accepts, since it reaches the shell. */
+export const JIRA_KEY_RE = new RegExp(`^${JIRA_KEY_PATTERN}$`);
+
+/**
+ * The PRs a group launch takes, or null when the heading offers it none. Only
+ * a Jira-key group (by issue or by parent task — the "Other" bucket and a
+ * repository have no task); the first `MAX_GROUP_PRS` in the order shown.
+ *  - `explain`: the open ones, drafts left out since nobody reviews them yet;
+ *    at least two — one PR has its own Explain;
+ *  - `review`: the ones your review is due on (`isReviewDue`, the card's
+ *    "Review" and the `To review` segment), so it never reviews your own PR,
+ *    a draft or one nobody asked you about; at least one.
+ */
+export function groupLaunchPrs<T extends Pick<PullRequest, "isDraft" | "roles" | "myReReviewDue">>(
+  kind: GroupLaunchKind,
+  key: string,
+  prs: readonly T[],
+): T[] | null {
+  if (!JIRA_KEY_RE.test(key)) return null;
+  const picked = kind === "explain" ? prs.filter((p) => !p.isDraft) : prs.filter(isReviewDue);
+  return picked.length >= (kind === "explain" ? 2 : 1) ? picked.slice(0, MAX_GROUP_PRS) : null;
+}
 
 /** The integration is opt-in: nothing on the cards until it is switched on. */
 export const DEFAULT_CLAUDE_SETTINGS: ClaudeSettings = {
@@ -80,7 +208,7 @@ export function pickClaudeLaunch(pr: LaunchPr, opts: { trackComments: boolean })
 
 /** The template for `kind` with `{url}` filled in; an empty template falls back to the default. */
 export function renderClaudePrompt(
-  prompts: Partial<Record<ClaudeLaunchKind, string>>,
+  prompts: Partial<Record<ClaudePromptKey, string>>,
   kind: ClaudeLaunchKind,
   pr: Pick<PullRequest, "url">,
 ): string {

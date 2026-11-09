@@ -34,6 +34,7 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     baseIsDefaultBranch: true,
     stack: null,
     blockedByStack: false,
+    requiredReviewPending: false,
     author: { login: "octocat", avatarUrl: "https://avatars.githubusercontent.com/u/583231?v=4" },
     createdAt: new Date(Date.now() - 864e5).toISOString(),
     updatedAt: new Date(Date.now() - 36e5).toISOString(),
@@ -197,6 +198,21 @@ const FIXTURES: Record<string, PullRequest[]> = {
   // Exercises the sort/filter/group work: reviewer requests (some untouched,
   // one returned-to-me), a nobody-reviewed-yet PR, and two PRs of one ticket.
   review: [
+    // Approved by a teammate, but branch protection still wants the code
+    // owners: GitHub reports REVIEW_REQUIRED + BLOCKED, so it is not ready.
+    pr({
+      title: "Add a collapse() helper to the panel page object",
+      repo: "acme/testkit",
+      number: 463,
+      issueKey: "ENG-90463",
+      headRefName: "feature/eng-90463-collapse",
+      reviewDecision: "REVIEW_REQUIRED",
+      requiredReviewPending: true,
+      hasHumanApproval: true,
+      hasNoReviews: false,
+      checks: [{ name: "build", kind: "check", state: "success", url: null }],
+      reviewers: [{ login: "teammate", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4", reviewState: "approved" }],
+    }),
     pr({
       title: "ENG-93373: Add response deadline for read-only MCP tools",
       repo: "acme/clio",
@@ -428,6 +444,18 @@ const CLAUDE_SESSIONS: ClaudeSessionInfo[] = [
     repoKeys: ["github.com/acme/clio-knowledge"],
     branch: "feature/eng-93374-docs",
     lastActivityAt: Date.now() - 3 * 36e5,
+  },
+  {
+    // An "Explain all" overview: it holds the ENG-93367 heading, none of the cards.
+    id: "00000000-0000-4000-8000-000000000006",
+    name: "✋🏻 ENG-93367 · Overview of the open reviews",
+    status: "waiting",
+    waitingFor: "input needed",
+    where: "desktop",
+    prKeys: [],
+    groups: [{ kind: "explain", key: "ENG-93367" }],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "main",
   },
   {
     id: "00000000-0000-4000-8000-000000000004",
@@ -826,6 +854,7 @@ const api: PrManagerApi = {
       ],
       trackComments: true,
       claudeEnabled: true,
+      claudeDesktop: true,
     },
   }),
   markSeen: async () => {},
@@ -847,6 +876,7 @@ const api: PrManagerApi = {
   setJiraToken: async () => ({ ok: true }),
   getAppVersion: async () => "dev",
   launchClaude: async () => ({ ok: false, error: "Not available in mock mode." }),
+  launchClaudeGroup: async () => ({ ok: false, error: "Not available in mock mode." }),
   getClaudeSessions: async () => CLAUDE_SESSIONS,
   focusClaudeSession: async () => ({ ok: false, error: "Not available in mock mode." }),
   onClaudeSessions: () => () => {},

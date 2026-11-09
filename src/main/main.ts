@@ -19,6 +19,7 @@ import type {
   AgentAction,
   AgentActionResult,
   AgentState,
+  ClaudeGroupLaunchResult,
   ClaudeLaunchResult,
   ClaudeSessionInfo,
   ConfigResult,
@@ -32,7 +33,7 @@ import type {
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
 import { createAgent, type Agent, type AgentNotice } from "./agent";
-import { findCheckout, launchClaude, resumeClaudeSession } from "./claude-launch";
+import { findCheckout, launchClaude, launchGroup, resumeClaudeSession } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
 import { clearJiraCaches, deleteTask, fetchTaskInfo, transitionTask } from "../shared/jira";
@@ -47,6 +48,7 @@ import {
   validateJiraToken,
   validateAgentAction,
   validateClaudeKind,
+  validateGroupLaunchArgs,
   validateClaudeSessionId,
   validatePrId,
   validateSeenItems,
@@ -451,7 +453,9 @@ function applyPreferences(settings: Settings): void {
 // pulls the list again when it is shown.
 
 const CLAUDE_SESSIONS_INTERVAL_MS = 5_000;
-const claudeSessionScanner = createClaudeSessionScanner();
+const claudeSessionScanner = createClaudeSessionScanner({
+  groupsFile: () => path.join(app.getPath("userData"), "claude-group-sessions.json"),
+});
 let claudeSessionsOn = false;
 let claudeSessions: ClaudeSessionInfo[] = [];
 let claudeSessionsJson = "[]";
@@ -748,6 +752,30 @@ function registerIpc(): void {
     if (result.ok) setTimeout(() => void refreshClaudeSessions(), 2_000);
     return result;
   });
+
+  // Like claude:launch: only the kind, the group's Jira key and the PR ids
+  // cross over, and the PRs (their links, repositories, roles) come from
+  // main's snapshot.
+  ipcMain.handle(
+    "claude:launchGroup",
+    async (_event, rawKind: unknown, rawKey: unknown, rawIds: unknown): Promise<ClaudeGroupLaunchResult> => {
+      const { kind, key, ids } = validateGroupLaunchArgs(rawKind, rawKey, rawIds);
+      const all = poller?.getSnapshot()?.pullRequests ?? [];
+      // In the order the renderer listed them, which is the order it shows.
+      const prs = ids.flatMap((id) => all.filter((p) => p.id === id));
+      let settings: Settings;
+      try {
+        settings = loadSettings();
+      } catch (e) {
+        return { ok: false, error: (e as Error).message };
+      }
+      const result = await launchGroup(kind, key, prs, settings.claude, {
+        openUrl: (url) => shell.openExternal(url),
+      });
+      if (result.ok) setTimeout(() => void refreshClaudeSessions(), 2_000);
+      return result;
+    },
+  );
 
   ipcMain.handle("claude:sessions", async (): Promise<ClaudeSessionInfo[]> => refreshClaudeSessions());
 

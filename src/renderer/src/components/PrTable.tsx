@@ -699,6 +699,16 @@ function ReviewCell({ pr }: { pr: PullRequest }) {
       </span>
     );
   }
+  if (pr.requiredReviewPending) {
+    return (
+      <span
+        className="text-amber-700 dark:text-amber-300"
+        title="Approved, but branch protection still requires another review (e.g. a code owner) before it can merge"
+      >
+        ◐ Pending
+      </span>
+    );
+  }
   if (!tally) {
     // Approved (or commented) with no reviewer left on the request list.
     return (

@@ -409,7 +409,17 @@ export function PrCard({
           </span>
         )}
 
-        {review && <span className={cn(pill, review.cls)}>{review.text}</span>}
+        {review &&
+          (pr.requiredReviewPending ? (
+            <span
+              className={cn(pill, "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40")}
+              title="Approved, but branch protection still requires another review (e.g. a code owner) before it can merge"
+            >
+              Required review pending
+            </span>
+          ) : (
+            <span className={cn(pill, review.cls)}>{review.text}</span>
+          ))}
 
         {pr.returnedToMe && (
           <span

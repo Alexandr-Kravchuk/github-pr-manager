@@ -148,6 +148,10 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       "after merging",
       "self-review",
       "reviewer comments",
+      "explain all",
+      "review all",
+      "overview",
+      "group",
     ],
   },
   // The Agent tab. Its words stay clear of the exact searches other sections

@@ -1498,6 +1498,7 @@ test("toPublicConfig: strips graphqlUrl, keeps label + repos", () => {
     hosts: [{ label: "GH", repos: ["a/b"] }],
     trackComments: true,
     claudeEnabled: false,
+    claudeDesktop: false,
   });
 });
 test("toPublicConfig: trackComments is propagated, not assumed", () => {
@@ -1945,6 +1946,44 @@ test("mapPr.canBeMerged: failing CI blocks readiness", () =>
   assert.strictEqual(canMerge({ commits: failingRollup }), false));
 test("mapPr.canBeMerged: still-running CI blocks readiness", () =>
   assert.strictEqual(canMerge({ commits: pendingRollup }), false));
+// The shape a GitHub Enterprise host returned for a real PR: a team-member
+// approval is in, but the code owners (a requested team) have not approved, so
+// GitHub keeps REVIEW_REQUIRED and refuses the merge with BLOCKED.
+test("mapPr: an approval that does not satisfy a required code-owner review is not ready", () => {
+  for (const roles of [["author"], ["reviewed"]]) {
+    const pr = github.mapPr(
+      rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED" }),
+      "GHE",
+      roles,
+      roles[0] === "author" ? "auth" : "rev",
+    );
+    assert.strictEqual(pr.hasHumanApproval, true);
+    assert.strictEqual(pr.requiredReviewPending, true);
+    assert.strictEqual(pr.canBeMerged, false);
+    for (const trackComments of [true, false]) {
+      assert.notStrictEqual(prFilter.prSignal(pr, { trackComments }), "approved", roles[0]);
+    }
+  }
+  const own = github.mapPr(rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED" }), "GHE", ["author"], "auth");
+  assert.strictEqual(prFilter.prSignal(own, { trackComments: true }), "waiting");
+});
+test("mapPr: REVIEW_REQUIRED + BLOCKED without any approval is plain awaiting review", () => {
+  const pr = github.mapPr(
+    rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED", latestOpinionatedReviews: { nodes: [] } }),
+    "GHE",
+    ["author"],
+    "auth",
+  );
+  assert.strictEqual(pr.requiredReviewPending, false);
+  assert.strictEqual(pr.canBeMerged, false);
+});
+test("mapPr: REVIEW_REQUIRED without a BLOCKED merge state still counts as ready", () => {
+  for (const mergeStateStatus of ["CLEAN", "HAS_HOOKS", "UNSTABLE", undefined]) {
+    const pr = github.mapPr(rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus }), "GH", ["author"], "auth");
+    assert.strictEqual(pr.requiredReviewPending, false, String(mergeStateStatus));
+    assert.strictEqual(pr.canBeMerged, true, String(mergeStateStatus));
+  }
+});
 
 // --- github: mapPr hasConflicts (merge-conflict flag) ------------------------
 // Keys strictly off GitHub's CONFLICTING verdict. UNKNOWN (recomputing right
@@ -2788,6 +2827,12 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     );
     assert.strictEqual(changes, unaddressed, "either form of change request ranks the same");
     assert.ok(changes < untouched && untouched < partial && partial < done);
+  });
+  test("reviewRank: a required review still pending ranks with the partial approvals", () => {
+    // Every listed user reviewer approved, yet a code owner's review is missing.
+    const pr = tpr({ hasHumanApproval: true, reviewers: [rev("ann", "approved")] });
+    assert.strictEqual(prTable.reviewRank({ ...pr, requiredReviewPending: true }), 3);
+    assert.strictEqual(prTable.reviewRank({ ...pr, requiredReviewPending: false }), 4);
   });
 
   test("approvalTally: counts approvals out of the reviewers on the PR", () =>
@@ -3826,6 +3871,26 @@ test("activeFilterCount: every narrowing control at once", () =>
       }),
       "blocked",
     ));
+  // requiredReviewPending: the edges of the "waiting over attention" precedence
+  // on your own PR, and the reviewer side, where it must never read green.
+  {
+    const pending = (o = {}) =>
+      sigPr({ hasHumanApproval: true, awaitingReview: false, requiredReviewPending: true, ...o });
+    for (const trackComments of [true, false]) {
+      test(`prSignal: required review pending with CI still running stays waiting (trackComments=${trackComments})`, () =>
+        assert.strictEqual(
+          prFilter.prSignal(
+            pending({ ciState: "pending", pendingChecks: [{ name: "build", kind: "check", state: "pending", url: null }] }),
+            { trackComments },
+          ),
+          "waiting",
+        ));
+      test(`prSignal: required review pending with new activity reaches attention (trackComments=${trackComments})`, () =>
+        assert.strictEqual(prFilter.prSignal(pending({ hasNewActivity: true }), { trackComments }), "attention"));
+      test(`prSignal: required review pending on a PR you only reviewed is idle, not approved (trackComments=${trackComments})`, () =>
+        assert.strictEqual(prFilter.prSignal(pending({ roles: ["reviewed"] }), { trackComments }), "idle"));
+    }
+  }
 
   // --- contract: the usercustom-ai-skills cron detectors mirror prSignal ------
   // Three headless detectors (`red-prs.cjs`, `purple-prs.cjs`, `green-prs.cjs`
@@ -3879,6 +3944,7 @@ test("activeFilterCount: every narrowing control at once", () =>
         ["not author: behind base", sigPr({ isBehindBase: true, roles: ["reviewed"], awaitingReview: false, hasHumanApproval: true })],
         ["blocked: merge conflict", sigPr({ hasConflicts: true })],
         ["attention: approved but waits for a lower PR of its stack", sigPr({ hasHumanApproval: true, awaitingReview: false, blockedByStack: true })],
+        ["waiting: approved but a required code-owner review is pending", sigPr({ hasHumanApproval: true, awaitingReview: false, requiredReviewPending: true })],
         [
           "blocked: unresolved thread on your own PR",
           sigPr({ awaitingReview: false, unresolvedThreads: 2 }),
@@ -7755,6 +7821,151 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
       assert.match(src, /"claude:launch"[\s\S]{0,300}validatePrId[\s\S]{0,200}validateClaudeKind[\s\S]{0,200}getSnapshot\(\)/);
     });
+
+    // The group heading's launches: "Explain all" (one session over the open
+    // PRs) and "Review all" (a Desktop parent that nests one review session per
+    // PR awaiting your review), each prompt behind a marker the scanner reads.
+    test("group launches: a Jira group only; explain takes 2+ open PRs, review the ones due on you", () => {
+      const pr = (n, extra = {}) => ({ id: `p${n}`, isDraft: false, roles: ["reviewer"], myReReviewDue: false, ...extra });
+      assert.strictEqual(cl.groupLaunchPrs("explain", "acme/widgets", [pr(1), pr(2)]), null, "a repository group has no task");
+      assert.strictEqual(cl.groupLaunchPrs("review", "__other__", [pr(1), pr(2)]), null);
+      assert.strictEqual(cl.groupLaunchPrs("explain", "ENG-1", [pr(1), pr(2, { isDraft: true })]), null, "one open PR has its own Explain");
+      assert.deepStrictEqual(cl.groupLaunchPrs("explain", "ENG-1", [pr(1), pr(2, { isDraft: true }), pr(3)]).map((p) => p.id), ["p1", "p3"]);
+      const mixed = [
+        pr(1),
+        pr(2, { roles: ["author"] }),
+        pr(3, { roles: ["reviewed"] }),
+        pr(4, { roles: ["reviewed"], myReReviewDue: true }),
+        pr(5, { isDraft: true }),
+      ];
+      assert.deepStrictEqual(
+        cl.groupLaunchPrs("review", "ENG-1", mixed).map((p) => p.id),
+        ["p1", "p4"],
+        "never your own PR, a draft, or one you reviewed and nobody asked about again",
+      );
+      assert.deepStrictEqual(cl.groupLaunchPrs("review", "ENG-1", [pr(1)]).map((p) => p.id), ["p1"], "one due PR is enough");
+      assert.strictEqual(cl.groupLaunchPrs("review", "ENG-1", [pr(2, { roles: ["author"] })]), null);
+      const many = Array.from({ length: cl.MAX_GROUP_PRS + 5 }, (_, i) => pr(i));
+      assert.strictEqual(cl.groupLaunchPrs("explain", "ENG-1", many).length, cl.MAX_GROUP_PRS);
+      assert.strictEqual(cl.groupLaunchPrs("review", "ENG-1", many).length, cl.MAX_GROUP_PRS);
+    });
+
+    test("group launches: each prompt fills its template behind its marker", () => {
+      const prs = [{ url: "https://github.com/a/b/pull/1" }, { url: "https://github.com/a/b/pull/2" }];
+      const explain = cl.renderGroupPrompt({}, "explain", "ENG-83532", prs);
+      assert.ok(explain.startsWith("[PR Dashboard overview of ENG-83532] "), explain);
+      assert.deepStrictEqual(cl.groupMarkerOf(explain), { kind: "explain", key: "ENG-83532" });
+      assert.strictEqual(cl.groupMarkerOf("https://github.com/a/b/pull/1"), null);
+      assert.match(explain, /the 2 open pull requests of ENG-83532/);
+      assert.match(explain, /https:\/\/github\.com\/a\/b\/pull\/1 https:\/\/github\.com\/a\/b\/pull\/2/);
+      assert.match(explain, /do not send a letter/);
+      const review = cl.renderGroupPrompt({ review: "/my-review {url}" }, "review", "ENG-7", prs);
+      assert.ok(review.startsWith("[PR Dashboard review of ENG-7] "), review);
+      assert.deepStrictEqual(cl.groupMarkerOf(review), { kind: "review", key: "ENG-7" });
+      assert.match(review, /start_session/);
+      assert.match(review, /1\) \/my-review https:\/\/github\.com\/a\/b\/pull\/1 2\) \/my-review https:\/\/github\.com\/a\/b\/pull\/2/, "each PR's own review prompt");
+      const placed = cl.renderGroupPrompt({}, "review", "ENG-7", prs, ["C:\\Projects\\core", null]);
+      assert.match(placed, /start_session's cwd/);
+      assert.ok(
+        placed.includes("1) in C:\\Projects\\core: /creatio-code-review https://github.com/a/b/pull/1 2) /creatio-code-review https://github.com/a/b/pull/2"),
+        "a PR from another repository names its own checkout; one with none runs in the parent's folder",
+      );
+      for (const prompt of [explain, review]) {
+        assert.ok(!/[{}]/.test(prompt), "every placeholder is filled");
+        assert.ok(!/["%^&|<>]/.test(prompt), "cmd.exe could not pass the default prompt");
+      }
+      const custom = cl.renderGroupPrompt({ explainGroup: "/overview {key} {urls}" }, "explain", "ENG-1", prs);
+      assert.strictEqual(custom, "[PR Dashboard overview of ENG-1] /overview ENG-1 https://github.com/a/b/pull/1 https://github.com/a/b/pull/2");
+      // MAX_GROUP_PRS exists for cmd.exe's 8191-character command line: a full
+      // group of long GHE links behind the longest key must still fit, with
+      // room for `cmd /c start "" /D "<dir>" cmd /k claude "…"` around it.
+      const full = Array.from({ length: cl.MAX_GROUP_PRS }, (_, i) => ({
+        url: `https://creatio.ghe.com/engineering/creatio-playwright-testkit-extended/pull/${100000 + i}`,
+      }));
+      const longest = cl.renderGroupPrompt({}, "explain", "ENG-123456789", full);
+      assert.ok(longest.length + 400 < 8191, `a ${cl.MAX_GROUP_PRS}-PR overview is ${longest.length} characters`);
+      const c = cfg.validateClaude({});
+      assert.strictEqual(c.prompts.explainGroup, cl.DEFAULT_CLAUDE_PROMPTS.explainGroup);
+      assert.strictEqual(c.prompts.reviewGroup, cl.DEFAULT_CLAUDE_PROMPTS.reviewGroup);
+      assert.strictEqual(cfg.toPublicConfig(cfg.validateSettings({ claude: { ...c, terminal: "desktop" } })).claudeDesktop, true);
+      assert.strictEqual(cfg.toPublicConfig(cfg.validateSettings({ claude: c })).claudeDesktop, false);
+    });
+
+    test("group launches: only a kind, a Jira key and 1..max distinct PR ids cross from the renderer", () => {
+      const v = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+      assert.deepStrictEqual(v.validateGroupLaunchArgs("review", "ENG-1", ["a", "b", "a"]), { kind: "review", key: "ENG-1", ids: ["a", "b"] });
+      assert.deepStrictEqual(v.validateGroupLaunchArgs("explain", "ENG-1", ["a"]).ids, ["a"]);
+      for (const kind of ["", "merge", "review; rm -rf ~", 1, null]) {
+        assert.throws(() => v.validateGroupLaunchArgs(kind, "ENG-1", ["a"]), /unknown action/, String(kind));
+      }
+      for (const key of ["eng-1", "ENG-1; rm -rf ~", "ENG-1 ", "__other__", 1, null]) {
+        assert.throws(() => v.validateGroupLaunchArgs("explain", key, ["a", "b"]), /Jira issue key/, String(key));
+      }
+      assert.throws(() => v.validateGroupLaunchArgs("explain", "ENG-1", "a,b"), /list of PR ids/);
+      assert.throws(() => v.validateGroupLaunchArgs("explain", "ENG-1", []), /expected 1 to/);
+      assert.throws(() => v.validateGroupLaunchArgs("explain", "ENG-1", Array.from({ length: cl.MAX_GROUP_PRS + 1 }, (_, i) => `p${i}`)), /expected 1 to/);
+      assert.throws(() => v.validateGroupLaunchArgs("explain", "ENG-1", ["a", 5]), /PR id/);
+    });
+
+    await atest("group launches: run in the majority repository's checkout; review needs Desktop and due PRs", async () => {
+      const nfs = require("node:fs");
+      const root = nfs.mkdtempSync(path.join(os.tmpdir(), "prd-claude-"));
+      const mk = (name, url) => {
+        nfs.mkdirSync(path.join(root, name, ".git"), { recursive: true });
+        nfs.writeFileSync(path.join(root, name, ".git", "config"), `[remote "origin"]\n\turl = ${url}\n`);
+      };
+      mk("ui", "https://github.com/acme/ui.git");
+      mk("core", "https://github.com/acme/core.git");
+      const at = (repo, n, extra = {}) => ({ ...quiet, roles: ["reviewer"], id: `${repo}#${n}`, repo, url: `https://github.com/${repo}/pull/${n}`, ...extra });
+      const settings = { enabled: true, projectsRoot: root, repoPaths: {}, prompts: {}, terminal: "desktop" };
+      const opened = [];
+      const openUrl = async (u) => { opened.push(decodeURIComponent(u)); };
+      try {
+        const prs = [at("acme/core", 1), at("acme/ui", 2), at("acme/ui", 3)];
+        assert.strictEqual(launcher.overviewCheckout(prs, settings), path.join(root, "ui"));
+        const asked = [];
+        launcher.overviewCheckout(prs, settings, (pr, s) => { asked.push(pr.repo); return launcher.findCheckout(pr, s); });
+        assert.deepStrictEqual(asked, ["acme/ui"], "the lookup is asked per repository, majority first, until one is found");
+        assert.strictEqual(
+          launcher.overviewCheckout([at("acme/none", 1), at("acme/none", 2), at("acme/core", 3)], settings),
+          path.join(root, "core"),
+          "a repository with no checkout gives way to the next one",
+        );
+        const res = await launcher.launchGroup("explain", "ENG-7", prs, settings, { openUrl });
+        assert.deepStrictEqual(res, { ok: true, count: 3, dir: path.join(root, "ui") });
+        assert.ok(opened[0].includes("[PR Dashboard overview of ENG-7] Explain together the 3 open pull requests of ENG-7"), opened[0]);
+
+        // Review: main picks the due PRs again, whatever the renderer sent.
+        const withMine = [...prs, at("acme/ui", 4, { roles: ["author"] })];
+        const rev = await launcher.launchGroup("review", "ENG-7", withMine, settings, { openUrl });
+        assert.deepStrictEqual(rev, { ok: true, count: 3, dir: path.join(root, "ui") });
+        assert.ok(opened[1].includes("[PR Dashboard review of ENG-7] Review the 3 pull requests of ENG-7"), opened[1]);
+        assert.ok(!opened[1].includes("/pull/4"), "your own PR is never sent for review");
+        assert.ok(
+          opened[1].includes(`1) in ${path.join(root, "core")}: /creatio-code-review https://github.com/acme/core/pull/1 2) /creatio-code-review https://github.com/acme/ui/pull/2`),
+          "the core PR is reviewed in core's checkout, the ui ones in the parent's folder",
+        );
+
+        const terminal = await launcher.launchGroup("review", "ENG-7", prs, { ...settings, terminal: "auto" }, { openUrl });
+        assert.match(terminal.ok ? "" : terminal.error, /only Claude Desktop/);
+        const notDue = await launcher.launchGroup("review", "ENG-7", [at("acme/ui", 4, { roles: ["author"] })], settings, { openUrl });
+        assert.match(notDue.ok ? "" : notDue.error, /waits for your review/);
+        const off = await launcher.launchGroup("explain", "ENG-7", prs, { ...settings, enabled: false }, { openUrl });
+        assert.strictEqual(off.ok, false);
+        const one = await launcher.launchGroup("explain", "ENG-7", prs.slice(0, 1), settings, { openUrl });
+        assert.strictEqual(one.ok, false, "a PR that left the dashboard can leave fewer than two");
+        const none = await launcher.launchGroup("explain", "ENG-7", [at("acme/none", 1), at("acme/none", 2)], settings, { openUrl });
+        assert.match(none.ok ? "" : none.error, /No checkout of acme\/none/);
+        assert.strictEqual(opened.length, 2, "a refused launch opens nothing");
+      } finally {
+        nfs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("main.js wiring: claude:launchGroup validates, then reads the PRs from the snapshot", () => {
+      const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /"claude:launchGroup"[\s\S]{0,300}validateGroupLaunchArgs[\s\S]{0,200}getSnapshot\(\)/);
+    });
   }
 
 
@@ -7777,6 +7988,56 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         cs.extractPrKeys("see <https://github.com/a/b/pull/1>, https://github.com/a/b/pull/1/files and (https://x.io/c/d/pull/22)"),
         ["github.com/a/b/pull/1", "x.io/c/d/pull/22"],
       );
+    });
+
+    test("claude sessions: a group session holds none of the PRs it lists", () => {
+      const cl = require(path.join(__dirname, "../dist/main/shared/claude-launch.js"));
+      const urls = [{ url: "https://github.com/a/b/pull/1" }, { url: "https://github.com/a/b/pull/2" }];
+      const explain = cl.renderGroupPrompt({}, "explain", "ENG-1", urls);
+      const review = cl.renderGroupPrompt({}, "review", "ENG-1", urls);
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine(explain)), []);
+      assert.deepStrictEqual(cs.promptLinks(promptLine(explain)), { prKeys: [], group: { kind: "explain", key: "ENG-1" } });
+      assert.deepStrictEqual(cs.promptLinks(promptLine(review)), { prKeys: [], group: { kind: "review", key: "ENG-1" } });
+      const noLinks = cl.renderGroupPrompt({ explainGroup: "/my-overview {key}" }, "explain", "ENG-1", urls);
+      assert.ok(!noLinks.includes("/pull/"), noLinks);
+      assert.deepStrictEqual(
+        cs.promptLinks(promptLine(noLinks)),
+        { prKeys: [], group: { kind: "explain", key: "ENG-1" } },
+        "a custom template with no PR links still names its group",
+      );
+      assert.deepStrictEqual(cs.promptPrKeys(promptLine(`now fix https://github.com/a/b/pull/1`)), ["github.com/a/b/pull/1"], "a later prompt in it still counts");
+      const quoted = JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", content: explain }] }, origin: { kind: "human" } });
+      assert.deepStrictEqual(cs.promptLinks(quoted), { prKeys: [], group: null }, "a quoted group prompt starts nothing");
+    });
+
+    test("claude sessions: a group heading finds its own sessions, the one that needs you first", () => {
+      const s = (id, status, groups, where = "terminal") => ({ id, name: id, status, where, prKeys: [], repoKeys: [], branch: null, groups });
+      const list = [
+        s("idle", "idle", [{ kind: "explain", key: "ENG-1" }]),
+        s("other", "waiting", [{ kind: "explain", key: "ENG-2" }]),
+        s("wait", "waiting", [{ kind: "review", key: "ENG-1" }]),
+        s("plain", "busy", undefined),
+      ];
+      assert.deepStrictEqual(cs.sessionsForGroup("ENG-1", list).map((x) => x.id), ["wait", "idle"]);
+      assert.deepStrictEqual(cs.sessionsForGroup("ENG-3", list), []);
+      assert.strictEqual(cs.groupKindOf(list[0], "ENG-1"), "explain");
+      const onBranch = { id: "g", name: "g", status: "busy", where: "desktop", prKeys: [], repoKeys: ["github.com/acme/widgets"], branch: "feature/x" };
+      const pr = { url: "https://github.com/acme/widgets/pull/7", repo: "acme/widgets", headRefName: "feature/x" };
+      assert.deepStrictEqual(cs.sessionsForPr(pr, [onBranch]).map((x) => x.id), ["g"], "a plain session on the PR's branch holds it");
+      assert.deepStrictEqual(
+        cs.sessionsForPr(pr, [{ ...onBranch, groups: [{ kind: "review", key: "ENG-1" }] }]),
+        [],
+        "a group session in a checkout on one of its PRs' branches holds none of them",
+      );
+      assert.strictEqual(cs.groupKindOf(list[2], "ENG-1"), "review");
+      // A heading's words are its kind's, not the card's: "Needs you" there
+      // would read as "these reviews need you".
+      for (const kind of ["explain", "review"]) {
+        assert.deepStrictEqual(Object.keys(cs.GROUP_STATUS_TEXT[kind]).sort(), Object.keys(cs.SESSION_STATUS_TEXT).sort());
+        for (const text of Object.values(cs.GROUP_STATUS_TEXT[kind])) assert.ok(!/needs you/i.test(text), text);
+      }
+      assert.strictEqual(cs.GROUP_STATUS_TEXT.explain.idle, "Overview ready");
+      assert.ok(!/done|ready/i.test(cs.GROUP_STATUS_TEXT.review.idle), "an idle review parent may still be waiting for its sessions");
     });
 
     test("claude sessions: only a prompt the user sent counts, not what other turns quote", () => {
@@ -7957,6 +8218,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         nfs.appendFileSync(transcript, later.slice(40) + "\n");
         list = await sc.scan();
         assert.deepStrictEqual(list.find((x) => x.id === SID).prKeys, ["github.com/acme/widgets/pull/7", "github.com/acme/widgets/pull/8"]);
+        assert.strictEqual(list.find((x) => x.id === SID).groups, undefined);
+        const cl = require(path.join(__dirname, "../dist/main/shared/claude-launch.js"));
+        nfs.appendFileSync(transcript, promptLine(cl.renderGroupPrompt({}, "explain", "ENG-5", [{ url: "https://github.com/acme/widgets/pull/9" }, { url: "https://github.com/acme/widgets/pull/10" }])) + "\n");
+        list = await sc.scan();
+        assert.deepStrictEqual(list.find((x) => x.id === SID).groups, [{ kind: "explain", key: "ENG-5" }], "the overview prompt names its group");
+        assert.deepStrictEqual(list.find((x) => x.id === SID).prKeys, ["github.com/acme/widgets/pull/7", "github.com/acme/widgets/pull/8"], "and binds none of its PRs");
 
         // Switching: the Desktop session by its link; refusals say why.
         const opened = [];
@@ -8066,6 +8333,85 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual((await sc.scan()).length, 1);
         clock += 61_000;
         assert.deepStrictEqual((await sc.scan()).map((x) => x.name).sort(), ["New", "Paused older"]);
+      } finally {
+        nfs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // A finished overview is idle, and Desktop pauses idle sessions: the
+    // heading must keep it, and neither state may hand it the group's cards.
+    await atest("claude sessions: a group session keeps its heading once Desktop pauses it", async () => {
+      const root = nfs.mkdtempSync(path.join(os.tmpdir(), "prd-overview-"));
+      try {
+        const configDir = path.join(root, "claude");
+        const desktopDir = path.join(root, "desktop");
+        const org = path.join(desktopDir, "claude-code-sessions", "acct", "org");
+        nfs.mkdirSync(org, { recursive: true });
+        nfs.mkdirSync(path.join(configDir, "sessions"), { recursive: true });
+        const pr7 = "https://github.com/acme/widgets/pull/7";
+        nfs.writeFileSync(path.join(org, "local_ov.json"), JSON.stringify({ sessionId: "local_ov", cliSessionId: SID, isArchived: false, title: "Overview", prs: [{ url: pr7 }] }));
+        nfs.writeFileSync(path.join(configDir, "sessions", "301.json"), JSON.stringify({
+          pid: 301, sessionId: SID, cwd: root, entrypoint: "claude-desktop", hostSessionId: "local_ov", status: "idle",
+        }));
+        const tdir = path.join(configDir, "projects", scanner.projectDirName(root));
+        nfs.mkdirSync(tdir, { recursive: true });
+        const cl = require(path.join(__dirname, "../dist/main/shared/claude-launch.js"));
+        nfs.writeFileSync(path.join(tdir, `${SID}.jsonl`), promptLine(cl.renderGroupPrompt({}, "review", "ENG-9", [{ url: pr7 }, { url: pr7 + "0" }])) + "\n");
+        let running = true;
+        const sc = scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => running });
+        let [ov] = await sc.scan();
+        assert.deepStrictEqual({ status: ov.status, groups: ov.groups, prKeys: ov.prKeys }, { status: "idle", groups: [{ kind: "review", key: "ENG-9" }], prKeys: [] }, "Desktop's bound PRs do not reach a running group session");
+        running = false;
+        [ov] = await sc.scan();
+        assert.deepStrictEqual({ status: ov.status, groups: ov.groups, prKeys: ov.prKeys }, { status: "paused", groups: [{ kind: "review", key: "ENG-9" }], prKeys: [] }, "nor a paused one");
+        assert.deepStrictEqual(cs.sessionsForGroup("ENG-9", [ov]).map((x) => x.id), [SID]);
+      } finally {
+        nfs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // The dashboard restarts (an update, a reboot) while a group session is
+    // paused: the session must come back under its heading, not bound to every
+    // PR Desktop recorded for it.
+    await atest("claude sessions: a paused group session survives a dashboard restart", async () => {
+      const root = nfs.mkdtempSync(path.join(os.tmpdir(), "prd-restart-"));
+      try {
+        const configDir = path.join(root, "claude");
+        const desktopDir = path.join(root, "desktop");
+        const org = path.join(desktopDir, "claude-code-sessions", "acct", "org");
+        nfs.mkdirSync(org, { recursive: true });
+        nfs.mkdirSync(path.join(configDir, "sessions"), { recursive: true });
+        const groupsFile = path.join(root, "claude-group-sessions.json");
+        const pr7 = "https://github.com/acme/widgets/pull/7";
+        nfs.writeFileSync(path.join(org, "local_ov.json"), JSON.stringify({ sessionId: "local_ov", cliSessionId: SID, isArchived: false, title: "Review", prs: [{ url: pr7 }] }));
+        nfs.writeFileSync(path.join(configDir, "sessions", "401.json"), JSON.stringify({
+          pid: 401, sessionId: SID, cwd: root, entrypoint: "claude-desktop", hostSessionId: "local_ov", status: "idle",
+        }));
+        const tdir = path.join(configDir, "projects", scanner.projectDirName(root));
+        nfs.mkdirSync(tdir, { recursive: true });
+        const cl = require(path.join(__dirname, "../dist/main/shared/claude-launch.js"));
+        nfs.writeFileSync(path.join(tdir, `${SID}.jsonl`), promptLine(cl.renderGroupPrompt({}, "review", "ENG-9", [{ url: pr7 }])) + "\n");
+
+        await scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => true, groupsFile: () => groupsFile }).scan();
+        assert.deepStrictEqual(JSON.parse(nfs.readFileSync(groupsFile, "utf8")), { [SID]: [{ kind: "review", key: "ENG-9" }] });
+
+        // A new app run, the session paused meanwhile.
+        const [ov] = await scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => false, groupsFile: () => groupsFile }).scan();
+        assert.deepStrictEqual(
+          { status: ov.status, groups: ov.groups, prKeys: ov.prKeys },
+          { status: "paused", groups: [{ kind: "review", key: "ENG-9" }], prKeys: [] },
+        );
+
+        // Archived in Desktop: gone from the file on the next save.
+        nfs.writeFileSync(path.join(org, "local_ov.json"), JSON.stringify({ sessionId: "local_ov", cliSessionId: SID, isArchived: true, title: "Review" }));
+        nfs.writeFileSync(path.join(org, "local_other.json"), JSON.stringify({ sessionId: "local_other", cliSessionId: SID2, isArchived: false, title: "Other", prs: [{ url: pr7 }] }));
+        nfs.rmSync(path.join(org, "local_ov.json"));
+        await scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => false, groupsFile: () => groupsFile }).scan();
+        assert.deepStrictEqual(JSON.parse(nfs.readFileSync(groupsFile, "utf8")), {}, "a session Desktop no longer lists is dropped");
+
+        nfs.writeFileSync(groupsFile, "{not json");
+        const list = await scanner.createClaudeSessionScanner({ configDir, desktopDir, isAlive: () => false, groupsFile: () => groupsFile }).scan();
+        assert.ok(Array.isArray(list), "a broken file starts empty instead of failing the scan");
       } finally {
         nfs.rmSync(root, { recursive: true, force: true });
       }

@@ -378,12 +378,20 @@ export function approvalTally(
 export function reviewRank(
   pr: Pick<
     PullRequest,
-    "reviewDecision" | "hasUnaddressedChangeRequest" | "hasNoReviews" | "hasHumanApproval" | "reviewers"
+    | "reviewDecision"
+    | "hasUnaddressedChangeRequest"
+    | "hasNoReviews"
+    | "hasHumanApproval"
+    | "reviewers"
+    | "requiredReviewPending"
   >,
 ): number {
   if (pr.reviewDecision === "CHANGES_REQUESTED" || pr.hasUnaddressedChangeRequest) return 0;
   if (pr.hasNoReviews) return 1;
   if (!pr.hasHumanApproval) return 2;
+  // A required review (e.g. a code owner's) still missing is not a full set,
+  // even when every listed user reviewer has approved.
+  if (pr.requiredReviewPending) return 3;
   const tally = approvalTally(pr);
   // An approval is in — but a reviewer still owed one ranks above a full set.
   if (tally && tally.approved < tally.total) return 3;
