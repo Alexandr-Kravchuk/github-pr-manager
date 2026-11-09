@@ -343,6 +343,16 @@ function keyHead(key: string): string | null {
   return h && h !== "-" ? h : null;
 }
 
+/** When a re-review's trigger happened — the time in its key's cursor (`reply@…`, `asked@…`) — or null when none is known. */
+function keyCursorTime(key: string): number | null {
+  const at = key.split("|")[3]?.split("@")[1];
+  const t = at && at !== "-" ? Date.parse(at) : NaN;
+  return Number.isNaN(t) ? null : t;
+}
+
+/** Why the agent can't work on a PR's code. */
+const noCheckoutWhy = (repo: string): string => `No checkout of ${repo} — set its folder in Settings › Claude`;
+
 /** A host to leave alone for now: its last fetch failed, or its GitHub budget is nearly spent. */
 export function hostHeld(snapshot: DashboardResponse | null, hostLabel: string): string | null {
   if (!snapshot) return null;
@@ -624,12 +634,20 @@ export function createAgent(deps: AgentDeps): Agent {
     }
   }
 
-  /** A review or brief the plan wants on a head you already asked the agent to review or brief — whatever came of it. */
+  /**
+   * A review or brief the plan wants on a head you already asked the agent to
+   * review or brief — whatever came of it; or a re-review of a head whose
+   * re-review you asked for after its trigger (the author's answer, the new
+   * request) — that run already saw it.
+   */
   const FRESH_REVIEW: ReadonlySet<AgentScenario> = new Set(["review", "brief"]);
   function askedOfHead(job: Pick<AgentJob, "prId" | "key" | "scenario">): boolean {
-    if (!FRESH_REVIEW.has(job.scenario)) return false;
     const head = keyHead(job.key);
-    return store.data.items.some((i) => i.prId === job.prId && FRESH_REVIEW.has(i.scenario) && i.key.endsWith("|asked") && keyHead(i.key) === head);
+    const asked = store.data.items.filter((i) => i.prId === job.prId && i.key.endsWith("|asked") && keyHead(i.key) === head);
+    if (FRESH_REVIEW.has(job.scenario)) return asked.some((i) => FRESH_REVIEW.has(i.scenario));
+    if (job.scenario !== "rereview") return false;
+    const trigger = keyCursorTime(job.key);
+    return asked.some((i) => i.scenario === "rereview" && (trigger === null || Date.parse(i.queuedAt) >= trigger));
   }
 
   /** Scenarios that are offers with a button, never a session. */
@@ -922,7 +940,18 @@ export function createAgent(deps: AgentDeps): Agent {
     }
     const claudeSettings = loadAll()?.claude;
     const badges: Record<string, { key: string; stage: string | null }> = {};
+    // One look for a clone per repository and plan: the search reads every folder's git config.
+    const clones = new Map<string, boolean>();
     const plan = planJobs(snapshot.pullRequests, s, {
+      noCheckout: (pr) => {
+        const repoUrl = pr.url.replace(/\/pull\/\d+.*$/, "");
+        let has = clones.get(repoUrl);
+        if (has === undefined) {
+          has = claudeSettings ? deps.findCheckout(pr, claudeSettings) !== null : false;
+          clones.set(repoUrl, has);
+        }
+        return has ? null : noCheckoutWhy(pr.repo);
+      },
       hasOwnSession: (pr) => sessionsForPr(pr, sessions).length > 0,
       driveExhausted: (pr) => {
         const d = store.data.drive[pr.id];
@@ -1081,7 +1110,7 @@ export function createAgent(deps: AgentDeps): Agent {
     if (item.scenario !== "afterMerge" && !resume) {
       if (!pr) return;
       checkout = deps.findCheckout(pr, all.claude);
-      if (!checkout) return fail(`No checkout of ${pr.repo} — set its folder in Settings › Claude`);
+      if (!checkout) return fail(noCheckoutWhy(pr.repo));
       remote = remoteFor(checkout, pr);
       if (!remote) return fail(`No remote of ${checkout} points at ${pr.repo}`);
     }
@@ -1897,6 +1926,9 @@ export function createAgent(deps: AgentDeps): Agent {
     if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
       return { ok: false, error: "The agent is already on this PR." };
     }
+    // Every run you can ask for works on the PR's code: without a clone it would only fail.
+    const claude = loadAll()?.claude;
+    if (!claude || !deps.findCheckout(pr, claude)) return { ok: false, error: `${noCheckoutWhy(pr.repo)}.` };
     const key = `${pr.id}|${scenario}|${pr.headOid ?? "-"}|asked`;
     delete store.data.ledger[key];
     // Asked by you: in the scenario's own mode, and never more than Shadow when that is off.

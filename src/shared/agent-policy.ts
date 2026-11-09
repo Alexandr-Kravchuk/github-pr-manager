@@ -62,6 +62,12 @@ export interface PlanContext {
    * re-review runs. Absent: "changed".
    */
   baseOnlyState?: (pr: PullRequest) => "unchecked" | "checking" | "same" | "changed";
+  /**
+   * Why no session can work on this PR's code — no clone of its repository —
+   * or null. A run needs one; without it the PR waits with this reason
+   * instead of being queued only to fail, and to notify, on every new trigger.
+   */
+  noCheckout?: (pr: PullRequest) => string | null;
 }
 
 /** Why your PR gets no self-review now, or null when it should get one. */
@@ -349,6 +355,12 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
         skip("Reviewed — nothing new from the author since");
         continue;
       }
+      // Asked again with nothing new: your review is on this very head and the
+      // author hasn't answered since, so a re-review could only repeat it.
+      if (!since && pr.viewerReviewedHead) {
+        skip("Asked again — your review is on this head and the author hasn't answered since");
+        continue;
+      }
       if (pr.isDraft && !s.scenarios.review.drafts) {
         skip("Draft — picked up once it's ready for review");
         continue;
@@ -414,8 +426,17 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
       createdAt: pr.createdAt,
     });
   }
-  jobs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  return { jobs, merges, reapprovals, baseChecks, idle };
+  // A session works in a clone of the PR's repository: without one the PR
+  // waits and says so. Offers (merge, re-approve) need no session.
+  const byId = new Map(prs.map((p) => [p.id, p]));
+  const runnable = jobs.filter((job) => {
+    const pr = byId.get(job.prId);
+    const why = pr ? (ctx.noCheckout?.(pr) ?? null) : null;
+    if (why) idle.set(job.prId, why);
+    return !why;
+  });
+  runnable.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  return { jobs: runnable, merges, reapprovals, baseChecks, idle };
 }
 
 /** `{url}` filled in; an empty template falls back to the given default. */

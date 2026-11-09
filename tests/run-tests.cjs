@@ -8949,7 +8949,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         getSnapshot: () => snapshot,
         // Your live Claude sessions; a test changes the array in place.
         getSessions: () => sessions,
-        findCheckout: () => (checkout ? co : null),
+        // `checkout`: a flag, or a function when a test clones the repository midway.
+        findCheckout: () => ((typeof checkout === "function" ? checkout() : checkout) ? co : null),
         hookScript: hookJs,
         execPath: process.execPath,
         plugins: () => [],
@@ -9098,15 +9099,24 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
-    await atest("agent: without a checkout the run fails once and is not retried on the same head", async () => {
-      const f = agentFixture({ checkout: false, script: () => {} });
+    await atest("agent: without a checkout the PR waits and says why — nothing queued, failed or notified, and asking for a run is refused", async () => {
+      let cloned = false;
+      const notices = [];
+      const f = agentFixture({ checkout: () => cloned, script: () => {}, notify: (n) => notices.push(n.kind) });
       try {
         f.agent.onSnapshot(f.snapshot);
-        await until(() => f.agent.getState().items.some((i) => i.state === "error"));
-        assert.match(f.agent.getState().items[0].headline, /No checkout of a\/b/);
         f.agent.onSnapshot(f.snapshot);
-        assert.strictEqual(f.agent.getState().items.length, 1);
-        assert.strictEqual(f.children.length, 0, "nothing was started");
+        await new Promise((r) => setTimeout(r, 30));
+        assert.deepStrictEqual(f.agent.getState().items, []);
+        assert.strictEqual(f.agent.getState().idle.PR_R, "No checkout of a/b — set its folder in Settings › Claude");
+        assert.deepStrictEqual([f.children.length, notices], [0, []], "nothing started, no toast");
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: false, error: "No checkout of a/b — set its folder in Settings › Claude." });
+        assert.deepStrictEqual(f.agent.getState().items, [], "a refused ask leaves no failed card behind");
+        // The repository cloned (or its folder set): the next plan picks the PR up.
+        cloned = true;
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1);
+        assert.strictEqual(f.agent.getState().items[0].scenario, "review");
       } finally {
         f.agent.stop();
       }
@@ -9142,6 +9152,30 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     // A run that starts and then keeps working until it is told otherwise.
     const keepWorking = (c) => emit(c, { type: "system", subtype: "init", session_id: "s" });
     const only = (f) => f.agent.getState().items;
+
+    await atest("agent: a re-review you asked for covers the author's answers before it — only a later answer starts another", async () => {
+      const iso = (min) => new Date(Date.now() + min * 60_000).toISOString();
+      const pr = { ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), viewerReviewedAt: iso(-60), viewerReviewedHead: true, authorRepliedAt: null };
+      const f = agentFixture({ pr, script: succeed("Re-reviewed.") });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(only(f).length, 0, "nothing new from the author: no re-review of its own");
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: pr.id }), { ok: true });
+        await until(() => only(f).length === 1 && !["queued", "working"].includes(only(f)[0].state));
+        // The dashboard learns of an answer the author gave before you asked: your run already saw it.
+        f.snapshot.pullRequests[0] = { ...pr, authorRepliedAt: iso(-30) };
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(only(f).length, 1);
+        assert.strictEqual(f.agent.getState().idle[pr.id], "You asked the agent about this head yourself");
+        // An answer after your ask is new work.
+        f.snapshot.pullRequests[0] = { ...pr, authorRepliedAt: iso(1) };
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).length === 2);
+        assert.match(only(f).find((i) => !i.key.endsWith("|asked")).key, /\|rereview\|aaa111\|reply@/);
+      } finally {
+        f.agent.stop();
+      }
+    });
 
 
     await atest("agent act: pause, hint and resume reach the running session; Stop leaves a note, not a decision", async () => {
@@ -10593,7 +10627,25 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.notStrictEqual(later, replied[0].key, "a later reply without a push is new work");
       const asked = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true })], agentOn(), noSessions).jobs[0];
       assert.match(asked.key, /\|asked@-$/);
+      // Asked again on the very head your review is on, with no answer from the author: nothing a re-review could add.
+      const same = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true, viewerReviewedHead: true })], agentOn(), noSessions);
+      assert.deepStrictEqual(same.jobs, []);
+      assert.strictEqual(same.idle.get("PR_R"), "Asked again — your review is on this head and the author hasn't answered since");
+      const answered = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true, viewerReviewedHead: true, authorRepliedAt: at(7) })], agentOn(), noSessions).jobs[0];
+      assert.strictEqual(answered.key, `PR_R|rereview|aaa111|asked@${at(7)}`, "an answer in a thread since your review is new work on the same head");
       assert.match(policy.planJobs([rv({ authorRepliedAt: at(7) })], agentOn({ scenarios: { rereview: { mode: "off" } } }), noSessions).idle.get("PR_R"), /re-reviews are off/);
+    });
+
+    test("agent policy: a PR with no clone of its repository gets no run — it waits and says why; offers need none", () => {
+      const none = { ...noSessions, noCheckout: (pr) => `No checkout of ${pr.repo} — set its folder in Settings › Claude` };
+      const r = policy.planJobs([reviewPr()], agentOn(), none);
+      assert.deepStrictEqual(r.jobs, []);
+      assert.match(r.idle.get("PR_R"), /^No checkout of .+ — set its folder in Settings › Claude$/);
+      const mergeOnly = policy.planJobs([reviewPr({ role: "author" })], agentOn(), none);
+      assert.deepStrictEqual([mergeOnly.jobs.length, mergeOnly.merges.map((m) => m.scenario)], [0, ["merge"]], "a merge offer doesn't depend on a clone");
+      const why = policy.planJobs([reviewPr()], agentOn(), { ...noSessions, noCheckout: () => null });
+      assert.strictEqual(why.jobs.length, 1, "with a clone the review is planned as before");
+      assert.match(policy.planJobs([reviewPr({ isIgnored: true })], agentOn(), none).idle.get("PR_R"), /Ignored/, "the reason a PR is skipped anyway comes first");
     });
 
     test("agent policy: your PR is driven for red CI, conflicts or review comments — not a draft, not a fork, not past its attempts", () => {
