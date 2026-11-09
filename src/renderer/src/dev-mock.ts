@@ -531,11 +531,31 @@ function mockAgentState(): AgentState {
       worktree: "/tmp/agent-clio-912",
       output:
         "Problem: transient network errors fail the whole sync.\nApproach: retry each operation with a bounded budget.\nRisky parts: the retry has no overall time limit.\n\nDecisions for you:\n1. Is an unbounded retry acceptable?\n2. The public contract of sync-schemas changed: agreed?",
+      diagrams: {
+        checked: true,
+        list: [
+          {
+            title: "Flow",
+            source:
+              'sequenceDiagram\n  participant S as SyncSchemas\n  participant R as RetryPolicy (new)\n  participant A as CreatioApi\n  S->>R: run(operation)\n  R->>A: send request\n  A-->>R: transient error\n  R->>R: wait with backoff\n  R->>A: send again\n  A-->>R: ok\n  R-->>S: result',
+          },
+        ],
+      },
     }),
     item(118, { state: "error", headline: "No checkout of acme/clio-knowledge: set its folder in Settings > Claude", finishedAt: iso(30 * 60_000) }),
     item(929, {
       state: "needsYou",
-      headline: "Would post: request changes, 1 inline comment, 1 reply",
+      headline: "Would post: request changes, 1 inline comment, 1 reply, 1 diagram",
+      diagrams: {
+        checked: true,
+        list: [
+          {
+            title: "Architecture",
+            source:
+              'flowchart LR\n  designer["Schema designer"] --> rename["Rename()"]\n  rename --> column["SchemaColumn"]\n  guard["Prefix guard"] --> column\n  column --> db[("Database")]\n  classDef existing fill:#FDEBD9,stroke:#E8832A,color:#7A3E0C\n  classDef newComp fill:#DDF2E2,stroke:#28A745,color:#145A26\n  classDef extended fill:#E1E8F4,stroke:#4A6FA5,color:#22385C\n  class designer,db existing\n  class guard newComp\n  class rename,column extended',
+          },
+        ],
+      },
       result: {
         summary: "Renaming an entity still drops the Usr prefix from its schema column (AC-2); the rest of the change is sound.",
         asks: [],
@@ -560,6 +580,7 @@ function mockAgentState(): AgentState {
         replies: [{ replyTo: 1001, body: "Still applies at the head: the guard on line 88 checks the caption, not the name." }],
         resolves: 0,
         escalations: [],
+        diagrams: 1,
       },
     }),
     item(934, {
@@ -927,6 +948,8 @@ const api: PrManagerApi = {
   getAgentState: async () => agentState,
   agentAction: async (action) => mockAgentAction(action),
   revealAgentLog: async () => {},
+  onCheckDiagrams: () => () => {},
+  diagramsChecked: async () => {},
   onAgentState: (listener) => {
     agentListeners.add(listener);
     return () => {

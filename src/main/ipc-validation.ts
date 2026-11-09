@@ -153,6 +153,21 @@ export function validateClaudeSessionId(value: unknown): string {
   return value;
 }
 
+/**
+ * The renderer's answer to "do these diagrams parse?": the id main minted for
+ * the question and one boolean per diagram — never text, so nothing it sends
+ * can change what is posted, only hold a diagram back.
+ */
+export function validateDiagramsChecked(requestId: unknown, results: unknown): { requestId: string; results: boolean[] } {
+  if (typeof requestId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+    throw new Error("diagramsChecked: expected the request's id.");
+  }
+  if (!Array.isArray(results) || results.length > 10 || !results.every((r) => typeof r === "boolean")) {
+    throw new Error("diagramsChecked: expected one yes/no per diagram.");
+  }
+  return { requestId, results: results as boolean[] };
+}
+
 const RUN_ACTIONS = ["skip", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver", "publish", "push"] as const;
 const MERGE_METHODS = ["merge", "squash", "rebase"] as const;
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

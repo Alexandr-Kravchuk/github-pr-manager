@@ -39,6 +39,7 @@ export function agentSectionContent({
     agentScenarios: <ScenariosSection {...props} onEditPrompts={onEditPrompts} />,
     agentLimits: <LimitsSection {...props} />,
     agentPermissions: <PermissionsSection {...props} />,
+    agentDiagrams: <DiagramsSection {...props} />,
     agentCompanion: <CompanionSection {...props} />,
     agentNotifications: <NotificationsSection {...props} />,
     agentPolicy: <PolicySection {...props} />,
@@ -406,6 +407,38 @@ function PermissionsSection({ agent, setAgent, inputCls }: SectionProps) {
   );
 }
 
+function DiagramsSection({ agent, setAgent, inputCls }: SectionProps) {
+  const d = agent.diagrams;
+  const patch = (value: Partial<AgentSettings["diagrams"]>) => setAgent((a) => ({ ...a, diagrams: { ...a.diagrams, ...value } }));
+  return (
+    <section className={cn(SECTION, "space-y-3")}>
+      <h2 className={H2}>Diagrams</h2>
+      <p className="text-xs text-fg-subtle">
+        After a review or a brief, a short run of its own draws the change as Mermaid diagrams — the architecture and the flow — and the
+        card shows them. Orange is what existed before the PR, green what it adds, blue what it extends.
+      </p>
+      <Dimmed off={!agent.enabled}>
+        <Check checked={d.enabled} onChange={(enabled) => patch({ enabled })} title="Draw diagrams of the change" />
+        <Dimmed off={!d.enabled}>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-fg-secondary">
+            For a PR of at least
+            <Num bound="diagramMinLines" value={d.minLines} onChange={(minLines) => patch({ minLines })} unit="changed lines" />
+          </div>
+          <Check
+            checked={d.post}
+            onChange={(post) => patch({ post })}
+            title="Post them with the review"
+            hint="One comment beside the review, signed like everything the agent posts — none when the PR has a Mermaid diagram already. A brief's diagrams stay in the app."
+          />
+          <Field label="Model for drawing" hint="A short run with no tools that reads the diff. Empty: Claude Code's default.">
+            <input value={d.model} onChange={(e) => patch({ model: e.target.value })} placeholder="Claude Code's default" className={inputCls} />
+          </Field>
+        </Dimmed>
+      </Dimmed>
+    </section>
+  );
+}
+
 function CompanionSection({ agent, setAgent }: SectionProps) {
   const patch = (value: Partial<AgentSettings["companion"]>) => setAgent((a) => ({ ...a, companion: { ...a.companion, ...value } }));
   return (
@@ -497,7 +530,7 @@ function Dimmed({ off, children }: { off: boolean; children: ReactNode }) {
 function Check({ checked, onChange, title, hint }: { checked: boolean; onChange: (v: boolean) => void; title: string; hint?: string }) {
   return (
     <label className="flex items-start gap-3">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="mt-0.5 h-4 w-4 accent-sky-500" />
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 accent-sky-500" />
       <span>
         <span className="block text-sm text-fg-secondary">{title}</span>
         {hint && <span className="block text-xs text-fg-faint">{hint}</span>}

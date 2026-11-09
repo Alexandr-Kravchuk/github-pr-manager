@@ -11,6 +11,7 @@ import { PrTile } from "./components/PrTile";
 import { SettingsScreen } from "./components/Settings";
 import { ViewSwitch } from "./components/ViewSwitch";
 import { cn, relativeTime } from "./format";
+import { parseDiagrams } from "./mermaid";
 import { playNotifySound } from "./notify-sound";
 import { shouldAllowForcedRefresh, shouldRefreshOnKey } from "../../shared/hotkeys";
 import {
@@ -475,6 +476,17 @@ export function App() {
   }, [focusItem]);
   // A clicked agent notification opens its card on the Board: that is where its decision waits.
   useEffect(() => window.api.onAgentShowBoard((runId) => focusItem(runId)), [focusItem]);
+  // Main asks whether the agent's diagrams parse (it has no DOM). No answer when
+  // mermaid fails to load: main then posts none unchecked.
+  useEffect(
+    () =>
+      window.api.onCheckDiagrams(({ requestId, sources }) => {
+        void parseDiagrams(sources)
+          .then((ok) => window.api.diagramsChecked(requestId, ok))
+          .catch(() => {});
+      }),
+    [],
+  );
   useEffect(
     () =>
       window.api.onAgentOpenCompanion(() => {

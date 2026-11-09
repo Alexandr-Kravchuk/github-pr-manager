@@ -22,6 +22,7 @@ import { resultCard, type FindingSeverity, type RunAsk, type RunFinding } from "
 import type { AgentAction, AgentItem, AgentState, MergeMethod, PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { AgentContext } from "./agent-context";
+import { AgentDiagrams } from "./AgentDiagrams";
 
 // The Board: every PR in the column of whose move it is — yours, the agent's,
 // the people you wait on — or done today, in two lanes: your PRs and the PRs
@@ -510,6 +511,7 @@ function YouDetails({
             <PlanView plan={plan} />
           </>
         )}
+        {item.diagrams && <AgentDiagrams diagrams={item.diagrams} posts={Boolean(plan.diagrams)} />}
       </>
     );
   }
@@ -556,6 +558,7 @@ function YouDetails({
             {report && <div className="mt-1 max-h-96 overflow-y-auto whitespace-pre-wrap rounded border border-line bg-elevated/40 p-2 text-xs text-fg-secondary">{report}</div>}
           </>
         )}
+        {item.diagrams && <AgentDiagrams diagrams={item.diagrams} posts={false} />}
       </>
     );
   }

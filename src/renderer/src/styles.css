@@ -171,6 +171,19 @@
 }
 
 /*
+ * The PR agent's diagrams: mermaid's own stylesheet ships an endlessly running
+ * dash animation for edges marked to animate. The guard refuses that syntax
+ * (agent-diagrams.ts), and nothing on a card may animate forever anyway.
+ */
+.agent-diagram svg,
+.agent-diagram svg * {
+  animation: none !important;
+}
+.agent-diagram svg {
+  height: auto;
+}
+
+/*
  * Header live-refresh dot — one finite blink per incoming snapshot, keyed on the
  * snapshot's `fetchedAt` in App.tsx. Deliberately NOT Tailwind's `animate-pulse`:
  * that ships `infinite` keyframes, and an always-running animation keeps the

@@ -34,7 +34,13 @@ export type PublishStep =
    * answering in it (a re-review never argues with the author on your
    * behalf). The app drops any reply to that thread and lists it for you.
    */
-  | { kind: "escalate"; replyTo: number; body: string };
+  | { kind: "escalate"; replyTo: number; body: string }
+  /**
+   * A comment in the PR's conversation — the app's own, never the session's:
+   * the diagrams it drew (`agent-diagrams.ts`). The capture script has no such
+   * write and `readPlanLines` reads none back, so a session can't add one.
+   */
+  | { kind: "note"; body: string; label: string };
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -307,6 +313,8 @@ export function planRequests(steps: readonly PublishStep[], ctx: PublishContext)
         return { label: `reply to comment ${s.replyTo}`, endpoint: `${base}/comments/${s.replyTo}/replies`, body: { body: signedBody(s.body, ctx.signature) } };
       case "resolve":
         return { label: `resolve ${s.threadId}`, endpoint: "graphql", body: { query: RESOLVE_MUTATION, variables: { id: s.threadId } } };
+      case "note":
+        return { label: s.label, endpoint: `repos/${ctx.repo}/issues/${ctx.number}/comments`, body: { body: signedBody(s.body, ctx.signature) } };
       case "escalate":
         // Filtered out by postedSteps; here only for the type checker.
         throw new Error("an escalation is not a GitHub write");
@@ -325,6 +333,8 @@ export interface PublishSummary {
   escalations: Array<{ replyTo: number; body: string }>;
   /** The head the review was made against, when it says. */
   commitId?: string;
+  /** Diagrams that go out with it, as one comment (set by the app after drawing, not by the session). */
+  diagrams?: number;
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
@@ -345,7 +355,7 @@ export function summarizePlan(steps: readonly PublishStep[]): PublishSummary {
       if (!escalated.has(s.replyTo)) out.replies.push({ replyTo: s.replyTo, body: clip(s.body, 4_000) });
     } else if (s.kind === "escalate") {
       out.escalations.push({ replyTo: s.replyTo, body: clip(s.body, 1_000) });
-    } else {
+    } else if (s.kind === "resolve") {
       out.resolves++;
     }
   }
@@ -366,6 +376,7 @@ export function describePlan(p: PublishSummary): string {
     n(p.replies.length, "reply", "replies"),
     n(p.resolves, "resolve", "resolves"),
     n(p.escalations?.length ?? 0, "dispute for you", "disputes for you"),
+    n(p.diagrams ?? 0, "diagram", "diagrams"),
   ]) {
     if (part) parts.push(part);
   }

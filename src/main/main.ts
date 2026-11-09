@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
@@ -48,6 +49,7 @@ import {
   validateJiraToken,
   validateAgentAction,
   validateClaudeKind,
+  validateDiagramsChecked,
   validateGroupLaunchArgs,
   validateClaudeSessionId,
   validatePrId,
@@ -166,6 +168,32 @@ function sendToRenderer(channel: string, payload: unknown): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+}
+
+/**
+ * The agent's diagrams are parsed in the renderer: a flowchart needs a DOM, and
+ * the window — hidden in the tray or not — is the only browser at hand. Only
+ * the sources go over and one yes/no per source comes back, so what is posted
+ * stays main's own text. No window, or no answer in time: null, and nothing is
+ * posted unchecked.
+ */
+const diagramChecks = new Map<string, (results: boolean[]) => void>();
+function checkMermaid(sources: string[]): Promise<boolean[] | null> {
+  const win = mainWindow;
+  if (!win || win.isDestroyed() || win.webContents.isLoading()) return Promise.resolve(null);
+  const requestId = randomUUID();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      diagramChecks.delete(requestId);
+      resolve(null);
+    }, 20_000);
+    diagramChecks.set(requestId, (results) => {
+      clearTimeout(timer);
+      diagramChecks.delete(requestId);
+      resolve(results.length === sources.length ? results : null);
+    });
+    win.webContents.send("agent-check-diagrams", { requestId, sources });
+  });
 }
 
 /** Brings the window back to the foreground (from minimized / hidden / behind). */
@@ -810,6 +838,10 @@ function registerIpc(): void {
     fs.mkdirSync(dir, { recursive: true });
     await shell.openPath(dir);
   });
+  ipcMain.handle("agent:diagramsChecked", (_e, rawId: unknown, rawResults: unknown): void => {
+    const { requestId, results } = validateDiagramsChecked(rawId, rawResults);
+    diagramChecks.get(requestId)?.(results);
+  });
 
   // Only the session id crosses over: what to open for it — the Desktop link or
   // the terminal tab — comes from main's own scan of the registry.
@@ -1039,6 +1071,7 @@ function startApp(): void {
       },
       notify: handleAgentNotice,
       onChange: scheduleAgentPush,
+      checkMermaid,
     });
     updateTrayAgent();
   }

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
-import { describePlan, disputeSteps, gitBashPath, readPlanLines, summarizePlan } from "../../shared/agent-publish";
+import { describePlan, disputeSteps, gitBashPath, readPlanLines, summarizePlan, type PublishStep } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
@@ -45,7 +45,9 @@ import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
-import { cutShort, hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
+import { cutShort, hookCommand, NO_PUSH_ENV, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
+import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
+import { diagramComment, wantsDiagrams } from "../../shared/agent-diagrams";
 import { actionArgs, boardNow, clip, diffBoard, diffIdle, diffItems, itemFields, runStats, settingsDiff, type ItemMark } from "./journal";
 import { openStore, type AgentItemRecord, type AgentLogEntry, type AgentStore, type LedgerEntry } from "./store";
 import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor, type OrchestratorRun } from "./sdlc";
@@ -94,6 +96,8 @@ export interface AgentDeps {
   plugins?: () => InstalledPlugin[];
   git?: GitRunner;
   spawner?: Spawner;
+  /** Parses diagrams in the renderer's mermaid (a flowchart needs a DOM); absent, none is posted. */
+  checkMermaid?: MermaidChecker;
   now?: () => Date;
   /** Called whenever what the agent shows changed. */
   onChange?: () => void;
@@ -1003,6 +1007,16 @@ export function createAgent(deps: AgentDeps): Agent {
     if (!cut) item.cuts = undefined;
     let publishNow = false;
     let pushNow = false;
+    // A finished review or brief gets its diagrams before it reaches you: still
+    // "working", its slot stays taken and nothing can be sent without them.
+    const finished = !cut && !entry.takeOver && !entry.offStop && !outcome.stopped && !outcome.timedOut && result && !result.isError && result.subtype === "success";
+    if (finished && pr && wantsDiagrams(item.scenario, pr, s.diagrams)) {
+      item.headline = "Drawing diagrams";
+      changed();
+      await drawFor(item, pr, result.text, s);
+      // The app closed meanwhile: `stop` has written the run down as interrupted.
+      if (stopped) return;
+    }
     // A run that asks nothing of you — you took it over, stopped it, or it
     // ran out of time or found nothing to post — is a note on its card.
     if (entry.takeOver) {
@@ -1092,6 +1106,11 @@ export function createAgent(deps: AgentDeps): Agent {
       fail("The run failed", result?.text || outcome.stderr.trim().split("\n").slice(-3).join(" ") || `exit ${outcome.exitCode}`);
     }
     // Nothing to post, nothing asked, nothing major found: no decision is left.
+    // Its diagrams go out with the review, as one comment of their own.
+    if (item.plan && postsDiagrams(item, s) && item.headline.startsWith("Would post: ")) {
+      item.plan.diagrams = item.diagrams!.list.length;
+      item.headline = `Would post: ${describePlan(item.plan)}`;
+    }
     if ((item.state as AgentItem["state"]) === "needsYou" && !item.interrupted && nothingForYou(item)) item.state = "done";
     // `fail` changes the state behind TypeScript's back; read it afresh.
     const ended = item.state as AgentItem["state"];
@@ -1214,6 +1233,67 @@ export function createAgent(deps: AgentDeps): Agent {
    * stops it (the review would talk about code that isn't the head), as does
    * a PR that was merged or closed.
    */
+  /** Draws the PR's diagrams after its review or brief (`./diagrams.ts`) and writes down how it went. */
+  async function drawFor(item: AgentItemRecord, pr: PullRequest, text: string, s: AgentSettings): Promise<void> {
+    const out = await drawDiagrams(
+      {
+        url: item.url,
+        repo: item.repo,
+        number: item.prNumber,
+        title: pr.title,
+        summary: parseRunResult(text, item.scenario).card.summary,
+        model: s.diagrams.model,
+        cwd: path.join(deps.dir, "runs", item.runId, "diagrams"),
+      },
+      { gh, spawner: deps.spawner ?? spawnClaude, ...(deps.checkMermaid ? { check: deps.checkMermaid } : {}) },
+    );
+    item.diagrams = out.diagrams;
+    logRun(item, "diagrams", {
+      detail: clip(out.diagrams.note ?? `${out.diagrams.list.length} drawn`),
+      ms: out.ms,
+      data: {
+        count: out.diagrams.list.length,
+        checked: out.diagrams.checked,
+        ...(out.diagrams.existingUrl ? { existing: out.diagrams.existingUrl } : {}),
+        ...(out.costUsd !== undefined ? { costUsd: out.costUsd } : {}),
+      },
+    });
+  }
+
+  /** A review whose diagrams go out with it (Settings › Agent › Diagrams › Post them with the review). */
+  function postsDiagrams(item: AgentItemRecord, s: AgentSettings): boolean {
+    return item.scenario === "review" && s.diagrams.post && (item.diagrams?.list.length ?? 0) > 0;
+  }
+
+  /**
+   * The diagrams as the review's last write: rendered in the app's own mermaid
+   * first, and only while the PR has no Mermaid diagram yet — another tool, or
+   * a colleague, may have posted one since they were drawn.
+   */
+  async function diagramNote(item: AgentItemRecord, s: AgentSettings): Promise<PublishStep | null> {
+    const d = item.diagrams;
+    if (!d || !postsDiagrams(item, s)) return null;
+    const hold = (why: string): null => {
+      logRun(item, "diagrams-held", { detail: why });
+      return null;
+    };
+    if (!d.checked) {
+      const ok = deps.checkMermaid ? await deps.checkMermaid(d.list.map((x) => x.source)).catch(() => null) : null;
+      if (!ok || ok.length !== d.list.length) return hold("not checked — no window could render them");
+      d.list = d.list.filter((_, i) => ok[i]);
+      d.checked = true;
+      if (d.list.length === 0) return hold("none of them renders");
+    }
+    const existing = await existingDiagramUrl(gh, item.url, item.repo, item.prNumber);
+    if (existing === undefined) return hold("couldn't read the PR's comments to check for a diagram there");
+    if (existing) {
+      d.existingUrl = existing;
+      return hold("the PR has a Mermaid diagram already");
+    }
+    const body = diagramComment(d.list);
+    return body ? { kind: "note", body, label: "diagrams comment" } : null;
+  }
+
   async function publishItem(item: AgentItemRecord, all: Settings, byYou: boolean): Promise<AgentActionResult> {
     const refuse = (error: string): AgentActionResult => {
       logRun(item, "not-published", { detail: clip(error), data: { byYou } });
@@ -1241,6 +1321,10 @@ export function createAgent(deps: AgentDeps): Agent {
     // Threads where the author pushed back and you dropped your comment: answered and resolved with the review.
     const dropped = (item.plan.escalations ?? []).filter((e) => item.disputes?.[String(e.replyTo)] === "drop");
     const extra = dropped.length > 0 ? disputeSteps(dropped, item.disputes ?? {}, await threadIdsByFirstComment(item.url, item.repo, item.prNumber, gh)) : [];
+    // Last, so a retry finds every earlier write at the same place.
+    const note = await diagramNote(item, all.agent);
+    if (note) extra.push(note);
+    item.plan.diagrams = note ? item.diagrams?.list.length : undefined;
     const out = await publishPlan(
       item.runFolder,
       item.url,
@@ -1262,6 +1346,7 @@ export function createAgent(deps: AgentDeps): Agent {
       if (publishedCount(item.runFolder) > 0) return refuse("part of it went out already and the rest changed in the session — run it again");
       const text = readPlanText(item.runFolder);
       item.plan = summarizePlan(readPlanLines(text));
+      if (postsDiagrams(item, all.agent)) item.plan.diagrams = item.diagrams!.list.length;
       item.planHash = planHash(text);
       item.planEdited = true;
       item.state = "needsYou";

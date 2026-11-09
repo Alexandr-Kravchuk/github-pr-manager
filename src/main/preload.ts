@@ -25,6 +25,18 @@ const api: PrManagerApi = {
   getAgentState: () => ipcRenderer.invoke("agent:get"),
   agentAction: (action) => ipcRenderer.invoke("agent:action", action),
   revealAgentLog: () => ipcRenderer.invoke("agent:revealLog"),
+  onCheckDiagrams: (listener) => {
+    const handler = (_e: unknown, raw: unknown) => {
+      const r = (typeof raw === "object" && raw !== null ? raw : {}) as { requestId?: unknown; sources?: unknown };
+      if (typeof r.requestId !== "string" || !Array.isArray(r.sources)) return;
+      listener({ requestId: r.requestId, sources: r.sources.filter((s): s is string => typeof s === "string") });
+    };
+    ipcRenderer.on("agent-check-diagrams", handler);
+    return () => {
+      ipcRenderer.removeListener("agent-check-diagrams", handler);
+    };
+  },
+  diagramsChecked: (requestId, results) => ipcRenderer.invoke("agent:diagramsChecked", requestId, results),
   onAgentState: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, state: AgentState) => listener(state);
     ipcRenderer.on("agent-state", handler);

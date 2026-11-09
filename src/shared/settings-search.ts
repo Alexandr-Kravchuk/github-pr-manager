@@ -25,6 +25,7 @@ export type SettingsSectionId =
   | "agentScenarios"
   | "agentLimits"
   | "agentPermissions"
+  | "agentDiagrams"
   | "agentCompanion"
   | "agentNotifications"
   | "agentPolicy";
@@ -228,6 +229,12 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     tab: "agent",
     title: "Permissions",
     keywords: ["permissions", "allowed tools", "allowlist", "push", "branch", "safety"],
+  },
+  {
+    id: "agentDiagrams",
+    tab: "agent",
+    title: "Diagrams",
+    keywords: ["diagram", "mermaid", "architecture", "flow", "draw", "picture", "chart"],
   },
   { id: "agentCompanion", tab: "agent", title: "Companion", keywords: ["companion", "header", "chip", "ring", "tray", "icon"] },
   {

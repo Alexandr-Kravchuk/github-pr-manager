@@ -145,6 +145,7 @@ export const AGENT_BOUNDS = {
   maxMinutes: { min: 5, max: 240 },
   promoteAfter: { min: 1, max: 100 },
   logRetentionDays: { min: 1, max: 365 },
+  diagramMinLines: { min: 0, max: 100_000 },
 } as const;
 
 export type AgentBoundKey = keyof typeof AGENT_BOUNDS;
@@ -184,6 +185,8 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
     promoteAfter: 10,
   },
   permissions: { tools: DEFAULT_AGENT_TOOLS, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: true },
+  // A small PR reads fine without a picture; each diagram is a model run of its own.
+  diagrams: { enabled: true, minLines: 100, post: true, model: "sonnet" },
   companion: { headerChip: true, trayState: true },
   notifications: { needsYou: true, failed: true, finished: false },
   policy: { signature: DEFAULT_AGENT_SIGNATURE, logRetentionDays: 30 },

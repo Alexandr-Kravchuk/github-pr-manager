@@ -332,6 +332,7 @@ export function validateAgent(raw: unknown): AgentSettings {
   const companion = o(obj.companion);
   const notifications = o(obj.notifications);
   const policy = o(obj.policy);
+  const diagrams = o(obj.diagrams);
 
   // A list saved before a newer default rule existed gets that rule; one saved without a version is from before versions (1).
   const savedVersion = typeof permissions.toolsVersion === "number" && Number.isInteger(permissions.toolsVersion) ? permissions.toolsVersion : 1;
@@ -390,6 +391,16 @@ export function validateAgent(raw: unknown): AgentSettings {
       promoteAfter: num(limits.promoteAfter, "promoteAfter", d.limits.promoteAfter),
     },
     permissions: { tools, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: bool(permissions.pushOwnBranch, d.permissions.pushOwnBranch) },
+    diagrams: {
+      enabled: bool(diagrams.enabled, d.diagrams.enabled),
+      minLines: num(diagrams.minLines, "diagramMinLines", d.diagrams.minLines),
+      post: bool(diagrams.post, d.diagrams.post),
+      // Absent: the default model; saved empty: Claude Code's default. A name only — it goes on a command line.
+      model:
+        typeof diagrams.model === "string" && (diagrams.model.trim() === "" || /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,79}$/.test(diagrams.model.trim()))
+          ? diagrams.model.trim()
+          : d.diagrams.model,
+    },
     companion: {
       headerChip: bool(companion.headerChip, d.companion.headerChip),
       trayState: bool(companion.trayState, d.companion.trayState),

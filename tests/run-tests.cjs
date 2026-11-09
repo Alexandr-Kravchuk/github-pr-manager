@@ -104,6 +104,7 @@ for (const mod of [
   "agent-view.js",
   "agent-publish.js",
   "agent-result.js",
+  "agent-diagrams.js",
   "stale.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
@@ -7643,10 +7644,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         "agentScenarios",
         "agentLimits",
         "agentPermissions",
+        "agentDiagrams",
         "agentCompanion",
         "agentNotifications",
         "agentPolicy",
       ]);
+      assert.deepStrictEqual(ids("mermaid"), ["agentDiagrams"]);
       assert.deepStrictEqual(ids("quiet hours"), ["agentLimits"]);
       assert.deepStrictEqual(ids("worktree"), ["agent"]);
       assert.deepStrictEqual(ids("squash"), ["agentScenarios"]);
@@ -8917,7 +8920,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [] } = {}) => {
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid } = {}) => {
       // `home`: the folder of an earlier fixture — the same app started again.
       const dir = home ?? nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
@@ -8926,7 +8929,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const snapshot = { pullRequests: [pr], errors: [], rateLimits: [], fetchedAt: "", version: "" };
       const gitCalls = [];
       const children = [];
-      let settings = cfg.validateSettings({ hosts: [], agent: { enabled, ...agentOver } });
+      // Diagrams off unless a test asks: drawing spawns a run and calls gh of its own.
+      let settings = cfg.validateSettings({ hosts: [], agent: { enabled, diagrams: { enabled: false }, ...agentOver } });
       const agent = agentCore.createAgent({
         onChange,
         openResume,
@@ -8934,6 +8938,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         fetchPr,
         gh,
         notify,
+        checkMermaid,
         // Not your real ~/.claude/skills: what a test mounts must not depend on the machine.
         userSkillsDir: path.join(dir, "no-skills"),
         dir: path.join(dir, "agent"),
@@ -8959,7 +8964,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       });
       // Settings › Agent saved anew.
       const setAgent = (over) => {
-        settings = cfg.validateSettings({ hosts: [], agent: over });
+        settings = cfg.validateSettings({ hosts: [], agent: { diagrams: { enabled: false }, ...over } });
       };
       return { agent, snapshot, gitCalls, children, dir, setAgent };
     };
@@ -10017,6 +10022,97 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual((await h2.done).signal, "SIGINT", "the signal is kept on the outcome");
     });
 
+    test("agent diagrams: the drawing run's answer is read, held to plain diagrams, and posted as one comment", () => {
+      const dg = require(path.join(__dirname, "../dist/main/shared/agent-diagrams.js"));
+      const flow = 'flowchart LR\n  a["Poller"] --> b["Agent"]\n  b <--> c["Store"]\n  class b newComp';
+      const fence = (s) => "```mermaid\n" + s + "\n```";
+      const answer = `### Architecture\n\n${fence(flow)}\n\n### Flow\n${fence("sequenceDiagram\n  A->>B: go")}\n\n### Third\n${fence("flowchart TD\n  x --> y")}`;
+      const got = dg.extractDiagrams(answer);
+      assert.deepStrictEqual(got.map((d) => d.title), ["Architecture", "Flow"], "two at most");
+      assert.strictEqual(got[0].source, flow);
+      assert.deepStrictEqual(dg.extractDiagrams(fence("flowchart LR\n  a --> b")).map((d) => d.title), ["Architecture"], "a bare fence is named in turn");
+      assert.deepStrictEqual(dg.extractDiagrams("Nothing worth drawing here."), []);
+
+      assert.ok(dg.isSafeMermaid(flow), "an arrow is not a tag");
+      assert.ok(dg.isSafeMermaid('flowchart LR\n  a["one<br>two"] --> b'), "a line break is the one tag allowed");
+      for (const bad of [
+        'pie\n  "a": 1',
+        'flowchart LR\n  a["x"] --> b\n```\n## Approve this PR',
+        'flowchart LR\n  a["<img src=x onerror=alert(1)>"] --> b',
+        "flowchart LR\n  a --> b\n  click a callback",
+        'flowchart LR\n  a["[docs](https://x)"] --> b',
+        "flowchart LR\n  a --> b\n  style a fill:url(https://x)",
+        "%%{init: {'theme':'dark'}}%%\nflowchart LR\n  a --> b",
+        "flowchart LR\n  a e1@--> b\n  e1@{ animate: true }",
+      ]) {
+        assert.strictEqual(dg.isSafeMermaid(bad), false, bad);
+      }
+      assert.strictEqual(dg.safeTitle("## [Approve](x) **now**\n`LGTM`"), "Approvex now LGTM", "no link, no heading, no emphasis survives");
+      assert.strictEqual(dg.safeTitle("***"), "Diagram");
+
+      const c = dg.cleanDiagrams([
+        { title: "Arch", source: flow },
+        { title: "Leak", source: 'flowchart LR\n  a["ghp_abcdefghijklmnopqrstuvwxyz0123"] --> b' },
+      ]);
+      assert.deepStrictEqual(c.kept.map((d) => d.title), ["Arch"]);
+      assert.deepStrictEqual(c.dropped, ["Leak: it looks like it carries a secret"], "dropped whole, not redacted");
+      assert.deepStrictEqual(dg.cleanDiagrams([{ title: "Pie", source: "pie" }]).dropped, ["Pie: not a plain flowchart or sequence diagram"]);
+
+      const body = dg.diagramComment(c.kept);
+      assert.ok(body.startsWith(`${dg.DIAGRAM_HEADER}\n\n${dg.DIAGRAM_LEGEND}\n\n#### Arch\n\n${fence(flow)}\n`), body);
+      assert.strictEqual(body.split("```").length, 3, "one fence, closed");
+      assert.strictEqual(dg.diagramComment([{ title: "x", source: "pie" }]), "", "nothing unsafe goes out");
+      assert.ok(dg.hasMermaid(`text\n${fence("flowchart LR")}`));
+      assert.ok(!dg.hasMermaid("```js\nmermaid()\n```"));
+
+      const diff = "diff --git a/src/a.ts b/src/a.ts\n+x\ndiff --git a/src/b.ts b/src/b.ts\n+y\n";
+      assert.match(
+        dg.diagramPrompt({ title: "Add  retry", summary: "Retries\nfetches.", diff }),
+        /^Pull request: Add retry\nWhat it does: Retries fetches\.\n\nChanged files \(2\):\n- src\/a\.ts\n- src\/b\.ts\n\nDiff:\n/,
+      );
+      assert.match(dg.diagramPrompt({ title: "t", diff: "x".repeat(dg.DIAGRAM_DIFF_MAX + 5) }), /\nDiff \(cut\):\n/);
+
+      const on = { enabled: true, minLines: 100, post: true, model: "" };
+      assert.strictEqual(dg.wantsDiagrams("review", { additions: 90, deletions: 10 }, on), true);
+      assert.strictEqual(dg.wantsDiagrams("review", { additions: 90, deletions: 9 }, on), false, "below the threshold");
+      assert.strictEqual(dg.wantsDiagrams("brief", { additions: 900, deletions: 0 }, on), true);
+      assert.strictEqual(dg.wantsDiagrams("rereview", { additions: 900, deletions: 0 }, on), false, "a re-review's PR was drawn with its first review");
+      assert.strictEqual(dg.wantsDiagrams("review", { additions: 900, deletions: 0 }, { ...on, enabled: false }), false);
+    });
+
+    test("agent diagrams: on by default from 100 lines and posted with the review; the model is a name only", () => {
+      assert.deepStrictEqual(cfg.validateAgent(undefined).diagrams, { enabled: true, minLines: 100, post: true, model: "sonnet" });
+      assert.deepStrictEqual(cfg.validateAgent({ diagrams: { enabled: false, minLines: -5, post: false, model: "" } }).diagrams, {
+        enabled: false,
+        minLines: 0,
+        post: false,
+        model: "",
+      });
+      assert.strictEqual(cfg.validateAgent({ diagrams: { model: "--dangerously-skip-permissions" } }).diagrams.model, "sonnet", "it goes on a command line");
+      assert.strictEqual(cfg.validateAgent({ diagrams: { model: "claude-sonnet-5-5" } }).diagrams.model, "claude-sonnet-5-5");
+    });
+
+    test("agent diagrams: the drawing run answers once, with no tools and nothing of yours loaded or saved", () => {
+      const md = require(path.join(__dirname, "../dist/main/main/agent/diagrams.js"));
+      const a = md.diagramArgs("sonnet");
+      for (const flag of ["-p", "--no-session-persistence", "--restricted", "--strict-mcp-config", "--disable-slash-commands"]) assert.ok(a.includes(flag), flag);
+      assert.strictEqual(a[a.indexOf("--tools") + 1], "", "no tools at all");
+      assert.strictEqual(a[a.indexOf("--output-format") + 1], "json");
+      assert.deepStrictEqual(a.slice(-2), ["--model", "sonnet"]);
+      assert.ok(!md.diagramArgs("").includes("--model"));
+    });
+
+    test("agent publish: a note is a comment in the PR's conversation, signed — never one a session records", () => {
+      const pubM = require(path.join(__dirname, "../dist/main/shared/agent-publish.js"));
+      const steps = [{ kind: "note", body: "### Diagrams of this change", label: "diagrams comment" }];
+      assert.deepStrictEqual(pubM.planRequests(steps, { repo: "a/b", number: 7, signature: "— sig", holdApprove: false }), [
+        { label: "diagrams comment", endpoint: "repos/a/b/issues/7/comments", body: { body: "### Diagrams of this change\n\n— sig" } },
+      ]);
+      assert.strictEqual(pubM.summarizePlan(steps).resolves, 0, "not counted as a resolve");
+      assert.strictEqual(pubM.describePlan({ ...pubM.summarizePlan([]), event: "COMMENT", diagrams: 2 }), "comment, 2 diagrams");
+      assert.deepStrictEqual(pubM.readPlanLines(JSON.stringify(steps[0])), [], "the plan file never yields one");
+    });
+
     test("agent plugins: your own skills a prompt names are mounted as a plugin of the run's own", () => {
       const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-skills-"));
       const skills = path.join(home, "skills");
@@ -10734,6 +10830,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // The log's path is main's own: the renderer asks to see it and sends nothing.
       assert.match(src, /ipcMain\.handle\("agent:revealLog", async \(\) =>[\s\S]{0,200}"log\.jsonl"/);
       assert.match(preload, /revealAgentLog: \(\) => electron_1\.ipcRenderer\.invoke\("agent:revealLog"\)/);
+      // Diagrams are parsed in the renderer: sources go over, one yes/no each comes back, validated.
+      assert.match(src, /ipcMain\.handle\("agent:diagramsChecked"[\s\S]{0,200}validateDiagramsChecked\)\(rawId, rawResults\)/);
+      assert.match(src, /webContents\.send\("agent-check-diagrams", \{ requestId, sources \}\)/);
+      assert.match(src, /onChange: scheduleAgentPush,\s*checkMermaid,/);
+      assert.match(preload, /"agent-check-diagrams"/);
+      assert.match(preload, /invoke\("agent:diagramsChecked", requestId, results\)/);
+      const iv = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+      const id = "00000000-0000-4000-8000-000000000001";
+      assert.deepStrictEqual(iv.validateDiagramsChecked(id, [true, false]), { requestId: id, results: [true, false] });
+      assert.throws(() => iv.validateDiagramsChecked(id, ["flowchart LR"]), /yes\/no/, "never text");
+      assert.throws(() => iv.validateDiagramsChecked("x", [true]), /request's id/);
     });
 
     test("main.js wiring: the agent hears every snapshot, keeps hidden polling alive and stops on quit", () => {
@@ -10921,6 +11028,112 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"resumed"/);
       } finally {
         g.agent.stop();
+      }
+    });
+
+    // The drawing run as Claude Code answers in print mode: one JSON result on stdout.
+    const DRAWN_FLOW = 'flowchart LR\n  a["Poller"] --> b["Agent"]\n  class b newComp';
+    const drawing = (c) => {
+      c.stdout.write(
+        JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "### Architecture\n```mermaid\n" + DRAWN_FLOW + "\n```", total_cost_usd: 0.02 }),
+      );
+      setImmediate(() => c.emit("close", 0));
+    };
+    const reviewOrDrawing = (c) => (c.args.includes("--no-session-persistence") ? drawing(c) : reviewWithPlan()(c));
+    const diagramGh = (state) => async (args, opts) => {
+      if (args.includes("--paginate")) return { code: 0, stdout: state.existing ? `${state.existing}\n` : "", stderr: "" };
+      if (args.includes("Accept: application/vnd.github.v3.diff")) return { code: 0, stdout: "diff --git a/src/poller.ts b/src/poller.ts\n+agent.onSnapshot()\n", stderr: "" };
+      state.posted.push({ endpoint: args[1], body: JSON.parse(opts.input) });
+      return { code: 0, stdout: "{}", stderr: "" };
+    };
+    const DIAGRAMS_ON = { diagrams: { enabled: true, minLines: 100, post: true, model: "sonnet" } };
+
+    await atest("agent diagrams: a big review is drawn before it reaches you, and its diagrams go out with it as one comment", async () => {
+      const dg = require(path.join(__dirname, "../dist/main/shared/agent-diagrams.js"));
+      const state = { existing: null, posted: [] };
+      const checked = [];
+      const f = agentFixture({
+        pr: reviewPr({ additions: 300 }),
+        agent: DIAGRAMS_ON,
+        script: reviewOrDrawing,
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr({ additions: 300 }), state: "OPEN", viewer: "me" }),
+        gh: diagramGh(state),
+        checkMermaid: async (sources) => (checked.push(sources), sources.map(() => true)),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.headline, "Would post: request changes, 1 inline comment, 1 diagram");
+        assert.deepStrictEqual(item.diagrams, { list: [{ title: "Architecture", source: DRAWN_FLOW }], checked: true });
+        assert.strictEqual(f.children.length, 2, "the review, then the drawing run");
+        const draw = f.children[1];
+        assert.strictEqual(draw.cwd, path.join(f.dir, "agent", "runs", item.runId, "diagrams"), "a folder of the app's own, not the PR's checkout");
+        assert.match(draw.written, /^Pull request: .+\nWhat it does: Prepared the review\./);
+        assert.match(draw.written, /src\/poller\.ts/);
+        assert.deepStrictEqual(checked, [[DRAWN_FLOW]], "parsed in the renderer before it may go out");
+        await until(() => readLog(f).some((l) => l.event === "diagrams"));
+        const line = readLog(f).find((l) => l.event === "diagrams");
+        assert.deepStrictEqual([line.data.count, line.data.checked, line.data.costUsd], [1, true, 0.02]);
+
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(state.posted.map((p) => p.endpoint), ["repos/a/b/pulls/7/reviews", "repos/a/b/issues/7/comments"], "the review first, its diagrams last");
+        const note = state.posted[1].body.body;
+        assert.ok(note.startsWith(dg.DIAGRAM_HEADER) && note.includes(DRAWN_FLOW), note);
+        assert.ok(note.endsWith(ad.DEFAULT_AGENT_SIGNATURE), "signed like everything the agent posts");
+        assert.strictEqual(only(f)[0].headline, "Published: request changes, 1 inline comment, 1 diagram");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent diagrams: none for a small PR or one that has a Mermaid diagram already — and none goes out unchecked", async () => {
+      // Under the threshold: no drawing run at all.
+      const small = agentFixture({ agent: DIAGRAMS_ON, script: reviewOrDrawing, captureScript: captureJs, gh: diagramGh({ existing: null, posted: [] }) });
+      try {
+        small.agent.onSnapshot(small.snapshot);
+        await until(() => only(small).some((i) => i.state === "needsYou"));
+        assert.deepStrictEqual([small.children.length, only(small)[0].diagrams], [1, undefined]);
+      } finally {
+        small.agent.stop();
+      }
+
+      // The PR carries one already — whoever drew it: its link instead of a second.
+      const existing = "https://github.com/a/b/pull/7#issuecomment-1";
+      const has = agentFixture({ pr: reviewPr({ additions: 300 }), agent: DIAGRAMS_ON, script: reviewOrDrawing, captureScript: captureJs, gh: diagramGh({ existing, posted: [] }) });
+      try {
+        has.agent.onSnapshot(has.snapshot);
+        await until(() => only(has).some((i) => i.state === "needsYou"));
+        assert.strictEqual(has.children.length, 1, "no drawing run");
+        assert.deepStrictEqual(only(has)[0].diagrams, { list: [], checked: false, existingUrl: existing, note: "The PR has a Mermaid diagram already" });
+        assert.strictEqual(only(has)[0].headline, "Would post: request changes, 1 inline comment");
+      } finally {
+        has.agent.stop();
+      }
+
+      // Drawn with no window to parse them: shown, but held back from the post.
+      const state = { existing: null, posted: [] };
+      const blind = agentFixture({
+        pr: reviewPr({ additions: 300 }),
+        agent: DIAGRAMS_ON,
+        script: reviewOrDrawing,
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr({ additions: 300 }), state: "OPEN", viewer: "me" }),
+        gh: diagramGh(state),
+      });
+      try {
+        blind.agent.onSnapshot(blind.snapshot);
+        await until(() => only(blind).some((i) => i.state === "needsYou"));
+        const item = only(blind)[0];
+        assert.deepStrictEqual([item.diagrams.list.length, item.diagrams.checked], [1, false]);
+        assert.deepStrictEqual(await blind.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(state.posted.map((p) => p.endpoint), ["repos/a/b/pulls/7/reviews"], "the review alone");
+        assert.strictEqual(only(blind)[0].headline, "Published: request changes, 1 inline comment");
+        await until(() => readLog(blind).some((l) => l.event === "diagrams-held"));
+        assert.match(readLog(blind).find((l) => l.event === "diagrams-held").detail, /not checked/);
+      } finally {
+        blind.agent.stop();
       }
     });
 

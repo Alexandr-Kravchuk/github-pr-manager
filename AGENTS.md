@@ -165,7 +165,7 @@ Three layers:
   only the PR id and its choices, the PR is closed first and the task second,
   and a missing Jira token stops it before anything changes. Jira writes need a
   token with write scope — the read-only one the Jira section recommends gets a
-  refusal that says so) and the PR agent's five: `agent-defaults.ts`
+  refusal that says so) and the PR agent's six: `agent-defaults.ts`
   (the Agent tab's defaults and bounds), `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (where a
@@ -190,13 +190,33 @@ Three layers:
   posts — its skill's `publishCommand` is a wrapper of the app's that only
   records each write, checked like the skill's own `pr-review-publish.sh`, and
   the app posts the plan with `gh api` afterwards, signature added, one write
-  at a time with progress on disk so a retry never posts twice). Keep any such
+  at a time with progress on disk so a retry never posts twice) and
+  `agent-diagrams.ts` (Mermaid diagrams of a PR's change — Settings › Agent ›
+  Diagrams: after a review or a brief of a PR at least `minLines` big,
+  `main/agent/diagrams.ts` runs one short `claude -p` of its own — no tools,
+  `--restricted --strict-mcp-config --no-session-persistence`, in a folder of
+  the app's, the PR's title, summary and diff on stdin — while the item is still
+  `working`, so its slot stays taken and nothing goes out without them. The
+  answer is untrusted model output posted under your name: only a plain
+  flowchart or sequence diagram passes `isSafeMermaid` (no fence, no tag but
+  `<br>`, no click/link/`url()`/init/`@{…}`), titles are stripped to words, one
+  that looks like it carries a secret is dropped whole. A flowchart can't be
+  parsed without a DOM, so main asks the renderer (`agent-check-diagrams` →
+  `agent:diagramsChecked`, one boolean per source back, never text) and posts
+  none unchecked. A review's diagrams are its plan's last write, a `note` step
+  (an issue comment, signed) that only the app adds — the capture script has no
+  such write — and none is drawn or posted while the PR's conversation already
+  has a Mermaid comment, whoever drew it (the creatio-pr-watch reviewer draws
+  the same kind, with the same three colours). The card renders them with the
+  renderer's own mermaid, loaded on first use, labels as SVG text and the SVG
+  sanitized again to SVG only — HTML in a `<foreignObject>` came out empty).
+  Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
-  `agent-stream.js`, `agent-result.js` and `agent-view.js`
+  `agent-stream.js`, `agent-result.js`, `agent-view.js` and `agent-diagrams.js`
   stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
@@ -376,7 +396,10 @@ Three layers:
   the *oldest* host's stamp and stalls. A guard test in `tests/run-tests.cjs`
   scans `.ts`/`.tsx`/`.css`/`.html` under `src/renderer` for
   `animate-{pulse,spin,bounce,ping}` (bare or arbitrary-value) and for literal
-  `infinite` iteration counts, so this can't regress unnoticed.
+  `infinite` iteration counts, so this can't regress unnoticed. The scan does
+  not see a dependency's stylesheet: mermaid's ships an endless dash animation
+  for edges marked `@{ animate: true }`, so the diagram guard refuses `@{` and
+  `.agent-diagram svg *` sets `animation: none`.
   Related: `backdrop-blur` on the sticky header is free at rest but multiplies
   the cost of anything animating beneath it (~3x in one dev-instance A/B) — keep
   animations under it short and finite.

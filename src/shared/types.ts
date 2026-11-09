@@ -318,6 +318,19 @@ export interface AgentSettings {
     /** Allow pushing to the head branch of your own PR (drive). */
     pushOwnBranch: boolean;
   };
+  /**
+   * Mermaid diagrams of the change (`shared/agent-diagrams.ts`), drawn by a
+   * short model run of their own after a review or a brief, shown on its card.
+   */
+  diagrams: {
+    enabled: boolean;
+    /** Only for a PR with at least this many changed lines (additions + deletions). */
+    minLines: number;
+    /** Post them with the review, as one comment — unless the PR has a Mermaid diagram already. */
+    post: boolean;
+    /** Model for the drawing run; "" = Claude Code's default. */
+    model: string;
+  };
   companion: { headerChip: boolean; trayState: boolean };
   notifications: { needsYou: boolean; failed: boolean; finished: boolean };
   policy: {
@@ -827,6 +840,18 @@ export type AgentScenario = "review" | "brief" | "rereview" | "drive" | "merge" 
 
 export type AgentItemState = "queued" | "working" | "needsYou" | "done" | "error";
 
+/** What a run's drawing step left: the diagrams, or the comment that already had one, or why none. */
+export interface AgentItemDiagrams {
+  /** Passed the guard (`cleanDiagrams`) and, once `checked`, rendered in the app's own mermaid. */
+  list: import("./agent-diagrams").AgentDiagram[];
+  /** Checked in the renderer (a flowchart can't be parsed without a DOM). None is posted unchecked. */
+  checked: boolean;
+  /** The PR has a comment with a Mermaid diagram already — nothing drawn, its link instead. */
+  existingUrl?: string;
+  /** Why none was drawn or some were dropped, in a line. */
+  note?: string;
+}
+
 /** One thing the agent did or is doing on a PR — persisted in userData/agent/state.json. */
 export interface AgentItem {
   runId: string;
@@ -871,6 +896,8 @@ export interface AgentItem {
    * interrupted run, up to a cap; a run that ends any other way clears it.
    */
   cuts?: number;
+  /** Diagrams of the change, drawn after the run (Settings › Agent › Diagrams). */
+  diagrams?: AgentItemDiagrams;
   /** The next run continues `sessionId` instead of starting a session: after a restart, or with your answer. */
   resumeSession?: boolean;
   /**
@@ -1059,6 +1086,13 @@ export interface PrManagerApi {
   agentAction(action: AgentAction): Promise<AgentActionResult>;
   /** Shows the agent's log (userData/agent/log.jsonl) in the file manager. */
   revealAgentLog(): Promise<void>;
+  /**
+   * Main asks whether the agent's diagrams parse — a flowchart needs a DOM,
+   * and the renderer is the only browser at hand. Returns an unsubscribe function.
+   */
+  onCheckDiagrams(listener: (request: { requestId: string; sources: string[] }) => void): () => void;
+  /** The answer: one yes/no per source, in order. Nothing else crosses back. */
+  diagramsChecked(requestId: string, results: boolean[]): Promise<void>;
   /** Subscribe to agent state pushes (sent only while the window is visible). */
   onAgentState(listener: (state: AgentState) => void): () => void;
   /** An agent notification was clicked: show the Board, where its decision waits. */
