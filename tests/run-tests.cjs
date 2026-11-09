@@ -7649,7 +7649,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.ok(
         defaultReview.includes(
           "Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
-            "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.» " +
+            "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
             "Публікуй рев'ю на PR за цим дозволом.",
         ),
         "the publishing permission is quoted word for word",
