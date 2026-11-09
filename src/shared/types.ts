@@ -350,6 +350,17 @@ export interface PullRequest {
    * below it are merged, whatever its own reviews and checks say.
    */
   blockedByStack: boolean;
+  /**
+   * Branch protection still demands a review the PR does not have yet — most
+   * often a code owner's approval, or more approvals than it got. GitHub says
+   * so with `reviewDecision: REVIEW_REQUIRED` together with
+   * `mergeStateStatus: BLOCKED`; an approval from someone who does not satisfy
+   * the rule leaves both as they are, so `hasHumanApproval` alone cannot tell.
+   * `REVIEW_REQUIRED` without `BLOCKED` does not count: nothing gates the merge.
+   * Without any human approval it stays false — such a PR is simply awaiting
+   * review, and the card keeps its plain "Review required" pill.
+   */
+  requiredReviewPending: boolean;
   author: { login: string; avatarUrl: string } | null;
   createdAt: string;
   updatedAt: string;
@@ -530,6 +541,7 @@ export interface PullRequest {
    * report UNKNOWN right after a push; while it is UNKNOWN this stays false and
    * flips true on a later poll once GitHub settles. Never true while
    * `blockedByStack`: GitHub reports such a PR CLEAN yet refuses to merge it.
+   * Never true while `requiredReviewPending` either.
    */
   canBeMerged: boolean;
 

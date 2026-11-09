@@ -77,7 +77,12 @@ Three layers:
   keeps the PRs of one native GitHub stack together bottom-first in the
   Roomy/Compact list; GitHub merges a stack bottom-up only yet reports the PRs
   above the bottom as `CLEAN`, so `canBeMerged` in `github.ts` is gated on
-  `blockedByStack` and `prSignal` paints such a PR amber, not green; a host
+  `blockedByStack` and `prSignal` paints such a PR amber, not green; in the
+  same way an approval that branch protection does not accept — GitHub still
+  says `REVIEW_REQUIRED` with a `BLOCKED` merge state, typically while the code
+  owners have not approved — sets `requiredReviewPending`, which keeps
+  `canBeMerged` false, the accent off green (grey on your own PR) and turns the
+  card's review pill amber; a host
   whose schema has no `stack` field is read again without it and remembered for
   the app run. The stack badge's menu is portalled to <body> because table
   cells clip with `overflow-hidden`), `view-mode.ts` (the three

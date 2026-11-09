@@ -1852,6 +1852,44 @@ test("mapPr.canBeMerged: failing CI blocks readiness", () =>
   assert.strictEqual(canMerge({ commits: failingRollup }), false));
 test("mapPr.canBeMerged: still-running CI blocks readiness", () =>
   assert.strictEqual(canMerge({ commits: pendingRollup }), false));
+// The shape a GitHub Enterprise host returned for a real PR: a team-member
+// approval is in, but the code owners (a requested team) have not approved, so
+// GitHub keeps REVIEW_REQUIRED and refuses the merge with BLOCKED.
+test("mapPr: an approval that does not satisfy a required code-owner review is not ready", () => {
+  for (const roles of [["author"], ["reviewed"]]) {
+    const pr = github.mapPr(
+      rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED" }),
+      "GHE",
+      roles,
+      roles[0] === "author" ? "auth" : "rev",
+    );
+    assert.strictEqual(pr.hasHumanApproval, true);
+    assert.strictEqual(pr.requiredReviewPending, true);
+    assert.strictEqual(pr.canBeMerged, false);
+    for (const trackComments of [true, false]) {
+      assert.notStrictEqual(prFilter.prSignal(pr, { trackComments }), "approved", roles[0]);
+    }
+  }
+  const own = github.mapPr(rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED" }), "GHE", ["author"], "auth");
+  assert.strictEqual(prFilter.prSignal(own, { trackComments: true }), "waiting");
+});
+test("mapPr: REVIEW_REQUIRED + BLOCKED without any approval is plain awaiting review", () => {
+  const pr = github.mapPr(
+    rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED", latestOpinionatedReviews: { nodes: [] } }),
+    "GHE",
+    ["author"],
+    "auth",
+  );
+  assert.strictEqual(pr.requiredReviewPending, false);
+  assert.strictEqual(pr.canBeMerged, false);
+});
+test("mapPr: REVIEW_REQUIRED without a BLOCKED merge state still counts as ready", () => {
+  for (const mergeStateStatus of ["CLEAN", "HAS_HOOKS", "UNSTABLE", undefined]) {
+    const pr = github.mapPr(rawPr({ reviewDecision: "REVIEW_REQUIRED", mergeStateStatus }), "GH", ["author"], "auth");
+    assert.strictEqual(pr.requiredReviewPending, false, String(mergeStateStatus));
+    assert.strictEqual(pr.canBeMerged, true, String(mergeStateStatus));
+  }
+});
 
 // --- github: mapPr hasConflicts (merge-conflict flag) ------------------------
 // Keys strictly off GitHub's CONFLICTING verdict. UNKNOWN (recomputing right
@@ -2680,6 +2718,12 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     );
     assert.strictEqual(changes, unaddressed, "either form of change request ranks the same");
     assert.ok(changes < untouched && untouched < partial && partial < done);
+  });
+  test("reviewRank: a required review still pending ranks with the partial approvals", () => {
+    // Every listed user reviewer approved, yet a code owner's review is missing.
+    const pr = tpr({ hasHumanApproval: true, reviewers: [rev("ann", "approved")] });
+    assert.strictEqual(prTable.reviewRank({ ...pr, requiredReviewPending: true }), 3);
+    assert.strictEqual(prTable.reviewRank({ ...pr, requiredReviewPending: false }), 4);
   });
 
   test("approvalTally: counts approvals out of the reviewers on the PR", () =>
@@ -3717,6 +3761,26 @@ test("activeFilterCount: every narrowing control at once", () =>
       }),
       "blocked",
     ));
+  // requiredReviewPending: the edges of the "waiting over attention" precedence
+  // on your own PR, and the reviewer side, where it must never read green.
+  {
+    const pending = (o = {}) =>
+      sigPr({ hasHumanApproval: true, awaitingReview: false, requiredReviewPending: true, ...o });
+    for (const trackComments of [true, false]) {
+      test(`prSignal: required review pending with CI still running stays waiting (trackComments=${trackComments})`, () =>
+        assert.strictEqual(
+          prFilter.prSignal(
+            pending({ ciState: "pending", pendingChecks: [{ name: "build", kind: "check", state: "pending", url: null }] }),
+            { trackComments },
+          ),
+          "waiting",
+        ));
+      test(`prSignal: required review pending with new activity reaches attention (trackComments=${trackComments})`, () =>
+        assert.strictEqual(prFilter.prSignal(pending({ hasNewActivity: true }), { trackComments }), "attention"));
+      test(`prSignal: required review pending on a PR you only reviewed is idle, not approved (trackComments=${trackComments})`, () =>
+        assert.strictEqual(prFilter.prSignal(pending({ roles: ["reviewed"] }), { trackComments }), "idle"));
+    }
+  }
 
   // --- contract: the usercustom-ai-skills cron detectors mirror prSignal ------
   // Three headless detectors (`red-prs.cjs`, `purple-prs.cjs`, `green-prs.cjs`
@@ -3770,6 +3834,7 @@ test("activeFilterCount: every narrowing control at once", () =>
         ["not author: behind base", sigPr({ isBehindBase: true, roles: ["reviewed"], awaitingReview: false, hasHumanApproval: true })],
         ["blocked: merge conflict", sigPr({ hasConflicts: true })],
         ["attention: approved but waits for a lower PR of its stack", sigPr({ hasHumanApproval: true, awaitingReview: false, blockedByStack: true })],
+        ["waiting: approved but a required code-owner review is pending", sigPr({ hasHumanApproval: true, awaitingReview: false, requiredReviewPending: true })],
         [
           "blocked: unresolved thread on your own PR",
           sigPr({ awaitingReview: false, unresolvedThreads: 2 }),

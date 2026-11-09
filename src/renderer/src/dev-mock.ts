@@ -29,6 +29,7 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     baseIsDefaultBranch: true,
     stack: null,
     blockedByStack: false,
+    requiredReviewPending: false,
     author: { login: "octocat", avatarUrl: "https://avatars.githubusercontent.com/u/583231?v=4" },
     createdAt: new Date(Date.now() - 864e5).toISOString(),
     updatedAt: new Date(Date.now() - 36e5).toISOString(),
@@ -182,6 +183,21 @@ const FIXTURES: Record<string, PullRequest[]> = {
   // Exercises the sort/filter/group work: reviewer requests (some untouched,
   // one returned-to-me), a nobody-reviewed-yet PR, and two PRs of one ticket.
   review: [
+    // Approved by a teammate, but branch protection still wants the code
+    // owners: GitHub reports REVIEW_REQUIRED + BLOCKED, so it is not ready.
+    pr({
+      title: "Add a collapse() helper to the panel page object",
+      repo: "acme/testkit",
+      number: 463,
+      issueKey: "ENG-90463",
+      headRefName: "feature/eng-90463-collapse",
+      reviewDecision: "REVIEW_REQUIRED",
+      requiredReviewPending: true,
+      hasHumanApproval: true,
+      hasNoReviews: false,
+      checks: [{ name: "build", kind: "check", state: "success", url: null }],
+      reviewers: [{ login: "teammate", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4", reviewState: "approved" }],
+    }),
     pr({
       title: "ENG-93373: Add response deadline for read-only MCP tools",
       repo: "acme/clio",
