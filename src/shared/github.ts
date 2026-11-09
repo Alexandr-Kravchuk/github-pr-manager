@@ -820,6 +820,7 @@ export function mapPr(
     viewerApproved,
     viewerReviewedAt,
     viewerReviewedHead,
+    viewerReviewedOid: viewerReview?.commit?.oid ?? null,
     myReReviewDue,
     hasNoReviews,
     // The threshold is a setting — the poller sets the real value.

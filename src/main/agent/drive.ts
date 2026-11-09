@@ -81,7 +81,7 @@ export async function collectDrive(
   reasons: string[],
   hooksDir: string,
   place?: GitPlace,
-): Promise<{ drive: AgentDriveResult; fastForward: boolean }> {
+): Promise<{ drive: AgentDriveResult; fastForward: boolean; merges: number }> {
   if (!/^[0-9a-f]{7,40}$/.test(base)) throw new Error(`no head commit to compare with (${base || "none"})`);
   const g = (args: string[]) => git([...safeGit(hooksDir, place), ...args], dir);
   const range = `${base}..HEAD`;
@@ -95,17 +95,19 @@ export async function collectDrive(
       return { oid: oid.trim(), subject: subject.join("\t").trim() };
     })
     .reverse();
-  if (commits.length === 0) return { drive: { base, head, reasons, commits, stat: "", patch: "" }, fastForward: true };
+  if (commits.length === 0) return { drive: { base, head, reasons, commits, stat: "", patch: "" }, fastForward: true, merges: 0 };
   let fastForward = true;
   try {
     await g(["merge-base", "--is-ancestor", base, "HEAD"]);
   } catch {
     fastForward = false;
   }
+  // Merge commits among them: a stack's layer must not get one (its history has to stay linear).
+  const merges = Number.parseInt((await g(["rev-list", "--count", "--min-parents=2", range])).trim(), 10) || 0;
   const stat = await g(["diff", ...PLAIN, "--stat", range]);
   let patch = await g(["diff", ...PLAIN, range]);
   if (patch.length > PATCH_MAX) patch = `${patch.slice(0, PATCH_MAX)}\n… (cut at 100 kB)`;
-  return { drive: { base, head, reasons, commits, stat: stat.trim(), patch }, fastForward };
+  return { drive: { base, head, reasons, commits, stat: stat.trim(), patch }, fastForward, merges };
 }
 
 /** A branch name the app will put in a refspec: plain characters, no `..`, not an option. */

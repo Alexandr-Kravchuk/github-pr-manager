@@ -48,10 +48,11 @@ import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { cutShort, hookCommand, NO_PUSH_ENV, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
-import { checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
+import { checkReapproval, reapproveRequest, reaskRequest, sameChangeOnNewBase } from "./reapprove";
+import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
 import { diagramComment, wantsDiagrams } from "../../shared/agent-diagrams";
 import { actionArgs, boardNow, clip, diffBoard, diffIdle, diffItems, itemFields, runStats, settingsDiff, type ItemMark } from "./journal";
-import { openStore, type AgentItemRecord, type AgentLogEntry, type AgentStore, type LedgerEntry, type ReapproveMark } from "./store";
+import { openStore, type AgentItemRecord, type AgentLogEntry, type AgentStore, type BaseOnlyMark, type LedgerEntry, type ReapproveMark } from "./store";
 import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor, type OrchestratorRun } from "./sdlc";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
 
@@ -221,9 +222,18 @@ export function agentRules(
   scenario: AgentScenario,
   mode: "shadow" | "on",
   folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null = null,
-  pr: { repo: string; number: number; baseRef?: string; reasons?: readonly string[] } | null = null,
+  pr: RulesPr | null = null,
 ): string {
   return `${scenarioRules(scenario, mode, folder, pr)} ${resultRuleFor(scenario)}`;
+}
+
+/** The PR a session's rules name: its place, a drive's base, why it runs — and, in a GitHub stack, its layer (`stackRules`). */
+interface RulesPr {
+  repo: string;
+  number: number;
+  baseRef?: string;
+  reasons?: readonly string[];
+  stack?: string | null;
 }
 
 /** What a run on your own PR is for, on top of the drive rules. */
@@ -247,10 +257,12 @@ function scenarioRules(
   scenario: AgentScenario,
   mode: "shadow" | "on",
   folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null,
-  pr: { repo: string; number: number; baseRef?: string; reasons?: readonly string[] } | null,
+  pr: RulesPr | null,
 ): string {
+  const stack = pr?.stack ?? null;
   const plan =
-    "You run unattended as the user's PR agent. First write your plan as a task list with TaskCreate — one short task per step — and keep it current with TaskUpdate as you go, so the user can follow along. (A skill that runs as a Workflow shows its own phases; then no task list is needed.)";
+    "You run unattended as the user's PR agent. First write your plan as a task list with TaskCreate — one short task per step — and keep it current with TaskUpdate as you go, so the user can follow along. (A skill that runs as a Workflow shows its own phases; then no task list is needed.)" +
+    (stack ? ` ${stack}` : "");
   const never =
     "Never push, and never try to work around a refused tool call: if something is refused, say what you would have done and continue without it.";
   const jira =
@@ -272,7 +284,9 @@ function scenarioRules(
       driveFocus(pr?.reasons ?? []) +
       `Commit each fix with git (add, commit) and follow the repository's own conventions — read its CLAUDE.md and AGENTS.md first, since this session doesn't load them on its own — and end every commit message with the trailer "Co-Authored-By: Claude <noreply@anthropic.com>". ` +
       `Never push and never rewrite history (no rebase, no amend of a commit that was already there): the app pushes your commits to the PR's branch as a fast-forward${later}, after checking them. ` +
-      `Resolve a conflict by merging the base branch in — it is fetched for you as ${pr?.baseRef ?? "<remote>/<base>"}; this session's git has no network — never by rebasing. CI runs once the app pushes, so don't wait for it. ` +
+      // In a stack the layer's rules (in `plan`) say what to do about a conflict instead: nothing — the stack needs a rebase.
+      (stack ? "" : `Resolve a conflict by merging the base branch in — it is fetched for you as ${pr?.baseRef ?? "<remote>/<base>"}; this session's git has no network — never by rebasing. `) +
+      `CI runs once the app pushes, so don't wait for it. ` +
       (w ? `To answer a reviewer in a thread, write the reply to a file under ${out}/ and run \`${w} reply ${target} <comment-id> <file>\`; the app posts it after the push. ` : "") +
       `Find what to fix with gh, which already points at this PR's host and repository: the failing checks with \`gh pr checks ${pr?.number ?? "<number>"}\` and \`gh run view <run-id> --log-failed\`, the review threads with \`gh api repos/${pr?.repo ?? "<owner/repo>"}/pulls/${pr?.number ?? "<number>"}/comments\`. ` +
       `Leave .git, .github, .claude, .husky, .npmrc and git attributes alone. End with what you changed and why. ${never}`
@@ -692,7 +706,8 @@ export function createAgent(deps: AgentDeps): Agent {
    * again ten minutes later; meanwhile nothing else starts on someone's PR.
    */
   function startReapprovalCheck(job: AgentJob, pr: PullRequest): void {
-    if (reapproveChecks.has(job.key)) return;
+    // In flight, or failed lately: the plan it ends in must not start it again at once.
+    if (reapproveChecks.has(job.key) || (reapproveRetry.get(job.key) ?? 0) > now().getTime()) return;
     reapproveChecks.add(job.key);
     const fields = { prId: pr.id, prNumber: pr.number, repo: pr.repo, scenario: job.scenario, ...(pr.headOid ? { headOid: pr.headOid } : {}) };
     void (async () => {
@@ -813,6 +828,61 @@ export function createAgent(deps: AgentDeps): Agent {
     }
   }
 
+  /** Heads being checked for "only the base changed" right now, and those to check again later after a failed check. */
+  const baseOnlyChecks = new Set<string>();
+  const baseOnlyRetry = new Map<string, number>();
+
+  /** Where a reviewed PR's pushed head stands — the policy's `baseOnlyState`. */
+  function baseOnlyState(pr: PullRequest): "unchecked" | "checking" | "same" | "changed" {
+    const key = jobKey(pr, "rereview", "base");
+    if (baseOnlyChecks.has(key) || (baseOnlyRetry.get(key) ?? 0) > now().getTime()) return "checking";
+    const mark = store.data.baseOnly?.[key];
+    // Compared with another review of yours than the latest: look again.
+    if (!mark || mark.oldHead !== pr.viewerReviewedOid) return "unchecked";
+    return mark.verdict;
+  }
+
+  /**
+   * Checks in your clone whether a reviewed PR's new head is the change you
+   * reviewed on a new base (`sameChangeOnNewBase`), writes down what it found
+   * and plans again with it. No clone: "changed", the re-review runs as it
+   * always did. A failed check is tried again ten minutes later.
+   */
+  function startBaseOnlyCheck(job: AgentJob, pr: PullRequest): void {
+    if (baseOnlyChecks.has(job.key) || (baseOnlyRetry.get(job.key) ?? 0) > now().getTime()) return;
+    const oldHead = pr.viewerReviewedOid;
+    const newHead = pr.headOid;
+    if (!oldHead || !newHead) return;
+    baseOnlyChecks.add(job.key);
+    const fields = { prId: pr.id, prNumber: pr.number, repo: pr.repo, scenario: job.scenario, headOid: newHead };
+    void (async () => {
+      try {
+        const claude = loadAll()?.claude;
+        const checkout = claude ? deps.findCheckout(pr, claude) : null;
+        const remote = checkout ? remoteFor(checkout, pr) : null;
+        const why =
+          checkout && remote
+            ? await sameChangeOnNewBase({ git, checkout, remote }, { number: pr.number, baseRefName: pr.baseRefName }, oldHead, newHead)
+            : "no clone of the repository to check the push in";
+        if (stopped) return;
+        const mark: BaseOnlyMark = { verdict: why === null ? "same" : "changed", oldHead, note: why ?? `only the base changed since ${oldHead.slice(0, 7)}`, at: stamp() };
+        store.data.baseOnly = { ...(store.data.baseOnly ?? {}), [job.key]: mark };
+        baseOnlyRetry.delete(job.key);
+        store.log({ at: stamp(), kind: "plan", event: "base-check", ...fields, detail: clip(mark.note), data: { verdict: mark.verdict, oldHead, ...(pr.stack ? { stack: pr.stack.number, layer: pr.stack.position } : {}) } });
+      } catch (e) {
+        baseOnlyRetry.set(job.key, now().getTime() + 10 * 60_000);
+        store.log({ at: stamp(), kind: "plan", event: "base-check", ...fields, detail: clip(`couldn't check: ${(e as Error).message}`), data: { verdict: "error", oldHead } });
+      } finally {
+        baseOnlyChecks.delete(job.key);
+      }
+      if (stopped) return;
+      void store.save();
+      const snapshot = deps.getSnapshot();
+      if (snapshot) onSnapshot(snapshot);
+      changed();
+    })();
+  }
+
   function onSnapshot(snapshot: DashboardResponse): void {
     const s = settings();
     plannedWith = JSON.stringify(s);
@@ -860,6 +930,7 @@ export function createAgent(deps: AgentDeps): Agent {
       },
       selfReviewed: (pr) => Boolean(store.data.ledger[jobKey(pr, "drive", "self")]) || (pr.headOid !== null && store.data.pushedHeads[pr.id] === pr.headOid),
       reapproveState,
+      baseOnlyState,
       orchestrated: (pr) => {
         const run = orchestratorRun(pr, claudeSettings);
         if (!run) return null;
@@ -946,6 +1017,16 @@ export function createAgent(deps: AgentDeps): Agent {
       for (const key of Object.keys(store.data.reapprove)) {
         if (!byId.has(key.split("|")[0])) {
           delete store.data.reapprove[key];
+          dirty = true;
+        }
+      }
+    }
+    // Re-reviews after a push alone: checked once per head whether only the base moved under your review.
+    for (const job of plan.baseChecks) startBaseOnlyCheck(job, byId.get(job.prId)!);
+    if (store.data.baseOnly) {
+      for (const key of Object.keys(store.data.baseOnly)) {
+        if (!byId.has(key.split("|")[0])) {
+          delete store.data.baseOnly[key];
           dirty = true;
         }
       }
@@ -1134,6 +1215,7 @@ export function createAgent(deps: AgentDeps): Agent {
           number: item.prNumber,
           ...(kind === "drive" && pr && remote ? { baseRef: `${remote}/${pr.baseRefName}` } : {}),
           ...(item.reasons ? { reasons: item.reasons } : {}),
+          stack: pr ? stackRules(pr, item.scenario) : null,
         }),
         allowedTools,
         pluginDirs,
@@ -1253,6 +1335,8 @@ export function createAgent(deps: AgentDeps): Agent {
           item.headline = "No commits — see what it found";
         } else if (!read.fastForward) {
           fail("The run rewrote the branch's history — nothing to push", "The app pushes fast-forwards only; run it again.");
+        } else if (read.merges > 0 && pr?.stack) {
+          fail("The run made a merge commit in a stacked PR — nothing to push", `A stack merges only with a linear history; ${STACK_REBASE_HINT}.`);
         } else {
           item.drive = read.drive;
           if (steps.length > 0) {
@@ -1610,6 +1694,8 @@ export function createAgent(deps: AgentDeps): Agent {
       const now = await collectDrive(git, worktree, drive.base, drive.reasons, hooksDir, place).catch((e: Error) => ({ error: e.message }));
       if ("error" in now) return `couldn't read the commits: ${now.error}`;
       if (!now.fastForward) return "the commits rewrite the branch's history — the app pushes fast-forwards only";
+      // A stack merges only with a linear history: a merge commit in a layer blocks the whole stack's merge.
+      if (now.merges > 0 && pr.stack) return `a merge commit in a stacked PR would break the stack's linear history — ${STACK_REBASE_HINT}`;
       if (now.drive.head !== drive.head) {
         item.drive = now.drive;
         return `there are commits you haven't seen — look at the ${now.drive.commits.length} commits again, then Push`;
@@ -1635,6 +1721,10 @@ export function createAgent(deps: AgentDeps): Agent {
     store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
     logRun(item, "pushed", { headOid: head, sessionId: item.sessionId, detail: `${n} commit(s)`, data: { attempt: store.data.drive[item.prId].attempts, mode: item.mode } });
     let headline = `Pushed ${n} commit${n === 1 ? "" : "s"}`;
+    // The open layers above a stacked PR are off its new head now: GitHub
+    // doesn't rebase them on a push, and the agent never rebases.
+    const above = stackLayer(pr)?.above ?? [];
+    if (above.length > 0) headline += ` — the ${above.length === 1 ? "layer above (#" + above[0] + ") needs" : `${above.length} layers above (${above.map((x) => `#${x}`).join(", ")}) need`} Rebase stack`;
     // The run's answers to reviewers go out once the code they talk about is on the branch.
     if (item.runFolder && item.plan && item.plan.replies.length > 0) {
       const out = await publishPlan(

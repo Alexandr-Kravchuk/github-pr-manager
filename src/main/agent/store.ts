@@ -55,6 +55,20 @@ export interface AgentStoreData {
    * restart. Dropped once its PR leaves the dashboard.
    */
   reapprove?: Record<string, ReapproveMark>;
+  /**
+   * Re-review after a push alone: whether the new head was the reviewed change
+   * on a new base (`sameChangeOnNewBase`), by `…|rereview|<head>|base` key —
+   * read once per head. Dropped once its PR leaves the dashboard.
+   */
+  baseOnly?: Record<string, BaseOnlyMark>;
+}
+
+export interface BaseOnlyMark {
+  verdict: "same" | "changed";
+  /** The head of your review it was compared with. */
+  oldHead: string;
+  note: string;
+  at: string;
 }
 
 export interface ReapproveMark {
@@ -90,6 +104,7 @@ export function readStore(file: string, day: string): AgentStoreData {
       paused: raw.paused === true,
       ...(typeof raw.board === "object" && raw.board !== null && !Array.isArray(raw.board) ? { board: raw.board } : {}),
       ...(typeof raw.reapprove === "object" && raw.reapprove !== null && !Array.isArray(raw.reapprove) ? { reapprove: raw.reapprove } : {}),
+      ...(typeof raw.baseOnly === "object" && raw.baseOnly !== null && !Array.isArray(raw.baseOnly) ? { baseOnly: raw.baseOnly } : {}),
     };
   } catch {
     return emptyStore(day);

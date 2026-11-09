@@ -133,6 +133,7 @@ function pr(overrides: Partial<PullRequest> & { id: string; number: number }): P
     viewerApproved: false,
     viewerReviewedAt: null,
     viewerReviewedHead: false,
+    viewerReviewedOid: null,
     myReReviewDue: false,
     hasNoReviews: true,
     isStale: false,

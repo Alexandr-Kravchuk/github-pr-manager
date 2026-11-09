@@ -597,6 +597,13 @@ export interface PullRequest {
    */
   viewerReviewedHead: boolean;
   /**
+   * The commit your latest opinionated review was submitted on, or null. The PR
+   * agent checks a new head against it: the same change on a new base (a stack
+   * GitHub rebased after a lower layer merged, the base merged in) needs no
+   * re-review.
+   */
+  viewerReviewedOid: string | null;
+  /**
    * true when YOUR change request still stands and the author has since acted
    * (pushed a new commit, or replied and left nothing unresolved) — the merge is
    * blocked on your re-review and GitHub will not ask you for it, because

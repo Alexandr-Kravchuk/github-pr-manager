@@ -689,7 +689,8 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
         const names = pr.failingChecks.map((c) => c.name);
         parts.push(names.length > 0 ? `CI failing: ${names.slice(0, 3).join(", ")}${names.length > 3 ? ` +${names.length - 3}` : ""}` : "CI failing");
       }
-      if (pr.hasConflicts) parts.push("Conflicts with the base branch");
+      // A stack mends a conflict by a rebase of its layers, never by a merge of the base in.
+      if (pr.hasConflicts) parts.push(pr.stack ? "Conflicts in the stack — it needs Rebase stack" : "Conflicts with the base branch");
       if (pr.hasUnaddressedChangeRequest || pr.hasUnaddressedComments) parts.push("Reviewers wait for your answer");
       return parts.join(" · ");
     }

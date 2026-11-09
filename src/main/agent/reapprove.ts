@@ -61,6 +61,75 @@ const lines = (out: string): string[] =>
     .map((l) => l.trim())
     .filter(Boolean);
 
+const OID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+/**
+ * The checks' common start, inside `withNoHooks`: the PR's head and its base's
+ * tip read from the remote — the head must be the one the dashboard shows, or
+ * it throws and the next head is checked — and both fetched without touching
+ * the clone: an empty refmap moves not even a remote-tracking branch, and no
+ * FETCH_HEAD is written. `baseTip` is null when the base branch is gone.
+ */
+async function fetchPrTips(
+  local: LocalRepo,
+  hooks: string,
+  pr: { number: number; baseRefName: string },
+  newHead: string,
+): Promise<{ git: (args: string[]) => Promise<string>; succeeds: (args: string[]) => Promise<boolean>; baseTip: string | null }> {
+  const git = (args: string[]) => local.git([...safeGit(hooks), ...args], local.checkout);
+  const succeeds = async (args: string[]) => {
+    try {
+      await git(args);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const baseRef = `refs/heads/${pr.baseRefName}`;
+  const pullRef = `refs/pull/${pr.number}/head`;
+  const tips = new Map(lines(await git(["ls-remote", local.remote, baseRef, pullRef])).map((l) => [l.split(/\s+/)[1], l.split(/\s+/)[0]]));
+  const baseTip = tips.get(baseRef) ?? null;
+  if (tips.get(pullRef) !== newHead) throw new Error("the PR has a newer head than the dashboard shows");
+  if (baseTip) await git(["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", local.remote, baseRef, pullRef]);
+  return { git, succeeds, baseTip };
+}
+
+/**
+ * Null when the PR's new head is exactly the change you reviewed on a new base
+ * — else why not. Covers a stack GitHub rebased after a lower layer merged, a
+ * "Rebase stack", and the base merged in: the expected tree is what git makes
+ * of the reviewed head and the base commit the new head sits on, merged over
+ * their common ancestor (`merge-tree --merge-base`); the new head's tree must
+ * be that one exactly. Anything of the author's own since — a commit, a
+ * conflict resolved by hand — makes it differ. Read in your clone the way
+ * `baseOnlyPush` reads it; the reviewed head, which a rebase leaves on no
+ * branch, is fetched by its id when the clone lacks it.
+ */
+export async function sameChangeOnNewBase(local: LocalRepo, pr: { number: number; baseRefName: string }, oldHead: string, newHead: string): Promise<string | null> {
+  if (!OID.test(oldHead) || !OID.test(newHead)) return "no commit id to compare";
+  if (oldHead === newHead) return "the head is the one you reviewed";
+  return withNoHooks(async (hooks) => {
+    const { git, succeeds, baseTip } = await fetchPrTips(local, hooks, pr, newHead);
+    if (!baseTip) return `no base branch ${pr.baseRefName} on the remote`;
+    if (!(await succeeds(["cat-file", "-e", `${oldHead}^{commit}`]))) {
+      await git(["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", local.remote, oldHead]).catch(() => "");
+      if (!(await succeeds(["cat-file", "-e", `${oldHead}^{commit}`]))) return "the reviewed head is in neither your clone nor the remote";
+    }
+    const onto = lines(await git(["merge-base", newHead, baseTip]).catch(() => ""))[0];
+    if (!onto) return "the new head shares no history with its base";
+    const from = lines(await git(["merge-base", oldHead, onto]).catch(() => ""))[0];
+    if (!from) return "the reviewed head shares no history with the new base";
+    let expected: string | undefined;
+    try {
+      expected = lines(await git(["merge-tree", "--write-tree", `--merge-base=${from}`, onto, oldHead]))[0];
+    } catch (e) {
+      return /unknown option/i.test((e as Error).message) ? "checking it needs git 2.40 or newer" : "the reviewed change doesn't go onto the new base cleanly";
+    }
+    const tree = lines(await git(["rev-parse", `${newHead}^{tree}`]))[0];
+    return expected && expected === tree ? null : "the PR's own change differs from the one you reviewed";
+  });
+}
+
 /**
  * Null when everything pushed between the approved head and the new one is
  * merges of the base, each exactly the tree `git merge-tree` makes of its two
@@ -71,23 +140,8 @@ const lines = (out: string): string[] =>
  */
 export async function baseOnlyPush(local: LocalRepo, pr: { number: number; baseRefName: string }, oldHead: string, newHead: string): Promise<string | null> {
   return withNoHooks(async (hooks) => {
-    const git = (args: string[]) => local.git([...safeGit(hooks), ...args], local.checkout);
-    const succeeds = async (args: string[]) => {
-      try {
-        await git(args);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    const baseRef = `refs/heads/${pr.baseRefName}`;
-    const pullRef = `refs/pull/${pr.number}/head`;
-    const tips = new Map(lines(await git(["ls-remote", local.remote, baseRef, pullRef])).map((l) => [l.split(/\s+/)[1], l.split(/\s+/)[0]]));
-    const baseTip = tips.get(baseRef);
+    const { git, succeeds, baseTip } = await fetchPrTips(local, hooks, pr, newHead);
     if (!baseTip) return `no base branch ${pr.baseRefName} on the remote`;
-    if (tips.get(pullRef) !== newHead) throw new Error("the PR has a newer head than the dashboard shows");
-    // An empty refmap: not even the remote-tracking branch moves.
-    await git(["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", local.remote, baseRef, pullRef]);
     if (!(await succeeds(["cat-file", "-e", `${oldHead}^{commit}`]))) return "the approved head is gone — the branch was rewritten since";
     if (!(await succeeds(["merge-base", "--is-ancestor", oldHead, newHead]))) return "the branch was rewritten since the approval";
     const own = lines(await git(["rev-list", "--parents", `${oldHead}..${newHead}`, "--not", baseTip])).map((l) => l.split(" "));

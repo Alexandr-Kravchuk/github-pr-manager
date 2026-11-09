@@ -165,7 +165,7 @@ Three layers:
   only the PR id and its choices, the PR is closed first and the task second,
   and a missing Jira token stops it before anything changes. Jira writes need a
   token with write scope — the read-only one the Jira section recommends gets a
-  refusal that says so) and the PR agent's seven: `agent-defaults.ts`
+  refusal that says so) and the PR agent's eight: `agent-defaults.ts`
   (the Agent tab's defaults and bounds), `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (where a
@@ -237,15 +237,43 @@ Three layers:
   branch moves (a test pins both on a real repository).
   Shadow offers it, On gives it at once; the PR is read again before anything
   goes out, the approval carries one line and the signature, and turning an
-  offer down hands the head back to the other rules).
+  offer down hands the head back to the other rules — a read that failed is
+  tried again ten minutes later, never by the plan it ends in, which would
+  start it over at once) and
+  `agent-stack.ts` (the agent and GitHub's native stacks: each layer's diff is
+  its own, the stack merges only with a linear history, and GitHub rebases
+  the layers above after a lower one merges — so a session on a layer is
+  told its place (`stackRules`: a review keeps to its layer, a finding in a
+  lower layer's code is a note, not a comment here; a drive never merges the
+  base in), a layer of yours that conflicts gets no drive but a "Rebase
+  stack" card (the agent never rebases or force-pushes — the button on
+  GitHub, or `gh stack rebase` + `gh stack push`), only the lowest broken
+  layer of your stack is driven (`brokenLayerBelow`; the ones above wait),
+  a drive's commits with a merge in them are neither kept at the run's end
+  nor pushed (`collectDrive` counts merges), and a push to a layer with open
+  layers above says they need Rebase stack. Not stack-only: a PR you
+  reviewed that got a push and nothing else since — no reply, not asked
+  again — is held while main checks in your clone that the new head is the
+  change you reviewed on a new base (`sameChangeOnNewBase` in
+  `main/agent/reapprove.ts`: the tree `git merge-tree --merge-base` makes of
+  the reviewed head and the base commit the new head sits on, over their
+  common ancestor, must be the new head's tree exactly — a stack GitHub
+  rebased, a Rebase stack, the base merged in). Then no re-review runs;
+  once per head (`baseOnly` marks in `state.json`, keyed
+  `…|rereview|<head>|base`), with the reviewed head fetched by its id when a
+  rebase left it on no branch; no clone or another review of yours since
+  makes it "changed" or looks again, and a failed check waits ten minutes
+  like re-approve's. The merge itself is not adapted yet: GitHub's
+  synchronous merge API, which `gh pr merge` uses, does not support stacked
+  PRs — the asynchronous `merge-async` endpoint does).
   Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
-  `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`
-  and `agent-reapprove.js` stay free of `node:` builtin references, so the
+  `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`,
+  `agent-reapprove.js` and `agent-stack.js` stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
@@ -396,8 +424,9 @@ Three layers:
   state change of an item), `board`
   (a card's column or button changed: `seen` on the first look, `move`,
   `action`, `left`), `plan` (why the agent leaves a PR alone — `idle` — what
-  holds the queue — `held`/`released` — and what a head's re-approve check
-  found, `reapprove-check`), `action` (each `act`, i.e. each
+  holds the queue — `held`/`released` — what a head's re-approve check
+  found, `reapprove-check`, and whether a reviewed PR's new head was the same
+  change on a new base, `base-check`), `action` (each `act`, i.e. each
   click, with its result) and `agent` (start, stop, `on`/`off`, `settings`
   path by path). State changes are found by diffing in `main/agent/journal.ts`,
   run before every save (`openStore`'s `beforeSave`) and after every plan, so a

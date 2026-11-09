@@ -106,6 +106,7 @@ for (const mod of [
   "agent-result.js",
   "agent-diagrams.js",
   "agent-reapprove.js",
+  "agent-stack.js",
   "stale.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
@@ -10759,9 +10760,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const read = await driveMod.withNoHooks((h) => driveMod.collectDrive(wt.runGit, repo, base, ["ci"], h));
       assert.deepStrictEqual(read.drive.commits.map((c) => c.subject), ["fix: one", "fix: two"]);
       assert.strictEqual(read.fastForward, true);
+      assert.strictEqual(read.merges, 0);
       assert.strictEqual(read.drive.head, g("rev-parse", "HEAD").stdout.trim(), "the commit a Push would send");
       assert.match(read.drive.stat, /a\.txt/);
       assert.match(read.drive.patch, /^\+3$/m);
+      // A merge among the run's commits is counted — a stack's layer must not get one.
+      const fixes = g("rev-parse", "HEAD").stdout.trim();
+      g("checkout", "-q", "-b", "side", base);
+      nfsA.writeFileSync(path.join(repo, "b.txt"), "side\n");
+      g("add", "b.txt");
+      g("commit", "-q", "-m", "side");
+      g("checkout", "-q", "-");
+      g("checkout", "-q", fixes);
+      g("merge", "-q", "--no-edit", "side");
+      const merged = await driveMod.withNoHooks((h) => driveMod.collectDrive(wt.runGit, repo, base, ["ci"], h));
+      assert.deepStrictEqual([merged.merges, merged.fastForward], [1, true], "a merge is still a fast-forward — but it is one");
       g("reset", "-q", "--hard", base);
       nfsA.writeFileSync(path.join(repo, "a.txt"), "amended\n");
       g("commit", "-q", "--amend", "-am", "base, amended");
@@ -11469,6 +11482,364 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(only(h).find((i) => i.scenario === "reask").headline, "Asked anna again — only the base changed");
       } finally {
         h.agent.stop();
+      }
+    });
+
+    await atest("agent re-approve: a failed read is tried again ten minutes later, not by the very plan it ends in", async () => {
+      let reads = 0;
+      const f = agentFixture({
+        pr: reviewPr({ role: "reviewed" }),
+        agent: { scenarios: { reapprove: { mode: "shadow", askReviewers: true } } },
+        script: keepWorking,
+        gh: async (args) => {
+          if (args[1] === "graphql") reads++;
+          return { code: 1, stdout: "", stderr: "HTTP 502" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => readLog(f).some((l) => l.event === "reapprove-check"));
+        await tickOnce();
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.strictEqual(reads, 1, "one read until the ten minutes are up");
+        assert.strictEqual(f.agent.getState().idle.PR_R, "Checking whether only the base changed since your approval");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    // --- GitHub's native stacks ---
+    const stk = require(path.join(__dirname, "../dist/main/shared/agent-stack.js"));
+    // Stack #9 of a/b: layer n is PR #(10 + n), all open unless `states` says otherwise.
+    const inStack = (position, size = 3, states = []) => ({
+      number: 9,
+      position,
+      size,
+      baseRefName: "master",
+      entries: Array.from({ length: size }, (_, i) => ({ position: i + 1, number: 11 + i, title: `layer ${i + 1}`, url: `https://github.com/a/b/pull/${11 + i}`, state: states[i] ?? "OPEN" })),
+      bottom: position > 1 ? { number: 11, url: "https://github.com/a/b/pull/11" } : null,
+    });
+    const layerPr = (position, o = {}) => ({
+      ...reviewPr({ id: `PR_L${position}`, number: 10 + position, role: o.role ?? "author" }),
+      stack: inStack(position, o.size, o.states),
+      baseRefName: position === 1 ? "master" : `layer-${position - 1}`,
+      blockedByStack: position > 1,
+      ...o.pr,
+    });
+
+    test("agent stack: a layer knows the PR below it and the open ones above; the lowest broken layer comes first", () => {
+      assert.strictEqual(stk.stackLayer({ stack: null }), null);
+      assert.deepStrictEqual(stk.stackLayer(layerPr(2, { size: 4, states: ["OPEN", "OPEN", "MERGED", "OPEN"] })), { number: 9, position: 2, size: 4, trunk: "master", below: 11, above: [14] }, "a merged layer above has nothing to rebase");
+      assert.strictEqual(stk.stackLayer(layerPr(1)).below, null);
+      const prs = [layerPr(1), layerPr(2), layerPr(3), { ...layerPr(1), id: "PR_X", repo: "x/y" }];
+      const red = new Set(["PR_L1", "PR_L2", "PR_X"]);
+      assert.strictEqual(stk.brokenLayerBelow(prs[2], prs, (p) => red.has(p.id)).id, "PR_L1", "the lowest of them");
+      assert.strictEqual(stk.brokenLayerBelow(prs[0], prs, (p) => red.has(p.id)), null, "nothing below the bottom — stack #9 of another repository is another stack");
+      assert.strictEqual(stk.brokenLayerBelow(prs[2], prs, () => false), null);
+      assert.strictEqual(stk.brokenLayerBelow(reviewPr(), prs, () => true), null, "outside a stack");
+    });
+
+    test("agent stack: a session on a layer keeps to it — a review to its own diff, a drive away from merging the base in", () => {
+      const review = stk.stackRules(layerPr(2), "review");
+      assert.match(review, /layer 2 of 3 in GitHub stack #9 \(bottom first, onto master\)/);
+      assert.match(review, /targets layer-1, the branch of #11 below it/);
+      assert.match(review, /a problem in code a lower layer added belongs to that PR/);
+      assert.match(stk.stackRules(layerPr(1), "rereview"), /it is the bottom layer, onto master/);
+      assert.match(stk.stackRules(layerPr(2), "drive"), /never merge the base branch into this one, and never rebase it/);
+      assert.strictEqual(stk.stackRules(layerPr(2), "afterMerge"), null);
+      assert.strictEqual(stk.stackRules(reviewPr(), "review"), null, "outside a stack");
+      const drive = agentCore.agentRules("drive", "shadow", null, { repo: "a/b", number: 12, baseRef: "origin/layer-1", reasons: ["ci"], stack: stk.stackRules(layerPr(2), "drive") });
+      assert.match(drive, /linear history/);
+      assert.doesNotMatch(drive, /Resolve a conflict by merging the base branch in/, "a layer is never told to merge its base");
+      assert.match(agentCore.agentRules("drive", "shadow", null, { repo: "a/b", number: 7, baseRef: "origin/master", reasons: ["ci"] }), /Resolve a conflict by merging the base branch in/, "outside a stack it still is");
+      assert.match(agentCore.agentRules("review", "shadow", null, { repo: "a/b", number: 12, stack: review }), /Review this layer only/);
+    });
+
+    test("agent stack: a conflicting layer is yours to rebase, and a broken layer waits for a broken one below it", () => {
+      const s = agentOn();
+      const conflicted = policy.planJobs([layerPr(2, { pr: { hasConflicts: true, ciState: "failure" } })], s, noSessions);
+      assert.deepStrictEqual([conflicted.jobs, conflicted.merges], [[], []], "no drive merging the base in, no self-review, no merge offer");
+      assert.match(conflicted.idle.get("PR_L2"), /^Yours — in a stack with conflicts; rebase the stack: Rebase stack on GitHub, or gh stack rebase and gh stack push$/);
+      assert.deepStrictEqual(policy.planJobs([{ ...reviewPr({ role: "author" }), hasConflicts: true }], s, noSessions).jobs[0].reasons, ["conflicts"], "outside a stack a conflict is still a drive");
+
+      const red = { ciState: "failure" };
+      const drives = (prs) => policy.planJobs(prs, s, noSessions).jobs.filter((j) => j.scenario === "drive").map((j) => j.prNumber);
+      const r = policy.planJobs([layerPr(3, { pr: red }), layerPr(2, { pr: red }), layerPr(1, { pr: red })], s, noSessions);
+      assert.deepStrictEqual(r.jobs.map((j) => j.prNumber), [11], "only the lowest broken layer is driven");
+      assert.strictEqual(r.idle.get("PR_L2"), "Yours — #11 below it in the stack comes first");
+      assert.strictEqual(r.idle.get("PR_L3"), "Yours — #11 below it in the stack comes first");
+      assert.deepStrictEqual(drives([layerPr(2, { pr: red }), layerPr(1)]), [12], "a green layer below holds nothing");
+      assert.deepStrictEqual(drives([layerPr(2, { pr: red }), layerPr(1, { role: "reviewer", pr: red })]), [12], "nor someone else's");
+      assert.deepStrictEqual(drives([layerPr(2, { pr: red }), layerPr(1, { pr: { ...red, isDraft: true } })]), [12], "nor a draft");
+      assert.strictEqual(policy.planJobs([layerPr(2, { pr: red }), layerPr(1, { pr: { hasConflicts: true } })], s, noSessions).idle.get("PR_L2"), "Yours — #11 below it in the stack comes first", "a layer below that needs its rebase holds the ones above");
+      // The Board's card says what mends it.
+      const conflictPr = layerPr(2, { pr: { hasConflicts: true } });
+      assert.strictEqual(view.stageLine(stage(conflictPr), conflictPr), "Conflicts in the stack — it needs Rebase stack");
+      const plainPr = { ...reviewPr({ role: "author" }), hasConflicts: true };
+      assert.strictEqual(view.stageLine(stage(plainPr), plainPr), "Conflicts with the base branch");
+    });
+
+    test("agent stack: a push alone after your review is checked for the same change on a new base before any re-review", () => {
+      const at = (h) => `2026-07-0${h}T00:00:00Z`;
+      const rv = (o = {}) => ({ ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), viewerReviewedAt: at(5), viewerReviewedHead: false, viewerReviewedOid: "old111", lastCommitPushedAt: at(6), authorRepliedAt: null, ...o });
+      const plan = (state, o) => policy.planJobs([rv(o)], agentOn(), { ...noSessions, baseOnlyState: () => state });
+      let r = plan("unchecked");
+      assert.deepStrictEqual([r.jobs, r.baseChecks.map((j) => j.key)], [[], ["PR_R|rereview|aaa111|base"]]);
+      assert.strictEqual(r.idle.get("PR_R"), "Reviewed — checking whether only the base changed under your review");
+      r = plan("checking");
+      assert.deepStrictEqual([r.jobs.length, r.baseChecks.length], [0, 1]);
+      r = plan("same");
+      assert.deepStrictEqual([r.jobs, r.baseChecks, r.idle.get("PR_R")], [[], [], "Reviewed — only the base changed under your review since"]);
+      assert.deepStrictEqual(plan("changed").jobs.map((j) => j.key), [`PR_R|rereview|aaa111|reply@${at(6)}`], "the re-review runs as it always did");
+      assert.strictEqual(plan("same", { authorRepliedAt: at(7) }).jobs.length, 1, "the author answered too: no check");
+      assert.strictEqual(plan("same", { roles: ["reviewer"], requestedOfMe: true }).jobs.length, 1, "asked again: no check");
+      assert.strictEqual(plan("same", { viewerReviewedOid: null }).jobs.length, 1, "no review commit to compare with");
+      assert.strictEqual(policy.planJobs([rv()], agentOn(), noSessions).jobs.length, 1, "no hook: changed");
+    });
+
+    await atest("agent stack: in a real clone a layer rebased after the one below merged is the same change; an own commit, a change folded in or a conflict resolved by hand isn't", async () => {
+      const md = require(path.join(__dirname, "../dist/main/main/agent/reapprove.js"));
+      const wtM = require(path.join(__dirname, "../dist/main/main/agent/worktrees.js"));
+      const { execFileSync } = require("node:child_process");
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-stack-"));
+      const remote = path.join(root, "remote.git");
+      const co = path.join(root, "co");
+      const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+      const g = (...args) => execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", "-c", "core.editor=true", ...args], { cwd: co, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+      const write = (file, text) => nfsA.writeFileSync(path.join(co, file), text);
+      const lines = (over = {}) => Array.from({ length: 12 }, (_, i) => over[i + 1] ?? `line ${i + 1}`).join("\n") + "\n";
+      execFileSync("git", ["init", "--bare", "-b", "master", remote], { env, stdio: "ignore" });
+      // As GitHub does: a commit is fetched by its id, whichever ref holds it.
+      execFileSync("git", ["-C", remote, "config", "uploadpack.allowAnySHA1InWant", "true"], { env, stdio: "ignore" });
+      execFileSync("git", ["clone", remote, co], { env, stdio: "ignore" });
+      g("checkout", "-b", "master");
+      write("a.txt", lines());
+      write("b.txt", lines());
+      g("add", ".");
+      g("commit", "-m", "base");
+      g("push", "origin", "master");
+      // Layer 1 changes a.txt; layer 2 — the PR you reviewed — changes b.txt on top of it.
+      g("checkout", "-b", "layer-1");
+      write("a.txt", lines({ 2: "layer 1" }));
+      g("commit", "-am", "layer 1");
+      g("push", "origin", "layer-1");
+      g("checkout", "-b", "layer-2");
+      write("b.txt", lines({ 5: "layer 2" }));
+      g("commit", "-am", "layer 2");
+      const reviewed = g("rev-parse", "HEAD");
+      const pushPr = () => {
+        g("push", "-f", "origin", "HEAD:refs/pull/2/head");
+        return g("rev-parse", "HEAD");
+      };
+      pushPr();
+      // Layer 1 lands squashed, master moves on elsewhere, and GitHub rebases layer 2 onto master.
+      g("checkout", "master");
+      write("c.txt", "elsewhere\n");
+      g("add", ".");
+      g("commit", "-m", "master moves");
+      g("merge", "--squash", "layer-1");
+      g("commit", "-m", "layer 1 (#1)");
+      g("push", "origin", "master");
+      g("checkout", "-B", "rebased", reviewed);
+      g("rebase", "--onto", "master", "layer-1");
+      const rebased = pushPr();
+      const local = { git: wtM.runGit, checkout: co, remote: "origin" };
+      const check = (head) => md.sameChangeOnNewBase(local, { number: 2, baseRefName: "master" }, reviewed, head);
+      assert.strictEqual(await check(rebased), null, "the same layer on the new base");
+
+      write("d.txt", "more\n");
+      g("add", ".");
+      g("commit", "-m", "more");
+      assert.strictEqual(await check(pushPr()), "the PR's own change differs from the one you reviewed", "a commit of the author's on top");
+
+      g("reset", "--hard", rebased);
+      write("b.txt", lines({ 5: "layer 2", 9: "slipped in" }));
+      g("commit", "--amend", "-a", "--no-edit");
+      assert.strictEqual(await check(pushPr()), "the PR's own change differs from the one you reviewed", "a change folded into the rebase");
+
+      // Outside a stack: the base merged in is the same change too.
+      g("checkout", "-B", "merged", reviewed);
+      g("merge", "--no-edit", "master");
+      assert.strictEqual(await check(pushPr()), null, "the base merged in, cleanly");
+
+      // The base changes the reviewed line; the rebase's conflict is resolved by hand.
+      g("checkout", "master");
+      write("b.txt", lines({ 5: "master's own line 5" }));
+      g("commit", "-am", "master touches line 5");
+      g("push", "origin", "master");
+      g("checkout", "-B", "conflict", rebased);
+      try {
+        g("rebase", "master");
+      } catch {
+        // The conflict, as expected.
+      }
+      write("b.txt", lines({ 5: "layer 2" }));
+      g("add", ".");
+      g("rebase", "--continue");
+      const conflicted = pushPr();
+      assert.strictEqual(await check(conflicted), "the reviewed change doesn't go onto the new base cleanly");
+
+      await assert.rejects(check(rebased), /newer head/, "the PR moved on since the dashboard saw it");
+      assert.strictEqual(await md.sameChangeOnNewBase(local, { number: 2, baseRefName: "master" }, "nope", conflicted), "no commit id to compare");
+      assert.ok(!nfsA.existsSync(path.join(co, ".git", "FETCH_HEAD")), "no FETCH_HEAD is written");
+
+      // A clone that never saw the reviewed head: it is fetched by its id from the remote, where no ref holds it now.
+      const co2 = path.join(root, "co2");
+      // --no-local: a plain local clone copies every object, unreachable ones too.
+      execFileSync("git", ["clone", "--no-local", remote, co2], { env, stdio: "ignore" });
+      g("push", "-f", "origin", `${rebased}:refs/pull/2/head`);
+      assert.throws(() => execFileSync("git", ["cat-file", "-e", `${reviewed}^{commit}`], { cwd: co2, stdio: "ignore" }), "not in the new clone yet");
+      assert.strictEqual(await md.sameChangeOnNewBase({ git: wtM.runGit, checkout: co2, remote: "origin" }, { number: 2, baseRefName: "master" }, reviewed, rebased), null);
+    });
+
+    await atest("agent stack: a reviewed PR whose new head is the same change on a new base gets no re-review — checked once per head", async () => {
+      const oldHead = "1".repeat(40);
+      const head = "2".repeat(40);
+      const reviewed = () => ({
+        ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false, headOid: head }),
+        ...{ viewerReviewedAt: "2026-07-05T00:00:00Z", viewerReviewedHead: false, viewerReviewedOid: oldHead, lastCommitPushedAt: "2026-07-06T00:00:00Z", authorRepliedAt: null },
+        stack: inStack(2),
+      });
+      const fakeGit = (tree) => async (args) => {
+        const a = gitCmd(args);
+        // ls-remote <remote> <base ref> <pull ref>: both there, the PR at the dashboard's head.
+        if (a[0] === "ls-remote") return `${"b".repeat(40)}\t${a[2]}\n${head}\t${a[3]}\n`;
+        if (a[0] === "merge-base") return `${"c".repeat(40)}\n`;
+        if (a[0] === "merge-tree") return "tree1\n";
+        if (a[0] === "rev-parse") return `${tree}\n`;
+        return "";
+      };
+      const f = agentFixture({ pr: reviewed(), script: keepWorking, git: fakeGit("tree1") });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => readLog(f).some((l) => l.event === "base-check"));
+        await tickOnce();
+        const line = readLog(f).find((l) => l.event === "base-check");
+        assert.deepStrictEqual([line.data.verdict, line.data.oldHead, line.data.stack, line.data.layer, line.detail], ["same", oldHead, 9, 2, "only the base changed since 1111111"]);
+        assert.deepStrictEqual([only(f).length, f.children.length], [0, 0], "no re-review");
+        assert.strictEqual(f.agent.getState().idle.PR_R, "Reviewed — only the base changed under your review since");
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.strictEqual(readLog(f).filter((l) => l.event === "base-check").length, 1, "once per head");
+      } finally {
+        f.agent.stop();
+      }
+
+      // The layer's own change differs: the re-review runs — told it is a layer.
+      const g = agentFixture({ pr: reviewed(), script: keepWorking, git: fakeGit("tree2") });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length === 1);
+        assert.strictEqual(readLog(g).find((l) => l.event === "base-check").data.verdict, "changed");
+        const c = g.children[0];
+        assert.match(c.args[c.args.indexOf("--append-system-prompt") + 1], /layer 2 of 3 in GitHub stack #9/);
+      } finally {
+        g.agent.stop();
+      }
+
+      // A failed check waits its ten minutes; meanwhile no re-review starts.
+      let lsRemotes = 0;
+      const k = agentFixture({
+        pr: reviewed(),
+        script: keepWorking,
+        git: async (args) => {
+          if (gitCmd(args)[0] === "ls-remote") {
+            lsRemotes++;
+            throw new Error("network down");
+          }
+          return "";
+        },
+      });
+      try {
+        k.agent.onSnapshot(k.snapshot);
+        await until(() => readLog(k).some((l) => l.event === "base-check"));
+        await tickOnce();
+        k.agent.onSnapshot(k.snapshot);
+        await tickOnce();
+        assert.deepStrictEqual([lsRemotes, readLog(k).find((l) => l.event === "base-check").data.verdict, only(k).length], [1, "error", 0]);
+        assert.strictEqual(k.agent.getState().idle.PR_R, "Reviewed — checking whether only the base changed under your review");
+      } finally {
+        k.agent.stop();
+      }
+    });
+
+    await atest("agent stack: a drive on a layer never pushes a merge commit, and says which layers above need Rebase stack", async () => {
+      const mine = { ...layerPr(2), ciState: "failure", headRefName: "layer-2", headOid: "a".repeat(40) };
+      let merges = "0";
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const pushes = [];
+      const f = agentFixture({
+        pr: mine,
+        script: succeed("Fixed the failing test."),
+        fetchPr: async () => ({ pr: mine, state: "OPEN", viewer: "me" }),
+        git: async (all) => {
+          let i = 0;
+          for (;;) {
+            if (all[i] === "-c") i += 2;
+            else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+            else break;
+          }
+          const args = all.slice(i);
+          if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+          if (args[0] === "log") return "2222222222222222222222222222222222222222\tfix: the failing test\n";
+          if (args[0] === "rev-list") return `${merges}\n`;
+          if (args[0] === "diff") return args.includes("--stat") ? " a.ts | 2 +-" : "+fixed";
+          if (args[0] === "rev-parse") return args.includes("HEAD") ? "2222222222222222222222222222222222222222\n" : `${commonDir}\n`;
+          if (args[0] === "remote") return "https://github.com/a/b.git\n";
+          if (args[0] === "push") pushes.push(all);
+          return "";
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        const rules = f.children[0].args[f.children[0].args.indexOf("--append-system-prompt") + 1];
+        assert.match(rules, /layer 2 of 3 in GitHub stack #9/);
+        assert.doesNotMatch(rules, /Resolve a conflict by merging the base branch in/);
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        // A merge commit turned up in the worktree since (the session went on): nothing pushed.
+        merges = "1";
+        assert.match((await f.agent.act({ type: "push", runId: item.runId })).error, /merge commit in a stacked PR/);
+        assert.strictEqual(pushes.length, 0);
+        merges = "0";
+        only(f)[0].state = "needsYou";
+        assert.deepStrictEqual(await f.agent.act({ type: "push", runId: item.runId }), { ok: true });
+        assert.strictEqual(pushes.length, 1);
+        assert.strictEqual(only(f)[0].headline, "Pushed 1 commit — the layer above (#13) needs Rebase stack");
+      } finally {
+        f.agent.stop();
+      }
+
+      // A run that made a merge commit itself: failed, nothing to push.
+      merges = "1";
+      const g = agentFixture({
+        pr: mine,
+        script: succeed("Merged the base in."),
+        git: async (all) => {
+          let i = 0;
+          for (;;) {
+            if (all[i] === "-c") i += 2;
+            else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+            else break;
+          }
+          const args = all.slice(i);
+          if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+          if (args[0] === "log") return "2222222222222222222222222222222222222222\tMerge branch 'layer-1'\n";
+          if (args[0] === "rev-list") return "1\n";
+          if (args[0] === "rev-parse") return args.includes("HEAD") ? "2222222222222222222222222222222222222222\n" : `${commonDir}\n`;
+          if (args[0] === "remote") return "https://github.com/a/b.git\n";
+          return "";
+        },
+      });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => only(g).some((i) => i.state === "error"));
+        assert.strictEqual(only(g)[0].headline, "The run made a merge commit in a stacked PR — nothing to push");
+      } finally {
+        g.agent.stop();
       }
     });
 

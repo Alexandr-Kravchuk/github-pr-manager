@@ -1,3 +1,4 @@
+import { brokenLayerBelow, STACK_REBASE_HINT } from "./agent-stack";
 import type { AgentRunKind, AgentScenario, AgentSettings, PullRequest } from "./types";
 
 export type { AgentScenario };
@@ -53,6 +54,14 @@ export interface PlanContext {
    * the other rules decide. Absent: "pass".
    */
   reapproveState?: (pr: PullRequest, scenario: "reapprove" | "reask") => "unchecked" | "checking" | "same" | "pass";
+  /**
+   * A PR you reviewed that got a push and nothing else since: whether its new
+   * head is the change you reviewed on a new base — a stack GitHub rebased
+   * after a lower layer merged, the base merged in. "unchecked" — main hasn't
+   * looked yet; "checking"; "same" — no re-review needed; "changed" — the
+   * re-review runs. Absent: "changed".
+   */
+  baseOnlyState?: (pr: PullRequest) => "unchecked" | "checking" | "same" | "changed";
 }
 
 /** Why your PR gets no self-review now, or null when it should get one. */
@@ -74,6 +83,11 @@ export interface PlanResult {
    * main still has to check, and those it found the same (their offers stand).
    */
   reapprovals: AgentJob[];
+  /**
+   * Re-reviews held until main has checked whether only the base changed
+   * under the reviewed change (`baseOnlyState` "unchecked") — never a run.
+   */
+  baseChecks: AgentJob[];
   /** Why each PR the agent leaves alone is idle — shown on the Board's Idle column. */
   idle: Map<string, string>;
 }
@@ -199,10 +213,11 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
   const jobs: AgentJob[] = [];
   const merges: AgentJob[] = [];
   const reapprovals: AgentJob[] = [];
+  const baseChecks: AgentJob[] = [];
   const idle = new Map<string, string>();
   if (!s.enabled) {
     for (const pr of prs) idle.set(pr.id, "The agent is off");
-    return { jobs, merges, reapprovals, idle };
+    return { jobs, merges, reapprovals, baseChecks, idle };
   }
   for (const pr of prs) {
     const skip = (reason: string) => idle.set(pr.id, reason);
@@ -237,6 +252,13 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
         skip(`Yours — ${orchestrated}`);
         continue;
       }
+      // A layer of a stack that conflicts with its base: only a rebase of the
+      // stack mends it — a merge of the base in would break the linear history
+      // the stack needs to merge — and the agent never rebases or force-pushes.
+      if (pr.stack && pr.hasConflicts) {
+        skip(`Yours — in a stack with conflicts; ${STACK_REBASE_HINT}`);
+        continue;
+      }
       // Your own PRs: driven to green when something is wrong, a Merge button once they're ready.
       const reasons = driveReasons(pr, s);
       if (reasons.length > 0) {
@@ -255,6 +277,13 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
         const exhausted = ctx.driveExhausted?.(pr) ?? null;
         if (exhausted) {
           skip(exhausted);
+          continue;
+        }
+        // In a stack, the lowest broken layer first: what breaks a layer usually
+        // comes from below, and a fix there rebases this one anyway.
+        const below = brokenLayerBelow(pr, prs, (p) => p.roles.includes("author") && !p.isDraft && (p.hasConflicts || driveReasons(p, s).length > 0));
+        if (below) {
+          skip(`Yours — #${below.number} below it in the stack comes first`);
           continue;
         }
         // On only when every reason's scenario is On; one Shadow reason makes the run Shadow.
@@ -328,6 +357,22 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
         skip("Your Claude session is on it");
         continue;
       }
+      // A push and nothing else since your review: it may be the change you
+      // reviewed on a new base — GitHub rebasing a stack after a lower layer
+      // merged, the base merged in. Main checks that in your clone first.
+      const replied = pr.authorRepliedAt !== null && pr.viewerReviewedAt !== null && pr.authorRepliedAt > pr.viewerReviewedAt;
+      if (!asked && !replied && pr.viewerReviewedOid && pr.headOid) {
+        const state = ctx.baseOnlyState?.(pr) ?? "changed";
+        if (state === "same") {
+          skip("Reviewed — only the base changed under your review since");
+          continue;
+        }
+        if (state !== "changed") {
+          baseChecks.push({ key: jobKey(pr, "rereview", "base"), prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario: "rereview", kind: "rereview", mode: rr, createdAt: pr.createdAt });
+          skip("Reviewed — checking whether only the base changed under your review");
+          continue;
+        }
+      }
       jobs.push({
         key: jobKey(pr, "rereview", `${asked ? "asked" : "reply"}@${since ?? "-"}`),
         prId: pr.id,
@@ -370,7 +415,7 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     });
   }
   jobs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  return { jobs, merges, reapprovals, idle };
+  return { jobs, merges, reapprovals, baseChecks, idle };
 }
 
 /** `{url}` filled in; an empty template falls back to the given default. */
