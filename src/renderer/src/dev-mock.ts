@@ -304,6 +304,26 @@ const FIXTURES: Record<string, PullRequest[]> = {
       canBeMerged: true,
       reviewers: [{ login: "me", avatarUrl: "", reviewState: "approved" }],
     }),
+    // Approved by me on this very head, then my review was asked for again:
+    // nothing waits on me — Done, with "Approve again" in its menu.
+    pr({
+      title: "ENG-105880: Modal window size falls back to the default when the add-on fails",
+      repo: "acme/clio",
+      number: 941,
+      issueKey: "ENG-105880",
+      roles: ["reviewer", "reviewed"],
+      author: { login: "teammate", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4" },
+      requestedOfMe: true,
+      viewerHasReviewed: true,
+      viewerApproved: true,
+      viewerReviewedHead: true,
+      viewerReviewedAt: new Date(Date.now() - 3 * 3600e3).toISOString(),
+      hasHumanApproval: true,
+      hasNoReviews: false,
+      reviewDecision: "APPROVED",
+      canBeMerged: true,
+      reviewers: [{ login: "me", avatarUrl: "", reviewState: "approved" }],
+    }),
     // The author merged master in: the branch rule dismissed my approval, and
     // nothing of the PR changed — the agent offers it back.
     pr({
@@ -801,6 +821,14 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
     for (const l of agentListeners) l(agentState);
     return { ok: true };
   }
+  // Your approval again answers the request: GitHub stops listing you as asked.
+  if (action.type === "approveAgain") {
+    const pr = snapshot.pullRequests.find((p) => p.id === action.prId);
+    if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+    pr.requestedOfMe = false;
+    pr.roles = pr.roles.filter((r) => r !== "reviewer");
+    return { ok: true };
+  }
   if (action.type === "enqueue") {
     const pr = snapshot.pullRequests.find((p) => p.id === action.prId);
     if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
@@ -892,9 +920,16 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
   return { ok: true };
 }
 
+/** As main pushes a forced poll's snapshot to the window: a fresh copy, so React sees the change. */
+const snapshotListeners = new Set<(s: typeof snapshot) => void>();
+
 const api: PrManagerApi = {
   getDashboard: async () => ({ ok: true, snapshot }),
-  refresh: async () => ({ ok: true, snapshot }),
+  refresh: async () => {
+    const fresh = { ...snapshot, pullRequests: snapshot.pullRequests.map((p) => ({ ...p })) };
+    for (const l of snapshotListeners) l(fresh);
+    return { ok: true, snapshot: fresh };
+  },
   getConfig: async () => ({
     ok: true,
     config: {
@@ -969,7 +1004,10 @@ const api: PrManagerApi = {
   }),
   getWhatsNew: async () => null,
   dismissWhatsNew: async () => {},
-  onSnapshot: () => () => {},
+  onSnapshot: (listener) => {
+    snapshotListeners.add(listener);
+    return () => snapshotListeners.delete(listener);
+  },
   onConfigError: () => () => {},
   onUpdateStatus: () => () => {},
   onNotifySound: () => () => {},

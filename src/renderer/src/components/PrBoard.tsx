@@ -250,6 +250,17 @@ function menuFor(card: StageCard, state: AgentState, first: string | null, run: 
     hand(stage.lane === "mine" ? "Self-review again" : "Re-review now", stage.lane === "mine" ? "The agent reviews its head again before reviewers look" : "The agent re-reviews it now");
     return out;
   }
+  if (stage.column === "done") {
+    // Asked again with your approval standing on this head: one click answers the request.
+    if (stage.askedAgain && pr) {
+      out.push({
+        label: "Approve again",
+        title: "Answers the review request with your approval on this same head — one line, signed by the agent",
+        action: () => run({ type: "approveAgain", prId: pr.id }).then((ok) => ok && void window.api.refresh()),
+      });
+    }
+    return out;
+  }
   if (stage.column !== "you" || !stage.action) return out;
   const discard = (label: string, title: string) => item && out.push({ label, title, action: () => run({ type: "skip", runId: item.runId }) });
   const claude = (label: string, title: string) => hasSession && item && out.push({ label, title, action: () => run({ type: "continue", runId: item.runId }) });

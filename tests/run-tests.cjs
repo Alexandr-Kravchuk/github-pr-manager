@@ -9320,6 +9320,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(v({ type: "pause", runId: RID, extra: "dropped" }), { type: "pause", runId: RID });
       assert.deepStrictEqual(v({ type: "hint", runId: RID, text: "  look at x.ts  " }), { type: "hint", runId: RID, text: "look at x.ts" });
       assert.deepStrictEqual(v({ type: "enqueue", prId: "PR_kwDOA" }), { type: "enqueue", prId: "PR_kwDOA" });
+      assert.deepStrictEqual(v({ type: "approveAgain", prId: "PR_kwDOA", body: "anything", commit: "x" }), { type: "approveAgain", prId: "PR_kwDOA" }, "only the PR is named — what goes out is main's");
+      assert.throws(() => v({ type: "approveAgain", prId: 7 }));
       for (const t of ["skip", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver"]) {
         assert.strictEqual(v({ type: t, runId: RID }).type, t);
       }
@@ -11956,6 +11958,94 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         g.agent.onSnapshot(g.snapshot);
         await until(() => only(g).some((i) => i.state === "error"));
         assert.strictEqual(only(g)[0].headline, "The run made a merge commit in a stacked PR — nothing to push");
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    // --- asked again with your approval standing on the head (#4079) ---
+    const approvedHere = (o = {}) => ({
+      ...reviewPr({ viewerHasReviewed: true, role: "reviewer", requestedOfMe: true, headOid: "e".repeat(40) }),
+      roles: ["reviewer", "reviewed"],
+      viewerApproved: true,
+      viewerReviewedHead: true,
+      viewerReviewedOid: "e".repeat(40),
+      viewerReviewedAt: new Date(Date.now() - 3 * 3600e3).toISOString(),
+      authorRepliedAt: null,
+      ...o,
+    });
+
+    test("agent board: asked again with your approval standing on this head is Done, not Your move — a reply or a new head is yours again", () => {
+      const s = stage(approvedHere());
+      assert.deepStrictEqual([s.lane, s.column, s.action, s.askedAgain, s.earlier], ["review", "done", null, true, false]);
+      assert.strictEqual(view.stageLine(s, approvedHere()), "Asked again — your approval stands on this head");
+      assert.strictEqual(view.approvalStands(approvedHere()), true);
+      // The author answered in a thread after your approval: a look is due.
+      const replied = approvedHere({ authorRepliedAt: new Date().toISOString() });
+      assert.strictEqual(view.approvalStands(replied), false);
+      assert.deepStrictEqual(where(stage(replied)), ["review", "you", "rereview", "Open on GitHub", false]);
+      // Your approval is on an older head: the new head is unreviewed.
+      assert.deepStrictEqual(where(stage(approvedHere({ viewerReviewedHead: false }))), ["review", "you", "rereview", "Open on GitHub", false]);
+      // Not asked: the plain approval, as before.
+      const quiet = stage(approvedHere({ requestedOfMe: false, roles: ["reviewed"] }));
+      assert.deepStrictEqual([quiet.column, quiet.askedAgain], ["done", false]);
+      assert.strictEqual(view.stageLine(quiet, approvedHere({ requestedOfMe: false, roles: ["reviewed"] })), "You approved");
+    });
+
+    await atest("agent: Approve again answers the request on your click — read again first, signed, on the same head; nothing else", async () => {
+      const head = "e".repeat(40);
+      let freshPr = approvedHere();
+      const posted = [];
+      const f = agentFixture({
+        pr: approvedHere(),
+        script: keepWorking,
+        fetchPr: async () => ({ pr: freshPr, state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => {
+          posted.push({ endpoint: args[1], body: JSON.parse(opts.input) });
+          return { code: 0, stdout: "{}", stderr: "" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.deepStrictEqual([only(f).length, f.children.length], [0, 0], "asked again with nothing new: no re-review");
+        // GitHub says otherwise by now: nothing goes out.
+        freshPr = approvedHere({ headOid: "f".repeat(40) });
+        assert.match((await f.agent.act({ type: "approveAgain", prId: "PR_R" })).error, /new commits since/);
+        freshPr = approvedHere({ authorRepliedAt: new Date().toISOString() });
+        assert.match((await f.agent.act({ type: "approveAgain", prId: "PR_R" })).error, /no longer stands|answered since/);
+        assert.deepStrictEqual(posted, []);
+        freshPr = approvedHere();
+        assert.deepStrictEqual(await f.agent.act({ type: "approveAgain", prId: "PR_R" }), { ok: true });
+        assert.deepStrictEqual(posted.map((p) => [p.endpoint, p.body.event, p.body.commit_id]), [["repos/a/b/pulls/7/reviews", "APPROVE", head]]);
+        assert.ok(posted[0].body.body.startsWith("Approved again: nothing changed since my approval of `eeeeeee`.") && posted[0].body.body.endsWith(ad.DEFAULT_AGENT_SIGNATURE), "one line and the signature");
+        assert.deepStrictEqual(only(f), [], "no item, no session");
+        const logged = readLog(f).find((l) => l.event === "approved-again");
+        assert.deepStrictEqual([logged.kind, logged.prNumber, logged.headOid], ["run", 7, head]);
+        assert.ok(readLog(f).some((l) => l.kind === "action" && l.event === "approveAgain" && l.data.ok === true), "the click is in the log");
+        assert.strictEqual((await f.agent.act({ type: "approveAgain", prId: "PR_GONE" })).ok, false);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a review you asked for that finds your approval already on the head says so", async () => {
+      const f = agentFixture({ pr: approvedHere({ requestedOfMe: false, roles: ["reviewed"] }), script: succeed("Already approved this head; nothing new."), captureScript: captureJs });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => only(f).length === 1 && only(f)[0].state === "done");
+        assert.strictEqual(only(f)[0].headline, "Already approved on this head — nothing to post");
+      } finally {
+        f.agent.stop();
+      }
+      // Elsewhere it stays as it was.
+      const g = agentFixture({ pr: { ...approvedHere({ requestedOfMe: false, roles: ["reviewed"] }), viewerApproved: false }, script: succeed("Nothing to add."), captureScript: captureJs });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        assert.deepStrictEqual(await g.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => only(g).length === 1 && only(g)[0].state === "done");
+        assert.strictEqual(only(g)[0].headline, "Reviewed — nothing to post");
       } finally {
         g.agent.stop();
       }

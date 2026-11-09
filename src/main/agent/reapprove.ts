@@ -346,6 +346,18 @@ export function reapproveRequest(repo: string, number: number, head: string, old
   };
 }
 
+/**
+ * Your approval given again on the head it already stands on — on your click,
+ * to answer a review request made after it: one line and the signature.
+ */
+export function approveAgainRequest(repo: string, number: number, head: string, signature: string): PublishRequest {
+  return {
+    label: "approval",
+    endpoint: `repos/${repo}/pulls/${number}/reviews`,
+    body: { event: "APPROVE", commit_id: head, body: signedBody(`Approved again: nothing changed since my approval of \`${head.slice(0, 7)}\`.`, signature) },
+  };
+}
+
 /** Your reviewers asked again — GitHub tells them; nothing is written in the PR. */
 export function reaskRequest(repo: string, number: number, logins: readonly string[]): PublishRequest {
   return { label: "review request", endpoint: `repos/${repo}/pulls/${number}/requested_reviewers`, body: { reviewers: [...logins] } };

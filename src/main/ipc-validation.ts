@@ -191,6 +191,8 @@ export function validateAgentAction(value: unknown): AgentAction {
     const b = before();
     return { type: "enqueue", prId: validatePrId(v.prId), ...(b ? { before: b } : {}) };
   }
+  // What goes out is main's own line on the PR's head: only the PR is named.
+  if (v.type === "approveAgain") return { type: "approveAgain", prId: validatePrId(v.prId) };
   // The whole agent: nothing else rides along.
   if (v.type === "pauseAgent" || v.type === "resumeAgent") return { type: v.type };
   if (typeof v.runId !== "string" || !RUN_ID.test(v.runId)) throw new Error("agentAction: expected a run id.");

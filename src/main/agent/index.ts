@@ -8,7 +8,7 @@ import { describePlan, disputeSteps, gitBashPath, readPlanLines, summarizePlan, 
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
-import { AGENT_CLOSED, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
+import { AGENT_CLOSED, approvalStands, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -48,7 +48,7 @@ import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { cutShort, hookCommand, NO_PUSH_ENV, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
-import { checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
+import { approveAgainRequest, checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
 import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
 import { diagramComment, wantsDiagrams } from "../../shared/agent-diagrams";
 import { actionArgs, boardNow, clip, diffBoard, diffIdle, diffItems, itemFields, runStats, settingsDiff, type ItemMark } from "./journal";
@@ -846,6 +846,44 @@ export function createAgent(deps: AgentDeps): Agent {
     }
   }
 
+  /** PRs being approved again right now — a second click waits for the first. */
+  const approvingAgain = new Set<string>();
+
+  /**
+   * Your approval again, on your click, on a PR it already stands on: a review
+   * requested of you after it keeps the PR listed as asked of you, and only a
+   * new review answers that. The PR is read again first — it must still be open,
+   * at the head on the card, with your approval standing on that head and
+   * nothing from the author since — and what goes out is one line and the
+   * signature, on that head. Nothing else: no session, no item.
+   */
+  async function approveAgain(prId: string, all: Settings): Promise<AgentActionResult> {
+    const pr = snapshotPr(prId);
+    if (!pr?.headOid) return { ok: false, error: "The PR isn't on the dashboard any more." };
+    if (!deps.fetchPr) return { ok: false, error: "The app can't read the PR here." };
+    if (approvingAgain.has(prId)) return { ok: false, error: "It is being approved again already." };
+    approvingAgain.add(prId);
+    try {
+      let read: FreshPullRequest | null;
+      try {
+        read = await deps.fetchPr({ id: pr.id, hostLabel: pr.hostLabel, roles: pr.roles });
+      } catch (e) {
+        return { ok: false, error: `Couldn't read the PR: ${(e as Error).message}` };
+      }
+      if (!read) return { ok: false, error: "The PR is gone or out of reach." };
+      if (read.state !== "OPEN") return { ok: false, error: `The PR was ${read.state.toLowerCase()} already.` };
+      if (read.pr.headOid !== pr.headOid) return { ok: false, error: "There are new commits since — it needs a review, not your approval again." };
+      if (!approvalStands(read.pr)) return { ok: false, error: "Your approval no longer stands on this head, or the author answered since — review it again instead." };
+      const req = approveAgainRequest(pr.repo, pr.number, pr.headOid, all.agent.policy.signature);
+      const res = await gh(ghApiArgs(req, pr.url), { input: JSON.stringify(req.body) });
+      if (res.code !== 0) return { ok: false, error: `GitHub refused it: ${ghError(res)}` };
+      store.log({ at: stamp(), kind: "run", event: "approved-again", prId: pr.id, prNumber: pr.number, repo: pr.repo, headOid: pr.headOid, detail: "Approved again on your click — the request came after your approval of this head" });
+      return { ok: true };
+    } finally {
+      approvingAgain.delete(prId);
+    }
+  }
+
   /** Heads being checked for "only the base changed" right now, and those to check again later after a failed check. */
   const baseOnlyChecks = new Set<string>();
   const baseOnlyRetry = new Map<string, number>();
@@ -1390,7 +1428,9 @@ export function createAgent(deps: AgentDeps): Agent {
       } else {
         // Nothing captured to post: there's nothing to send — the report says what it found.
         item.state = "done";
-        item.headline = "Reviewed — nothing to post";
+        // Your approval already stands on this head: the review had nothing to add to it — say so.
+        const current = snapshotPr(item.prId);
+        item.headline = current && approvalStands(current) && current.headOid === keyHead(item.key) ? "Already approved on this head — nothing to post" : "Reviewed — nothing to post";
       }
     } else {
       // `fail` saves, logs and tells; the rest of this function only cleans up.
@@ -2006,6 +2046,7 @@ export function createAgent(deps: AgentDeps): Agent {
       setPaused(action.type === "pauseAgent");
       return { ok: true };
     }
+    if (action.type === "approveAgain") return approveAgain(action.prId, all);
     if (action.type === "enqueue") {
       const pr = snapshot?.pullRequests.find((p) => p.id === action.prId);
       if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };

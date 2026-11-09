@@ -92,6 +92,9 @@ export function AgentStatusLine({ pr }: { pr: PullRequest }) {
   if (!word) return null;
   const { item, stage } = word;
   const watch = item.state === "working" && state?.headerChip;
+  // A move the agent prepared says what it is — "Approve →", "Push 2 fixes →" — not just "Open":
+  // its button is on the Board's card, where you see what goes out before it does.
+  const move = stage.column === "you" && stage.ready && stage.action ? stage.action.label : null;
   return (
     <div className="mt-2 flex items-center gap-2 border-t border-line pt-2 text-xs">
       <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", word.dot)} />
@@ -105,9 +108,13 @@ export function AgentStatusLine({ pr }: { pr: PullRequest }) {
           // A move waits on the Board, at its card; a run is watched in the popover —
           // or on the Board too, when the header chip (and with it the popover) is off.
           onClick={() => (watch ? openCompanion(item.runId) : focusItem(item.runId))}
-          className="shrink-0 rounded-md border border-line-strong px-2 py-0.5 text-xs text-fg-secondary hover:bg-elevated"
+          title={move ? "Opens its card on the Board — what it would do, and the button that does it" : undefined}
+          className={cn(
+            "shrink-0 rounded-md border px-2 py-0.5 text-xs",
+            move ? "border-sky-600 bg-sky-600 font-medium text-white hover:bg-sky-700 dark:border-sky-500 dark:bg-sky-500/90" : "border-line-strong text-fg-secondary hover:bg-elevated",
+          )}
         >
-          {watch ? "Watch" : "Open"}
+          {watch ? "Watch" : move ? `${move} →` : "Open"}
         </button>
       )}
     </div>
@@ -117,7 +124,22 @@ export function AgentStatusLine({ pr }: { pr: PullRequest }) {
 /** The Cozy table's Agent cell. */
 export function AgentCell({ pr }: { pr: PullRequest }) {
   const word = useAgentWord(pr);
+  const { focusItem } = useContext(AgentContext);
   if (!word) return <span className="text-xs text-fg-faint">—</span>;
+  // A move ready for you is one click from its card on the Board, where it is sent.
+  if (word.stage.column === "you" && word.stage.ready && word.stage.action) {
+    return (
+      <button
+        type="button"
+        onClick={() => focusItem(word.item.runId)}
+        title={`${word.column}: ${word.text} — opens its card on the Board`}
+        className="flex min-w-0 items-center gap-1.5 rounded text-left text-xs hover:underline"
+      >
+        <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", word.dot)} />
+        <span className={cn("truncate font-medium", word.tone)}>{word.short} →</span>
+      </button>
+    );
+  }
   return (
     <span className="flex min-w-0 items-center gap-1.5 text-xs" title={`${word.column}: ${word.text}`}>
       <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", word.dot)} />

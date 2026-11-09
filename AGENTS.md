@@ -173,7 +173,18 @@ Three layers:
   (queued, working), yours (a move it prepared: Send review, Push N fixes,
   Your call, Merge, Draft a review, a run that failed — or GitHub's say-so with
   the agent not on it), the people you wait on, or done today; a run that asks
-  nothing, stopped or taken over, is a note on its card — and the words every
+  nothing, stopped or taken over, is a note on its card. A PR whose review is
+  asked of you again while your approval stands on its head and the author
+  hasn't answered since (`approvalStands`) is not your move: it sits in Done
+  with that line (`askedAgain`) and "Approve again" in its ⋯ — an
+  `approveAgain` action on the PR, not an item: main reads the PR again and,
+  only if that still holds at the same head, posts an APPROVE of that head
+  with one line and the signature, logged as `run/approved-again`; a review
+  you ask for that finds the same says "Already approved on this head". A
+  move ready for you names itself wherever the PR shows — the Roomy line's
+  button ("Send review →", "Push 2 fixes →") and the Cozy cell open its card
+  on the Board, the one place it is sent from, since a bare "Open" left an
+  approval waiting two days unfound — and the words every
   surface says it in: a card's line, the Cozy cell and tile, "ready for you"
   (`readyItems`) on the chip and the tray, a notification's title; the *local*
   day "Done today" and the daily run limit count on, quiet hours
@@ -432,7 +443,8 @@ Three layers:
   `needsYou`/`done`/`failed`, with time, turns, cost, tokens, tool calls,
   refused tools and stderr's tail; `interrupted` when its process was ended
   under it; `diagrams`; `published`/`pushed`/`merged`/`reapproved`/`reasked`
-  and their `not-*` refusals; `offered` for an offer; `notice`), `item` (every
+  and their `not-*` refusals; `approved-again` (no run: your Approve again);
+  `offered` for an offer; `notice`), `item` (every
   state change of an item), `board`
   (a card's column or button changed: `seen` on the first look, `move`,
   `action`, `left`), `plan` (why the agent leaves a PR alone — `idle` — what

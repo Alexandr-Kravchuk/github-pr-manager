@@ -330,6 +330,8 @@ export interface BoardStage {
   sdlc: SdlcBadge | null;
   /** An approval of yours from an earlier day: counted as "+N earlier" under Done today, not a card. */
   earlier: boolean;
+  /** Your approval stands on this head, yet GitHub lists a request for your review made after it (`approvalStands`). */
+  askedAgain: boolean;
   /** When the PR came to this column, as near as is known: the age a card shows and the order in a column. */
   since: string;
 }
@@ -424,6 +426,16 @@ export function readyItems(items: readonly AgentItem[]): AgentItem[] {
   return out.sort((a, b) => (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
 }
 
+/**
+ * Your approval stands on the PR's current head and the author hasn't answered
+ * in a thread since: a request for your review that came after it — GitHub
+ * keeps listing you as asked — asks nothing new of you.
+ */
+export function approvalStands(pr: Pick<PullRequest, "viewerApproved" | "viewerReviewedHead" | "viewerReviewedAt" | "authorRepliedAt">): boolean {
+  if (!pr.viewerApproved || !pr.viewerReviewedHead) return false;
+  return !(pr.authorRepliedAt !== null && pr.viewerReviewedAt !== null && pr.authorRepliedAt > pr.viewerReviewedAt);
+}
+
 /** Your PR is ready to merge as GitHub sees it. */
 function githubReady(pr: PullRequest): boolean {
   return !pr.isDraft && pr.canBeMerged && !pr.awaitingReview && pr.ciState !== "failure" && !pr.hasConflicts;
@@ -455,7 +467,7 @@ export function boardStage(pr: PullRequest | null, items: readonly AgentItem[], 
   const lane: BoardLane | null = pr ? laneOfPr(pr) : first ? laneOfScenario(first.scenario) : null;
   if (!lane) return null;
   const sdlc = pr ? (ctx.orchestrated?.[pr.id] ?? null) : null;
-  const base = { lane, action: null, ready: false, note: null, why: null, sdlc, earlier: false };
+  const base = { lane, action: null, ready: false, note: null, why: null, sdlc, earlier: false, askedAgain: false };
   const at = (i: AgentItem) => i.finishedAt ?? i.startedAt ?? i.queuedAt;
 
   // 1. The agent is on it.
@@ -501,6 +513,10 @@ export function boardStage(pr: PullRequest | null, items: readonly AgentItem[], 
     return card("waiting", waitedSince);
   }
 
+  // Asked again with your approval standing on this very head: nothing waits on
+  // you. It sits with today's approvals, with "Approve again" in its menu to
+  // answer the request — never in Your move with only a link to GitHub.
+  if (isReviewDue(pr) && approvalStands(pr)) return card("done", pr.viewerReviewedAt ?? pr.updatedAt, null, { askedAgain: true });
   if (isReviewDue(pr)) {
     const again = pr.viewerHasReviewed || pr.myReReviewDue;
     return card("you", pr.updatedAt, { kind: again ? "rereview" : "review", label: "Open on GitHub" });
@@ -705,6 +721,7 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
     return `${verdict}${pr.unresolvedThreads > 0 ? ` · ${count(pr.unresolvedThreads, "thread")} open` : ""}`;
   }
   if (stage.column === "done") {
+    if (stage.askedAgain) return "Asked again — your approval stands on this head";
     if (pr?.viewerApproved) return "You approved";
     if (item) return item.headline;
   }

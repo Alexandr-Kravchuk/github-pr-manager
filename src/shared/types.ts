@@ -1028,6 +1028,8 @@ export type AgentAction =
   | { type: "merge"; runId: string; method?: MergeMethod }
   /** `before`: the queued run it goes in front of; null or absent, the end of the queue. */
   | { type: "enqueue"; prId: string; before?: string | null }
+  /** Your approval again, on a PR it already stands on, to answer a review request made after it. */
+  | { type: "approveAgain"; prId: string }
   | { type: "moveQueued"; runId: string; before: string | null };
 
 export type AgentActionResult = { ok: true } | { ok: false; error: string };
