@@ -165,7 +165,11 @@ Three layers:
   only the PR id and its choices, the PR is closed first and the task second,
   and a missing Jira token stops it before anything changes. Jira writes need a
   token with write scope — the read-only one the Jira section recommends gets a
-  refusal that says so) and the PR agent's eight: `agent-defaults.ts`
+  refusal that says so) and the PR agent's nine: `agent-explain.ts` (the
+  Board in plain words — each card's owner (you, the agent, others, nobody),
+  what is happening, what is needed from you, what to read, every button with
+  what it does, and what comes next; `explainBoard` orders them) and
+  `agent-defaults.ts`
   (the Agent tab's defaults and bounds), `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (where a
@@ -176,7 +180,7 @@ Three layers:
   nothing, stopped or taken over, is a note on its card. A PR whose review is
   asked of you again while your approval stands on its head and the author
   hasn't answered since (`approvalStands`) is not your move: it sits in Done
-  with that line (`askedAgain`) and "Approve again" in its ⋯ — an
+  with that line (`askedAgain`) and "Approve again" under its More — an
   `approveAgain` action on the PR, not an item: main reads the PR again and,
   only if that still holds at the same head, posts an APPROVE of that head
   with one line and the signature, logged as `run/approved-again`; a review
@@ -296,7 +300,7 @@ Three layers:
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
   `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`,
-  `agent-reapprove.js` and `agent-stack.js` stay free of `node:` builtin references, so the
+  `agent-reapprove.js`, `agent-stack.js` and `agent-explain.js` stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
@@ -306,12 +310,22 @@ Three layers:
   Finder-style `ViewSwitch` in the header row next to Refresh and persisted with
   the other view preferences in `localStorage`: `roomy` (`PrCard`, the original
   full cards and the default), `cozy` (`PrTable`), `compact` (`PrTile`) and
-  `board` (`PrBoard`: the filtered PRs by whose move it is, in two lanes — your
-  PRs and the PRs you review — of four columns: Your move, Agent on it, With
-  reviewers / With the author, Merged today / Done today. The column is
-  `boardStage` in `shared/agent-view.ts`, one pure function the chip and the
-  tray read too, so a PR is in one column only; a Your-move card has one
-  button and a ⋯ of at most three. Like Cozy it turns off Group-by and Sort).
+  `board` (`PrBoard`: what needs you first, then what doesn't — a sentence of
+  how much is yours; Your turn, every decision as an open card, readiest
+  first (a merge or an approval in one click, then a question or a brief, a
+  failure, then a review nobody started), each saying what happened, what to
+  read (the summary, findings, what goes out on GitHub, the commits, the
+  pushed-back comments), your move with what its button does, and what comes
+  next; then rows that ask nothing of you — the agent is on it, waiting on
+  others, done today — each with what comes next and what you could do one
+  click away. Where a PR stands is still `boardStage` in
+  `shared/agent-view.ts`, one pure function the chip and the tray read too,
+  so a PR shows once; the words are `shared/agent-explain.ts`. A card nobody
+  started (asked of you, red CI) offers "Let the agent …" first and GitHub
+  second, never only a link. The two lanes are a tag on each card, not rows
+  of columns: a move was missed for days among eight equal columns. The
+  three variants it was picked from are on the `prototype/board-redesign`
+  branch. Like Cozy it turns off Group-by and Sort).
   Roomy and Compact are the same grid at two densities — one `PrList` renders
   both, so their column counts are the only difference and can't drift. Cozy is
   the odd one out and deliberately so: it is one FLAT table sorted by any

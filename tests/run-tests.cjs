@@ -107,6 +107,7 @@ for (const mod of [
   "agent-diagrams.js",
   "agent-reapprove.js",
   "agent-stack.js",
+  "agent-explain.js",
   "stale.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
@@ -9388,6 +9389,99 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const drive = (n) => ({ base: "a", head: "b", reasons: ["self"], commits: Array.from({ length: n }, (_, i) => ({ oid: `c${i}`, subject: `fix ${i}` })), stat: "", patch: "" });
     const stage = (pr, items = [], ctx = {}) => view.boardStage(pr, items, { today: sToday, ...ctx });
     const where = (s) => (s ? [s.lane, s.column, s.action?.kind ?? null, s.action?.label ?? null, s.ready] : null);
+
+    // --- the Board in plain words (agent-explain) ---------------------------------
+    const ex = require(path.join(__dirname, "../dist/main/shared/agent-explain.js"));
+    const xPr = (o = {}) => sPr({ reviewers: [], unresolvedThreads: 0, requestedOfMe: false, title: `PR ${o.id ?? "P"}`, url: "https://github.com/a/b/pull/1", ...o });
+    const xState = (items, o = {}) => ({ items, enabled: true, running: [], ...o });
+    const xBoard = (prs, items = [], o = {}) => ex.explainBoard(prs, prs, xState(items, o), { today: sToday });
+    const xOne = (pr, items = [], o = {}) => xBoard([pr], items, o).entries[0];
+    const choice = (e, label) => e.choices.find((c) => c.label === label);
+
+    test("agent board words: Your turn first and readiest first, then the agent's, the others', done", () => {
+      const prs = [
+        xPr({ id: "R", roles: ["reviewer"], requestedOfMe: true }),
+        xPr({ id: "X" }),
+        xPr({ id: "M", canBeMerged: true, awaitingReview: false }),
+        xPr({ id: "A", roles: ["reviewer"] }),
+        xPr({ id: "W" }),
+      ];
+      const items = [
+        sIt({ prId: "X", scenario: "drive", state: "error", headline: "No checkout of a/b", error: "git said no" }),
+        sIt({ prId: "M", scenario: "merge", state: "needsYou", key: "M|merge|h" }),
+        sIt({ prId: "A", scenario: "review", state: "working" }),
+      ];
+      const b = xBoard(prs, items);
+      assert.deepStrictEqual(
+        b.entries.map((e) => [e.prId, e.owner]),
+        [
+          ["M", "you"],
+          ["X", "you"],
+          ["R", "you"],
+          ["A", "agent"],
+          ["W", "others"],
+        ],
+        "a merge in one click, then a failure, then a review nobody started",
+      );
+      const x = b.entries[1];
+      assert.strictEqual(x.now, "The agent couldn't finish: no checkout of a/b.");
+      assert.strictEqual(x.read.error, "git said no", "what went wrong is there to read");
+      assert.deepStrictEqual(x.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
+        ["Try again", "retry", true],
+        ["Leave it", "skip", false],
+      ]);
+    });
+
+    test("agent board words: a prepared review says what goes out, under whose name, and what comes after", () => {
+      const e = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: plan("APPROVE"), result: { summary: "Looks right.", asks: [], findings: [{ severity: "minor", text: "a nit", where: "x.ts:1" }], authorQuestions: [], structured: true } })]);
+      assert.deepStrictEqual([e.owner, e.laneLabel, e.now, e.ask], ["you", "You review", "The agent reviewed the latest commit and suggests approving.", "Read the summary, then approve — or discard it."]);
+      assert.deepStrictEqual([e.read.summary, e.read.findings.length, e.read.plan.event], ["Looks right.", 1, "APPROVE"]);
+      const send = e.choices[0];
+      assert.deepStrictEqual([send.label, send.act.type, send.primary], ["Approve", "publish", true]);
+      assert.match(send.does, /^Posts an approval on GitHub under your name, signed by the agent/);
+      assert.match(e.next, /author can merge/);
+      assert.ok(choice(e, "Discard"), "and a way out");
+      // Request changes, with the comments counted, and the re-review after.
+      const rc = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: plan("REQUEST_CHANGES") })]);
+      assert.strictEqual(rc.now, "The agent drafted a review that requests changes: 1 inline comment.");
+      assert.match(rc.choices[0].does, /Posts the review with 1 comment/);
+      assert.match(rc.next, /re-review/);
+    });
+
+    test("agent board words: a review nobody started is the agent's to start — unless the agent is off", () => {
+      const pr = xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true });
+      const e = xOne(pr);
+      assert.deepStrictEqual([e.owner, e.choices[0].label, e.choices[0].act], ["you", "Let the agent review", { type: "enqueue", prId: "P" }]);
+      assert.ok(e.choices.some((c) => c.url && !c.act), "or on GitHub yourself");
+      const off = xOne(pr, [], { enabled: false });
+      assert.deepStrictEqual([off.choices.length, Boolean(off.choices[0].url), off.ask], [1, true, "Review it on GitHub."], "nothing that needs the agent while it is off");
+      // Your PR with red CI: the agent fixes it, on your say-so.
+      const red = xOne(xPr({ ciState: "failure", failingChecks: [{ name: "build" }] }));
+      assert.strictEqual(red.choices[0].label, "Let the agent fix it");
+      assert.match(red.now, /^CI failing: build\./);
+    });
+
+    test("agent board words: the agent's own, the others' and done each say what happens next and what you could do", () => {
+      const runId = "00000000-0000-4000-8000-0000000000aa";
+      const working = xOne(xPr({ roles: ["reviewer"] }), [sIt({ runId, state: "working", scenario: "rereview" })], {
+        running: [{ runId, paused: false, progress: { steps: [{ id: "1", subject: "Read the diff", status: "completed" }, { id: "2", subject: "Check the answers", status: "in_progress" }], activity: "Read x.ts" } }],
+      });
+      assert.deepStrictEqual([working.owner, working.now, working.progress], ["agent", "The agent is re-reviewing it.", { step: "Check the answers", done: 1, total: 2, activity: "Read x.ts" }]);
+      assert.deepStrictEqual(working.choices.map((c) => c.act.type), ["stop"]);
+      assert.match(working.next, /Nothing is posted on GitHub until you send it/);
+      const queued = xBoard([xPr({ id: "Q1", roles: ["reviewer"] }), xPr({ id: "Q2", roles: ["reviewer"] })], [sIt({ prId: "Q1", state: "queued", queuedAt: sAgo(10) }), sIt({ prId: "Q2", state: "queued", queuedAt: sAgo(5) })]).entries;
+      assert.deepStrictEqual(queued.map((e) => [e.prId, e.place, e.now]), [
+        ["Q1", 1, "The agent starts reviewing it next."],
+        ["Q2", 2, "The agent starts reviewing it after 1 other."],
+      ]);
+      const author = xOne(xPr({ roles: ["reviewed"], viewerHasReviewed: true, unresolvedThreads: 2, awaitingReview: false }));
+      assert.deepStrictEqual([author.owner, author.waitingOn, author.now], ["others", "The author", "You asked for changes · 2 threads open — the author's turn."]);
+      assert.deepStrictEqual(author.choices.map((c) => c.label), ["Re-review now"]);
+      const reviewers = xOne(xPr({ reviewers: [{ login: "anna", reviewState: "pending" }, { login: "oleg", reviewState: "approved" }] }));
+      assert.deepStrictEqual([reviewers.owner, reviewers.waitingOn, reviewers.now], ["others", "anna", "Waiting for anna to review."]);
+      const asked = xOne(xPr({ roles: ["reviewer", "reviewed"], requestedOfMe: true, viewerHasReviewed: true, viewerApproved: true, viewerReviewedHead: true, viewerReviewedAt: sAgo(60), authorRepliedAt: null }));
+      assert.deepStrictEqual([asked.owner, asked.choices[0].label, asked.choices[0].act.type], ["done", "Approve again", "approveAgain"]);
+    });
 
     // --- the journal: what the agent did, and where each card went --------------
     const journal = require(path.join(__dirname, "../dist/main/main/agent/journal.js"));
