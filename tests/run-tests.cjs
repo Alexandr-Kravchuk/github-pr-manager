@@ -2718,6 +2718,12 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     assert.strictEqual(changes, unaddressed, "either form of change request ranks the same");
     assert.ok(changes < untouched && untouched < partial && partial < done);
   });
+  test("reviewRank: a required review still pending ranks with the partial approvals", () => {
+    // Every listed user reviewer approved, yet a code owner's review is missing.
+    const pr = tpr({ hasHumanApproval: true, reviewers: [rev("ann", "approved")] });
+    assert.strictEqual(prTable.reviewRank({ ...pr, requiredReviewPending: true }), 3);
+    assert.strictEqual(prTable.reviewRank({ ...pr, requiredReviewPending: false }), 4);
+  });
 
   test("approvalTally: counts approvals out of the reviewers on the PR", () =>
     assert.deepStrictEqual(
@@ -3754,6 +3760,26 @@ test("activeFilterCount: every narrowing control at once", () =>
       }),
       "blocked",
     ));
+  // requiredReviewPending: the edges of the "waiting over attention" precedence
+  // on your own PR, and the reviewer side, where it must never read green.
+  {
+    const pending = (o = {}) =>
+      sigPr({ hasHumanApproval: true, awaitingReview: false, requiredReviewPending: true, ...o });
+    for (const trackComments of [true, false]) {
+      test(`prSignal: required review pending with CI still running stays waiting (trackComments=${trackComments})`, () =>
+        assert.strictEqual(
+          prFilter.prSignal(
+            pending({ ciState: "pending", pendingChecks: [{ name: "build", kind: "check", state: "pending", url: null }] }),
+            { trackComments },
+          ),
+          "waiting",
+        ));
+      test(`prSignal: required review pending with new activity reaches attention (trackComments=${trackComments})`, () =>
+        assert.strictEqual(prFilter.prSignal(pending({ hasNewActivity: true }), { trackComments }), "attention"));
+      test(`prSignal: required review pending on a PR you only reviewed is idle, not approved (trackComments=${trackComments})`, () =>
+        assert.strictEqual(prFilter.prSignal(pending({ roles: ["reviewed"] }), { trackComments }), "idle"));
+    }
+  }
 
   // --- contract: the usercustom-ai-skills cron detectors mirror prSignal ------
   // Three headless detectors (`red-prs.cjs`, `purple-prs.cjs`, `green-prs.cjs`
