@@ -9,6 +9,8 @@
  * tokens from `gh`.
  */
 
+import type { TwgStatus } from "./types";
+
 /** What one run of `twg` produced. `notFound` is true when no `twg` binary was found. */
 export interface TwgRunResult {
   stdout: string;
@@ -145,5 +147,48 @@ export function issueFields(issue: RawJiraIssue): {
     summary: issue.fields?.summary ?? issue.summary,
     parent: issue.fields?.parent ?? issue.parent,
     issuetype: issue.fields?.issuetype ?? issue.issuetype,
+  };
+}
+
+/** What a `twg whoami` run says about the sign-in. */
+export function twgStatusFrom(run: TwgRunResult): TwgStatus {
+  const failure = classifyTwgRun(run);
+  if (!failure) {
+    const account = parseTwgAccount(run.stdout);
+    return account ? { state: "signed-in", account } : { state: "signed-in" };
+  }
+  if (failure.kind === "not-installed") return { state: "not-installed" };
+  if (failure.kind === "auth") return { state: "signed-out", message: failure.message };
+  return { state: "error", message: failure.message };
+}
+
+/** The last known twg status, and one `twg whoami` at a time to renew it. */
+export interface TwgStatusCache {
+  /** The last status read, or null before the first read finishes. */
+  current(): TwgStatus | null;
+  /** Reads the status again; callers that ask while a read is running share it. Never rejects. */
+  refresh(): Promise<TwgStatus>;
+}
+
+/**
+ * Keeps the status call from waiting on `twg whoami`, which can take many
+ * seconds while twg renews its session: a caller reads `current()` at once,
+ * and concurrent `refresh()` calls start one process, not one each.
+ */
+export function createTwgStatusCache(read: () => Promise<TwgStatus>): TwgStatusCache {
+  let last: TwgStatus | null = null;
+  let inFlight: Promise<TwgStatus> | null = null;
+  return {
+    current: () => last,
+    refresh: () => {
+      inFlight ??= read()
+        .catch((e: unknown): TwgStatus => ({ state: "error", message: e instanceof Error ? e.message : String(e) }))
+        .then((status) => {
+          last = status;
+          inFlight = null;
+          return status;
+        });
+      return inFlight;
+    },
   };
 }

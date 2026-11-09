@@ -34,11 +34,13 @@ import { ensureCliPath } from "./cli-path";
 import { clearJiraCaches } from "../shared/jira";
 import { shouldNotifyJiraAuth } from "../shared/jira-health";
 import { buildJiraEnricher, getJiraStatus, setJiraToken } from "./jira-store";
-import { openTwgLogin } from "./twg";
+import { getTwgStatus, openTwgLogin } from "./twg";
+import { createTwgStatusCache } from "../shared/jira-twg";
 import {
   validateClipboardText,
   validateExternalUrl,
   validateIgnoredArgs,
+  validateJiraStatusMode,
   validateJiraToken,
   validateClaudeKind,
   validateGroupLaunchArgs,
@@ -221,13 +223,6 @@ function showOsNotification(title: string, body: string, silent: boolean, onClic
   n.show();
 }
 
-/**
- * Diffs the new snapshot against the last, then delivers desktop notifications
- * per the user's settings: a native OS notification (click opens the PR) and/or
- * a sound. Best-effort — a failure here must never break the poll loop, and the
- * baseline is kept current even when settings can't be read, so re-enabling
- * notifications later doesn't replay a backlog.
- */
 /** The Jira health of the last snapshot — the baseline for `shouldNotifyJiraAuth`. */
 let prevJiraHealth: JiraHealth | undefined;
 
@@ -259,6 +254,13 @@ function handleJiraAuthNotification(health: JiraHealth | undefined): void {
   }
 }
 
+/**
+ * Diffs the new snapshot against the last, then delivers desktop notifications
+ * per the user's settings: a native OS notification (click opens the PR) and/or
+ * a sound. Best-effort — a failure here must never break the poll loop, and the
+ * baseline is kept current even when settings can't be read, so re-enabling
+ * notifications later doesn't replay a backlog.
+ */
 function handleNotifications(prs: PullRequest[]): void {
   const dbg = (msg: string): void => {
     if (process.env.PRD_DEBUG) console.log(`[notify] ${msg}`);
@@ -794,7 +796,18 @@ function registerIpc(): void {
     }
   });
 
-  ipcMain.handle("jira:status", async (): Promise<JiraStatus> => getJiraStatus(loadSettings));
+  // `cached` answers at once: the last twg status, or `checking` while the first
+  // `twg whoami` runs. `fresh` waits for a new one; concurrent reads share it.
+  const twgStatus = createTwgStatusCache(getTwgStatus);
+  ipcMain.handle("jira:status", async (_event, raw: unknown): Promise<JiraStatus> => {
+    const mode = validateJiraStatusMode(raw);
+    let twg = mode === "fresh" ? await twgStatus.refresh() : twgStatus.current();
+    if (!twg) {
+      void twgStatus.refresh();
+      twg = { state: "checking" };
+    }
+    return getJiraStatus(loadSettings, twg);
+  });
 
   ipcMain.handle("jira:twgLogin", async () => {
     try {

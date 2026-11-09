@@ -6,7 +6,7 @@ import {
   type GroupLaunchKind,
   type ClaudeLaunchKind,
 } from "../shared/claude-launch";
-import type { SeenInput, ThemePreference } from "../shared/types";
+import type { JiraStatusMode, SeenInput, ThemePreference } from "../shared/types";
 
 // Validators for values that cross the IPC boundary from the renderer. The
 // renderer is trusted, but a compromised/buggy caller must not be able to push
@@ -85,6 +85,13 @@ export function validateJiraToken(value: unknown): string {
     throw new Error("setJiraToken: token too long.");
   }
   return value.trim();
+}
+
+/** Ensures a Jira status mode is one of the known ones; absent means `cached`. */
+export function validateJiraStatusMode(value: unknown): JiraStatusMode {
+  if (value === undefined || value === "cached") return "cached";
+  if (value === "fresh") return value;
+  throw new Error(`getJiraStatus: invalid mode: ${String(value)}`);
 }
 
 /** Ensures clipboard text is a string of sane length before writing it. */

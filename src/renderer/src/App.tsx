@@ -32,6 +32,7 @@ import {
 } from "../../shared/pr-filter";
 import { groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
 import { hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
+import { createJiraStatusLoader } from "../../shared/jira-status";
 import { AuthorFilterContext } from "./components/author-filter-context";
 import { ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
@@ -242,6 +243,7 @@ export function App() {
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraStatus | null>(null);
+  const loadJiraStatus = useMemo(() => createJiraStatusLoader((mode) => window.api.getJiraStatus(mode), setJiraStatus), []);
   const [claudeSessions, setClaudeSessions] = useState<ClaudeSessionInfo[]>([]);
   const [data, setData] = useState<DashboardResponse | null>(null);
   // Monotonic count of snapshots applied — the live-dot's remount key.
@@ -377,8 +379,8 @@ export function App() {
       })
       .catch(() => {});
     window.api.getWhatsNew().then(setWhatsNew).catch(() => {});
-    window.api.getJiraStatus().then(setJiraStatus).catch(() => {});
-  }, []);
+    void loadJiraStatus();
+  }, [loadJiraStatus]);
 
   // A sign-in done outside the app (`twg login` in a terminal) or a credential
   // that stopped working changes which grouping options exist — re-read the
@@ -386,8 +388,8 @@ export function App() {
   const jiraHealthState = data?.jiraHealth?.state;
   useEffect(() => {
     if (!jiraHealthState) return;
-    window.api.getJiraStatus().then(setJiraStatus).catch(() => {});
-  }, [jiraHealthState]);
+    void loadJiraStatus(true);
+  }, [jiraHealthState, loadJiraStatus]);
 
   // Subscribe to live updates first (so we don't miss an early snapshot), then
   // do the initial paint. The poller in the main process pushes a fresh snapshot
@@ -856,7 +858,7 @@ export function App() {
               if (r.ok) setConfig(r.config);
             })
             .catch(() => {});
-          window.api.getJiraStatus().then(setJiraStatus).catch(() => {});
+          void loadJiraStatus();
           loadInitial();
         }}
       />

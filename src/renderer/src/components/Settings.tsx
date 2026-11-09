@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import type {
   ClaudeSettings,
@@ -16,6 +16,7 @@ import type {
 import { DEFAULT_NOTIFICATION_SETTINGS as DEFAULT_NOTIFICATIONS } from "../../../shared/notify";
 // Node-free (see AGENTS.md) — the defaults the Claude section starts from.
 import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "../../../shared/claude-launch";
+import { createJiraStatusLoader } from "../../../shared/jira-status";
 import {
   SETTINGS_TABS,
   searchSettings,
@@ -144,9 +145,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
     window.api.getGhStatus().then(setGh).catch(() => {});
   }, []);
 
-  const loadJira = useCallback(() => {
-    window.api.getJiraStatus().then(setJira).catch(() => {});
-  }, []);
+  const loadJira = useMemo(() => createJiraStatusLoader((mode) => window.api.getJiraStatus(mode), setJira), []);
 
   useEffect(() => {
     window.api
@@ -653,10 +652,12 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           <h2 className="text-sm font-semibold text-fg-secondary">Jira (optional)</h2>
           {/* Named after the source that can sign in now, not after `configured`,
               which stays true for a signed-out twg so a saved grouping survives. */}
-          {jira?.hasConfig && jira.twg.state === "signed-in" ? (
+          {jira?.signInSource === "twg" ? (
             <span className="text-xs text-emerald-700 dark:text-emerald-400">connected via twg ✓</span>
-          ) : jira?.hasConfig && jira.hasToken && jira.hasEmail ? (
+          ) : jira?.signInSource === "token" ? (
             <span className="text-xs text-emerald-700 dark:text-emerald-400">connected via API token ✓</span>
+          ) : jira?.hasConfig && jira.twg.state === "checking" ? (
+            <span className="text-xs text-fg-faint">checking…</span>
           ) : jira?.hasConfig ? (
             <span className="text-xs text-amber-700 dark:text-amber-400">sign-in needed</span>
           ) : (
@@ -683,7 +684,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
 
         <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
           <span className="text-fg-secondary">twg:</span>
-          {!jira ? (
+          {!jira || jira.twg.state === "checking" ? (
             <span className="text-fg-faint">checking…</span>
           ) : jira.twg.state === "signed-in" ? (
             <span className="text-emerald-700 dark:text-emerald-400">
@@ -696,7 +697,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           ) : (
             <span className="text-amber-700 dark:text-amber-400">{jira.twg.message ?? "not working"}</span>
           )}
-          {jira && jira.twg.state !== "signed-in" && jira.twg.state !== "not-installed" && (
+          {jira && (jira.twg.state === "signed-out" || jira.twg.state === "error") && (
             <button
               type="button"
               onClick={startTwgLogin}
@@ -709,7 +710,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             type="button"
             onClick={() => {
               setJira(null);
-              loadJira();
+              void loadJira(true);
             }}
             className="rounded-md border border-line-strong px-2 py-1 text-xs text-fg-muted hover:bg-elevated"
           >

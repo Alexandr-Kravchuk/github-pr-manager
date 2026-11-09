@@ -11,11 +11,18 @@ import path from "node:path";
 import { app, safeStorage } from "electron";
 
 import { makeDebug } from "../shared/debug";
-import { enrichmentSkipReason, hasJiraConfig, healthFromError, jiraConfigured, jiraSiteState } from "../shared/jira-health";
+import {
+  enrichmentSkipReason,
+  hasJiraConfig,
+  healthFromError,
+  jiraConfigured,
+  jiraSiteState,
+  signInSource,
+} from "../shared/jira-health";
 import { clearJiraCaches } from "../shared/jira";
 import { createJiraPass } from "../shared/jira-pass";
 import type { TwgRunner } from "../shared/jira-twg";
-import { getTwgStatus, runTwg } from "./twg";
+import { runTwg } from "./twg";
 import type { JiraHealth, JiraStatus, PullRequest, Settings, TwgStatus } from "../shared/types";
 
 function jiraTokenPath(): string {
@@ -79,11 +86,12 @@ export function getJiraToken(): string | null {
   }
 }
 
-/** Setup state for the settings UI and the grouping gate. */
-export async function getJiraStatus(
-  loadSettings: () => Settings,
-  opts: { readTwgStatus?: () => Promise<TwgStatus> } = {},
-): Promise<JiraStatus> {
+/**
+ * Setup state for the settings UI and the grouping gate. The twg status is
+ * passed in — read from the cache in `main.ts` — so this never waits on a
+ * `twg whoami`.
+ */
+export function getJiraStatus(loadSettings: () => Settings, twg: TwgStatus): JiraStatus {
   // Both settings-derived fields come from `jiraSiteState`, which is pure and
   // therefore unit-tested — including its fail-closed branch, which is what
   // makes a broken settings file degrade to "no Jira" instead of a broken badge.
@@ -95,11 +103,10 @@ export async function getJiraStatus(
     jira = undefined;
   }
   const hasToken = hasJiraToken();
-  // Injectable so tests don't run the machine's real `twg whoami`.
-  const twg = await (opts.readTwgStatus ?? getTwgStatus)();
   return {
     configured: jiraConfigured(jira, twg, hasToken),
     twg,
+    signInSource: signInSource(jira, twg, hasToken),
     hasConfig,
     hasEmail: Boolean(hasConfig && jira?.email),
     hasToken,

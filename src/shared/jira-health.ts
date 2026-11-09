@@ -41,6 +41,17 @@ export function jiraConfigured(jira: JiraSettings | undefined, twg: TwgStatus, h
   return hasJiraConfig(jira) && (twg.state !== "not-installed" || canUseToken(jira, hasToken));
 }
 
+/**
+ * The source a pass can sign in with now: twg when it is signed in, else the API
+ * token when it and the email are stored. Unlike `jiraConfigured`, a signed-out
+ * or still-checking twg does not count.
+ */
+export function signInSource(jira: JiraSettings | undefined, twg: TwgStatus, hasToken: boolean): JiraSource | null {
+  if (!hasJiraConfig(jira)) return null;
+  if (twg.state === "signed-in") return "twg";
+  return canUseToken(jira, hasToken) ? "token" : null;
+}
+
 /** The settings half of `JiraStatus`: is the connection configured, and where does the site live. */
 export interface JiraSiteState {
   hasConfig: boolean;

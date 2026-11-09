@@ -438,12 +438,21 @@ async function fetchTokenChunk(
     if (lastError) throw lastError instanceof Error ? lastError : new Error(String(lastError));
     throw new Error("Jira: no reachable API base");
   }
+  // Trust a result enough to cache (pin the base + write negatives) when the base
+  // was already vetted and pinned on an earlier call, OR the fresh candidate set
+  // settled the token type cleanly. Both cases live inside resultIsTrustworthy so
+  // the pinned steady-state can't silently fall through to "untrusted".
+  const trusted = resultIsTrustworthy(bases, cleanFallback, pinned);
   // A rejected token must surface before anything below is cached: the site
   // answers it with an anonymous 200-but-empty that would otherwise pin the site
   // base and write a negative entry for every key — and a 401 on the last base
-  // (the pinned gateway of a scoped token) is the same verdict.
+  // (the pinned gateway of a scoped token) is the same verdict. Only a trusted
+  // verdict is a rejection: a scoped token that reached the site because the
+  // gateway was skipped is refused there too, and is a plain error retried next
+  // pass, never a credential to stop sending.
   if (res.status === 401 || siteRejectedCredentials(res)) {
-    throw new JiraAuthError(TOKEN_REJECTED, "token");
+    if (trusted) throw new JiraAuthError(TOKEN_REJECTED, "token");
+    throw new Error(`Jira refused the API token on ${winner ?? "the site"}, but the API gateway could not be checked`);
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -451,11 +460,6 @@ async function fetchTokenChunk(
       `Jira HTTP ${res.status} ${res.statusText}${text ? `${JIRA_ERROR_DETAIL_SEP}${text.slice(0, 200)}` : ""}`,
     );
   }
-  // Trust a result enough to cache (pin the base + write negatives) when the base
-  // was already vetted and pinned on an earlier call, OR the fresh candidate set
-  // settled the token type cleanly. Both cases live inside resultIsTrustworthy so
-  // the pinned steady-state can't silently fall through to "untrusted".
-  const trusted = resultIsTrustworthy(bases, cleanFallback, pinned);
   // A pass that raced a clearJiraCaches() (epoch moved while a fetch was
   // awaited) fetched with the old token: writing it back would re-pin the stale
   // base and repopulate the just-cleared caches, so it must not touch them.
@@ -522,11 +526,13 @@ export function fetchIssues(
  *
  * Best-effort on top of a pass that already succeeded: a failure here returns
  * an empty map instead of throwing, so it costs the epic link, not the issue
- * summaries and parents already resolved.
+ * summaries and parents already resolved. `onError` still sees the failure, so
+ * the caller can back off a source that hung here.
  */
 export async function fetchSubtaskParents(
   lookup: JiraLookup,
   issues: Iterable<JiraIssue>,
+  onError?: (error: unknown) => void,
 ): Promise<Map<string, JiraIssue>> {
   const keys = new Set<string>();
   for (const issue of issues) if (issue.isSubtask && issue.parentKey) keys.add(issue.parentKey);
@@ -535,6 +541,7 @@ export async function fetchSubtaskParents(
     return await resolveIssues(lookup, [...keys]);
   } catch (e) {
     debug(`subtask parents failed: ${(e as Error).message}`);
+    onError?.(e);
     return new Map();
   }
 }

@@ -71,9 +71,22 @@ export function createJiraPass(
   let twgBackoff: { passesLeft: number; health: JiraHealth } | null = null;
   const debug = deps.debug ?? (() => {});
 
+  /** Starts the twg backoff unless the failure is a sign-out (retried every pass) or a missing twg. */
+  function backOffTwg(health: JiraHealth): void {
+    if (health.state !== "auth") twgBackoff = { passesLeft: TWG_BACKOFF_PASSES, health };
+  }
+
   async function run(lookup: JiraLookup, source: JiraSource, keys: string[]): Promise<JiraPassResult> {
     const issues = await resolveIssues(lookup, keys);
-    const tasks = await fetchSubtaskParents(lookup, issues.values());
+    // A twg that hangs only on the subtask parents still costs its timeout every
+    // pass while the issues themselves come from the cache, so it backs off too.
+    const onTasksError =
+      source === "twg"
+        ? (e: unknown) => {
+            if (!(e instanceof TwgNotInstalledError)) backOffTwg(healthFromError(keys.length, e, "twg"));
+          }
+        : undefined;
+    const tasks = await fetchSubtaskParents(lookup, issues.values(), onTasksError);
     return { health: healthFromIssues(keys.length, issues.values(), source), issues, tasks };
   }
 
@@ -95,7 +108,7 @@ export function createJiraPass(
         if (e instanceof TwgNotInstalledError) debug("twg not installed — API token fallback");
         else {
           twgProblem = healthFromError(keys.length, e, "twg");
-          if (twgProblem.state !== "auth") twgBackoff = { passesLeft: TWG_BACKOFF_PASSES, health: twgProblem };
+          backOffTwg(twgProblem);
           debug(`twg failed (${twgProblem.state}): ${twgProblem.message} — API token fallback`);
         }
       }

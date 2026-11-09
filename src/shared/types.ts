@@ -229,14 +229,18 @@ export type JiraSource = "twg" | "token";
 export interface TwgStatus {
   /**
    * `signed-in`: `twg whoami` answered; `signed-out`: twg is installed but has
-   * no usable login; `not-installed`: no `twg` on PATH; `error`: anything else.
+   * no usable login; `not-installed`: no `twg` on PATH; `error`: anything else;
+   * `checking`: not known yet — `twg whoami` is still running.
    */
-  state: "signed-in" | "signed-out" | "not-installed" | "error";
+  state: "signed-in" | "signed-out" | "not-installed" | "error" | "checking";
   /** Display name of the signed-in account. */
   account?: string;
   /** twg's own message for `signed-out` / `error`. */
   message?: string;
 }
+
+/** Whether `getJiraStatus` reuses the last twg status or waits for a new `twg whoami`. */
+export type JiraStatusMode = "cached" | "fresh";
 
 /** Jira setup state for the UI, from the main process. */
 export interface JiraStatus {
@@ -248,6 +252,8 @@ export interface JiraStatus {
   configured: boolean;
   /** The `twg` CLI, tried before the API token. */
   twg: TwgStatus;
+  /** The source that can sign in now — twg signed in, else a token with its email — or null when none can. */
+  signInSource: JiraSource | null;
   /**
    * The configured Jira site origin, or null when none is set. Carried here
    * because the renderer needs it to link a PR's issue key to `/browse/<KEY>`,
@@ -737,8 +743,12 @@ export interface PrManagerApi {
   setTheme(theme: ThemePreference): Promise<void>;
   /** `gh` CLI install + auth status for the configured hosts. */
   getGhStatus(): Promise<GhStatus>;
-  /** Jira setup state (config + stored token presence) for the settings UI and grouping. */
-  getJiraStatus(): Promise<JiraStatus>;
+  /**
+   * Jira setup state for the settings UI and grouping. `cached` (the default)
+   * answers at once, with the last known twg status or `checking`; `fresh` waits
+   * for a new `twg whoami`.
+   */
+  getJiraStatus(mode?: JiraStatusMode): Promise<JiraStatus>;
   /**
    * Store (or clear, when given an empty string) the Jira API token, encrypted
    * via the OS keychain. Returns whether it was persisted.

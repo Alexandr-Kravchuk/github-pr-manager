@@ -2,15 +2,15 @@
  * Runs the Atlassian `twg` CLI — the primary Jira source — and starts its
  * interactive sign-in. What the runs mean (arguments, output, failures) lives in
  * the pure `shared/jira-twg.ts`; this module only owns the processes. The
- * sign-in terminal is opened through `openTerminalWith` in `claude-launch.ts`,
- * the app's one terminal launcher.
+ * sign-in terminal is opened through `openTerminalWith` in `terminal.ts`, the
+ * app's one terminal launcher.
  */
 import { execFile } from "node:child_process";
 
-import { classifyTwgRun, parseTwgAccount, twgWhoamiArgs, type TwgRunResult } from "../shared/jira-twg";
+import { twgStatusFrom, twgWhoamiArgs, type TwgRunResult } from "../shared/jira-twg";
 import { launcherEnv } from "../shared/claude-launch";
 import type { TwgStatus } from "../shared/types";
-import { openTerminalWith } from "./claude-launch";
+import { openTerminalWith } from "./terminal";
 
 /**
  * A query of up to 50 keys answers in about 1.5 s; this only bounds a hung
@@ -60,15 +60,7 @@ export function runTwg(args: string[], timeoutMs = TWG_TIMEOUT_MS): Promise<TwgR
 
 /** Whether twg is installed and signed in, from `twg whoami`. */
 export async function getTwgStatus(): Promise<TwgStatus> {
-  const run = await runTwg(twgWhoamiArgs(), TWG_STATUS_TIMEOUT_MS);
-  const failure = classifyTwgRun(run);
-  if (!failure) {
-    const account = parseTwgAccount(run.stdout);
-    return account ? { state: "signed-in", account } : { state: "signed-in" };
-  }
-  if (failure.kind === "not-installed") return { state: "not-installed" };
-  if (failure.kind === "auth") return { state: "signed-out", message: failure.message };
-  return { state: "error", message: failure.message };
+  return twgStatusFrom(await runTwg(twgWhoamiArgs(), TWG_STATUS_TIMEOUT_MS));
 }
 
 const LOGIN_COMMAND = "twg login --force";

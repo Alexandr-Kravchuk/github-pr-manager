@@ -459,6 +459,7 @@ const api: PrManagerApi = {
         : jiraAuth === "token"
           ? { state: "not-installed" }
           : { state: "signed-in", account: "Mock User" },
+    signInSource: jiraAuth === "token" ? null : jiraAuth === "twg" ? "token" : "twg",
     hasConfig: true,
     hasEmail: true,
     hasToken: true,
