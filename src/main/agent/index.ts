@@ -45,7 +45,7 @@ import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
-import { hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
+import { cutShort, hookCommand, NO_PUSH_ENV, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { actionArgs, boardNow, clip, diffBoard, diffIdle, diffItems, itemFields, runStats, settingsDiff, type ItemMark } from "./journal";
 import { openStore, type AgentItemRecord, type AgentLogEntry, type AgentStore, type LedgerEntry } from "./store";
 import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor, type OrchestratorRun } from "./sdlc";
@@ -119,6 +119,8 @@ export interface Agent {
 
 /** How many recent things a run keeps for the companion's plan-and-log view. */
 const RECENT_MAX = 40;
+/** How many times in a row a run whose process was ended under it goes on by itself. */
+const CUT_RESUMES = 2;
 
 // The same local day the Board's "Done today" uses.
 const localDay = todayKey;
@@ -499,10 +501,14 @@ export function createAgent(deps: AgentDeps): Agent {
       // A notification is best-effort.
     }
   };
-  /** A run the app's closing cut short: held until the next start, which takes it up again. */
-  function markInterrupted(item: AgentItemRecord, at: string): void {
+  /**
+   * A run the app's closing cut short — or whose process was ended under it:
+   * held until the PRs are known (the next start, or the next snapshot), which
+   * takes it up again.
+   */
+  function markInterrupted(item: AgentItemRecord, at: string, why = "the app closed while it ran"): void {
     item.state = "needsYou";
-    item.headline = "Interrupted — the app closed while it ran";
+    item.headline = `Interrupted — ${why}`;
     item.interrupted = true;
     item.resumeSession = undefined;
     item.finishedAt = at;
@@ -583,8 +589,8 @@ export function createAgent(deps: AgentDeps): Agent {
         item.interrupted = undefined;
         item.resumeSession = true;
         item.finishedAt = undefined;
-        item.headline = "Queued: going on — the app closed while it ran";
-        logRun(item, "resumed", { detail: "after a restart" });
+        item.headline = item.cuts ? "Queued: going on — its process was ended" : "Queued: going on — the app closed while it ran";
+        logRun(item, "resumed", { detail: item.cuts ? `after it was cut short (${item.cuts} in a row)` : "after a restart" });
         continue;
       }
       const pr = snapshot.pullRequests.find((p) => p.id === item.prId);
@@ -991,6 +997,10 @@ export function createAgent(deps: AgentDeps): Agent {
     const result = outcome.progress.result;
     item.finishedAt = stamp();
     endStats = runStats(item, outcome, item.finishedAt, { takeOver: entry.takeOver, offStop: entry.offStop });
+    // Ended under it — a Windows restart, Ctrl+C, a workflow still running —
+    // rather than by you, by its time limit, or by finishing.
+    const cut = entry.takeOver || entry.offStop || outcome.stopped || outcome.timedOut ? null : cutShort(outcome);
+    if (!cut) item.cuts = undefined;
     let publishNow = false;
     let pushNow = false;
     // A run that asks nothing of you — you took it over, stopped it, or it
@@ -1016,6 +1026,12 @@ export function createAgent(deps: AgentDeps): Agent {
       item.state = "done";
       item.headline = `Stopped after ${s.limits.maxMinutes} min`;
       store.data.ledger[item.key].state = "failed";
+    } else if (cut) {
+      // Nothing it said yet is its answer. It goes on by itself, like a run the
+      // app's closing cut short — until that has happened too often in a row.
+      item.cuts = (item.cuts ?? 0) + 1;
+      if (item.cuts > CUT_RESUMES) fail(`Cut short ${item.cuts} times in a row`, `${cut} — run it again once that is sorted out`);
+      else markInterrupted(item, item.finishedAt, cut);
     } else if (result && !result.isError && result.subtype === "success") {
       item.state = "needsYou";
       // The card's summary, questions and findings; the rest is the full report.
@@ -1076,11 +1092,11 @@ export function createAgent(deps: AgentDeps): Agent {
       fail("The run failed", result?.text || outcome.stderr.trim().split("\n").slice(-3).join(" ") || `exit ${outcome.exitCode}`);
     }
     // Nothing to post, nothing asked, nothing major found: no decision is left.
-    if ((item.state as AgentItem["state"]) === "needsYou" && nothingForYou(item)) item.state = "done";
+    if ((item.state as AgentItem["state"]) === "needsYou" && !item.interrupted && nothingForYou(item)) item.state = "done";
     // `fail` changes the state behind TypeScript's back; read it afresh.
     const ended = item.state as AgentItem["state"];
     if (ended !== "error") {
-      logRun(item, ended, {
+      logRun(item, item.interrupted ? "interrupted" : ended, {
         sessionId,
         detail: clip(item.headline),
         ...(typeof endStats.ms === "number" ? { ms: endStats.ms } : {}),
@@ -1113,7 +1129,8 @@ export function createAgent(deps: AgentDeps): Agent {
     } else if (pushNow) {
       // On: the app pushes the drive's commits, with the same checks as your Push.
       await pushItem(item, all);
-    } else if (item.state === "needsYou") {
+    } else if (item.state === "needsYou" && !item.interrupted) {
+      // An interrupted run asks nothing of you: it goes on by itself.
       announce(item, "needsYou");
     } else if (item.state === "done" && !entry.takeOver && !entry.offStop && !outcome.stopped) {
       // What you did yourself isn't news to you.

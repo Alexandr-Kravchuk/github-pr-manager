@@ -604,8 +604,13 @@ function createWindow({ show = true }: { show?: boolean } = {}): void {
   // Windows shutdown/restart/logout never emits `before-quit` (documented
   // Electron behavior), so the quit latch must come from the window's own
   // session-end signal — otherwise close-to-tray would intercept the OS's
-  // close and hold up the logout.
-  mainWindow.on("session-end", () => trayController.markQuitting());
+  // close and hold up the logout. The agent hears of it here for the same
+  // reason: its runs are written down as interrupted (and go on at the next
+  // start) before Windows ends their processes, rather than read as finished.
+  mainWindow.on("session-end", () => {
+    trayController.markQuitting();
+    agent?.stop();
+  });
 
   // Returning to the dashboard (focus / un-minimize / re-show) should refresh
   // immediately rather than wait out the parked idle cadence. A visible window

@@ -150,9 +150,36 @@ export function interruptRequest(): string {
 export interface RunOutcome {
   progress: RunProgress;
   exitCode: number | null;
+  /** The signal that ended the process (macOS, Linux); null when it exited. */
+  signal?: NodeJS.Signals | null;
   timedOut: boolean;
   stopped: boolean;
   stderr: string;
+}
+
+/**
+ * Windows' exit status for a console process ended by Ctrl+C, by its console
+ * closing, or by the user's session ending — shutdown, restart, sign-out.
+ */
+export const STATUS_CONTROL_C_EXIT = 0xc000013a;
+const CUT_SIGNALS: ReadonlySet<string> = new Set(["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGKILL"]);
+
+/**
+ * Why a run's process ended before its session finished, or null when the
+ * session finished — or failed by itself, which stays a failure. A session
+ * finishes with a result while no background task runs: a result while one
+ * runs is the turn that launched a skill's Workflow ("I'll report once it
+ * completes"), not the run's answer, and taking it for one turned a review cut
+ * short by a Windows restart into "Reviewed — nothing to post". The app's own
+ * Stop and time limit are told apart before this is asked.
+ */
+export function cutShort(outcome: Pick<RunOutcome, "progress" | "exitCode" | "signal">): string | null {
+  const { result, backgroundTasks } = outcome.progress;
+  if (result && result.subtype !== "error_during_execution" && backgroundTasks === 0) return null;
+  if (outcome.exitCode === STATUS_CONTROL_C_EXIT) return "its process was ended (Ctrl+C, or Windows shutting down or signing out)";
+  if (outcome.signal && CUT_SIGNALS.has(outcome.signal)) return `its process was ended (${outcome.signal})`;
+  if (backgroundTasks > 0) return "its process ended while its workflow was still running";
+  return null;
 }
 
 export interface RunHandle {
@@ -234,16 +261,16 @@ export function startRun(spec: RunSpec, onProgress: (p: RunProgress) => void, sp
   }, spec.timeoutMs);
 
   const done = new Promise<RunOutcome>((resolve) => {
-    const finish = (exitCode: number | null) => {
+    const finish = (exitCode: number | null, signal: NodeJS.Signals | null = null) => {
       clearTimeout(timer);
       stdinOpen = false;
-      resolve({ progress, exitCode, timedOut, stopped, stderr });
+      resolve({ progress, exitCode, signal, timedOut, stopped, stderr });
     };
     child.on("error", (e) => {
       stderr += `\n${(e as Error).message}`;
       finish(null);
     });
-    child.on("exit", (code) => finish(code));
+    child.on("exit", (code, signal) => finish(code, signal));
   });
 
   write(userMessage(spec.prompt));

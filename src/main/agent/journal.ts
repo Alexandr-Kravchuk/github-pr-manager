@@ -228,11 +228,14 @@ export function runStats(item: Pick<AgentItem, "startedAt">, outcome: RunOutcome
   const r = p.result;
   const ms = item.startedAt ? msBetween(item.startedAt, at) : undefined;
   const done = p.steps.filter((s) => s.status === "completed").length;
-  const failed = !r || r.isError || r.subtype !== "success";
+  const failed = !r || r.isError || r.subtype !== "success" || p.backgroundTasks > 0;
   const stderr = outcome.stderr.trim();
   return {
     ...(ms !== undefined ? { ms } : {}),
     exitCode: outcome.exitCode,
+    ...(outcome.signal ? { signal: outcome.signal } : {}),
+    // Still running when the process ended: the result, if any, was a waiting turn's.
+    ...(p.backgroundTasks > 0 ? { backgroundTasks: p.backgroundTasks } : {}),
     ...(r ? { subtype: r.subtype } : {}),
     ...(r?.turns !== undefined ? { turns: r.turns } : {}),
     ...(r?.costUsd !== undefined ? { costUsd: r.costUsd } : {}),

@@ -9988,6 +9988,35 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.ok(a.indexOf("--add-dir") < a.indexOf("--allowedTools"), "--allowedTools stays last");
     });
 
+    await atest("agent runner: a process ended before its session finished is cut short — Ctrl+C, a signal, or a workflow still running", async () => {
+      // A review launched its workflow in the background, ended that turn, and
+      // Windows restarted under it: the result it left is the waiting turn's.
+      const c = fakeChild();
+      const h = runner.startRun(spec(), () => {}, () => c);
+      emit(c, { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "w" }] });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "The review workflow is running in the background. I'll report once it completes." });
+      await tickOnce();
+      c.emit("exit", runner.STATUS_CONTROL_C_EXIT, null);
+      const out = await h.done;
+      assert.strictEqual(out.exitCode, 3221225786);
+      assert.match(runner.cutShort(out), /process was ended/);
+
+      const fin = { subtype: "success", isError: false, text: "the review", denials: 0 };
+      const at = (over, exitCode, signal = null) => runner.cutShort({ progress: { ...out.progress, ...over }, exitCode, signal });
+      assert.strictEqual(at({ backgroundTasks: 0, result: fin }, 0), null, "finished");
+      assert.strictEqual(at({ backgroundTasks: 0, result: fin }, runner.STATUS_CONTROL_C_EXIT), null, "its answer came before the end");
+      assert.match(at({ backgroundTasks: 0, result: null }, runner.STATUS_CONTROL_C_EXIT), /Ctrl\+C, or Windows shutting down/);
+      assert.match(at({ backgroundTasks: 0, result: null }, null, "SIGTERM"), /\(SIGTERM\)/);
+      assert.match(at({ backgroundTasks: 1 }, 0), /workflow was still running/, "it exited by itself with its workflow unfinished");
+      assert.strictEqual(at({ backgroundTasks: 0, result: null }, 1), null, "a failure of its own stays a failure");
+      assert.strictEqual(at({ backgroundTasks: 0, result: { ...fin, subtype: "error_during_execution", isError: true } }, 1), null);
+
+      const d = fakeChild();
+      const h2 = runner.startRun(spec(), () => {}, () => d);
+      d.emit("exit", null, "SIGINT");
+      assert.strictEqual((await h2.done).signal, "SIGINT", "the signal is kept on the outcome");
+    });
+
     test("agent plugins: your own skills a prompt names are mounted as a plugin of the run's own", () => {
       const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-skills-"));
       const skills = path.join(home, "skills");
@@ -10721,6 +10750,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(pkg.build.asarUnpack, ["dist/main/main/agent/**", "dist/main/shared/**"], "Claude Code runs the hook and capture scripts as Node — they and what they require must be on disk");
       assert.match(src, /agent\?\.ownSessionIds\(\)/);
       assert.match(src, /markQuitting\(\);\s*agent\?\.stop\(\)/);
+      // Windows shutdown, restart or sign-out never emits before-quit: the
+      // window's session-end is the only word the agent gets of it.
+      assert.match(src, /mainWindow\.on\("session-end", \(\) => \{\s*trayController\.markQuitting\(\);\s*agent\?\.stop\(\);/);
     });
 
     // --- stage 6: quiet hours, the tray line, toasts, the whole-agent pause, Interrupted + Resume ---
@@ -10889,6 +10921,67 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"resumed"/);
       } finally {
         g.agent.stop();
+      }
+    });
+
+    await atest("agent: a run whose process is ended mid-workflow is interrupted, not a clean review — it goes on in the same session", async () => {
+      const notes = [];
+      let spawned = 0;
+      const cutMidWorkflow = (c) => {
+        emit(c, { type: "system", subtype: "init", session_id: "s" });
+        emit(c, { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "w" }] });
+        emit(c, { type: "result", subtype: "success", is_error: false, result: "The review workflow is running in the background. I'll report once it completes." });
+        setImmediate(() => c.emit("exit", runner.STATUS_CONTROL_C_EXIT, null));
+      };
+      const f = agentFixture({ script: (c) => (++spawned === 1 ? cutMidWorkflow(c) : keepWorking(c)), notify: (n) => notes.push(n.kind) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f)[0]?.interrupted === true);
+        const item = only(f)[0];
+        assert.deepStrictEqual(
+          [item.state, item.headline],
+          ["needsYou", "Interrupted — its process was ended (Ctrl+C, or Windows shutting down or signing out)"],
+          "not «Reviewed — nothing to post»",
+        );
+        assert.ok(!f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"), "its folder stays for the session to go on in");
+        await until(() => readLog(f).some((l) => l.event === "interrupted"));
+        const line = readLog(f).find((l) => l.event === "interrupted");
+        assert.deepStrictEqual([line.kind, line.data.exitCode, line.data.backgroundTasks], ["run", 3221225786, 1]);
+        assert.ok(!readLog(f).some((l) => l.kind === "run" && ["done", "needsYou", "failed"].includes(l.event)), "no false end");
+        assert.deepStrictEqual(notes, [], "nothing to tell you: it goes on by itself");
+
+        // The next snapshot takes it up again, in the session it ran.
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+        const c = f.children[1];
+        assert.strictEqual(c.args[c.args.indexOf("--resume") + 1], item.sessionId, "the very session it ran");
+        assert.strictEqual(c.cwd, item.worktree);
+        assert.strictEqual(only(f)[0].state, "working");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a run cut short three times in a row stops going on by itself", async () => {
+      const cut = (c) => {
+        emit(c, { type: "system", subtype: "init", session_id: "s" });
+        setImmediate(() => c.emit("exit", runner.STATUS_CONTROL_C_EXIT, null));
+      };
+      const f = agentFixture({ script: cut });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        for (let k = 1; k <= 2; k++) {
+          await until(() => f.children.length === k && only(f)[0].interrupted === true);
+          nfsA.mkdirSync(only(f)[0].worktree, { recursive: true });
+          f.agent.onSnapshot(f.snapshot);
+        }
+        await until(() => only(f)[0].state === "error");
+        assert.strictEqual(f.children.length, 3);
+        assert.strictEqual(only(f)[0].headline, "Cut short 3 times in a row");
+        assert.match(only(f)[0].error, /process was ended/);
+      } finally {
+        f.agent.stop();
       }
     });
 

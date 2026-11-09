@@ -865,6 +865,12 @@ export interface AgentItem {
    * drive) a new run.
    */
   interrupted?: boolean;
+  /**
+   * How many runs of it in a row ended with their process cut short (Ctrl+C,
+   * a shutdown, a workflow still running). Each goes on by itself like an
+   * interrupted run, up to a cap; a run that ends any other way clears it.
+   */
+  cuts?: number;
   /** The next run continues `sessionId` instead of starting a session: after a restart, or with your answer. */
   resumeSession?: boolean;
   /**
