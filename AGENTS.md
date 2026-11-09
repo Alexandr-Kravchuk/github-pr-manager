@@ -223,14 +223,18 @@ Three layers:
   review DISMISSED and the `ReviewDismissedEvent` of that very review, matched
   by review id (author and commit can match an earlier dismissed approval),
   saying it was APPROVED, so a dismissed change request never becomes an
-  approval and any later word of theirs wins — and compares the PR's own
-  changes at the dismissed head (`compare/<base>...<old head>`) and now by
-  `diffFingerprint`: each hunk's lines with their context, only no line
-  numbers, hunk headings or blob ids, so a base change next to the PR's lines
-  or a PR line moved elsewhere reads as a change; a file's header ends at its
-  first `@@` (past it a `--- `/`+++ ` line is content — a removed SQL comment
-  once hid there), and a binary file stays strict. A diff too big to compare,
-  or one `runGh` may have cut, passes.
+  approval and any later word of theirs wins — and then checks the push in
+  your clone (`baseOnlyPush`; no clone, no offer): everything between the
+  approved head and the new one must be merges of the base on the branch's
+  first-parent walk (`baseMerges` over `rev-list --parents old..new --not
+  <base>`), and each merge's tree exactly what `git merge-tree --write-tree`
+  makes of its two parents — so an own commit, a rewrite, a conflict resolved
+  by hand or a merge carrying changes of its own all pass. Diffs were compared
+  first and dropped: a change moved to a spot with the same context, or a
+  `--- `/`+++ ` content line read as a header, slipped through. The git calls
+  run under `withNoHooks` + `safeGit` and leave the clone as it was — the
+  fetch takes `--no-write-fetch-head --refmap=`, so not even a remote-tracking
+  branch moves (a test pins both on a real repository).
   Shadow offers it, On gives it at once; the PR is read again before anything
   goes out, the approval carries one line and the signature, and turning an
   offer down hands the head back to the other rules).

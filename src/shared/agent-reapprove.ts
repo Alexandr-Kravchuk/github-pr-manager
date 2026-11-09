@@ -6,8 +6,8 @@
 // although nothing of the PR changed. Across three epics that was 211
 // approvals in 70 PRs, and 42% of their review hours passed after the first
 // approval. Here: which approvals stand dismissed (from the PR's timeline),
-// and whether the PR's own changes are the same at the dismissed head and now
-// (from two diffs). Pure and Node-free — the reads are main's
+// and whether everything pushed since was merges of the base (from the
+// commits). Pure and Node-free — the reads are main's
 // (`main/agent/reapprove.ts`), and the policy asks here too.
 
 export interface DismissedApproval {
@@ -65,55 +65,33 @@ export function dismissedApprovals(nodes: readonly ReviewTimelineNode[], head: s
   return out.sort((a, b) => a.login.localeCompare(b.login));
 }
 
-/**
- * What a PR changes, whatever its base: per file, its path, how it changed
- * (new, deleted, renamed, mode) and each hunk's lines with their context —
- * only no line numbers, hunk headings or blob ids, which move when the base
- * changes somewhere else in the file. A base change next to the PR's lines
- * changes their context, and so reads as a change: the safe side, as is a
- * line of the PR moved elsewhere. A file's header ends at its first `@@`;
- * past it a line starting `--- ` or `+++ ` is content (a removed `-- comment`,
- * an added `++ x`), never skipped. A binary file keeps its index line, since
- * its content can't be compared any other way.
- */
-export function diffFingerprint(diff: string): string {
-  type File = { path: string; meta: string[]; index: string; hunks: string[][] };
-  const files: File[] = [];
-  let cur: File | null = null;
-  let hunk: string[] | null = null;
-  for (const raw of diff.split("\n")) {
-    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-    // Never a hunk line: each of those starts with " ", "+", "-" or "\".
-    const header = /^diff --git a\/.+? b\/(.+)$/.exec(line);
-    if (header) {
-      cur = { path: header[1], meta: [], index: "", hunks: [] };
-      files.push(cur);
-      hunk = null;
-      continue;
-    }
-    if (!cur) continue;
-    if (line.startsWith("@@")) {
-      hunk = [];
-      cur.hunks.push(hunk);
-      continue;
-    }
-    if (hunk === null) {
-      // The file's header. "--- a/…", "+++ b/…" and "similarity index" say nothing the lines here don't.
-      if (line.startsWith("index ")) cur.index = line;
-      else if (/^(new file mode|deleted file mode|old mode|new mode|rename from|rename to|copy from|copy to) /.test(line)) cur.meta.push(line);
-      else if (line.startsWith("Binary files ") || line === "GIT binary patch") cur.meta.push(line, cur.index);
-      continue;
-    }
-    if (line.startsWith(" ") || line.startsWith("+") || line.startsWith("-") || line.startsWith("\\")) hunk.push(line);
-  }
-  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  return files.map((f) => [f.path, ...f.meta, ...f.hunks.map((h) => `@@\n${h.join("\n")}`)].join("\n")).join("\n\u0000\n");
+export interface BaseMerge {
+  sha: string;
+  /** The branch side first, the base side second. */
+  parents: [string, string];
 }
 
-/** The same changes at both heads — and some at all: two empty diffs say nothing. */
-export function sameChanges(before: string, after: string): boolean {
-  const a = diffFingerprint(before);
-  return a !== "" && a === diffFingerprint(after);
+/**
+ * The merges a push added since the approval — or why the push was more than
+ * merging the base. Comparing diffs can't settle it: a change moved to a spot
+ * with the same context reads the same. The commits are what settle it:
+ * `own` are those reachable from the new head but neither from the approved
+ * head nor from the base, each as `[sha, ...parents]` (`git rev-list --parents
+ * old..new --not <base>`), and `chain` the first-parent walk from the new head
+ * down to the approved head. A base-only push has nothing in `own` but merges
+ * on that walk, two parents each, the second one the base's. Main then checks
+ * each merge is exactly what merging its parents gives (`git merge-tree`).
+ */
+export function baseMerges(own: readonly string[][], chain: ReadonlySet<string>): { merges: BaseMerge[] } | { why: string } {
+  if (own.length === 0) return { why: "nothing new on the branch since the approval" };
+  for (const c of own) {
+    if (c.length < 3) return { why: "the author pushed commits of their own since the approval" };
+    if (c.length > 3) return { why: "an octopus merge since the approval" };
+    if (!chain.has(c[0])) return { why: "a merge brought in commits that aren't the base's" };
+  }
+  // A step of the branch's own walk that is the base's: it was moved onto base commits, not merged.
+  if (chain.size !== own.length) return { why: "the branch took base commits without a merge" };
+  return { merges: own.map((c) => ({ sha: c[0], parents: [c[1], c[2]] })) };
 }
 
 /** The line a re-approval posts above the signature. */

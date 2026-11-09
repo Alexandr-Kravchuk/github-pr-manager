@@ -10120,7 +10120,32 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     // A review's id is its author and submission time here; a dismissal names the review it dismissed by that id.
     const review = (login, state, at, oid) => ({ __typename: "PullRequestReview", id: `R:${login}:${at}`, author: { login }, state, submittedAt: at, commit: { oid } });
     const dismissal = (login, previousReviewState, at, oid) => ({ __typename: "ReviewDismissedEvent", previousReviewState, review: { id: `R:${login}:${at}`, author: { login }, commit: { oid } } });
-    const diffOf = (hunk, index = "index 111..222 100644") => `diff --git a/src/x.ts b/src/x.ts\n${index}\n--- a/src/x.ts\n+++ b/src/x.ts\n${hunk}`;
+    // git as the base-only check calls it: the subcommand after the safeGit "-c" pairs.
+    const gitCmd = (args) => {
+      let i = 0;
+      while (args[i] === "-c") i += 2;
+      return args.slice(i);
+    };
+    // A clone where the approved head was followed by one clean merge of the base.
+    const cleanMergeGit = (o = {}) => async (args) => {
+      const a = gitCmd(args);
+      switch (a[0]) {
+        case "ls-remote":
+          return `base1\trefs/heads/${o.base ?? "master"}\n${o.head ?? "aaa111"}\trefs/pull/7/head\n`;
+        case "merge-base":
+          if (o.rewritten) throw new Error("git merge-base: exit 1");
+          return "";
+        case "rev-list":
+          return a[1] === "--parents" ? (o.own ?? "m1 old111 base1\n") : (o.chain ?? "m1\n");
+        case "rev-parse":
+          return "tree1\n";
+        case "merge-tree":
+          if (o.conflict) throw new Error("git merge-tree: CONFLICT (content): Merge conflict in a.txt");
+          return `${o.clean ?? "tree1"}\nAuto-merging a.txt\n`;
+        default:
+          return "";
+      }
+    };
 
     test("agent re-approve: a dismissed approval is told from a dismissed change request, a later word and the current head", () => {
       const t = [
@@ -10151,24 +10176,102 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(ra.dismissedApprovals([], "new222"), []);
     });
 
-    test("agent re-approve: the PR's own changes compare with their context but no line numbers or blob ids — and nothing hides as a header", () => {
-      const before = diffOf("@@ -1,3 +1,4 @@\n ctx\n+added line\n ctx2\n");
-      const after = diffOf("@@ -40,3 +44,4 @@ function moved() {\n ctx\n+added line\n ctx2\n", "index 999..222 100644");
-      assert.ok(ra.sameChanges(before, after), "the base changed elsewhere in the file: only the numbers moved");
-      assert.ok(ra.sameChanges(before.replace(/\n/g, "\r\n"), after));
-      assert.ok(!ra.sameChanges(before, diffOf("@@ -1,3 +1,4 @@\n ctx from the base\n+added line\n ctx2\n")), "the base changed right next to it: the safe side");
-      assert.ok(!ra.sameChanges(before, diffOf("@@ -1,3 +1,3 @@\n ctx\n ctx2\n@@ -30,2 +30,3 @@\n far\n+added line\n")), "the PR's line moved elsewhere");
-      // Past the first @@, "--- " and "+++ " are lines of the change: a removed SQL comment, an added "++ x".
-      const sqlBefore = diffOf("@@ -1,3 +1,2 @@\n select 1;\n--- grant to all\n+++ b\n");
-      assert.ok(!ra.sameChanges(sqlBefore, diffOf("@@ -1,3 +1,2 @@\n select 1;\n--- revoke from all\n+++ b\n")), "a removed «-- comment» line changed");
-      assert.ok(!ra.sameChanges(sqlBefore, diffOf("@@ -1,3 +1,2 @@\n select 1;\n--- grant to all\n+++ c\n")), "an added «++ x» line changed");
-      assert.ok(!ra.sameChanges(before, diffOf("@@ -1,3 +1,4 @@\n ctx\n+added line, changed\n ctx2\n")), "a line of the PR changed");
-      assert.ok(!ra.sameChanges(before, `${after}diff --git a/b.ts b/b.ts\n--- a/b.ts\n+++ b/b.ts\n@@ -1 +1 @@\n-a\n+b\n`), "a file more");
-      const bin = (index) => `diff --git a/i.png b/i.png\n${index}\nBinary files a/i.png and b/i.png differ\n`;
-      assert.ok(ra.sameChanges(bin("index aaa..bbb 100644"), bin("index aaa..bbb 100644")));
-      assert.ok(!ra.sameChanges(bin("index aaa..bbb 100644"), bin("index ccc..bbb 100644")), "a binary under a moved base can't be told: the safe side");
-      assert.ok(!ra.sameChanges("", ""), "two empty diffs say nothing");
+    test("agent re-approve: the commits since the approval decide — merges of the base on the branch's own walk, nothing else", () => {
+      const chain = (...shas) => new Set(shas);
+      assert.deepStrictEqual(ra.baseMerges([["m2", "m1", "b2"], ["m1", "old", "b1"]], chain("m2", "m1")), {
+        merges: [
+          { sha: "m2", parents: ["m1", "b2"] },
+          { sha: "m1", parents: ["old", "b1"] },
+        ],
+      });
+      assert.deepStrictEqual(ra.baseMerges([], chain()), { why: "nothing new on the branch since the approval" });
+      assert.deepStrictEqual(ra.baseMerges([["m1", "old", "b1"], ["c1", "old"]], chain("m1")), { why: "the author pushed commits of their own since the approval" });
+      assert.deepStrictEqual(ra.baseMerges([["m1", "old", "b1", "x1"]], chain("m1")), { why: "an octopus merge since the approval" });
+      assert.deepStrictEqual(ra.baseMerges([["m1", "old", "x1"], ["x1", "old", "y1"]], chain("m1")), { why: "a merge brought in commits that aren't the base's" }, "a second parent that isn't the base's shows up as a commit of its own");
+      assert.deepStrictEqual(ra.baseMerges([["m1", "b9", "b1"]], chain("m1", "b9")), { why: "the branch took base commits without a merge" });
       assert.strictEqual(ra.reapprovalBody("0123456789abcdef"), "Re-approved: only the base branch changed since my approval at `0123456` — the PR's own changes are the same.");
+    });
+
+    await atest("agent re-approve: in a real clone a clean merge of the base passes; a merge with changes of its own, an own commit, a rewrite and a conflict don't", async () => {
+      const md = require(path.join(__dirname, "../dist/main/main/agent/reapprove.js"));
+      const wt = require(path.join(__dirname, "../dist/main/main/agent/worktrees.js"));
+      const { execFileSync } = require("node:child_process");
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-reapprove-"));
+      const remote = path.join(root, "remote.git");
+      const co = path.join(root, "co");
+      const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+      const g = (...args) => execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", ...args], { cwd: co, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+      const write = (file, text) => nfsA.writeFileSync(path.join(co, file), text);
+      const lines = (over = {}) => Array.from({ length: 12 }, (_, i) => over[i + 1] ?? `line ${i + 1}`).join("\n") + "\n";
+      execFileSync("git", ["init", "--bare", "-b", "master", remote], { env, stdio: "ignore" });
+      execFileSync("git", ["clone", remote, co], { env, stdio: "ignore" });
+      g("checkout", "-b", "master");
+      write("a.txt", lines());
+      g("add", ".");
+      g("commit", "-m", "base");
+      g("push", "origin", "master");
+      g("checkout", "-b", "feature");
+      write("a.txt", lines({ 2: "the PR's line" }));
+      g("commit", "-am", "the PR");
+      const old = g("rev-parse", "HEAD");
+      const pushPr = () => {
+        g("push", "-f", "origin", "HEAD:refs/pull/1/head");
+        return g("rev-parse", "HEAD");
+      };
+      pushPr();
+      // The base moves, away from the PR's line, and is merged in cleanly.
+      g("checkout", "master");
+      write("b.txt", "the base's file\n");
+      g("add", ".");
+      g("commit", "-m", "base moves");
+      g("push", "origin", "master");
+      g("checkout", "feature");
+      g("merge", "--no-edit", "master");
+      const clean = pushPr();
+      const local = { git: wt.runGit, checkout: co, remote: "origin" };
+      const check = (head) => md.baseOnlyPush(local, { number: 1, baseRefName: "master" }, old, head);
+      assert.strictEqual(await check(clean), null, "a clean merge of the base");
+
+      // The same merge with one more change folded into it.
+      write("a.txt", lines({ 2: "the PR's line", 11: "slipped into the merge" }));
+      g("commit", "--amend", "-a", "--no-edit");
+      assert.strictEqual(await check(pushPr()), "a merge carries changes of its own");
+
+      // A commit of the author's after the clean merge.
+      g("reset", "--hard", clean);
+      write("c.txt", "more\n");
+      g("add", ".");
+      g("commit", "-m", "more");
+      assert.strictEqual(await check(pushPr()), "the author pushed commits of their own since the approval");
+
+      // The branch rebased onto the base instead of merging it.
+      g("checkout", "-B", "rebased", old);
+      g("rebase", "master");
+      assert.strictEqual(await check(pushPr()), "the branch was rewritten since the approval");
+
+      // The base changes the PR's line too; the conflict is resolved by hand.
+      g("checkout", "master");
+      write("a.txt", lines({ 2: "the base's own line 2" }));
+      g("commit", "-am", "base touches line 2");
+      g("push", "origin", "master");
+      g("checkout", "-B", "conflict", old);
+      try {
+        g("merge", "--no-edit", "master");
+      } catch {
+        // The conflict, as expected.
+      }
+      write("a.txt", lines({ 2: "the PR's line" }));
+      g("add", ".");
+      g("commit", "--no-edit");
+      const conflicted = pushPr();
+      assert.strictEqual(await check(conflicted), "a merge had conflicts resolved by hand");
+
+      await assert.rejects(check(clean), /newer head/, "the PR moved on since the dashboard saw it");
+      // Your clone behind the remote: the check fetches what it needs and moves none of its refs.
+      g("update-ref", "refs/remotes/origin/master", old);
+      assert.strictEqual(await check(conflicted), "a merge had conflicts resolved by hand");
+      assert.strictEqual(g("rev-parse", "refs/remotes/origin/master"), old, "the remote-tracking branch stays where it was");
+      assert.ok(!nfsA.existsSync(path.join(co, ".git", "FETCH_HEAD")), "and no FETCH_HEAD is written");
     });
 
     test("agent re-approve: the policy holds someone's PR while its head is checked, and re-asks beside driving your own", () => {
@@ -10196,33 +10299,36 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(policy.planJobs([{ ...mine, hasHumanApproval: true }], s, { ...noSessions, reapproveState: () => "unchecked" }).reapprovals, [], "an approval stands");
     });
 
-    await atest("agent re-approve: the check reads the timeline once and two diffs, and passes on whatever isn't a base-only push", async () => {
+    await atest("agent re-approve: the check reads the timeline once, checks the push in your clone, and passes on whatever isn't a base-only push", async () => {
       const md = require(path.join(__dirname, "../dist/main/main/agent/reapprove.js"));
       const timeline = [review("me", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("me", "APPROVED", "2026-11-01T10:00:00Z", "old111")];
-      const before = diffOf("@@ -1,3 +1,4 @@\n ctx\n+added\n ctx2\n");
-      const sameNow = diffOf("@@ -9,3 +9,4 @@\n ctx\n+added\n ctx2\n");
       const fake = (o = {}) => {
         const calls = [];
         const gh = async (args, opts) => {
           calls.push(args);
-          if (args[1] === "graphql") {
-            assert.match(JSON.parse(opts.input).query, /REVIEW_DISMISSED_EVENT/);
-            return { code: 0, stdout: JSON.stringify({ data: { viewer: { login: "me" }, node: { state: o.state ?? "OPEN", headRefOid: o.head ?? "aaa111", baseRefName: "release/8.3", author: { login: "author1" }, timelineItems: { nodes: o.timeline ?? timeline } } } }), stderr: "" };
-          }
-          if (o.tooBig) return { code: 1, stdout: "", stderr: "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)" };
-          return { code: 0, stdout: args[1].includes("/compare/") ? before : (o.now ?? sameNow), stderr: "" };
+          assert.strictEqual(args[1], "graphql", "nothing but the timeline is read from the API");
+          assert.match(JSON.parse(opts.input).query, /REVIEW_DISMISSED_EVENT/);
+          return { code: 0, stdout: JSON.stringify({ data: { viewer: { login: "me" }, node: { state: o.state ?? "OPEN", headRefOid: o.head ?? "aaa111", baseRefName: "release/8.3", author: { login: "author1" }, timelineItems: { nodes: o.timeline ?? timeline } } } }), stderr: "" };
         };
         return { gh, calls };
       };
+      const gitCalls = [];
+      const local = (o = {}) => ({ git: async (args) => (gitCalls.push(gitCmd(args)), cleanMergeGit({ base: "release/8.3", ...o })(args)), checkout: "/co", remote: "origin" });
       const target = { id: "PR_R", url: "https://github.com/a/b/pull/7", repo: "a/b", number: 7, headOid: "aaa111" };
       const ok = fake();
-      assert.deepStrictEqual(await md.checkReapproval(ok.gh, target, "reapprove"), { verdict: "same", logins: ["me"], oldHead: "old111", note: "only the base changed since old111" });
-      assert.deepStrictEqual(ok.calls.map((a) => a[1]), ["graphql", "repos/a/b/pulls/7", "repos/a/b/compare/release/8.3...old111"], "three reads, the base's slash kept");
-      assert.strictEqual((await md.checkReapproval(fake({ now: diffOf("@@ -1,3 +1,4 @@\n ctx\n+other\n ctx2\n") }).gh, target, "reapprove")).note, "the PR's own changes differ since the approval");
-      assert.strictEqual((await md.checkReapproval(fake().gh, target, "reask")).note, "no dismissed approvals", "on your PR, your own approval is no reviewer's");
-      assert.strictEqual((await md.checkReapproval(fake({ state: "MERGED" }).gh, target, "reapprove")).verdict, "pass");
-      assert.strictEqual((await md.checkReapproval(fake({ tooBig: true }).gh, target, "reapprove")).note, "too big to compare");
-      await assert.rejects(md.checkReapproval(fake({ head: "bbb222" }).gh, target, "reapprove"), /newer head/, "the dashboard is behind: checked again later");
+      assert.deepStrictEqual(await md.checkReapproval(ok.gh, target, "reapprove", local()), { verdict: "same", logins: ["me"], oldHead: "old111", note: "only merges of the base since old111" });
+      assert.deepStrictEqual(gitCalls.find((a) => a[0] === "fetch"), ["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", "refs/heads/release/8.3", "refs/pull/7/head"]);
+      assert.deepStrictEqual(gitCalls.find((a) => a[0] === "merge-tree"), ["merge-tree", "--write-tree", "old111", "base1"]);
+      const note = async (o, l = local()) => (await md.checkReapproval(fake(o).gh, target, "reapprove", l)).note;
+      assert.strictEqual(await note({}, local({ own: "c1 old111\n", chain: "c1\n" })), "the author pushed commits of their own since the approval");
+      assert.strictEqual(await note({}, local({ clean: "tree2" })), "a merge carries changes of its own");
+      assert.strictEqual(await note({}, local({ conflict: true })), "a merge had conflicts resolved by hand");
+      assert.strictEqual(await note({}, local({ rewritten: true })), "the branch was rewritten since the approval");
+      assert.strictEqual(await note({}, null), "no clone of the repository to check the push in");
+      assert.strictEqual((await md.checkReapproval(fake().gh, target, "reask", local())).note, "no dismissed approvals", "on your PR, your own approval is no reviewer's");
+      assert.strictEqual((await md.checkReapproval(fake({ state: "MERGED" }).gh, target, "reapprove", local())).verdict, "pass");
+      await assert.rejects(md.checkReapproval(fake({ head: "bbb222" }).gh, target, "reapprove", local()), /newer head/, "the dashboard is behind: checked again later");
+      await assert.rejects(md.checkReapproval(fake().gh, target, "reapprove", local({ head: "ccc333" })), /newer head/, "so is the remote");
       assert.deepStrictEqual(md.reapproveRequest("a/b", 7, "aaa111", "old111", "— sig"), {
         label: "approval",
         endpoint: "repos/a/b/pulls/7/reviews",
@@ -11265,10 +11371,6 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           stderr: "",
         };
       }
-      if (args.includes("Accept: application/vnd.github.v3.diff")) {
-        const before = "diff --git a/src/x.ts b/src/x.ts\n--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,3 +1,4 @@\n ctx\n+added\n ctx2\n";
-        return { code: 0, stdout: args[1].includes("/compare/") ? before : (st.now ?? before.replace("@@ -1,3 +1,4 @@", "@@ -7,3 +7,4 @@")), stderr: "" };
-      }
       st.posted.push({ endpoint: args[1], body: JSON.parse(opts.input) });
       return { code: 0, stdout: "{}", stderr: "" };
     };
@@ -11281,7 +11383,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         pr: reviewPr({ role: "reviewed" }),
         agent: { scenarios: { reapprove: { mode: "shadow", askReviewers: true } } },
         script: keepWorking,
-        gh: reapproveGh(st),
+        gh: reapproveGh(st), git: cleanMergeGit(st.git),
         fetchPr: async () => ({ pr: reviewPr({ role: "reviewed" }), state: "OPEN", viewer: "me" }),
         notify: (n) => notices.push([n.kind, n.item.scenario]),
       });
@@ -11319,7 +11421,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         pr: reviewPr({ role: "reviewed" }),
         agent: { scenarios: { reapprove: { mode: "on", askReviewers: true } } },
         script: keepWorking,
-        gh: reapproveGh(on),
+        gh: reapproveGh(on), git: cleanMergeGit(on.git),
         fetchPr: async () => ({ pr: reviewPr({ role: "reviewed" }), state: "OPEN", viewer: "me" }),
       });
       try {
@@ -11333,9 +11435,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         f.agent.stop();
       }
 
-      // A line of the PR changed: nothing is offered.
-      const changed = { timeline: myDismissal, posted: [], now: "diff --git a/src/x.ts b/src/x.ts\n--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,3 +1,4 @@\n ctx\n+other\n ctx2\n" };
-      const g = agentFixture({ pr: reviewPr({ role: "reviewed" }), agent: { scenarios: { reapprove: { mode: "on", askReviewers: true } } }, script: keepWorking, gh: reapproveGh(changed) });
+      // The author pushed a commit of their own: nothing is offered.
+      const changed = { timeline: myDismissal, posted: [], git: { own: "c1 old111\n", chain: "c1\n" } };
+      const g = agentFixture({ pr: reviewPr({ role: "reviewed" }), agent: { scenarios: { reapprove: { mode: "on", askReviewers: true } } }, script: keepWorking, gh: reapproveGh(changed), git: cleanMergeGit(changed.git) });
       try {
         g.agent.onSnapshot(g.snapshot);
         await until(() => readLog(g).some((l) => l.event === "reapprove-check"));
@@ -11354,7 +11456,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         pr: unapproved(),
         agent: { scenarios: { reapprove: { mode: "shadow", askReviewers: true }, selfReview: off, driveCi: { mode: "off", maxAttempts: 2 }, driveComments: off, merge: { mode: "off" } } },
         script: keepWorking,
-        gh: reapproveGh(mine),
+        gh: reapproveGh(mine), git: cleanMergeGit(mine.git),
         fetchPr: async () => ({ pr: unapproved(), state: "OPEN", viewer: "me" }),
       });
       try {

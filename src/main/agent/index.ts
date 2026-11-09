@@ -697,7 +697,16 @@ export function createAgent(deps: AgentDeps): Agent {
     const fields = { prId: pr.id, prNumber: pr.number, repo: pr.repo, scenario: job.scenario, ...(pr.headOid ? { headOid: pr.headOid } : {}) };
     void (async () => {
       try {
-        const found = await checkReapproval(gh, { id: pr.id, url: pr.url, repo: pr.repo, number: pr.number, headOid: pr.headOid }, job.scenario === "reask" ? "reask" : "reapprove");
+        // The push is checked in your clone of the repository: without one, nothing is given again.
+        const claude = loadAll()?.claude;
+        const checkout = claude ? deps.findCheckout(pr, claude) : null;
+        const remote = checkout ? remoteFor(checkout, pr) : null;
+        const found = await checkReapproval(
+          gh,
+          { id: pr.id, url: pr.url, repo: pr.repo, number: pr.number, headOid: pr.headOid },
+          job.scenario === "reask" ? "reask" : "reapprove",
+          checkout && remote ? { git, checkout, remote } : null,
+        );
         if (stopped) return;
         const mark: ReapproveMark = {
           verdict: found.verdict,

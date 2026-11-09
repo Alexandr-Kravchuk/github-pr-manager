@@ -1,13 +1,16 @@
-// Re-approve / re-ask: the GitHub reads and writes behind
-// `shared/agent-reapprove.ts`. Once per head of a PR the policy points at, one
-// GraphQL read of the PR's timeline tells a dismissed approval from a plain
-// comment, and two diffs tell a base-only push from one that changed the PR.
-// Only then is anything offered — and what is posted is the app's own: an
-// approval with one line and the signature, or a review request.
+// Re-approve / re-ask: the reads and writes behind `shared/agent-reapprove.ts`.
+// Once per head of a PR the policy points at, one GraphQL read of the PR's
+// timeline tells a dismissed approval from a plain comment; then the commits
+// pushed since are checked in your clone — merges of the base only, each one
+// exactly what merging its two parents gives. Only then is anything offered,
+// and what goes out is the app's own: an approval with one line and the
+// signature, or a review request.
 
 import { signedBody, type PublishRequest } from "../../shared/agent-publish";
-import { dismissedApprovals, reapprovalBody, sameChanges, type ReviewTimelineNode } from "../../shared/agent-reapprove";
+import { baseMerges, dismissedApprovals, reapprovalBody, type ReviewTimelineNode } from "../../shared/agent-reapprove";
+import { safeGit, withNoHooks } from "./drive";
 import { ghError, hostFlag, type GhRunner } from "./publish";
+import type { GitRunner } from "./worktrees";
 
 const TIMELINE_QUERY = `query($id: ID!) {
   viewer { login }
@@ -25,12 +28,9 @@ const TIMELINE_QUERY = `query($id: ID!) {
   }
 }`;
 
-/** `runGh` keeps the tail of a longer output: a diff that fills it may be cut, and two cut diffs could look alike. */
-const GH_STDOUT_MAX = 200_000;
-
 export interface ReapprovalCheck {
   verdict: "same" | "pass";
-  /** Whose dismissed approvals cover exactly the PR's changes now. */
+  /** Whose dismissed approvals the push since left standing — nothing but the base came in. */
   logins: string[];
   /** The head they were given on. */
   oldHead?: string;
@@ -46,26 +46,77 @@ export interface ReapprovalTarget {
   headOid: string | null;
 }
 
+/** Your clone of the PR's repository, and its remote for that repository. */
+export interface LocalRepo {
+  git: GitRunner;
+  checkout: string;
+  remote: string;
+}
+
 const pass = (note: string): ReapprovalCheck => ({ verdict: "pass", logins: [], note });
 
-/** The PR's diff at an endpoint; null when it is too big to compare whole. */
-async function readDiff(gh: GhRunner, url: string, endpoint: string): Promise<string | null> {
-  const r = await gh(["api", endpoint, "-H", "Accept: application/vnd.github.v3.diff", ...hostFlag(url)], { timeoutMs: 90_000 });
-  if (r.code !== 0) {
-    // GitHub refuses a diff past its own limits: that is an answer, not an outage.
-    if (/too large|too_large|diff is taking too long|406|422/i.test(`${r.stderr}\n${r.stdout}`)) return null;
-    throw new Error(`couldn't read a diff: ${ghError(r)}`);
-  }
-  return r.stdout.length >= GH_STDOUT_MAX ? null : r.stdout;
+const lines = (out: string): string[] =>
+  out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+/**
+ * Null when everything pushed between the approved head and the new one is
+ * merges of the base, each exactly the tree `git merge-tree` makes of its two
+ * parents — else why not. Read in your clone with nothing of its config able
+ * to start a program (no hooks, fsmonitor or gpg), and without touching it: the
+ * fetch writes no ref and no FETCH_HEAD, the merge only objects. Throws when
+ * the PR has moved on since the dashboard saw it — the next head is checked.
+ */
+export async function baseOnlyPush(local: LocalRepo, pr: { number: number; baseRefName: string }, oldHead: string, newHead: string): Promise<string | null> {
+  return withNoHooks(async (hooks) => {
+    const git = (args: string[]) => local.git([...safeGit(hooks), ...args], local.checkout);
+    const succeeds = async (args: string[]) => {
+      try {
+        await git(args);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const baseRef = `refs/heads/${pr.baseRefName}`;
+    const pullRef = `refs/pull/${pr.number}/head`;
+    const tips = new Map(lines(await git(["ls-remote", local.remote, baseRef, pullRef])).map((l) => [l.split(/\s+/)[1], l.split(/\s+/)[0]]));
+    const baseTip = tips.get(baseRef);
+    if (!baseTip) return `no base branch ${pr.baseRefName} on the remote`;
+    if (tips.get(pullRef) !== newHead) throw new Error("the PR has a newer head than the dashboard shows");
+    // An empty refmap: not even the remote-tracking branch moves.
+    await git(["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", local.remote, baseRef, pullRef]);
+    if (!(await succeeds(["cat-file", "-e", `${oldHead}^{commit}`]))) return "the approved head is gone — the branch was rewritten since";
+    if (!(await succeeds(["merge-base", "--is-ancestor", oldHead, newHead]))) return "the branch was rewritten since the approval";
+    const own = lines(await git(["rev-list", "--parents", `${oldHead}..${newHead}`, "--not", baseTip])).map((l) => l.split(" "));
+    const chain = new Set(lines(await git(["rev-list", "--first-parent", `${oldHead}..${newHead}`])));
+    const found = baseMerges(own, chain);
+    if ("why" in found) return found.why;
+    for (const m of found.merges) {
+      const tree = lines(await git(["rev-parse", `${m.sha}^{tree}`]))[0];
+      let clean: string | undefined;
+      try {
+        clean = lines(await git(["merge-tree", "--write-tree", m.parents[0], m.parents[1]]))[0];
+      } catch (e) {
+        // Exit 1 is a conflict; an older git doesn't know the option at all. (The
+        // message repeats the command line, so "write-tree" alone tells nothing.)
+        return /unknown option/i.test((e as Error).message) ? "checking a merge needs git 2.38 or newer" : "a merge had conflicts resolved by hand";
+      }
+      if (!clean || clean !== tree) return "a merge carries changes of its own";
+    }
+    return null;
+  });
 }
 
 /**
  * Whether a base-only push dismissed approvals on this head: yours on someone's
  * PR (`reapprove`), or your reviewers' on your PR (`reask`). Throws on a read
  * that failed — the caller tries again later — and answers "pass" for every
- * case where nothing should be given again.
+ * case where nothing should be given again, a missing clone included.
  */
-export async function checkReapproval(gh: GhRunner, pr: ReapprovalTarget, scenario: "reapprove" | "reask"): Promise<ReapprovalCheck> {
+export async function checkReapproval(gh: GhRunner, pr: ReapprovalTarget, scenario: "reapprove" | "reask", local: LocalRepo | null): Promise<ReapprovalCheck> {
   const r = await gh(["api", "graphql", "--input", "-", ...hostFlag(pr.url)], { input: JSON.stringify({ query: TIMELINE_QUERY, variables: { id: pr.id } }) });
   if (r.code !== 0) throw new Error(`couldn't read the PR's reviews: ${ghError(r)}`);
   type Node = {
@@ -88,24 +139,18 @@ export async function checkReapproval(gh: GhRunner, pr: ReapprovalTarget, scenar
     scenario === "reapprove" ? d.login.toLowerCase() === me : d.login.toLowerCase() !== me,
   );
   if (found.length === 0) return pass(scenario === "reapprove" ? "no dismissed approval of yours" : "no dismissed approvals");
-
-  const now = await readDiff(gh, pr.url, `repos/${pr.repo}/pulls/${pr.number}`);
-  if (now === null) return pass("too big to compare");
-  const base = encodeURIComponent(node.baseRefName ?? "").replace(/%2F/g, "/");
-  const same = new Set<string>();
+  if (!local) return pass("no clone of the repository to check the push in");
+  const why = new Map<string, string | null>();
   for (const oldHead of new Set(found.map((d) => d.head))) {
-    // Three dots: from where the old head left the base, so the base's own commits since are not in it.
-    const before = await readDiff(gh, pr.url, `repos/${pr.repo}/compare/${base}...${oldHead}`);
-    if (before === null) return pass("too big to compare");
-    if (sameChanges(before, now)) same.add(oldHead);
+    why.set(oldHead, await baseOnlyPush(local, { number: pr.number, baseRefName: node.baseRefName ?? "" }, oldHead, head));
   }
-  const ok = found.filter((d) => same.has(d.head));
-  if (ok.length === 0) return pass("the PR's own changes differ since the approval");
+  const ok = found.filter((d) => why.get(d.head) === null);
+  if (ok.length === 0) return pass([...why.values()].find((w) => w) ?? "more than the base came in since the approval");
   return {
     verdict: "same",
     logins: ok.map((d) => d.login),
     oldHead: ok[0].head,
-    note: `only the base changed since ${ok[0].head.slice(0, 7)}`,
+    note: `only merges of the base since ${ok[0].head.slice(0, 7)}`,
   };
 }
 
