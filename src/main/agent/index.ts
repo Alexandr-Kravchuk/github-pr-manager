@@ -48,7 +48,7 @@ import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { cutShort, hookCommand, NO_PUSH_ENV, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
-import { checkReapproval, reapproveRequest, reaskRequest, sameChangeOnNewBase } from "./reapprove";
+import { checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
 import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
 import { diagramComment, wantsDiagrams } from "../../shared/agent-diagrams";
 import { actionArgs, boardNow, clip, diffBoard, diffIdle, diffItems, itemFields, runStats, settingsDiff, type ItemMark } from "./journal";
@@ -855,8 +855,8 @@ export function createAgent(deps: AgentDeps): Agent {
     const key = jobKey(pr, "rereview", "base");
     if (baseOnlyChecks.has(key) || (baseOnlyRetry.get(key) ?? 0) > now().getTime()) return "checking";
     const mark = store.data.baseOnly?.[key];
-    // Compared with another review of yours than the latest: look again.
-    if (!mark || mark.oldHead !== pr.viewerReviewedOid) return "unchecked";
+    // Compared with another review of yours than the latest, or for another base (the PR was retargeted since): look again.
+    if (!mark || mark.oldHead !== pr.viewerReviewedOid || mark.baseRefName !== pr.baseRefName) return "unchecked";
     return mark.verdict;
   }
 
@@ -878,12 +878,13 @@ export function createAgent(deps: AgentDeps): Agent {
         const claude = loadAll()?.claude;
         const checkout = claude ? deps.findCheckout(pr, claude) : null;
         const remote = checkout ? remoteFor(checkout, pr) : null;
-        const why =
-          checkout && remote
-            ? await sameChangeOnNewBase({ git, checkout, remote }, { number: pr.number, baseRefName: pr.baseRefName }, oldHead, newHead)
-            : "no clone of the repository to check the push in";
+        const found = await checkBaseOnly(
+          gh,
+          { id: pr.id, url: pr.url, repo: pr.repo, number: pr.number, headOid: newHead, baseRefName: pr.baseRefName, viewerReviewedAt: pr.viewerReviewedAt, viewerReviewedOid: oldHead },
+          checkout && remote ? { git, checkout, remote } : null,
+        );
         if (stopped) return;
-        const mark: BaseOnlyMark = { verdict: why === null ? "same" : "changed", oldHead, note: why ?? `only the base changed since ${oldHead.slice(0, 7)}`, at: stamp() };
+        const mark: BaseOnlyMark = { verdict: found.verdict, oldHead, baseRefName: found.baseRefName, note: found.note, at: stamp() };
         store.data.baseOnly = { ...(store.data.baseOnly ?? {}), [job.key]: mark };
         baseOnlyRetry.delete(job.key);
         store.log({ at: stamp(), kind: "plan", event: "base-check", ...fields, detail: clip(mark.note), data: { verdict: mark.verdict, oldHead, ...(pr.stack ? { stack: pr.stack.number, layer: pr.stack.position } : {}) } });

@@ -11676,6 +11676,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       write("a.txt", lines({ 2: "layer 1" }));
       g("commit", "-am", "layer 1");
       g("push", "origin", "layer-1");
+      const layer1 = g("rev-parse", "HEAD");
       g("checkout", "-b", "layer-2");
       write("b.txt", lines({ 5: "layer 2" }));
       g("commit", "-am", "layer 2");
@@ -11685,20 +11686,49 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         return g("rev-parse", "HEAD");
       };
       pushPr();
-      // Layer 1 lands squashed, master moves on elsewhere, and GitHub rebases layer 2 onto master.
+      const local = { git: wtM.runGit, checkout: co, remote: "origin" };
+      const check = (head, reviewedOn = null) => md.sameChangeOnNewBase(local, { number: 2, baseRefName: "master" }, reviewed, head, reviewedOn);
       g("checkout", "master");
       write("c.txt", "elsewhere\n");
       g("add", ".");
       g("commit", "-m", "master moves");
+      g("push", "origin", "master");
+      // Layer 2 moved onto master with layer 1 NOT merged: layer 1's code is in its diff now.
+      g("checkout", "-B", "leak", reviewed);
+      g("rebase", "master");
+      const leaked = pushPr();
+      assert.strictEqual(await check(leaked), null, "against master alone it reads the same — the reviewed head holds layer 1 too");
+      assert.strictEqual(await check(leaked, layer1), "the PR's own change differs from the one you reviewed", "against the base you reviewed it on, it doesn't");
+      // Layer 1 lands squashed, and GitHub rebases layer 2 onto master.
+      g("checkout", "master");
       g("merge", "--squash", "layer-1");
       g("commit", "-m", "layer 1 (#1)");
       g("push", "origin", "master");
       g("checkout", "-B", "rebased", reviewed);
       g("rebase", "--onto", "master", "layer-1");
       const rebased = pushPr();
-      const local = { git: wtM.runGit, checkout: co, remote: "origin" };
-      const check = (head) => md.sameChangeOnNewBase(local, { number: 2, baseRefName: "master" }, reviewed, head);
       assert.strictEqual(await check(rebased), null, "the same layer on the new base");
+      assert.strictEqual(await check(rebased, layer1), null, "taken against the base you reviewed it on, too");
+
+      // The check as main runs it: GitHub says whether the PR was retargeted since your review.
+      const ghFor = (retargeted) => async (args, opts) => {
+        const { query } = JSON.parse(opts.input);
+        if (query.includes("BaseRefChangedEvent")) {
+          return { code: 0, stderr: "", stdout: JSON.stringify({ data: { node: { state: "OPEN", headRefOid: g("rev-parse", "HEAD"), baseRefName: "master", timelineItems: { nodes: retargeted ? [{ createdAt: "2026-11-02T00:00:00Z", previousRefName: "layer-1" }, { createdAt: "2026-10-01T00:00:00Z", previousRefName: "older" }] : [] } } } }) };
+        }
+        assert.deepStrictEqual(JSON.parse(opts.input).variables, { owner: "a", name: "b", ref: "layer-1" }, "the branch it had, by name");
+        return { code: 0, stderr: "", stdout: JSON.stringify({ data: { repository: { pullRequests: { nodes: [{ headRefOid: layer1 }] } } } }) };
+      };
+      const target = (head) => ({ id: "PR_2", url: "https://github.com/a/b/pull/2", repo: "a/b", number: 2, headOid: head, baseRefName: "master", viewerReviewedAt: "2026-11-01T00:00:00Z", viewerReviewedOid: reviewed });
+      assert.deepStrictEqual(await md.checkBaseOnly(ghFor(true), target(rebased), local), { verdict: "same", note: `only the base changed since ${reviewed.slice(0, 7)}`, baseRefName: "master" });
+      g("checkout", "-B", "leak", leaked);
+      pushPr();
+      assert.strictEqual((await md.checkBaseOnly(ghFor(true), target(leaked), local)).verdict, "changed", "retargeted onto master without layer 1: a re-review");
+      g("checkout", "-B", "rebased", rebased);
+      pushPr();
+      await assert.rejects(md.checkBaseOnly(ghFor(true), { ...target(rebased), baseRefName: "layer-1" }, local), /moved on/, "the dashboard is behind GitHub");
+      assert.deepStrictEqual(await md.checkBaseOnly(ghFor(false), { ...target(rebased), viewerReviewedOid: null }, local), { verdict: "changed", note: "no review commit to compare with", baseRefName: "master" });
+      assert.strictEqual((await md.checkBaseOnly(ghFor(false), target(rebased), null)).note, "no clone of the repository to check the push in");
 
       write("d.txt", "more\n");
       g("add", ".");
@@ -11748,11 +11778,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await atest("agent stack: a reviewed PR whose new head is the same change on a new base gets no re-review — checked once per head", async () => {
       const oldHead = "1".repeat(40);
       const head = "2".repeat(40);
-      const reviewed = () => ({
+      const reviewed = (base = "layer-1") => ({
         ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false, headOid: head }),
         ...{ viewerReviewedAt: "2026-07-05T00:00:00Z", viewerReviewedHead: false, viewerReviewedOid: oldHead, lastCommitPushedAt: "2026-07-06T00:00:00Z", authorRepliedAt: null },
+        baseRefName: base,
         stack: inStack(2),
       });
+      // GitHub as the check reads it: the PR at the dashboard's head and base, not retargeted since your review.
+      let ghBase = "layer-1";
+      let baseReads = 0;
+      const baseGh = async (args, opts) => {
+        baseReads++;
+        assert.match(JSON.parse(opts.input).query, /BaseRefChangedEvent/);
+        return { code: 0, stderr: "", stdout: JSON.stringify({ data: { node: { state: "OPEN", headRefOid: head, baseRefName: ghBase, timelineItems: { nodes: [] } } } }) };
+      };
       const fakeGit = (tree) => async (args) => {
         const a = gitCmd(args);
         // ls-remote <remote> <base ref> <pull ref>: both there, the PR at the dashboard's head.
@@ -11762,7 +11801,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         if (a[0] === "rev-parse") return `${tree}\n`;
         return "";
       };
-      const f = agentFixture({ pr: reviewed(), script: keepWorking, git: fakeGit("tree1") });
+      const f = agentFixture({ pr: reviewed(), script: keepWorking, git: fakeGit("tree1"), gh: baseGh });
       try {
         f.agent.onSnapshot(f.snapshot);
         await until(() => readLog(f).some((l) => l.event === "base-check"));
@@ -11773,13 +11812,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(f.agent.getState().idle.PR_R, "Reviewed — only the base changed under your review since");
         f.agent.onSnapshot(f.snapshot);
         await tickOnce();
-        assert.strictEqual(readLog(f).filter((l) => l.event === "base-check").length, 1, "once per head");
+        assert.deepStrictEqual([readLog(f).filter((l) => l.event === "base-check").length, baseReads], [1, 1], "once per head");
+        // Retargeted since, on the same head: the verdict was for the other base — looked at again.
+        ghBase = "master";
+        f.snapshot.pullRequests[0] = reviewed("master");
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => readLog(f).filter((l) => l.event === "base-check").length === 2);
+        assert.strictEqual(baseReads, 2);
       } finally {
         f.agent.stop();
+        ghBase = "layer-1";
       }
 
       // The layer's own change differs: the re-review runs — told it is a layer.
-      const g = agentFixture({ pr: reviewed(), script: keepWorking, git: fakeGit("tree2") });
+      const g = agentFixture({ pr: reviewed(), script: keepWorking, git: fakeGit("tree2"), gh: baseGh });
       try {
         g.agent.onSnapshot(g.snapshot);
         await until(() => g.children.length === 1);
@@ -11795,6 +11841,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const k = agentFixture({
         pr: reviewed(),
         script: keepWorking,
+        gh: baseGh,
         git: async (args) => {
           if (gitCmd(args)[0] === "ls-remote") {
             lsRemotes++;

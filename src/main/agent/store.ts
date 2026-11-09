@@ -67,6 +67,8 @@ export interface BaseOnlyMark {
   verdict: "same" | "changed";
   /** The head of your review it was compared with. */
   oldHead: string;
+  /** The base it holds for: the PR retargeted since, it is looked at again. */
+  baseRefName: string;
   note: string;
   at: string;
 }

@@ -8,7 +8,7 @@
 
 import { signedBody, type PublishRequest } from "../../shared/agent-publish";
 import { baseMerges, dismissedApprovals, reapprovalBody, type ReviewTimelineNode } from "../../shared/agent-reapprove";
-import { safeGit, withNoHooks } from "./drive";
+import { isPlainBranch, safeGit, withNoHooks } from "./drive";
 import { ghError, hostFlag, type GhRunner } from "./publish";
 import type { GitRunner } from "./worktrees";
 
@@ -97,28 +97,44 @@ async function fetchPrTips(
 /**
  * Null when the PR's new head is exactly the change you reviewed on a new base
  * — else why not. Covers a stack GitHub rebased after a lower layer merged, a
- * "Rebase stack", and the base merged in: the expected tree is what git makes
- * of the reviewed head and the base commit the new head sits on, merged over
- * their common ancestor (`merge-tree --merge-base`); the new head's tree must
- * be that one exactly. Anything of the author's own since — a commit, a
+ * "Rebase stack", and the base merged in.
+ *
+ * "The change you reviewed" is the reviewed head against the base it had then:
+ * from where it forks off that base (`from`) to the reviewed head. The base is
+ * the PR's present branch unless it was retargeted since your review — then
+ * `reviewedOn` is a commit of the branch it had (a stack's lower layer), so a
+ * layer moved onto the trunk without the layer below it merged doesn't pass:
+ * the lower layer's code is in its diff now, and you never reviewed it here.
+ * The expected tree is that change put onto the base commit the new head sits
+ * on (`merge-tree --merge-base=<from> <onto> <reviewed>`); the new head's tree
+ * must be that one exactly. Anything of the author's own since — a commit, a
  * conflict resolved by hand — makes it differ. Read in your clone the way
- * `baseOnlyPush` reads it; the reviewed head, which a rebase leaves on no
- * branch, is fetched by its id when the clone lacks it.
+ * `baseOnlyPush` reads it; a commit the clone lacks (the reviewed head, which
+ * a rebase leaves on no branch; `reviewedOn`) is fetched by its id.
  */
-export async function sameChangeOnNewBase(local: LocalRepo, pr: { number: number; baseRefName: string }, oldHead: string, newHead: string): Promise<string | null> {
-  if (!OID.test(oldHead) || !OID.test(newHead)) return "no commit id to compare";
+export async function sameChangeOnNewBase(
+  local: LocalRepo,
+  pr: { number: number; baseRefName: string },
+  oldHead: string,
+  newHead: string,
+  reviewedOn: string | null = null,
+): Promise<string | null> {
+  if (!OID.test(oldHead) || !OID.test(newHead) || (reviewedOn !== null && !OID.test(reviewedOn))) return "no commit id to compare";
   if (oldHead === newHead) return "the head is the one you reviewed";
   return withNoHooks(async (hooks) => {
     const { git, succeeds, baseTip } = await fetchPrTips(local, hooks, pr, newHead);
     if (!baseTip) return `no base branch ${pr.baseRefName} on the remote`;
-    if (!(await succeeds(["cat-file", "-e", `${oldHead}^{commit}`]))) {
-      await git(["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", local.remote, oldHead]).catch(() => "");
-      if (!(await succeeds(["cat-file", "-e", `${oldHead}^{commit}`]))) return "the reviewed head is in neither your clone nor the remote";
-    }
+    const have = async (oid: string) => {
+      if (await succeeds(["cat-file", "-e", `${oid}^{commit}`])) return true;
+      await git(["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", local.remote, oid]).catch(() => "");
+      return succeeds(["cat-file", "-e", `${oid}^{commit}`]);
+    };
+    if (!(await have(oldHead))) return "the reviewed head is in neither your clone nor the remote";
+    if (reviewedOn !== null && !(await have(reviewedOn))) return "the base you reviewed against is in neither your clone nor the remote";
     const onto = lines(await git(["merge-base", newHead, baseTip]).catch(() => ""))[0];
     if (!onto) return "the new head shares no history with its base";
-    const from = lines(await git(["merge-base", oldHead, onto]).catch(() => ""))[0];
-    if (!from) return "the reviewed head shares no history with the new base";
+    const from = lines(await git(["merge-base", oldHead, reviewedOn ?? onto]).catch(() => ""))[0];
+    if (!from) return "the reviewed head shares no history with the base you reviewed it against";
     let expected: string | undefined;
     try {
       expected = lines(await git(["merge-tree", "--write-tree", `--merge-base=${from}`, onto, oldHead]))[0];
@@ -128,6 +144,89 @@ export async function sameChangeOnNewBase(local: LocalRepo, pr: { number: number
     const tree = lines(await git(["rev-parse", `${newHead}^{tree}`]))[0];
     return expected && expected === tree ? null : "the PR's own change differs from the one you reviewed";
   });
+}
+
+const BASE_CHANGES_QUERY = `query($id: ID!) {
+  node(id: $id) {
+    ... on PullRequest {
+      state headRefOid baseRefName
+      timelineItems(last: 50, itemTypes: [BASE_REF_CHANGED_EVENT]) {
+        nodes { ... on BaseRefChangedEvent { createdAt previousRefName } }
+      }
+    }
+  }
+}`;
+
+/** The newest PR from a branch — a stack's lower layer, by its head branch; its head is kept after the branch is deleted. */
+const HEAD_BRANCH_QUERY = `query($owner: String!, $name: String!, $ref: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(headRefName: $ref, last: 1) { nodes { headRefOid } }
+  }
+}`;
+
+export interface BaseOnlyTarget {
+  id: string;
+  url: string;
+  repo: string;
+  number: number;
+  headOid: string | null;
+  baseRefName: string;
+  /** Your latest opinionated review: when, and on which commit. */
+  viewerReviewedAt: string | null;
+  viewerReviewedOid: string | null;
+}
+
+export interface BaseOnlyCheck {
+  verdict: "same" | "changed";
+  note: string;
+  /** The base the verdict holds for: a retarget since asks again. */
+  baseRefName: string;
+}
+
+/**
+ * Whether a reviewed PR's new head is the change you reviewed on a new base
+ * (`sameChangeOnNewBase`). One GraphQL read tells whether the PR was
+ * retargeted since your review — a stack's layer moves to the trunk when the
+ * one below merges — and then the branch it had is found (the newest PR from
+ * that branch, whose head GitHub keeps after the branch is deleted; else the
+ * branch itself), so the change is taken against the base you saw. Throws on a
+ * read that failed or a PR that moved on — the caller tries again later; no
+ * clone, or a base that can't be found, is "changed": the re-review runs.
+ */
+export async function checkBaseOnly(gh: GhRunner, pr: BaseOnlyTarget, local: LocalRepo | null): Promise<BaseOnlyCheck> {
+  const changed = (note: string): BaseOnlyCheck => ({ verdict: "changed", note, baseRefName: pr.baseRefName });
+  if (!local) return changed("no clone of the repository to check the push in");
+  if (!pr.viewerReviewedOid || !pr.viewerReviewedAt || !pr.headOid) return changed("no review commit to compare with");
+  const read = async (query: string, variables: Record<string, unknown>) => {
+    const r = await gh(["api", "graphql", "--input", "-", ...hostFlag(pr.url)], { input: JSON.stringify({ query, variables }) });
+    if (r.code !== 0) throw new Error(`couldn't read the PR's base: ${ghError(r)}`);
+    return JSON.parse(r.stdout) as { data?: Record<string, unknown> };
+  };
+  type Node = { state?: string; headRefOid?: string; baseRefName?: string; timelineItems?: { nodes?: Array<{ createdAt?: string; previousRefName?: string } | null> } };
+  const node = (await read(BASE_CHANGES_QUERY, { id: pr.id })).data?.node as Node | null | undefined;
+  if (!node) throw new Error("couldn't read the PR's base");
+  if (node.state !== "OPEN") return changed("the PR is not open");
+  if (node.headRefOid !== pr.headOid || node.baseRefName !== pr.baseRefName) throw new Error("the PR has moved on since the dashboard saw it");
+  const since = pr.viewerReviewedAt;
+  const retargets = (node.timelineItems?.nodes ?? [])
+    .filter((e): e is { createdAt: string; previousRefName?: string } => typeof e?.createdAt === "string" && e.createdAt > since)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  let reviewedOn: string | null = null;
+  if (retargets.length > 0) {
+    const was = retargets[0].previousRefName ?? "";
+    if (!isPlainBranch(was)) return changed("the base the PR had at your review can't be read");
+    const [owner, name] = pr.repo.split("/");
+    const found = (await read(HEAD_BRANCH_QUERY, { owner, name, ref: was })).data?.repository as { pullRequests?: { nodes?: Array<{ headRefOid?: string } | null> } } | null | undefined;
+    reviewedOn = found?.pullRequests?.nodes?.[0]?.headRefOid ?? null;
+    if (!reviewedOn) {
+      const tip = await withNoHooks(async (hooks) => lines(await local.git([...safeGit(hooks), "ls-remote", local.remote, `refs/heads/${was}`], local.checkout))[0]?.split(/\s+/)[0]);
+      reviewedOn = tip ?? null;
+    }
+    if (!reviewedOn) return changed(`the base the PR had at your review (${was}) is gone`);
+  }
+  const why = await sameChangeOnNewBase(local, { number: pr.number, baseRefName: pr.baseRefName }, pr.viewerReviewedOid, pr.headOid, reviewedOn);
+  if (why !== null) return changed(why);
+  return { verdict: "same", note: `only the base changed since ${pr.viewerReviewedOid.slice(0, 7)}`, baseRefName: pr.baseRefName };
 }
 
 /**

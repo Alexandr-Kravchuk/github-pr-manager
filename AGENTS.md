@@ -254,16 +254,22 @@ Three layers:
   layers above says they need Rebase stack. Not stack-only: a PR you
   reviewed that got a push and nothing else since — no reply, not asked
   again — is held while main checks in your clone that the new head is the
-  change you reviewed on a new base (`sameChangeOnNewBase` in
-  `main/agent/reapprove.ts`: the tree `git merge-tree --merge-base` makes of
-  the reviewed head and the base commit the new head sits on, over their
-  common ancestor, must be the new head's tree exactly — a stack GitHub
-  rebased, a Rebase stack, the base merged in). Then no re-review runs;
-  once per head (`baseOnly` marks in `state.json`, keyed
-  `…|rereview|<head>|base`), with the reviewed head fetched by its id when a
-  rebase left it on no branch; no clone or another review of yours since
-  makes it "changed" or looks again, and a failed check waits ten minutes
-  like re-approve's. The merge itself is not adapted yet: GitHub's
+  change you reviewed on a new base (`checkBaseOnly` / `sameChangeOnNewBase`
+  in `main/agent/reapprove.ts`: "the change you reviewed" is the reviewed
+  head against the base it had then, put onto the base commit the new head
+  sits on with `git merge-tree --merge-base`, and the result must be the new
+  head's tree exactly — a stack GitHub rebased, a Rebase stack, the base
+  merged in). The base it had then matters: a layer retargeted onto the
+  trunk without the layer below merged carries that layer's code in its
+  diff now, so one GraphQL read finds a retarget since your review
+  (`BaseRefChangedEvent`) and the change is taken against the branch it had
+  — the head of the newest PR from that branch, which GitHub keeps after the
+  branch is deleted, else the branch's tip. Then no re-review runs; once per
+  head and base (`baseOnly` marks in `state.json`, keyed
+  `…|rereview|<head>|base`, holding the base they were for), with commits the
+  clone lacks fetched by id; no clone, a base that can't be found or another
+  review of yours since makes it "changed" or looks again, and a failed check
+  waits ten minutes like re-approve's. The merge itself is not adapted yet: GitHub's
   synchronous merge API, which `gh pr merge` uses, does not support stacked
   PRs — the asynchronous `merge-async` endpoint does).
   Keep any such
