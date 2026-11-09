@@ -184,7 +184,7 @@ export function shellWords(command: string): { words: string[] } | { error: stri
     }
     if (";&|<>()".includes(ch)) return { error: "Shell operators (pipes, redirection, chaining) are not allowed in agent runs — run one plain command." };
     if (ch === "$" || ch === "`") return { error: "Expansion ($, backticks) is not allowed in agent runs." };
-    if ("*?[]".includes(ch)) return { error: "Unquoted wildcards are not allowed — they would expand to the PR's own file names." };
+    if ("*?[]".includes(ch)) return { error: "Unquoted wildcards are not allowed — they would expand to the PR's own file names. Quote the word (a query string such as 'repos/…/contents?ref=main' too)." };
     // `{a,b}` is brace expansion (one word becomes several), `~` expands to a
     // path, `#` starts a comment the shell drops — each makes the argv differ
     // from what is checked here. Quote them when they are meant literally.
@@ -546,17 +546,22 @@ function checkGhApi(args: string[], pr: GuardPr | null): GuardDecision {
   if (fields.length) return deny("gh api -f/-F would send a request body; agent runs read REST endpoints only.");
   // The signed-in user: who "I" am, for the review's own engagement checks.
   if (/^\/?user\/?$/.test(endpoint)) return { allow: true };
-  // "repos/a/b/../../c/d" would pass the repository check and reach another repository.
-  if (endpoint.split("?")[0].split("/").some((seg) => seg === "." || seg === "..")) return deny("Dot segments are not allowed in gh api paths.");
+  // "repos/a/b/../../c/d" would pass the repository check and reach another
+  // repository — and so would "..%2F..", the %2F (below) read as the slash it stands for.
+  if (endpoint.split("?")[0].replace(/%2f/gi, "/").split("/").some((seg) => seg === "." || seg === "..")) return deny("Dot segments are not allowed in gh api paths.");
+  const repo = endpoint.replace(/^\//, "").split("/").slice(1, 3).join("/").toLowerCase();
   // A relative REST path of the run's own repository: no other host (no "://"),
-  // no other repository, no {owner} placeholders resolved from a remote.
-  if (!/^\/?repos\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*\/?(\?[A-Za-z0-9._=&%-]*)?$/.test(endpoint)) {
+  // no other repository, no {owner} placeholders resolved from a remote. Past
+  // owner/name a segment may hold %2F — a branch name's slash, as in
+  // "branches/release%2F2.0" — and no other escape.
+  if (!/^\/?repos\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(\/(?:[A-Za-z0-9._-]|%2[Ff])+)*\/?(\?[A-Za-z0-9._=&%-]*)?$/.test(endpoint)) {
+    // This PR's repository, written with something the path doesn't take: say that, not "another repository".
+    if (pr && /^\/?repos\//.test(endpoint) && repo === pr.repo) {
+      return deny("A gh api path takes letters, digits, '.', '_', '-' and %2F (a slash inside a branch name) — nothing else.");
+    }
     return deny("Only GitHub REST reads of this PR's repository (repos/owner/name/…) are allowed.");
   }
-  if (pr) {
-    const repo = endpoint.replace(/^\//, "").split("/").slice(1, 3).join("/").toLowerCase();
-    if (repo !== pr.repo) return deny(`This run reads ${pr.repo} only.`);
-  }
+  if (pr && repo !== pr.repo) return deny(`This run reads ${pr.repo} only.`);
   return { allow: true };
 }
 

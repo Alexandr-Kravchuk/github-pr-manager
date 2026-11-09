@@ -8479,6 +8479,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         "gh api repos/Acme/Widgets/pulls/12/comments --jq '.[] | select(.user.login == \"x\") | .body'",
         "gh api /repos/acme/widgets/pulls/12/comments --paginate",
         "gh api 'repos/acme/widgets/pulls/12/files?per_page=100'",
+        // A branch name with a slash: one segment, its slash written %2F — or the ref path, slashes and all.
+        "gh api repos/acme/widgets/branches/integration%2Fcaadt-2.0 --jq .name",
+        "gh api repos/acme/widgets/branches/release%2f2.0",
+        "gh api repos/acme/widgets/git/ref/heads/integration/caadt-2.0",
         "gh pr view 12 -Racme/widgets --json title",
         "gh pr view 12 --template '{{.title}}'",
         "gh pr diff 12 --name-only",
@@ -8544,6 +8548,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ["review", "gh pr view 12 --hostname evil.example"],
         ["review", "gh pr view 12 --some-new-flag"],
         ["review", "gh api repos/acme/widgets/../../other/repo/pulls"],
+        // %2F is a slash inside a segment, never a way out of the repository, and the only escape taken.
+        ["review", "gh api repos/acme/widgets/branches/..%2F..%2F..%2Fother%2Frepo"],
+        ["review", "gh api repos/acme/widgets/x/..%2f..%2f..%2fother/repo/pulls"],
+        ["review", "gh api repos/acme%2Fwidgets/pulls/12"],
+        ["review", "gh api repos/acme/widgets%2F..%2F..%2Fother/repo/pulls"],
+        ["review", "gh api repos/acme/widgets/%2E%2E/%2E%2E/other/repo/pulls"],
+        ["review", "gh api repos/acme/widgets/branches/a%252Fb"],
+        ["review", "gh api repos/other/repo/branches/a%2Fb"],
         ["review", "gh pr view 12 ~"],
         ["review", "gh pr view 12 #--repo other/repo"],
         ["drive", "git diff '--output'=x"],
@@ -8555,6 +8567,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       for (const tool of ["Edit", "Write", "NotebookEdit"]) assert.strictEqual(guard.checkToolUse("review", tool, {}).allow, false, tool);
       for (const tool of ["WebFetch", "WebSearch", "PowerShell"]) assert.strictEqual(guard.checkToolUse("drive", tool, {}).allow, false, tool);
       assert.strictEqual(guard.checkToolUse("review", "Bash", {}).allow, false, "an empty command");
+    });
+
+    test("agent guard: a refused gh api read says what to change — not \"another repository\" for this one", () => {
+      const why = (cmd) => guard.checkToolUse("drive", "Bash", { command: cmd }, gpr).reason;
+      assert.match(why("gh api repos/acme/widgets/branches/a%2Eb"), /takes letters, digits, '\.', '_', '-' and %2F/, "this PR's repository, an escape it doesn't take");
+      assert.match(why("gh api repos/other/repo/branches/a%2Eb"), /Only GitHub REST reads of this PR's repository/);
+      assert.match(why("gh api repos/other/repo/pulls/1"), /reads acme\/widgets only/);
+      assert.match(why("gh api repos/acme/widgets/branches/..%2Fx"), /Dot segments/);
+      assert.match(why("gh api repos/acme/widgets/contents?ref=release"), /Quote the word/, "a query string is a wildcard to the shell");
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "gh api 'repos/acme/widgets/contents?ref=release'" }, gpr).allow, true, "quoted, it reads");
     });
 
     test("agent guard: drive may build, test and commit on its own PR", () => {
