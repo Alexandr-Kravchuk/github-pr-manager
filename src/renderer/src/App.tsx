@@ -34,7 +34,7 @@ import { groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMo
 import { hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
 import { createJiraStatusLoader } from "../../shared/jira-status";
 import { AuthorFilterContext } from "./components/author-filter-context";
-import { ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
+import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
   DEFAULT_TABLE_SORT,
@@ -1310,6 +1310,7 @@ export function App() {
       )}
 
       <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
+      <ClaudeDesktopContext.Provider value={config?.claudeDesktop ?? false}>
       <ClaudeSessionsContext.Provider value={claudeSessions}>
       <AuthorFilterContext.Provider value={authorFilter}>
       {viewMode === "cozy" ? (
@@ -1367,7 +1368,7 @@ export function App() {
                     )}
                   </button>
                   {groupBy !== "repo" && (
-                    <GroupClaudeButton groupKey={g.key} prs={g.prs} desktop={config?.claudeDesktop ?? false} />
+                    <GroupClaudeButton groupKey={g.key} prs={g.prs} />
                   )}
                   <div aria-hidden className="flex-1 self-stretch" onClick={() => toggleGroup(g.key)} />
                 </div>
@@ -1402,6 +1403,7 @@ export function App() {
       )}
       </AuthorFilterContext.Provider>
       </ClaudeSessionsContext.Provider>
+      </ClaudeDesktopContext.Provider>
       </ClaudeEnabledContext.Provider>
 
       <div className="pointer-events-none fixed bottom-2 right-3 z-10 flex items-center gap-2 text-[11px]">

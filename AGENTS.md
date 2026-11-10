@@ -97,7 +97,11 @@ Three layers:
   the renderer imports it for the tooltip, while finding the checkout by git
   remote live in `main/claude-launch.ts` and opening the terminal in
   `main/terminal.ts`, and the
-  renderer sends only the PR id so nothing it supplies reaches the shell; a
+  renderer sends only the PR id (plus a picked kind and an in-terminal
+  boolean) so nothing it supplies reaches the shell; while Settings open
+  sessions in Claude Desktop the menu also offers "Review in terminal"
+  (`claudeMenuItems`), which opens the default terminal instead — with a
+  terminal chosen, "Review" already does that, so the item is hidden; a
   Jira-key group heading also has a split Claude button beside its PR count
   with two group launches — "Explain all" (one session that explains the
   group's open PRs together, no letter) and "Review all" (a parent session

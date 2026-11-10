@@ -7,7 +7,7 @@ import type { ClaudeSessionInfo, PullRequest } from "../../../shared/types";
 import {
   CLAUDE_BUTTON_TEXT,
   CLAUDE_LAUNCH_LABEL,
-  claudeKindsFor,
+  claudeMenuItems,
   groupLaunchPrs,
   MAX_GROUP_PRS,
   pickClaudeLaunch,
@@ -26,7 +26,7 @@ import {
 } from "../../../shared/claude-sessions";
 import { cn } from "../format";
 import { useAnchoredMenu } from "./anchored-menu";
-import { ClaudeEnabledContext, ClaudeSessionsContext } from "./claude-context";
+import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext } from "./claude-context";
 
 const MENU_WIDTH_PX = 240;
 /** Wider once it lists sessions: their titles carry a task key and a summary. */
@@ -63,12 +63,16 @@ export function ClaudeButton({
   className?: string;
 }) {
   const enabled = useContext(ClaudeEnabledContext);
+  const desktop = useContext(ClaudeDesktopContext);
   const allSessions = useContext(ClaudeSessionsContext);
   const sessions = useMemo(() => sessionsForPr(pr, allSessions), [pr, allSessions]);
   const [state, run] = useLaunchState();
   const menu = useAnchoredMenu(sessions.length > 0 ? SESSIONS_MENU_WIDTH_PX : MENU_WIDTH_PX);
   // Without `kind` main picks from the PR's state, exactly as the button shows.
-  const launch = useCallback((kind?: ClaudeLaunchKind) => run(() => window.api.launchClaude(pr.id, kind)), [run, pr.id]);
+  const launch = useCallback(
+    (kind?: ClaudeLaunchKind, inTerminal?: boolean) => run(() => window.api.launchClaude(pr.id, kind, inTerminal)),
+    [run, pr.id],
+  );
 
   if (!enabled) return null;
   const kind = pickClaudeLaunch(pr, { trackComments });
@@ -148,25 +152,29 @@ export function ClaudeButton({
                 <div className={cn(MENU_HEADING, "mt-1 border-t border-line pt-2")}>Start a new session</div>
               </>
             )}
-            {claudeKindsFor(pr).map((k) => (
-              <button
-                key={k}
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  menu.close();
-                  launch(k);
-                }}
-                title={`Start Claude in the repo folder to ${CLAUDE_LAUNCH_LABEL[k]}`}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-elevated"
-              >
-                <span className={cn("h-2 w-2 shrink-0 rounded-full", KIND_DOT[k])} aria-hidden />
-                <span className={cn("flex-1", k === kind ? "font-semibold text-fg" : "text-fg-secondary")}>
-                  {CLAUDE_BUTTON_TEXT[k]}
-                </span>
-                {k === kind && <span className="text-xs text-fg-subtle">suggested</span>}
-              </button>
-            ))}
+            {claudeMenuItems(pr, desktop).map(({ kind: k, inTerminal }) => {
+              const suggested = k === kind && !inTerminal;
+              return (
+                <button
+                  key={inTerminal ? `${k}-terminal` : k}
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    menu.close();
+                    launch(k, inTerminal);
+                  }}
+                  title={`Start Claude${inTerminal ? " in a terminal" : ""} in the repo folder to ${CLAUDE_LAUNCH_LABEL[k]}`}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-elevated"
+                >
+                  <span className={cn("h-2 w-2 shrink-0 rounded-full", KIND_DOT[k])} aria-hidden />
+                  <span className={cn("flex-1", suggested ? "font-semibold text-fg" : "text-fg-secondary")}>
+                    {CLAUDE_BUTTON_TEXT[k]}
+                    {inTerminal && " in terminal"}
+                  </span>
+                  {suggested && <span className="text-xs text-fg-subtle">suggested</span>}
+                </button>
+              );
+            })}
           </div>,
           document.body,
         )}
@@ -363,14 +371,13 @@ function ClaudeMark({ size }: { size: number }) {
 export function GroupClaudeButton({
   groupKey,
   prs,
-  desktop,
 }: {
   groupKey: string;
   prs: readonly PullRequest[];
-  /** Whether sessions open in Claude Desktop — "Review all" needs it. */
-  desktop: boolean;
 }) {
   const enabled = useContext(ClaudeEnabledContext);
+  // Whether sessions open in Claude Desktop — "Review all" needs it.
+  const desktop = useContext(ClaudeDesktopContext);
   const allSessions = useContext(ClaudeSessionsContext);
   const sessions = useMemo(() => sessionsForGroup(groupKey, allSessions), [groupKey, allSessions]);
   const [state, run] = useLaunchState();

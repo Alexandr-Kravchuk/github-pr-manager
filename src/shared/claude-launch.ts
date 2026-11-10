@@ -31,6 +31,29 @@ export function claudeKindsFor(pr: Pick<PullRequest, "roles">): ClaudeLaunchKind
   return CLAUDE_LAUNCH_KINDS.filter((k) => k !== "close" || pr.roles.includes("author"));
 }
 
+/** One item of the button's menu: what it starts, and whether in a terminal although Settings pick Claude Desktop. */
+export interface ClaudeMenuItem {
+  kind: ClaudeLaunchKind;
+  inTerminal: boolean;
+}
+
+/**
+ * The button's menu for this PR: every kind `claudeKindsFor` offers, plus
+ * "Review in terminal" right after "Review" while Settings open sessions in
+ * Claude Desktop (`desktop`). With a terminal chosen, "Review" already opens
+ * one, so the extra item would repeat it.
+ */
+export function claudeMenuItems(pr: Pick<PullRequest, "roles">, desktop: boolean): ClaudeMenuItem[] {
+  return claudeKindsFor(pr).flatMap((kind): ClaudeMenuItem[] =>
+    kind === "review" && desktop
+      ? [
+          { kind, inTerminal: false },
+          { kind, inTerminal: true },
+        ]
+      : [{ kind, inTerminal: false }],
+  );
+}
+
 /**
  * What a group heading's Claude button starts for a Jira key:
  *  - `explain` — "Explain all": one session that explains the group's open PRs

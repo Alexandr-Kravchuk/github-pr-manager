@@ -8223,6 +8223,54 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     test("main.js wiring: claude:launch looks the PR up by id in the poller snapshot", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
       assert.match(src, /"claude:launch"[\s\S]{0,300}validatePrId[\s\S]{0,200}validateClaudeKind[\s\S]{0,200}getSnapshot\(\)/);
+      assert.match(src, /"claude:launch"[\s\S]{0,400}validateInTerminal\)?\(rawInTerminal\)[\s\S]{0,800}inTerminal,?\s*\}/);
+    });
+
+    // "Review in terminal": for Claude Desktop users only — with a terminal
+    // chosen in Settings, "Review" already opens one.
+    test("claude menu: Review in terminal follows Review only while Settings pick Claude Desktop", () => {
+      const items = (roles, desktop) =>
+        cl.claudeMenuItems({ roles }, desktop).map((i) => (i.inTerminal ? `${i.kind}@terminal` : i.kind));
+      assert.deepStrictEqual(items(["author"], true), ["drive", "review", "review@terminal", "close", "explain", "open"]);
+      assert.deepStrictEqual(items(["reviewer"], true), ["drive", "review", "review@terminal", "explain", "open"]);
+      assert.deepStrictEqual(items(["author"], false), ["drive", "review", "close", "explain", "open"]);
+      assert.deepStrictEqual(items(["reviewer"], false), ["drive", "review", "explain", "open"]);
+    });
+
+    test("claude menu: the in-terminal flag crosses from the renderer only as a boolean", () => {
+      const v = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+      assert.strictEqual(v.validateInTerminal(undefined), false);
+      assert.strictEqual(v.validateInTerminal(true), true);
+      assert.strictEqual(v.validateInTerminal(false), false);
+      for (const bad of ["true", 1, null, {}]) assert.throws(() => v.validateInTerminal(bad), /boolean/);
+    });
+
+    await atest("claude menu: in terminal opens the default terminal although Settings pick Claude Desktop", async () => {
+      const fs = require("node:fs");
+      const terminal = require(path.join(__dirname, "../dist/main/main/terminal.js"));
+      const realOpen = terminal.openTerminalWith;
+      const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "prd-claude-"));
+      const terminals = [];
+      terminal.openTerminalWith = async (command, opts) => { terminals.push({ command, opts }); };
+      try {
+        const pr = { ...quiet, roles: ["reviewer"] };
+        const settings = { enabled: true, projectsRoot: "", repoPaths: { [pr.repo]: dir }, prompts: {}, terminal: "desktop" };
+        const opened = [];
+        const openUrl = async (url) => { opened.push(url); };
+        const res = await launcher.launchClaude(pr, settings, { trackComments: true, openUrl, kind: "review", inTerminal: true });
+        assert.strictEqual(res.ok && res.kind, "review");
+        assert.strictEqual(opened.length, 0, "Claude Desktop must not open");
+        assert.strictEqual(terminals.length, 1);
+        assert.strictEqual(terminals[0].opts.terminal, "auto");
+        assert.match(terminals[0].command.posix, /claude '\/creatio-code-review https:\/\/github\.com\/acme\/widgets\/pull\/7'/);
+        const desktop = await launcher.launchClaude(pr, settings, { trackComments: true, openUrl, kind: "review" });
+        assert.strictEqual(desktop.ok, true);
+        assert.strictEqual(opened.length, 1, "without the flag Claude Desktop opens as before");
+        assert.strictEqual(terminals.length, 1);
+      } finally {
+        terminal.openTerminalWith = realOpen;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     // The group heading's launches: "Explain all" (one session over the open
