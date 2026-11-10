@@ -8098,6 +8098,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.strictEqual(loginLaunch.wasLaunchedAtLogin(["app"], false), false);
   });
 
+  test("main.js wiring: Save answers without waiting for the poll it starts", () => {
+    const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+    const start = src.indexOf('"settings:save"');
+    assert.ok(start !== -1, "the settings:save handler exists");
+    const body = src.slice(start, src.indexOf("ipcMain.handle(", start + 1));
+    assert.match(body, /void poller\?\.refresh\(\)/, "Save must start a fresh poll");
+    assert.doesNotMatch(body, /await poller\?\.refresh\(\)/, "Settings closes only on the reply, so the poll must not hold it");
+  });
+
   test("main.js wiring: a login launch starts hidden, and shows the window if no tray icon appeared", () => {
     const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
     assert.match(src, /loginItemSettingsFor\)\(enabled, process\.platform\)/, "the login item must carry the marker");
