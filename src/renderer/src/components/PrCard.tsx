@@ -298,6 +298,23 @@ export function PrCard({
           >
             {pr.isIgnored ? <EyeIcon /> : <EyeOffIcon />}
           </button>
+          {/* The issue key, straight to Jira, on the top line with the PR's own
+              number: both say which work this is. It opens in the system browser
+              rather than navigating this window. */}
+          {jiraUrl && (
+            <button
+              type="button"
+              onClick={openJira}
+              title={`Open ${pr.issueKey} in Jira`}
+              className={cn(
+                pill,
+                "shrink-0",
+                "border-indigo-500/40 bg-indigo-500/15 text-indigo-700 hover:bg-indigo-500/25 hover:underline dark:text-indigo-300",
+              )}
+            >
+              {pr.issueKey} ↗
+            </button>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <span title={new Date(pr.updatedAt).toLocaleString()}>{relativeTime(pr.updatedAt)}</span>
@@ -348,23 +365,6 @@ export function PrCard({
             />
             {pr.author.login}
           </AuthorButton>
-        )}
-
-        {/* The issue key, straight to Jira. First in the row because it answers
-            "what work is this?" before "what's my part in it?", and it opens in
-            the system browser rather than navigating this window. */}
-        {jiraUrl && (
-          <button
-            type="button"
-            onClick={openJira}
-            title={`Open ${pr.issueKey} in Jira`}
-            className={cn(
-              pill,
-              "border-indigo-500/40 bg-indigo-500/15 text-indigo-700 hover:bg-indigo-500/25 hover:underline dark:text-indigo-300",
-            )}
-          >
-            {pr.issueKey} ↗
-          </button>
         )}
 
         {pr.roles.includes("author") && (
