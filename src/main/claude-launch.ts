@@ -122,15 +122,18 @@ async function openTerminal(
 
 /**
  * Starts `claude <prompt>` in `dir` where Settings say: Claude Desktop through
- * `openUrl`, else a terminal. Returns the error to show, or null once started.
+ * `openUrl`, else a terminal. `inTerminal` overrides a Claude Desktop setting
+ * with the default terminal (iTerm2 when installed, else Terminal; cmd on
+ * Windows). Returns the error to show, or null once started.
  */
 async function startSession(
   dir: string,
   prompt: string,
   settings: ClaudeSettings,
   openUrl: (url: string) => Promise<void>,
+  inTerminal = false,
 ): Promise<string | null> {
-  if (settings.terminal === "desktop") {
+  if (settings.terminal === "desktop" && !inTerminal) {
     try {
       await openUrl(claudeDesktopUrl(dir, prompt));
     } catch (e) {
@@ -139,7 +142,7 @@ async function startSession(
     return null;
   }
   try {
-    await openTerminal(dir, prompt, settings.terminal);
+    await openTerminal(dir, prompt, settings.terminal === "desktop" ? "auto" : settings.terminal);
   } catch (e) {
     return `Could not open a terminal: ${(e as Error).message}`;
   }
@@ -159,6 +162,8 @@ export async function launchClaude(
     openUrl: (url: string) => Promise<void>;
     /** Picked from the button's menu; without it the PR's state picks. */
     kind?: ClaudeLaunchKind;
+    /** "… in terminal" from the menu: a terminal although Settings pick Claude Desktop. */
+    inTerminal?: boolean;
   },
 ): Promise<ClaudeLaunchResult> {
   if (!settings.enabled) return { ok: false, error: "Claude integration is off — turn it on in Settings." };
@@ -174,7 +179,7 @@ export async function launchClaude(
   }
   const kind = opts.kind ?? pickClaudeLaunch(pr, opts);
   const prompt = renderClaudePrompt(settings.prompts, kind, pr);
-  const error = await startSession(dir, prompt, settings, opts.openUrl);
+  const error = await startSession(dir, prompt, settings, opts.openUrl, opts.inTerminal);
   return error ? { ok: false, error } : { ok: true, kind, dir };
 }
 

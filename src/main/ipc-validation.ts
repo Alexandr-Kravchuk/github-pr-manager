@@ -118,6 +118,13 @@ export function validateClaudeKind(value: unknown): ClaudeLaunchKind | undefined
   throw new Error("launchClaude: unknown action.");
 }
 
+/** Validates the "… in terminal" flag of a Claude launch: undefined or a boolean. */
+export function validateInTerminal(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value === "boolean") return value;
+  throw new Error("launchClaude: expected inTerminal to be a boolean.");
+}
+
 /** Validates the PR id the renderer asks to start a Claude session on. */
 export function validatePrId(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || value.length > 200) {

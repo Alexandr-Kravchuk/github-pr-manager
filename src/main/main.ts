@@ -43,6 +43,7 @@ import {
   validateJiraStatusMode,
   validateJiraToken,
   validateClaudeKind,
+  validateInTerminal,
   validateGroupLaunchArgs,
   validateClaudeSessionId,
   validatePrId,
@@ -675,27 +676,32 @@ function registerIpc(): void {
 
   // The renderer sends only the PR id: the PR's state, its repository and the
   // prompt are all read here, so nothing from the renderer reaches the shell.
-  ipcMain.handle("claude:launch", async (_event, raw: unknown, rawKind?: unknown): Promise<ClaudeLaunchResult> => {
-    const id = validatePrId(raw);
-    const kind = validateClaudeKind(rawKind);
-    const pr = poller?.getSnapshot()?.pullRequests.find((p) => p.id === id);
-    if (!pr) return { ok: false, error: "This PR is no longer on the dashboard." };
-    let settings: Settings;
-    try {
-      settings = loadSettings();
-    } catch (e) {
-      return { ok: false, error: (e as Error).message };
-    }
-    const result = await launchClaude(pr, settings.claude, {
-      trackComments: settings.trackComments,
-      openUrl: (url) => shell.openExternal(url),
-      kind,
-    });
-    // The new session registers within seconds; look again soon after rather
-    // than leave the card without it for a full interval.
-    if (result.ok) setTimeout(() => void refreshClaudeSessions(), 2_000);
-    return result;
-  });
+  ipcMain.handle(
+    "claude:launch",
+    async (_event, raw: unknown, rawKind?: unknown, rawInTerminal?: unknown): Promise<ClaudeLaunchResult> => {
+      const id = validatePrId(raw);
+      const kind = validateClaudeKind(rawKind);
+      const inTerminal = validateInTerminal(rawInTerminal);
+      const pr = poller?.getSnapshot()?.pullRequests.find((p) => p.id === id);
+      if (!pr) return { ok: false, error: "This PR is no longer on the dashboard." };
+      let settings: Settings;
+      try {
+        settings = loadSettings();
+      } catch (e) {
+        return { ok: false, error: (e as Error).message };
+      }
+      const result = await launchClaude(pr, settings.claude, {
+        trackComments: settings.trackComments,
+        openUrl: (url) => shell.openExternal(url),
+        kind,
+        inTerminal,
+      });
+      // The new session registers within seconds; look again soon after rather
+      // than leave the card without it for a full interval.
+      if (result.ok) setTimeout(() => void refreshClaudeSessions(), 2_000);
+      return result;
+    },
+  );
 
   // Like claude:launch: only the kind, the group's Jira key and the PR ids
   // cross over, and the PRs (their links, repositories, roles) come from
