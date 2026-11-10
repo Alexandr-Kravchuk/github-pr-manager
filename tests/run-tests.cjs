@@ -2392,6 +2392,44 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     const list = [spr(3), spr(1), spr(2)];
     assert.strictEqual(prGroup.orderStacks(list), list);
   });
+  // Exercise the actual grouping memo, including its numeric sort: testing
+  // orderStacks alone missed the later sort that split stacks again.
+  const appSource = require("node:fs").readFileSync(path.join(__dirname, "../src/renderer/src/App.tsx"), "utf8");
+  const groupingBody = appSource.match(/const groups = useMemo<Group\[\] \| null>\(\(\) => \{([\s\S]*?)\}, \[sorted, groupBy, viewMode, sortBy\]\);/);
+  assert.ok(groupingBody, "App.tsx grouping memo is available for regression tests");
+  const ts = require("typescript");
+  const groupingJs = ts.transpile(groupingBody[1], { target: ts.ScriptTarget.ES2022 });
+  const groupPrs = new Function(
+    "sorted", "groupBy", "viewMode", "sortBy", "helpers",
+    `const { orderStacks, supportsGrouping, parentGroupKeys, groupKeyOf, groupLabel } = helpers;
+     const OTHER_GROUP_KEY = "other";
+     ${groupingJs}`,
+  );
+  const groupingHelpers = {
+    ...prGroup,
+    supportsGrouping: require("../dist/main/shared/view-mode.js").supportsGrouping,
+  };
+  for (const [scenario, members, expected] of [
+    ["keeps native stack members adjacent", [spr(10, [7, 1]), spr(11), spr(12, [7, 2])], [10, 12, 11]],
+    ["uses stack position before PR number", [spr(10, [7, 2]), spr(11), spr(12, [7, 1])], [12, 10, 11]],
+    ["keeps a hand-made stack bottom-first", [
+      spr(10, null, { headRefName: "top", baseRefName: "bottom", baseIsDefaultBranch: false }),
+      spr(11),
+      spr(12, null, { headRefName: "bottom", baseRefName: "main", baseIsDefaultBranch: true }),
+    ], [12, 10, 11]],
+    ["sorts unstacked PRs numerically", [spr(12), spr(10), spr(11)], [10, 11, 12]],
+  ]) {
+    test(`grouped By name: ${scenario} in Roomy and Compact`, () => {
+      const prs = members.map((p) => ({ ...p, id: `pr${p.number}`, issueKey: "ENG-1", parentKey: "ENG-2" }));
+      for (const view of ["roomy", "compact"]) {
+        for (const mode of ["repo", "issue", "parent"]) {
+          const groups = groupPrs(prGroup.orderStacks(prs), mode, view, "name", groupingHelpers);
+          assert.deepStrictEqual(groups.map((g) => g.prs.map((p) => p.number)), [expected], `${view}/${mode}`);
+          assert.deepStrictEqual(prs.map((p) => p.number), members.map((p) => p.number), "does not mutate input");
+        }
+      }
+    });
+  }
   // A hand-made stack: each PR opened on the previous one's branch (creatio-ui
   // ENG-83532: #4028 <- #4040 <- #4041 <- #4043 <- #4045, no native stack field).
   const cpr = (number, head, base, over = {}) => ({
