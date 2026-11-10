@@ -7,6 +7,7 @@ import { cn, relativeTime } from "../format";
 import { basePrTitle } from "../../../shared/pr-group";
 import { AuthorButton } from "./AuthorButton";
 import { BasePrContext } from "./base-pr-context";
+import { linkedPrHandlers } from "./linked-pr";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
 
@@ -111,6 +112,7 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
 
   return (
     <div
+      data-pr-id={pr.id}
       title={tileTooltip(pr, Date.now())}
       className={cn(
         // Hover darkens every side but the left: that one is the accent stripe,
@@ -183,6 +185,7 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
         <StackBadge pr={pr} />
         {!pr.stack && !pr.baseIsDefaultBranch && (
           <span
+            {...(basePr ? linkedPrHandlers(basePr.id) : {})}
             title={basePrTitle(pr, basePr)}
             className="shrink-0 text-emerald-600 tabular-nums dark:text-emerald-400"
           >

@@ -78,7 +78,9 @@ Three layers:
   Roomy/Compact list — and so a hand-made stack, where each PR is opened on
   the previous one's head branch: `basePrIndex` maps a PR to the listed PR
   whose head is its base (same host and repo), the card's umbrella then reads
-  "on #N" and opens that PR, the tile's `↳` carries the number, and the map is
+  "on #N" and opens that PR — hovering it outlines that PR's card
+  (`components/linked-pr.ts` toggles `.pr-linked` on its `data-pr-id` root, a
+  class rather than React state so a hover does not re-render the list) — the tile's `↳` carries the number, and the map is
   built from the whole snapshot (`BasePrContext`) so a filter cannot hide the
   base's number; GitHub merges a stack bottom-up only yet reports the PRs
   above the bottom as `CLEAN`, so `canBeMerged` in `github.ts` is gated on

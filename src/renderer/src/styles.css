@@ -338,3 +338,15 @@ input[type="search"]::-webkit-search-cancel-button {
   -webkit-appearance: none;
   appearance: none;
 }
+
+/*
+ * The PR a hovered "on #N" marker names (`components/linked-pr.ts`). An
+ * outline, not a border: the card's left border is its accent stripe, and an
+ * outline is drawn outside the box, so the card's own `overflow-hidden` does
+ * not clip it. A static style — nothing keeps animating while it is on.
+ */
+.pr-linked {
+  outline: 2px solid var(--color-emerald-500);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 6px color-mix(in oklab, var(--color-emerald-500) 20%, transparent);
+}

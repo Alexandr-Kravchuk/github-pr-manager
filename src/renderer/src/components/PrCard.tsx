@@ -8,6 +8,7 @@ import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/type
 import { cn, relativeTime } from "../format";
 import { AuthorButton } from "./AuthorButton";
 import { BasePrContext } from "./base-pr-context";
+import { linkedPrHandlers } from "./linked-pr";
 import { CheckBadge } from "./CheckBadge";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
@@ -212,6 +213,7 @@ export function PrCard({
 
   return (
     <div
+      data-pr-id={pr.id}
       className={cn(
         // Hover darkens every side but the left: that one is the accent stripe,
         // and a plain `hover:border-*` colour repaints it grey.
@@ -256,6 +258,7 @@ export function PrCard({
               <button
                 type="button"
                 onClick={() => onOpen(basePr)}
+                {...linkedPrHandlers(basePr.id)}
                 title={basePrTitle(pr, basePr)}
                 aria-label={`Based on pull request ${basePr.number}`}
                 className="inline-flex shrink-0 items-center gap-0.5 rounded px-0.5 text-emerald-600 tabular-nums hover:bg-elevated dark:text-emerald-400"
