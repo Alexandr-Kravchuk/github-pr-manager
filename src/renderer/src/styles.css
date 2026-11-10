@@ -68,108 +68,6 @@
   }
 }
 
-/* Header buddy (components/Buddy.tsx) — per-mood micro-animations. */
-.buddy :is(g, path, circle, text) {
-  transform-box: fill-box;
-  transform-origin: center;
-}
-.buddy-bob {
-  animation: buddy-bob 900ms ease-in-out 2;
-}
-.buddy-droop {
-  animation: buddy-droop 900ms ease-in-out 2;
-}
-.buddy-breathe {
-  animation: buddy-breathe 1s ease-in-out 2;
-}
-.buddy-look {
-  animation: buddy-look 1.8s ease-in-out 1;
-}
-.buddy-tear {
-  animation: buddy-tear 1.4s ease-in 1;
-}
-.buddy-zzz {
-  animation: buddy-zzz 1.4s ease-out 1;
-}
-.buddy-zzz-2 {
-  animation-delay: 0.3s;
-}
-.buddy-zzz-3 {
-  animation-delay: 0.6s;
-}
-
-@keyframes buddy-bob {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-2px);
-  }
-}
-@keyframes buddy-droop {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(1.5px);
-  }
-}
-@keyframes buddy-breathe {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.05);
-  }
-}
-@keyframes buddy-look {
-  0%,
-  25% {
-    transform: translateX(0);
-  }
-  40%,
-  60% {
-    transform: translateX(1.6px);
-  }
-  75%,
-  100% {
-    transform: translateX(0);
-  }
-}
-@keyframes buddy-tear {
-  0% {
-    opacity: 0;
-    transform: translateY(0);
-  }
-  15% {
-    opacity: 1;
-  }
-  70% {
-    opacity: 1;
-    transform: translateY(6px);
-  }
-  100% {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-}
-@keyframes buddy-zzz {
-  0% {
-    opacity: 0;
-    transform: translate(0, 2px);
-  }
-  25% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: translate(3px, -6px);
-  }
-}
-
 /*
  * The PR agent's diagrams: mermaid's own stylesheet ships an endlessly running
  * dash animation for edges marked to animate. The guard refuses that syntax
@@ -372,7 +270,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .buddy :is(g, path, circle, text),
   .refresh-spin,
   .live-beat,
   .claude-glow,

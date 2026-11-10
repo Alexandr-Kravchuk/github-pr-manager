@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AgentCompanion } from "./components/AgentCompanion";
 import { AgentContext } from "./components/agent-context";
-import { Buddy, type BuddyMood } from "./components/Buddy";
+import logoUrl from "./assets/logo.png";
 import { PrBoard } from "./components/PrBoard";
 import { GroupClaudeButton } from "./components/ClaudeButton";
 import { PrCard } from "./components/PrCard";
@@ -23,7 +23,6 @@ import {
   headerCountLabel,
   hiddenAttentionCount,
   hideApprovalsTitle,
-  isBaselinePr,
   isRevealChipShown,
   sourceFacetCount,
   prSignal,
@@ -805,16 +804,6 @@ export function App() {
   // deliberately independent of the filters.
   const stats = useMemo(() => baselineStats(allPrs), [allPrs]);
 
-  // Buddy mood mirrors the card accents over that same base — literally the same
-  // predicate as `baselineStats`, so the mascot and the numbers can't disagree:
-  // any red PR → sad, else a requested review → curious, else asleep.
-  const buddyMood = useMemo<BuddyMood>(() => {
-    const signals = allPrs.filter(isBaselinePr).map((pr) => prSignal(pr, { trackComments }));
-    if (signals.includes("blocked")) return "sad";
-    if (signals.includes("myReview")) return "curious";
-    return "sleeping";
-  }, [allPrs, trackComments]);
-
   const filtered = useMemo(() => filterPrs(allPrs, filterState), [allPrs, filterState]);
 
   // Chip badges are facet counts. A source chip reports how big that source is
@@ -1058,7 +1047,7 @@ export function App() {
         <HeaderSky weather={weather} />
         <div className="relative flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <Buddy mood={buddyMood} />
+            <img src={logoUrl} alt="" aria-hidden width={44} height={44} draggable={false} className="h-11 w-11 shrink-0 select-none" />
             <div>
               <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
               <p className="text-xs text-fg-subtle">
@@ -2018,8 +2007,8 @@ function HostPill({
   const body = (
     <>
       {label}
-      {/* One finite blink per incoming snapshot: `beat` remounts the dot, the
-          same monotonic-counter trick Buddy uses for its mood animations. The
+      {/* One finite blink per incoming snapshot: `beat` remounts the dot, a
+          monotonic counter rather than `fetchedAt`, which stalls. The
           live dot this replaced once carried Tailwind's `animate-pulse`, whose
           `infinite` keyframes kept the GPU helper at ~33% CPU permanently. */}
       <span key={beat} aria-hidden className={cn("live-beat inline-block h-2 w-2 rounded-full", HOST_DOT[health])} />

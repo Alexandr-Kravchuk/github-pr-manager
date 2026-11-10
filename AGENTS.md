@@ -626,7 +626,7 @@ Three layers:
   from 6.9% to 0.0% at idle; the dev-vs-packaged spread was never attributed, so
   treat ~33% as the observation that started this, not as a measured delta). Use
   a **finite** animation remounted via a React `key` when the underlying event
-  fires — see `Buddy.tsx` (mood changes), `.live-beat` in `styles.css` (one
+  fires — see `.live-beat` in `styles.css` (one
   blink per snapshot) and `.claude-glow` (three breaths of a PR card's glow
   when a Claude session on it starts working or waiting; only its own layer's
   `opacity` animates, so nothing repaints per frame). The header sky
@@ -636,8 +636,8 @@ Three layers:
   over the header and is `animation-play-state: paused` otherwise (a test pins
   both rules and that each animated element carries the class), with a finite
   iteration count. The play-state rules are two-class selectors on purpose:
-  the one-class `animation` shorthand resets the play state. Key it on something monotonic per event: `Buddy` uses a
-  run counter and `App.tsx` a snapshot counter, because `snapshot.fetchedAt` is
+  the one-class `animation` shorthand resets the play state. Key it on something monotonic per event: `App.tsx` uses a
+  snapshot counter, because `snapshot.fetchedAt` is
   the *oldest* host's stamp and stalls. A guard test in `tests/run-tests.cjs`
   scans `.ts`/`.tsx`/`.css`/`.html` under `src/renderer` for
   `animate-{pulse,spin,bounce,ping}` (bare or arbitrary-value) and for literal

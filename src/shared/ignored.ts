@@ -6,7 +6,7 @@ import type { PullRequest } from "./types";
 /**
  * Persistent "ignored PRs" store — a JSON file under userData mapping a PR's
  * node id to when it was ignored. An ignored PR is hidden from the dashboard
- * (and excluded from counts / buddy mood) until the user un-ignores it; unlike
+ * (and excluded from counts) until the user un-ignores it; unlike
  * the in-memory filter chips, this survives a relaunch. Mirrors the seen-state
  * store in `state.ts`.
  */

@@ -133,7 +133,7 @@ for (const mod of [
 // disabled — so the frames keep coming even while the window is hidden. In
 // v1.12.0 a single 2x2px `animate-pulse` dot in the header held the GPU helper
 // at ~33% CPU permanently, hidden window included. The pattern here is a finite
-// animation remounted via `key` (see Buddy.tsx and `.live-beat` in styles.css).
+// animation remounted via `key` (see `.live-beat` in styles.css).
 // Comments are blanked before matching (offsets preserved, so reported line
 // numbers stay honest) — the rule has to be explainable where it's enforced,
 // and stripping rather than exempting whole lines means a banned token on a

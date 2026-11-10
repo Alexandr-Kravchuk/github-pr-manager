@@ -783,7 +783,7 @@ export interface PullRequest {
   needsAttention: boolean;
   /**
    * true if the user has ignored this PR. Ignored PRs are hidden from the
-   * dashboard and excluded from counts / buddy mood, surfacing only when the
+   * dashboard and excluded from counts, surfacing only when the
    * "Ignored" filter is on. Persisted across relaunches — see `ignored.ts`.
    */
   isIgnored: boolean;

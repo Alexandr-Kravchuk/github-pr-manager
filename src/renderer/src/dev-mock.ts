@@ -4,8 +4,8 @@
  * there is no Electron preload and thus no `window.api`. Lets the renderer be
  * developed and eyeballed without booting Electron.
  *
- * `?buddy=sad|curious|sleeping` picks a PR fixture set that drives the header
- * buddy into that mood (default: sleeping). `?jiraAuth=token|twg` shows the
+ * `?buddy=sad|curious|sleeping` picks a PR fixture set: a red PR, a review
+ * asked of you, or nothing to do (default: sleeping). `?jiraAuth=token|twg` shows the
  * rejected-credentials banner for that Jira source.
  */
 import { rankBefore } from "../../shared/agent-view";

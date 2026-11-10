@@ -433,8 +433,7 @@ export interface BaselineStats {
 }
 
 /**
- * The header stats, over the PRs that are neither ignored nor drafts — the same
- * base `buddyMood` reads, so the mascot and the numbers can't disagree.
+ * The header stats, over the PRs that are neither ignored nor drafts.
  * Deliberately independent of the filters: it answers "how much work is there",
  * not "what's on screen" (`headerCountLabel` covers the latter). Only
  * the two numbers no filter chip shows: the attention / failing / new-comments
@@ -528,7 +527,7 @@ export function hiddenAttentionCount(
 }
 
 /**
- * Card signal, in priority order — drives the left accent and the header buddy.
+ * Card signal, in priority order — drives the left accent.
  *
  * Lives here rather than in `PrCard` so it can be unit-tested: it is a pure
  * function of a PullRequest, and this is the renderer-importable, Node-free half
