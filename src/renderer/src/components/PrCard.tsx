@@ -212,7 +212,7 @@ export function PrCard({
       className={cn(
         // Hover darkens every side but the left: that one is the accent stripe,
         // and a plain `hover:border-*` colour repaints it grey.
-        "relative isolate overflow-hidden rounded-lg border border-line border-l-4 bg-surface p-4 shadow-sm transition-colors hover:border-y-line-strong hover:border-r-line-strong",
+        "relative isolate flex flex-col overflow-hidden rounded-lg border border-line border-l-4 bg-surface p-4 shadow-sm transition-colors hover:border-y-line-strong hover:border-r-line-strong",
         accentClass(pr, trackComments),
         // Revealed by the Ignored chip: on screen, but not part of the workload
         // the header counts — so it reads as set aside rather than as normal.
@@ -341,9 +341,9 @@ export function PrCard({
       <button
         type="button"
         onClick={() => onOpen(pr)}
-        // The full title on hover, but only when it isn't what's already shown.
-        title={displayTitle === pr.title ? undefined : pr.title}
-        className="mb-2 block text-left text-[15px] font-semibold leading-snug text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300"
+        // One line, cut with "…": the full title is always on hover.
+        title={pr.title}
+        className="mb-2 block w-full truncate text-left text-[15px] font-semibold leading-snug text-fg hover:text-sky-600 hover:underline dark:hover:text-sky-300"
       >
         {displayTitle}
       </button>
@@ -523,10 +523,14 @@ export function PrCard({
         )}
       </div>
 
-      {/* Last row: the reviewers, and when the PR last changed in the corner.
+      {/* What the PR agent is doing with it; nothing while it has nothing here. */}
+      <AgentStatusLine pr={pr} />
+      {/* Last row, pinned to the card's bottom edge (`mt-auto`: a card in a grid
+          row is as tall as the tallest one): the reviewers, and when the PR
+          last changed in the corner.
           The avatar rings say who has not reviewed yet, so no separate
           "Waiting for" pill repeats it. */}
-      <div className="flex items-center justify-between gap-2">
+      <div className="mt-auto flex items-center justify-between gap-2">
         {pr.reviewers.length > 0 ? (
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-xs text-fg-subtle">Reviewers:</span>
@@ -541,8 +545,6 @@ export function PrCard({
           {relativeTime(pr.updatedAt)}
         </span>
       </div>
-      {/* What the PR agent is doing with it; nothing while it has nothing here. */}
-      <AgentStatusLine pr={pr} />
     </div>
   );
 }
