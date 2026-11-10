@@ -121,7 +121,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: "jira",
     tab: "integrations",
     title: "Jira",
-    keywords: ["atlassian", "api token", "site url", "email", "parent task", "group by", "issue"],
+    keywords: ["atlassian", "twg", "sign in", "api token", "site url", "email", "parent task", "group by", "issue"],
   },
   {
     id: "claude",

@@ -11,7 +11,7 @@ import {
   migrateTools,
   type AgentBoundKey,
 } from "./agent-defaults";
-import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "./claude-launch";
+import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS, PREVIOUS_DEFAULT_PROMPTS } from "./claude-launch";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "./notify";
 import { DEFAULT_STALE_AFTER_DAYS, validateStaleAfterDays } from "./stale";
 import type {
@@ -256,7 +256,13 @@ export function validateClaude(raw: unknown): ClaudeSettings {
     string,
     unknown
   >;
-  const prompt = (k: keyof typeof DEFAULT_CLAUDE_PROMPTS): string => str(rawPrompts[k]) || DEFAULT_CLAUDE_PROMPTS[k];
+  // An empty prompt, or a saved copy of a default it has since replaced, is the
+  // current default: a copy saved verbatim would otherwise hide every later
+  // change to that default from the user.
+  const prompt = (k: keyof typeof DEFAULT_CLAUDE_PROMPTS): string => {
+    const saved = str(rawPrompts[k]);
+    return !saved || PREVIOUS_DEFAULT_PROMPTS[k]?.includes(saved) ? DEFAULT_CLAUDE_PROMPTS[k] : saved;
+  };
   const rawAgentPrompts = (
     typeof obj.agentPrompts === "object" && obj.agentPrompts !== null ? obj.agentPrompts : {}
   ) as Record<string, unknown>;
@@ -425,18 +431,33 @@ export function validateAgent(raw: unknown): AgentSettings {
 
 /**
  * Validates the optional Jira connection. Returns undefined when absent or
- * incomplete (missing baseUrl/email) — an incomplete config just means Jira
- * grouping stays off, not a hard error. The baseUrl is normalized to an origin.
+ * without a site — that just means Jira grouping stays off, not a hard error.
+ * The email is optional: only the API-token fallback needs it, `twg` signs in on
+ * its own. The baseUrl is normalized to an origin.
  */
 function validateJira(raw: unknown): JiraSettings | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
   const obj = raw as Record<string, unknown>;
   const email = typeof obj.email === "string" ? obj.email.trim() : "";
   const rawUrl = typeof obj.baseUrl === "string" ? obj.baseUrl.trim() : "";
-  if (!email || !rawUrl) return undefined;
+  if (!rawUrl) return undefined;
   const baseUrl = normalizeJiraBaseUrl(rawUrl);
   if (!baseUrl) throw new ConfigError(`settings: jira.baseUrl is not a valid URL: ${rawUrl}`);
-  return { baseUrl, email };
+  return email ? { baseUrl, email } : { baseUrl };
+}
+
+/**
+ * What `persistSettings` writes: the settings with every Claude prompt that is
+ * still its default stored empty. An empty prompt reads back as the default,
+ * so a later release that changes a default reaches every user who never
+ * edited it — a verbatim copy would keep the old text in force.
+ */
+export function toStoredSettings(settings: Settings): Settings {
+  const prompts = { ...settings.claude.prompts };
+  for (const k of Object.keys(prompts) as (keyof typeof prompts)[]) {
+    if (prompts[k] === DEFAULT_CLAUDE_PROMPTS[k]) prompts[k] = "";
+  }
+  return { ...settings, claude: { ...settings.claude, prompts } };
 }
 
 /**

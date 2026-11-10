@@ -5,7 +5,8 @@
  * developed and eyeballed without booting Electron.
  *
  * `?buddy=sad|curious|sleeping` picks a PR fixture set that drives the header
- * buddy into that mood (default: sleeping).
+ * buddy into that mood (default: sleeping). `?jiraAuth=token|twg` shows the
+ * rejected-credentials banner for that Jira source.
  */
 import { rankBefore } from "../../shared/agent-view";
 import type {
@@ -14,6 +15,7 @@ import type {
   AgentState,
   ClaudeSessionInfo,
   DashboardResponse,
+  JiraSource,
   PrManagerApi,
   PullRequest,
   Settings,
@@ -406,8 +408,13 @@ const FIXTURES: Record<string, PullRequest[]> = {
 FIXTURES.agent = [...FIXTURES.showcase, ...FIXTURES.review];
 
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
+// `?jiraAuth=token` / `?jiraAuth=twg` shows the rejected-credentials banner and
+// the matching Settings state, which a working mock never reaches.
+const jiraAuthParam = new URLSearchParams(window.location.search).get("jiraAuth");
+const jiraAuth: JiraSource | null = jiraAuthParam === "token" || jiraAuthParam === "twg" ? jiraAuthParam : null;
 
 const snapshot: DashboardResponse = {
+  ...(jiraAuth ? { jiraHealth: { state: "auth" as const, queried: 3, resolved: 0, source: jiraAuth } } : {}),
   pullRequests: FIXTURES[mood] ?? FIXTURES.sleeping,
   errors: [],
   // Two hosts so the header's host pills act as filters; GHE's budget is low on
@@ -953,13 +960,24 @@ const api: PrManagerApi = {
   // A site is set so the issue-key badge renders in mock mode; openExternal is a
   // no-op above, so clicking it stays inert.
   getJiraStatus: async () => ({
+    // Still configured in both auth scenarios: a set-up source that stopped
+    // working keeps the grouping; the banner reports it.
     configured: true,
+    twg:
+      jiraAuth === "twg"
+        ? { state: "signed-out", message: "Not signed in" }
+        : jiraAuth === "token"
+          ? { state: "not-installed" }
+          : { state: "signed-in", account: "Mock User" },
+    signInSource: jiraAuth === "token" ? null : jiraAuth === "twg" ? "token" : "twg",
     hasConfig: true,
+    hasEmail: true,
     hasToken: true,
     baseUrl: "https://example.atlassian.net",
     encryptionAvailable: true,
   }),
   setJiraToken: async () => ({ ok: true }),
+  twgLogin: async () => ({ ok: false, error: "Not available in mock mode." }),
   getAppVersion: async () => "dev",
   launchClaude: async () => ({ ok: false, error: "Not available in mock mode." }),
   launchClaudeGroup: async () => ({ ok: false, error: "Not available in mock mode." }),

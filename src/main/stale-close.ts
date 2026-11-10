@@ -10,6 +10,9 @@
 import { canCloseStale, type CloseStaleOptions, type CloseStaleResult, type JiraTaskInfo } from "../shared/stale";
 import type { JiraSettings, PullRequest, Settings } from "../shared/types";
 
+/** Jira settings with the account email the API token's Basic auth needs. */
+type JiraTokenConfig = JiraSettings & { email: string };
+
 export interface StaleCloseDeps {
   loadSettings: () => Settings;
   /** The token `gh` holds for a GraphQL endpoint. */
@@ -20,15 +23,15 @@ export interface StaleCloseDeps {
     prId: string,
     comment: string,
   ) => Promise<void>;
-  fetchTaskInfo: (config: JiraSettings, token: string, key: string) => Promise<JiraTaskInfo>;
+  fetchTaskInfo: (config: JiraTokenConfig, token: string, key: string) => Promise<JiraTaskInfo>;
   transitionTask: (
-    config: JiraSettings,
+    config: JiraTokenConfig,
     token: string,
     key: string,
     transitionId: string,
     resolutionId: string | null,
   ) => Promise<void>;
-  deleteTask: (config: JiraSettings, token: string, key: string, deleteSubtasks: boolean) => Promise<void>;
+  deleteTask: (config: JiraTokenConfig, token: string, key: string, deleteSubtasks: boolean) => Promise<void>;
 }
 
 function message(e: unknown): string {
@@ -36,7 +39,9 @@ function message(e: unknown): string {
 }
 
 /** The Jira connection and token, or why there is none. */
-function jiraAccess(deps: StaleCloseDeps): { config: JiraSettings; token: string } | { error: string } {
+function jiraAccess(
+  deps: StaleCloseDeps,
+): { config: JiraTokenConfig; token: string } | { error: string } {
   let config: JiraSettings | undefined;
   try {
     config = deps.loadSettings().jira;
@@ -44,9 +49,11 @@ function jiraAccess(deps: StaleCloseDeps): { config: JiraSettings; token: string
     return { error: message(e) };
   }
   if (!config) return { error: "Jira isn't set up — add the site and email in Settings → Integrations." };
+  const email = config.email;
+  if (!email) return { error: "No Jira account email is set — add it in Settings → Integrations." };
   const token = deps.getJiraToken();
   if (!token) return { error: "No Jira API token is stored — add one in Settings → Integrations." };
-  return { config, token };
+  return { config: { ...config, email }, token };
 }
 
 /** The close dialog's view of the PR's task. */
@@ -83,7 +90,7 @@ export async function closeStale(
 
   // Jira access is checked before anything changes, so a missing token cannot
   // leave the PR closed with the chosen task action silently undone.
-  let access: { config: JiraSettings; token: string } | null = null;
+  let access: { config: JiraTokenConfig; token: string } | null = null;
   if (options.jira.action !== "keep") {
     if (!pr.issueKey) return fail("No Jira key in this PR's title or branch.");
     const a = jiraAccess(deps);

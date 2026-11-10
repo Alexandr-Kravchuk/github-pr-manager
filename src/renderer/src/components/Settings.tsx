@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import type {
   AgentPromptKey,
@@ -21,6 +21,7 @@ import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "../../../shared
 // Node-free too — the Agent tab starts from these before settings load.
 import { DEFAULT_AGENT_PROMPTS, DEFAULT_AGENT_SETTINGS } from "../../../shared/agent-defaults";
 import { DEFAULT_STALE_AFTER_DAYS, MAX_STALE_AFTER_DAYS } from "../../../shared/stale";
+import { createJiraStatusLoader } from "../../../shared/jira-status";
 import {
   SETTINGS_TABS,
   searchSettings,
@@ -152,9 +153,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
     window.api.getGhStatus().then(setGh).catch(() => {});
   }, []);
 
-  const loadJira = useCallback(() => {
-    window.api.getJiraStatus().then(setJira).catch(() => {});
-  }, []);
+  const loadJira = useMemo(() => createJiraStatusLoader((mode) => window.api.getJiraStatus(mode), setJira), []);
 
   useEffect(() => {
     window.api
@@ -201,6 +200,21 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const changeTheme = (next: ThemePreference) => {
     setTheme(next);
     window.api.setTheme(next).catch(() => {});
+  };
+
+  const [twgLoginNote, setTwgLoginNote] = useState<string | null>(null);
+  const startTwgLogin = async () => {
+    setTwgLoginNote(null);
+    try {
+      const r = await window.api.twgLogin();
+      setTwgLoginNote(
+        r.ok
+          ? "Finish the sign-in in the terminal, then press Check again."
+          : `${r.error ?? "Could not open a terminal."} Run twg login --force in a terminal.`,
+      );
+    } catch (e) {
+      setTwgLoginNote((e as Error).message);
+    }
   };
 
   const removeJiraToken = async () => {
@@ -250,8 +264,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           // Blank or garbage falls back to the default in main's validation.
           searchLimit: Number(h.searchLimitText) || DEFAULT_SEARCH_LIMIT,
         })),
-        // Only persist Jira when both fields are present; otherwise leave it off.
-        jira: baseUrl && email ? { baseUrl, email } : undefined,
+        // The site turns Jira on; the email only matters to the API-token fallback.
+        jira: baseUrl ? { baseUrl, ...(email ? { email } : {}) } : undefined,
         claude: { ...claude, repoPaths: folders },
         agent,
         staleAfterDays,
@@ -283,8 +297,14 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   }
 
   const labelCls = "block text-xs font-medium text-fg-muted";
-  const inputCls =
-    "mt-1 w-full rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none";
+  // `cn` only joins, it does not resolve Tailwind conflicts: a width or margin
+  // added on top of `inputCls` competes with its `w-full` / `mt-1` and the
+  // stylesheet order picks the winner (it was `w-full`, which squeezed the
+  // Repository folders' Folder field down to a bare square). Inputs that set
+  // their own width or margin build on `fieldCls` instead.
+  const fieldCls =
+    "rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-sky-600 focus:outline-none";
+  const inputCls = cn("mt-1 w-full", fieldCls);
 
   const sectionContent: Record<SettingsSectionId, ReactNode> = {
     ...agentSectionContent({
@@ -321,7 +341,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               min={10}
               value={pollIntervalSeconds}
               onChange={(e) => setPollIntervalSeconds(Math.max(10, Number(e.target.value) || 10))}
-              className={cn(inputCls.replace("w-full", "w-24"), "mt-0")}
+              className={cn(fieldCls, "w-24")}
             />
             seconds
           </span>
@@ -684,17 +704,78 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-fg-secondary">Jira (optional)</h2>
-          {jira?.configured ? (
-            <span className="text-xs text-emerald-700 dark:text-emerald-400">connected ✓</span>
-          ) : jira?.hasConfig && !jira?.hasToken ? (
-            <span className="text-xs text-amber-700 dark:text-amber-400">token needed</span>
+          {/* Named after the source that can sign in now, not after `configured`,
+              which stays true for a signed-out twg so a saved grouping survives. */}
+          {jira?.signInSource === "twg" ? (
+            <span className="text-xs text-emerald-700 dark:text-emerald-400">connected via twg ✓</span>
+          ) : jira?.signInSource === "token" ? (
+            <span className="text-xs text-emerald-700 dark:text-emerald-400">connected via API token ✓</span>
+          ) : jira?.hasConfig && jira.twg.state === "checking" ? (
+            <span className="text-xs text-fg-faint">checking…</span>
+          ) : jira?.hasConfig ? (
+            <span className="text-xs text-amber-700 dark:text-amber-400">sign-in needed</span>
           ) : (
             <span className="text-xs text-fg-faint">not set up</span>
           )}
         </div>
         <p className="mt-1 text-xs text-fg-subtle">
           Enables <span className="text-fg-muted">Group by parent task</span> — clusters review PRs
-          under their parent Jira issue. Create an API token at{" "}
+          under their parent Jira issue. Jira is read through the Atlassian{" "}
+          <code className="text-fg-muted">twg</code> CLI you&apos;re signed into, the same way GitHub
+          is read through <code className="text-fg-muted">gh</code> — no token to store or renew. An
+          API token is the fallback when twg isn&apos;t installed or signed in.
+        </p>
+
+        <div className="mt-3">
+          <label className={labelCls}>Site URL</label>
+          <input
+            value={jiraBaseUrl}
+            onChange={(e) => setJiraBaseUrl(e.target.value)}
+            placeholder="https://your-org.atlassian.net"
+            className={inputCls}
+          />
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-fg-secondary">twg:</span>
+          {!jira || jira.twg.state === "checking" ? (
+            <span className="text-fg-faint">checking…</span>
+          ) : jira.twg.state === "signed-in" ? (
+            <span className="text-emerald-700 dark:text-emerald-400">
+              signed in{jira.twg.account ? ` as ${jira.twg.account}` : ""} ✓
+            </span>
+          ) : jira.twg.state === "signed-out" ? (
+            <span className="text-amber-700 dark:text-amber-400">not signed in</span>
+          ) : jira.twg.state === "not-installed" ? (
+            <span className="text-fg-faint">not installed — the API token below is used</span>
+          ) : (
+            <span className="text-amber-700 dark:text-amber-400">{jira.twg.message ?? "not working"}</span>
+          )}
+          {jira && (jira.twg.state === "signed-out" || jira.twg.state === "error") && (
+            <button
+              type="button"
+              onClick={startTwgLogin}
+              className="rounded-md border border-line-strong px-2 py-1 text-xs text-fg-muted hover:bg-elevated"
+            >
+              Sign in with twg
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setJira(null);
+              void loadJira(true);
+            }}
+            className="rounded-md border border-line-strong px-2 py-1 text-xs text-fg-muted hover:bg-elevated"
+          >
+            Check again
+          </button>
+        </div>
+        {twgLoginNote && <p className="mt-1 text-xs text-fg-subtle">{twgLoginNote}</p>}
+
+        <h3 className="mt-4 text-xs font-semibold text-fg-secondary">API token (fallback)</h3>
+        <p className="mt-1 text-xs text-fg-subtle">
+          Used only when twg can&apos;t be. Create one at{" "}
           <button
             type="button"
             onClick={() =>
@@ -706,26 +787,18 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           </button>
           {" "}— a read-only token with the{" "}
           <code className="text-fg-muted">read:jira-work</code> scope is enough (a classic token works
-          too). The token is stored encrypted by your OS keychain — never in settings.
+          too). Atlassian tokens expire; the dashboard tells you when Jira starts rejecting it. The
+          token is stored encrypted by your OS keychain — never in settings.
         </p>
 
         {jira && !jira.encryptionAvailable && (
           <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
-            Your OS keychain is unavailable, so the token can&apos;t be stored securely. Jira
-            grouping is disabled on this machine.
+            Your OS keychain is unavailable, so the token can&apos;t be stored securely. Only twg can
+            be used on this machine.
           </p>
         )}
 
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <div>
-            <label className={labelCls}>Site URL</label>
-            <input
-              value={jiraBaseUrl}
-              onChange={(e) => setJiraBaseUrl(e.target.value)}
-              placeholder="https://your-org.atlassian.net"
-              className={inputCls}
-            />
-          </div>
           <div>
             <label className={labelCls}>Account email</label>
             <input
@@ -920,14 +993,14 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                         placeholder="owner/name"
                         aria-label="Repository"
                         onChange={(e) => updateRepoFolder(i, { repo: e.target.value })}
-                        className={cn(inputCls, "mt-0 w-56 shrink-0")}
+                        className={cn(fieldCls, "w-56 shrink-0")}
                       />
                       <input
                         value={row.path}
                         placeholder="~/Projects/name"
                         aria-label="Folder"
                         onChange={(e) => updateRepoFolder(i, { path: e.target.value })}
-                        className={cn(inputCls, "mt-0")}
+                        className={cn(fieldCls, "min-w-0 flex-1")}
                       />
                       <button
                         type="button"
@@ -1022,7 +1095,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           }}
           placeholder="Search settings"
           aria-label="Search settings"
-          className={cn(inputCls, "mt-0 min-w-[12rem] flex-1")}
+          className={cn(fieldCls, "min-w-[12rem] flex-1")}
         />
       </div>
 

@@ -79,9 +79,46 @@ export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
     "with the start_session tool (initiation user_asked, context fresh, use_worktree false), so each review runs in its own " +
     "session nested under this one. A prompt that starts with a folder (in, the folder, a colon) is that PR's own repository: start its " +
     "session there through start_session's cwd, so it reads that repository's rules and code; the others run in this folder. " +
+    "Give each session its prompt word for word, and add to it these five lines, each word for word as a line of its own " +
+    "and without its letter: " +
+    "a) Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
+    "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
+    "Публікуй рев'ю на PR за цим дозволом. " +
+    "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
+    "or by a test; without that check, ask it as a question in the summary. " +
+    "c) APPROVE only on my separate word for that PR: this permission does not cover it. " +
+    "d) Skip the PR when I already reviewed it after its last commit. " +
+    "e) Start your report with the link to the review you published on the PR (#pullrequestreview-…) and your decision, " +
+    "or with why you published none. " +
+    "The prompts: {prompts}. " +
+    "When every session has reported, give me one summary: for each PR the link to its review, its decision and its Blocker and Major findings, " +
+    "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently.",
+};
+
+/**
+ * Defaults a template had before its current text. The Settings screen used to
+ * save every prompt, defaults included, so a user who never edited one kept the
+ * old default in settings.json, where it would win over the new default for
+ * good. `validateClaude` reads such a saved copy as "the default"; extend the
+ * list with the outgoing text whenever a default changes.
+ */
+export const PREVIOUS_DEFAULT_PROMPTS: Partial<Record<ClaudePromptKey, readonly string[]>> = {
+  reviewGroup: [
+    // The first Review all.
+    "Review the {count} pull requests of {key} that wait for my review. Do not review them here: start one session per PR " +
+    "with the start_session tool (initiation user_asked, context fresh, use_worktree false), so each review runs in its own " +
+    "session nested under this one, with these prompts: {prompts}. " +
+    "When every session has reported, give me one summary: for each PR its decision and its Blocker and Major findings, " +
+    "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently.",
+    // Runs each review in its PR's own checkout.
+    "Review the {count} pull requests of {key} that wait for my review. Do not review them here: start one session per PR " +
+    "with the start_session tool (initiation user_asked, context fresh, use_worktree false), so each review runs in its own " +
+    "session nested under this one. A prompt that starts with a folder (in, the folder, a colon) is that PR's own repository: start its " +
+    "session there through start_session's cwd, so it reads that repository's rules and code; the others run in this folder. " +
     "The prompts: {prompts}. " +
     "When every session has reported, give me one summary: for each PR its decision and its Blocker and Major findings, " +
     "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently.",
+  ],
 };
 
 /**
