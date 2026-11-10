@@ -10,5 +10,11 @@ import type { ClaudeSessionInfo } from "../../../shared/types";
  */
 export const ClaudeEnabledContext = createContext(false);
 
+/**
+ * Whether Settings open Claude sessions in Claude Desktop — the button's menu
+ * then also offers "Review in terminal".
+ */
+export const ClaudeDesktopContext = createContext(false);
+
 /** The running Claude Code sessions main pushes; each button picks its PR's out of them. */
 export const ClaudeSessionsContext = createContext<readonly ClaudeSessionInfo[]>([]);

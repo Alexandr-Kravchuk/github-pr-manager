@@ -1126,9 +1126,15 @@ export interface PrManagerApi {
   /**
    * Open a terminal in the PR's local checkout and start `claude` with the
    * prompt for the PR's state — or for `kind`, when the user picked an action
-   * from the button's menu. Refused while the integration is off.
+   * from the button's menu. Refused while the integration is off. Settings
+   * pick Claude Desktop or a terminal; `inTerminal` ("Review in terminal" in
+   * the menu) opens the default terminal even when they pick Claude Desktop.
    */
-  launchClaude(prId: string, kind?: "drive" | "review" | "close" | "explain" | "open"): Promise<ClaudeLaunchResult>;
+  launchClaude(
+    prId: string,
+    kind?: "drive" | "review" | "close" | "explain" | "open",
+    inTerminal?: boolean,
+  ): Promise<ClaudeLaunchResult>;
   /**
    * Start a group heading's Claude session: "Explain all" (one session that
    * explains the group's PRs together) or "Review all" (a Claude Desktop

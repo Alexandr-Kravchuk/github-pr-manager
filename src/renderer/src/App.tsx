@@ -40,7 +40,7 @@ import { createJiraStatusLoader } from "../../shared/jira-status";
 import { AuthorFilterContext } from "./components/author-filter-context";
 import { StaleCloseDialog } from "./components/StaleCloseDialog";
 import { StaleCloseContext } from "./components/stale-close-context";
-import { ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
+import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
   DEFAULT_TABLE_SORT,
@@ -1450,6 +1450,7 @@ export function App() {
 
       <AgentContext.Provider value={agentContext}>
       <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
+      <ClaudeDesktopContext.Provider value={config?.claudeDesktop ?? false}>
       <ClaudeSessionsContext.Provider value={claudeSessions}>
       <AuthorFilterContext.Provider value={authorFilter}>
       <StaleCloseContext.Provider value={setClosingPr}>
@@ -1510,7 +1511,7 @@ export function App() {
                     )}
                   </button>
                   {groupBy !== "repo" && (
-                    <GroupClaudeButton groupKey={g.key} prs={g.prs} desktop={config?.claudeDesktop ?? false} />
+                    <GroupClaudeButton groupKey={g.key} prs={g.prs} />
                   )}
                   <div aria-hidden className="flex-1 self-stretch" onClick={() => toggleGroup(g.key)} />
                 </div>
@@ -1553,6 +1554,7 @@ export function App() {
         />
       )}
       </ClaudeSessionsContext.Provider>
+      </ClaudeDesktopContext.Provider>
       </ClaudeEnabledContext.Provider>
       </AgentContext.Provider>
 
