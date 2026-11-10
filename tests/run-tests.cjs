@@ -9180,8 +9180,135 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       ]) {
         assert.deepStrictEqual(guard.checkToolUse("review", "Bash", { command: cmd }, gpr), { allow: true }, cmd);
       }
-      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "src/x.ts" }).allow, true);
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "src/x.ts" }, gpr, { workDir: "C:/wt", readDirs: ["C:/wt"] }).allow, true);
       assert.strictEqual(guard.checkToolUse("review", "Skill", { skill: "x" }).allow, true);
+    });
+
+    // A review run as the app writes its guard file: the PR's worktree, the
+    // payload folder, one mounted plugin, and Claude Code's folders for the session.
+    const SID = "6250ec40-5c65-407c-8b04-61b1dba8fae7";
+    const PLUGIN = "C:/Users/me/.claude/plugins/cache/x/creatio-development/1.7.142";
+    const readRun = {
+      workDir: "C:/wt",
+      outDir: "C:/T/prd-agent/r/out",
+      readDirs: ["C:/wt", "C:/T/prd-agent/r/out", PLUGIN],
+      sessionId: SID,
+      sessionRoots: ["C:/Users/me/.claude/projects", "C:/Users/me/AppData/Local/Temp/claude"],
+    };
+
+    test("agent guard: the read tools read the run's own folders — worktree, payload, plugins, the session's spill-over", () => {
+      for (const [tool, input] of [
+        ["Read", { file_path: "src/x.ts" }],
+        ["Read", { file_path: "./src/x.ts" }],
+        ["Read", { file_path: "C:\\wt\\src\\x.ts" }],
+        ["Read", { file_path: "/c/wt/src/x.ts" }],
+        ["Read", { file_path: "C:/WT/README.md" }],
+        ["Read", { file_path: `${PLUGIN}/skills/creatio-code-review/SKILL.md` }],
+        ["Read", { file_path: "C:/T/prd-agent/r/out/review.json" }],
+        // A tool result too long to show, and a background Workflow's output: Claude Code tells the session to read them there.
+        ["Read", { file_path: `C:\\Users\\me\\.claude\\projects\\C--wt\\${SID}\\tool-results\\b1.txt`, offset: 300, limit: 20 }],
+        ["Read", { file_path: `C:/Users/me/AppData/Local/Temp/claude/C--wt/${SID.toUpperCase()}/tasks/w1.output` }],
+        ["Grep", { pattern: "x" }],
+        ["Grep", { pattern: "x", path: "src" }],
+        ["Grep", { pattern: "x", path: "C:/wt" }],
+        ["Grep", { pattern: "x", path: `C:/Users/me/.claude/projects/C--wt/${SID}/tool-results/b1.txt` }],
+        ["Glob", { pattern: "**/*.ts" }],
+        ["Glob", { pattern: "{CLAUDE.md,AGENTS.md,.ai/**/*.md}" }],
+        ["Glob", { pattern: `${PLUGIN}/skills/creatio-code-review/*` }],
+        ["Glob", { pattern: "*", path: "C:/T/prd-agent/r/out" }],
+        ["LS", { path: "src" }],
+        ["NotebookRead", { notebook_path: "C:/wt/nb/a.ipynb" }],
+      ]) {
+        assert.deepStrictEqual(guard.checkToolUse("review", tool, input, gpr, readRun), { allow: true }, `${tool} ${JSON.stringify(input)}`);
+      }
+      // The same rules for every kind of run: a drive reads what a review reads.
+      assert.deepStrictEqual(guard.checkToolUse("drive", "Read", { file_path: "src/x.ts" }, gpr, readRun), { allow: true });
+    });
+
+    test("agent guard: a read outside the run's folders is refused — secrets, .. escapes, ~, another session", () => {
+      for (const [tool, input] of [
+        ["Read", { file_path: "C:/Users/me/.ssh/id_rsa" }],
+        ["Read", { file_path: "~/.ssh/id_rsa" }],
+        ["Read", { file_path: "~" }],
+        ["Read", { file_path: "/home/me/.ssh/id_rsa" }],
+        ["Read", { file_path: "C:/Users/me/.config/gh/hosts.yml" }],
+        ["Read", { file_path: "C:/Users/me/AppData/Roaming/PR Dashboard/settings.json" }],
+        ["Read", { file_path: "C:/Users/me/.claude/settings.json" }],
+        ["Read", { file_path: "../../Users/me/.ssh/id_rsa" }],
+        ["Read", { file_path: "src/../../Users/me/.ssh/id_rsa" }],
+        ["Read", { file_path: "C:/wt/../Users/me/.ssh/id_rsa" }],
+        ["Read", { file_path: "C:/wt-other/x.ts" }],
+        ["Read", { file_path: "C:x.ts" }],
+        ["Read", { file_path: "src/x.ts:hidden" }],
+        ["Read", { file_path: "\\\\server\\share\\x" }],
+        ["Read", { file_path: "//server/share/x" }],
+        ["Grep", { pattern: "x", path: "\\\\?\\C:\\wt\\src" }],
+        ["Glob", { pattern: "C:*" }],
+        ["Glob", { pattern: "//server/share/*" }],
+        // The wrapper and the run's own files sit next to the payload folder, not in it.
+        ["Read", { file_path: "C:/T/prd-agent/r/bin/pr-review-publish.sh" }],
+        ["Read", { file_path: `${PLUGIN}/../../other-plugin/x` }],
+        // Another session's spill-over, and this session's transcript itself.
+        ["Read", { file_path: "C:/Users/me/.claude/projects/C--wt/11111111-2222-3333-4444-555555555555/tool-results/b1.txt" }],
+        ["Read", { file_path: `C:/Users/me/.claude/projects/C--wt/${SID}.jsonl` }],
+        ["Read", { file_path: `C:/Users/me/.claude/projects/C--wt/${SID}/../../other/${SID}/x` }],
+        ["Read", { file_path: `C:/Users/me/.claude/${SID}/x` }],
+        ["Read", {}],
+        ["Grep", { pattern: "token", path: "C:/Users/me" }],
+        ["Grep", { pattern: "token", path: ".." }],
+        ["Glob", { pattern: "C:/Users/me/.ssh/*" }],
+        ["Glob", { pattern: "/home/me/.ssh/*" }],
+        ["Glob", { pattern: "../*" }],
+        ["Glob", { pattern: "src/../../*" }],
+        ["Glob", { pattern: "**/../../*" }],
+        ["Glob", { pattern: "{/etc/*,x}" }],
+        ["Glob", { pattern: "{x,C:/Users/me/.ssh/*}" }],
+        ["Glob", { pattern: "~/.ssh/*" }],
+        ["Glob", { pattern: "*", path: "C:/Users/me/.claude/workflows" }],
+        ["LS", { path: "C:/Users/me" }],
+        ["NotebookRead", { notebook_path: "C:/Users/me/x.ipynb" }],
+      ]) {
+        assert.strictEqual(guard.checkToolUse("review", tool, input, gpr, readRun).allow, false, `${tool} ${JSON.stringify(input)}`);
+      }
+      assert.match(guard.checkToolUse("review", "Read", { file_path: "C:/Users/me/.ssh/id_rsa" }, gpr, readRun).reason, /reads only its own folders \(C:\/wt, .*\); C:\/Users\/me\/\.ssh\/id_rsa is outside them/);
+      // No guard file, or one that names nothing: nothing is read.
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "src/x.ts" }).allow, false, "no guard file");
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "C:/wt/x.ts" }, gpr, { workDir: "C:/wt" }).allow, false, "no readDirs");
+      assert.strictEqual(guard.checkToolUse("review", "Grep", { pattern: "x" }, gpr, { readDirs: ["C:/wt"] }).allow, false, "no working folder to search");
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "C:/x/y" }, gpr, { workDir: "C:/wt", readDirs: ["", "x", "C:/wt"] }).allow, false, "an empty or relative folder grants nothing");
+      const { sessionId, ...noSession } = readRun;
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: `C:/Users/me/.claude/projects/C--wt/${sessionId}/tool-results/b1.txt` }, gpr, noSession).allow, false, "no session id, no spill-over");
+    });
+
+    test("agent guard: a link is judged by where it leads, when the check is handed the disk's answer", () => {
+      // What a link in the PR's branch would do: C:/wt/docs/k leads to ~/.ssh/id_rsa.
+      const links = { "C:/wt/docs/k": "C:/Users/me/.ssh/id_rsa", "C:/wt/docs/dir": "C:/Users/me/.config/gh" };
+      const real = (p) => {
+        const g = p.replace(/\\/g, "/");
+        for (const [from, to] of Object.entries(links)) if (g === from || g.startsWith(`${from}/`)) return to + g.slice(from.length);
+        return g === "C:/wt/docs/dangling" ? null : g;
+      };
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "docs/k" }, gpr, readRun, real).allow, false, "a link to a secret");
+      assert.match(guard.checkToolUse("review", "Read", { file_path: "C:/wt/docs/k" }, gpr, readRun, real).reason, /it really is C:\/Users\/me\/\.ssh\/id_rsa/);
+      assert.strictEqual(guard.checkToolUse("review", "Grep", { pattern: "oauth", path: "docs/dir" }, gpr, readRun, real).allow, false, "a link to a folder");
+      assert.strictEqual(guard.checkToolUse("review", "Glob", { pattern: "*", path: "docs/dir" }, gpr, readRun, real).allow, false);
+      assert.match(guard.checkToolUse("review", "Read", { file_path: "docs/dangling" }, gpr, readRun, real).reason, /link to nowhere/);
+      assert.deepStrictEqual(guard.checkToolUse("review", "Read", { file_path: "docs/plain.md" }, gpr, readRun, real), { allow: true });
+    });
+
+    test("agent guard: a tool the guard doesn't name is refused — every tool the default lists grant is named", () => {
+      for (const tool of ["Skill", "Agent", "ToolSearch", "TaskCreate", "TaskUpdate", "StructuredOutput"]) {
+        assert.deepStrictEqual(guard.checkToolUse("review", tool, {}, gpr, readRun), { allow: true }, tool);
+      }
+      for (const tool of ["SendMessage", "ListAgents", "mcp__github__create_issue", "Monitor", "SomeToolAddedLater", ""]) {
+        assert.match(guard.checkToolUse("review", tool, {}, gpr, readRun).reason, /not one of the tools agent runs may use/, tool || "(no name)");
+      }
+      for (const kind of Object.keys(ad.DEFAULT_AGENT_TOOLS)) {
+        for (const name of runner.builtInTools(ad.DEFAULT_AGENT_TOOLS[kind])) {
+          const d = guard.checkToolUse(kind, name, {}, gpr, readRun);
+          assert.ok(d.allow || !/not one of the tools/.test(d.reason), `${kind}: ${name} is granted by default but unknown to the guard`);
+        }
+      }
     });
 
     test("agent guard: every escape found in review is refused, whatever the allow-list says", () => {
@@ -10703,7 +10830,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       for (const d of [path.join(workDir, "src"), path.join(workDir, ".git"), outDir, outside]) nfsA.mkdirSync(d, { recursive: true });
       const wrapperPath = path.join(runDir, "bin", "pr-review-publish.sh");
       const guardFile = path.join(runDir, "guard.json");
-      const written = { wrapperPath, outDir, subs: ["reply"], workDir, workflowDirs: [] };
+      const written = {
+        wrapperPath,
+        outDir,
+        subs: ["reply"],
+        workDir,
+        workflowDirs: [],
+        readDirs: [workDir, outDir],
+        sessionId: "6250ec40-5c65-407c-8b04-61b1dba8fae7",
+        sessionRoots: [path.join(runDir, "projects")],
+      };
       runner.writeGuardFile(guardFile, written);
       assert.deepStrictEqual(hookMod.readGuardFile(guardFile), written, "everything the app wrote comes back");
       const call = (tool_name, tool_input) =>
@@ -10730,12 +10866,106 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(call("Write", { file_path: path.join(workDir, "src", "dangling", "z.txt") }), 2, "a link to nowhere");
 
       // A guard file that names its subcommands wrongly gives nothing beyond reading: absent would mean all of them.
-      for (const bad of [{ subs: "reply" }, { subs: ["reply", "merge"] }, { subs: [1] }, { workDir: "" }, { workDir: 7 }]) {
+      for (const bad of [
+        { subs: "reply" },
+        { subs: ["reply", "merge"] },
+        { subs: [1] },
+        { workDir: "" },
+        { workDir: 7 },
+        { workDir: "relative/wt" },
+        { readDirs: workDir },
+        { sessionId: "../../x" },
+        { sessionId: "" },
+        { sessionId: 7 },
+        { sessionRoots: path.join(runDir, "projects") },
+      ]) {
         runner.writeGuardFile(guardFile, { ...written, ...bad });
         assert.strictEqual(hookMod.readGuardFile(guardFile), null, JSON.stringify(bad));
       }
       runner.writeGuardFile(guardFile, { ...written, subs: [] });
       assert.deepStrictEqual(hookMod.readGuardFile(guardFile).subs, [], "an empty list stays empty — no subcommand");
+      runner.writeGuardFile(guardFile, { ...written, readDirs: ["", "relative", 7, workDir], sessionRoots: ["."] });
+      const kept = hookMod.readGuardFile(guardFile);
+      assert.deepStrictEqual([kept.readDirs, kept.sessionRoots], [[workDir], []], "a folder list keeps absolute folders only — '' or '.' would be the hook's own folder");
+    });
+
+    test("agent guard hook: reads follow links on disk — the run's folders and its session's spill-over, nothing else", () => {
+      const base = nfsA.realpathSync.native(nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-hookr-")));
+      const workDir = path.join(base, "wt");
+      const outDir = path.join(base, "run", "out");
+      const plugin = path.join(base, "plugins", "creatio-development");
+      const home = path.join(base, "home");
+      const sid = "6250ec40-5c65-407c-8b04-61b1dba8fae7";
+      const spill = path.join(home, ".claude", "projects", "proj", sid, "tool-results");
+      const tasks = path.join(base, "temp", "claude", "proj", sid, "tasks");
+      const other = path.join(home, ".claude", "projects", "proj", "11111111-2222-3333-4444-555555555555", "tool-results");
+      for (const d of [path.join(workDir, "src"), outDir, path.join(plugin, "skills", "s"), path.join(home, ".ssh"), spill, tasks, other]) nfsA.mkdirSync(d, { recursive: true });
+      const files = {
+        code: path.join(workDir, "src", "x.ts"),
+        payload: path.join(outDir, "review.json"),
+        skill: path.join(plugin, "skills", "s", "SKILL.md"),
+        key: path.join(home, ".ssh", "id_rsa"),
+        spilled: path.join(spill, "b1.txt"),
+        task: path.join(tasks, "w1.output"),
+        otherSession: path.join(other, "b1.txt"),
+      };
+      for (const f of Object.values(files)) nfsA.writeFileSync(f, "x");
+      const guardFile = path.join(base, "run", "guard.json");
+      runner.writeGuardFile(guardFile, {
+        workDir,
+        outDir,
+        wrapperPath: path.join(base, "run", "bin", "pr-review-publish.sh"),
+        readDirs: [workDir, outDir, plugin],
+        sessionId: sid,
+        sessionRoots: [path.join(home, ".claude", "projects"), path.join(base, "temp", "claude")],
+        workflowDirs: [plugin],
+      });
+      const call = (tool_name, tool_input, kind = "review") =>
+        spawnSync(process.execPath, [hookJs, kind, "https://github.com/a/b/pull/7", guardFile], { input: JSON.stringify({ tool_name, tool_input }), encoding: "utf8" });
+      for (const f of [files.code, files.payload, files.skill, files.spilled, files.task]) assert.strictEqual(call("Read", { file_path: f }).status, 0, f);
+      assert.strictEqual(call("Read", { file_path: "src/x.ts" }).status, 0, "relative to the worktree");
+      assert.strictEqual(call("Grep", { pattern: "x" }).status, 0, "no path: the worktree");
+      assert.strictEqual(call("Glob", { pattern: `${plugin.replace(/\\/g, "/")}/skills/*` }).status, 0, "an absolute pattern inside a plugin");
+      assert.strictEqual(call("Read", { file_path: files.code }, "drive").status, 0, "a drive reads its worktree too");
+
+      const refused = (tool_name, tool_input, why) => {
+        const r = call(tool_name, tool_input);
+        assert.strictEqual(r.status, 2, `${why}: ${r.stderr}`);
+        assert.match(r.stderr, /^PR agent guard: /, why);
+      };
+      refused("Read", { file_path: files.key }, "a key outside every folder");
+      refused("Read", { file_path: `${workDir}/../home/.ssh/id_rsa` }, "a .. escape");
+      refused("Read", { file_path: "../home/.ssh/id_rsa" }, "a relative .. escape");
+      refused("Read", { file_path: files.otherSession }, "another session's spill-over");
+      refused("Read", { file_path: guardFile }, "the run's own guard file");
+      refused("Glob", { pattern: `${path.join(home, ".ssh").replace(/\\/g, "/")}/*` }, "an absolute pattern outside");
+      refused("SendMessage", { to: "x", message: "y" }, "a tool the guard doesn't name");
+
+      // Links the PR's branch could carry: followed to where they lead, and refused.
+      nfsA.symlinkSync(path.join(home, ".ssh"), path.join(workDir, "src", "docs"), "junction");
+      refused("Read", { file_path: path.join(workDir, "src", "docs", "id_rsa") }, "out of the worktree through a link");
+      refused("Grep", { pattern: "PRIVATE KEY", path: path.join(workDir, "src", "docs") }, "a search through a link");
+      refused("Glob", { pattern: "*", path: "src/docs" }, "a listing through a link");
+      nfsA.symlinkSync(path.join(home, ".ssh"), path.join(spill, "k"), "junction");
+      refused("Read", { file_path: path.join(spill, "k", "id_rsa") }, "out of the session's folder through a link");
+      nfsA.symlinkSync(path.join(base, "missing"), path.join(workDir, "src", "dangling"), "junction");
+      refused("Read", { file_path: path.join(workDir, "src", "dangling", "x") }, "a link to nowhere");
+      // A link that stays inside the worktree reads as usual.
+      nfsA.symlinkSync(path.join(workDir, "src"), path.join(workDir, "alias"), "junction");
+      assert.strictEqual(call("Read", { file_path: path.join(workDir, "alias", "x.ts") }).status, 0);
+      if (process.platform === "win32") {
+        // Claude Code reads Git Bash's /c/… as C:\… — and so does the check.
+        const bash = `/${base[0].toLowerCase()}/${base.slice(3).replace(/\\/g, "/")}`;
+        assert.strictEqual(call("Read", { file_path: `${bash}/wt/src/x.ts` }).status, 0, "Git Bash spelling");
+        assert.strictEqual(call("Read", { file_path: `${bash}/home/.ssh/id_rsa` }).status, 2);
+      }
+    });
+
+    test("agent runner: Claude Code's session folders — projects in its config folder, its temp folder", () => {
+      const home = os.homedir();
+      assert.deepStrictEqual(runner.claudeSessionRoots({ TEMP: "C:\\T" }, "win32"), [path.join(home, ".claude", "projects"), path.join("C:\\T", "claude")]);
+      assert.deepStrictEqual(runner.claudeSessionRoots({ CLAUDE_CONFIG_DIR: "/cfg", CLAUDE_CODE_TMPDIR: "/ct" }, "darwin"), [path.join("/cfg", "projects"), path.join("/ct", "claude")]);
+      assert.ok(runner.claudeSessionRoots({}, "darwin").includes(path.join("/tmp", "claude")), "off Windows /tmp too");
     });
 
     await atest("agent worktrees: setting a run's worktree up runs no hook — not even one the PR brings through a relative hooksPath", async () => {
@@ -11380,6 +11610,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         const sf = args[args.indexOf("--settings") + 1];
         const g = JSON.parse(nfsA.readFileSync(path.join(path.dirname(sf), "guard.json"), "utf8"));
         assert.ok(g.wrapperPath && g.outDir && Array.isArray(g.workflowDirs), "the guard knows the run's wrapper and payload folder");
+        assert.strictEqual(g.workDir, item.worktree, "a review's guard knows its worktree too");
+        assert.deepStrictEqual(g.readDirs.slice(0, 2), [item.worktree, g.outDir], "it reads its worktree and payload folder");
+        assert.strictEqual(g.sessionId, args[args.indexOf("--session-id") + 1], "and its own session's spill-over");
+        assert.ok(g.sessionRoots.length >= 2);
         assert.match(nfsA.readFileSync(sf, "utf8"), /guard\.json/, "and the hook is handed that file");
         head = "bbb222";
         assert.match((await f.agent.act({ type: "publish", runId: item.runId })).error, /new commits/);

@@ -3,7 +3,8 @@
 // the tool call as JSON on stdin (Claude Code's hook protocol). Exit 2 blocks
 // the call and tells the model why on stderr; exit 0 lets the permission rules
 // decide as usual. The decision itself is `checkToolUse` — pure, and tested on
-// its own — plus `checkRealWrite`, which follows links on disk.
+// its own, with reads followed through links on disk (`realRead`) — plus
+// `checkRealWrite`, which follows a drive's writes the same way.
 //
 // Started by the app with ELECTRON_RUN_AS_NODE=1 (so the app's own binary runs
 // it as plain Node) and kept free of Electron imports for the same reason.
@@ -26,17 +27,21 @@ import type { AgentRunKind } from "../../shared/types";
 
 /**
  * The run's guard file (written by the app next to its settings, where the
- * session can't write): a review's publish wrapper and payload folder, the
- * wrapper subcommands a drive may use, a drive's worktree, the plugin folders
- * a Workflow may run from. Missing or broken → nothing beyond reading is
- * allowed — and so is a `subs` that is there but not a list of known
- * subcommands, since a missing one means every subcommand.
+ * session can't write): the folders it reads, a review's publish wrapper and
+ * payload folder, the wrapper subcommands a drive may use, the run's working
+ * folder, the plugin folders a Workflow may run from, the session's own
+ * folders. Missing or broken → no file is read or written — and so is a `subs`
+ * that is there but not a list of known subcommands, since a missing one means
+ * every subcommand. A folder list keeps absolute paths only: an empty or
+ * relative one would be read against the hook's own working folder.
  */
 export function readGuardFile(file: string | undefined): GuardRun | null {
   if (!file) return null;
   try {
     const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
     const run: GuardRun = {};
+    const folders = (v: unknown): string[] | null =>
+      Array.isArray(v) ? v.filter((d): d is string => typeof d === "string" && d.length > 0 && path.isAbsolute(d)) : null;
     if (typeof raw.wrapperPath === "string" && typeof raw.outDir === "string") {
       run.wrapperPath = raw.wrapperPath;
       run.outDir = raw.outDir;
@@ -47,10 +52,25 @@ export function readGuardFile(file: string | undefined): GuardRun | null {
       run.subs = [...raw.subs];
     }
     if ("workDir" in raw) {
-      if (typeof raw.workDir !== "string" || !raw.workDir) return null;
+      if (typeof raw.workDir !== "string" || !raw.workDir || !path.isAbsolute(raw.workDir)) return null;
       run.workDir = raw.workDir;
     }
     if (Array.isArray(raw.workflowDirs)) run.workflowDirs = raw.workflowDirs.filter((d): d is string => typeof d === "string" && d.length > 0);
+    if ("readDirs" in raw) {
+      const dirs = folders(raw.readDirs);
+      if (!dirs) return null;
+      run.readDirs = dirs;
+    }
+    // A session id names one folder per root; anything but an id's characters could name another.
+    if ("sessionId" in raw) {
+      if (typeof raw.sessionId !== "string" || !/^[A-Za-z0-9-]{8,}$/.test(raw.sessionId)) return null;
+      run.sessionId = raw.sessionId;
+    }
+    if ("sessionRoots" in raw) {
+      const roots = folders(raw.sessionRoots);
+      if (!roots) return null;
+      run.sessionRoots = roots;
+    }
     return run;
   } catch {
     return null;
@@ -85,6 +105,18 @@ export function realTarget(file: string): string | null {
     rest.unshift(path.basename(cur));
     cur = parent;
   }
+}
+
+/**
+ * Where a read really lands, for `checkToolUse`'s read check: links and
+ * junctions followed (`realTarget`), so a link the PR's branch carries is
+ * judged by where it leads, and Windows' short names (`VB641~1.KUV`) read the
+ * same as long ones. Git Bash's `/c/…` is `C:\…` on Windows — Claude Code
+ * reads it so.
+ */
+export function realRead(p: string): string | null {
+  const drive = process.platform === "win32" ? /^\/([A-Za-z])(\/|$)/.exec(p) : null;
+  return realTarget(drive ? `${drive[1].toUpperCase()}:\\${p.slice(3)}` : p);
 }
 
 /**
@@ -141,7 +173,7 @@ function main(): void {
     let decision: GuardDecision;
     try {
       const tool = typeof call.tool_name === "string" ? call.tool_name : "";
-      decision = checkToolUse(kind, tool, call.tool_input, pr, run);
+      decision = checkToolUse(kind, tool, call.tool_input, pr, run, realRead);
       if (decision.allow) decision = checkRealWrite(kind, tool, call.tool_input, run);
     } catch (e) {
       decision = { allow: false, reason: `the check failed (${(e as Error).message}) — refusing.` };

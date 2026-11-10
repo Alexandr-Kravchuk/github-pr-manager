@@ -46,7 +46,7 @@ import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
-import { cutShort, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
+import { claudeSessionRoots, cutShort, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
 import { approveAgainRequest, checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
 import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
@@ -1274,16 +1274,21 @@ export function createAgent(deps: AgentDeps): Agent {
     const settingsFile = path.join(runDir, "settings.json");
     const guardFile = path.join(runDir, "guard.json");
     const hooksDir = freshHooksDir(runDir);
-    // A skill's Workflow may run its script from the plugins this run mounted — never one from the PR.
+    const sessionId = resume ?? randomUUID();
     writeGuardFile(guardFile, {
       ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),
       ...(subs ? { subs: [...subs] } : {}),
-      // A drive changes files in its worktree only.
-      ...(kind === "drive" ? { workDir: dir } : {}),
+      // Relative paths mean the run's folder; a drive changes files there only.
+      workDir: dir,
+      // The read tools read the run's own folders and nothing else — not your
+      // home folder, gh's or ssh's keys, this app's settings.
+      readDirs: [dir, ...(folder ? [folder.outDir] : []), ...pluginDirs],
+      sessionId,
+      sessionRoots: claudeSessionRoots(launcherEnv(process.env)),
+      // A skill's Workflow may run its script from the plugins this run mounted — never one from the PR.
       workflowDirs: pluginDirs,
     });
     writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url, guardFile));
-    const sessionId = resume ?? randomUUID();
     item.sessionId = sessionId;
     logRun(item, resume ? (answer ? "answered" : "resumed") : "started", {
       ...(answer ? { detail: clip(answer) } : {}),

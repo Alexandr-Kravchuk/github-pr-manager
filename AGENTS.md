@@ -538,14 +538,41 @@ Three layers:
   `core.hooksPath` at the run's own empty `no-hooks` folder, no fsmonitor, as
   `GIT_CONFIG_*` entries that win over every config file), so neither a drive's
   `git commit` nor Claude Code's own `git status` runs one. The guard hook
-  (`main/agent/hook.ts`) reads back every field of the guard file — a `subs`
-  or `workDir` that is there but malformed gives nothing beyond reading, since
-  a missing `subs` means every wrapper subcommand — and follows a drive's
-  write through links (`checkRealWrite`): `checkDriveWrite` alone is lexical,
-  and a link committed in the branch would lead it out of the worktree. A merge
+  (`main/agent/hook.ts`) reads back every field of the guard file — a `subs`,
+  `workDir`, `readDirs`, `sessionId` or `sessionRoots` that is there but
+  malformed gives no file access at all, since a missing `subs` means every
+  wrapper subcommand, and a folder list keeps absolute paths only — and
+  follows a drive's write through links (`checkRealWrite`): `checkDriveWrite`
+  alone is lexical, and a link committed in the branch would lead it out of
+  the worktree. A merge
   keeps the branch while open PRs build on it (`builtOn` in
   `main/agent/merge.ts`): gh's own delete can win the race with GitHub's
   retargeting and close them.
+- **An agent session reads its own folders only, and uses only the tools the
+  guard names.** A PR's diff, description or comments can tell a review to
+  read `~/.config/gh/hosts.yml`, `~/.ssh/*` or `userData` and quote it in a
+  comment, which On posts unseen. So `checkToolUse` (`shared/agent-guard.ts`)
+  holds `Read`, `Grep`, `Glob`, `LS` and `NotebookRead` to the guard file's
+  `readDirs` — the run's working folder (`workDir`, now written for every
+  kind of run: relative paths and a Grep/Glob with no path mean it), its
+  payload folder and the plugin folders it mounted (`prd-user-skills`
+  included; a skill reads its own files and Workflow script there) — plus
+  Claude Code's own folder for the session, `<root>/<project>/<sessionId>/`
+  under `sessionRoots` (`claudeSessionRoots` in `main/agent/runner.ts`:
+  `projects` in its config folder, `claude` in its temp folder), where it
+  spills a tool result too long to show and a background Workflow's output
+  and tells the session to read them; another session's folder there is
+  refused. `~`, `..`, a colon past the drive letter and an absolute Glob
+  pattern or brace alternative outside those folders are refused. The hook
+  passes `realRead` (links and junctions followed, Git Bash `/c/…` read as
+  `C:\…`, 8.3 short names resolved), so a link the PR's branch carries is
+  judged by where it leads — `--restricted` already keeps Read to the working
+  folders, but that is Claude Code's rule and it judges a link by its name.
+  Any tool the guard doesn't name is refused (`SESSION_TOOLS` lists the
+  harmless ones: `Skill`, `Agent`, `ToolSearch`, `TaskCreate`, `TaskUpdate`,
+  and `StructuredOutput`, which a Workflow's agents answer through); a test
+  pins that every tool the default `--allowedTools` lists grant is one the
+  guard knows, so extend the guard before adding a tool to the defaults.
 - **No always-running animation in the renderer.** An `infinite` CSS animation —
   including Tailwind's `animate-pulse` / `-spin` / `-bounce` / `-ping` — keeps the
   compositor producing frames for as long as the app is open, and Electron

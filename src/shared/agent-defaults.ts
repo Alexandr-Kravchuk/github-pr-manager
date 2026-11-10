@@ -20,9 +20,11 @@ export const DEFAULT_AGENT_PROMPTS: Record<AgentPromptKey, string> = {
 
 /**
  * `--allowedTools` rules per kind of run — a starting point the Agent tab lets
- * you edit. These are only the first gate: every Bash call also goes through
+ * you edit. These are only the first gate: every tool call also goes through
  * the agent's PreToolUse guard (`agent-guard.ts`), which the list here cannot
- * loosen. Reviews and briefs read only and run no code from the PR's
+ * loosen — it judges each Bash command, holds Read/Grep/Glob to the run's own
+ * folders, and refuses any tool it doesn't name, so a tool added here that the
+ * guard doesn't know stays refused. Reviews and briefs read only and run no code from the PR's
  * repository: no `git` at all (its `--output`, `--ext-diff` and `--textconv`
  * write files or run programs), and `gh api` is held to plain GET by the guard.
  * Pushing is never granted here; drive pushes through the guard alone.

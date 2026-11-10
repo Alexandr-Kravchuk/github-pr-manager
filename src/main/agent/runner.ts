@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { applyStreamEvent, initialProgress, parseStreamLine, type RunProgress } from "../../shared/agent-stream";
@@ -154,8 +155,25 @@ export function hookCommand(execPath: string, hookScript: string, kind: AgentRun
 }
 
 /**
+ * Where Claude Code files what a session spills over, by project and session
+ * id (`<root>/<project>/<sessionId>/…`), for the guard's `sessionRoots`:
+ * `projects` in its config folder holds a tool result too long to show, its
+ * temp folder's `claude` a background task's output — a Workflow's, say. The
+ * temp folder is `CLAUDE_CODE_TMPDIR` when the session's environment has one
+ * (`launcherEnv` drops it), else the system's; off Windows `/tmp` too, since
+ * Claude Code may not take `$TMPDIR` there. A root that doesn't exist only
+ * means nothing is read from it.
+ */
+export function claudeSessionRoots(env: Record<string, string | undefined>, platform: string = process.platform): string[] {
+  const config = env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), ".claude");
+  const tmp = env.CLAUDE_CODE_TMPDIR?.trim();
+  const temps = tmp ? [tmp] : platform === "win32" ? [env.TEMP?.trim() || env.TMP?.trim() || os.tmpdir()] : [os.tmpdir(), "/tmp"];
+  return [...new Set([path.join(config, "projects"), ...temps.map((t) => path.join(t, "claude"))])];
+}
+
+/**
  * The run's guard file, next to its settings file (outside every folder the
- * session may write): what the guard allows beyond reading — see `GuardRun`.
+ * session may write): what the guard lets it reach — see `GuardRun`.
  */
 export function writeGuardFile(file: string, run: GuardRun): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });

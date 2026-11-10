@@ -37,10 +37,10 @@ export function guardPrFromUrl(url: string): GuardPr | null {
 }
 
 /**
- * What one run may do beyond reading, from the guard file the app writes for
- * it (passed to the hook): a review's own publish wrapper (which records,
- * never posts — `agent-publish.ts`) and payload folder, and the plugin folders
- * a skill's Workflow script may come from.
+ * What one run may reach, from the guard file the app writes for it (passed to
+ * the hook): the folders it reads, a review's own publish wrapper (which
+ * records, never posts — `agent-publish.ts`) and payload folder, and the
+ * plugin folders a skill's Workflow script may come from.
  */
 export interface GuardRun {
   wrapperPath?: string;
@@ -49,8 +49,26 @@ export interface GuardRun {
   workflowDirs?: string[];
   /** The wrapper subcommands this run may use (a drive run only replies); absent = all. */
   subs?: PublishSub[];
-  /** A drive run's worktree: the only place its file tools may change. */
+  /**
+   * The run's working folder — the PR's worktree, or the after-merge run's
+   * empty folder: a relative path, and a Grep or Glob with no path, mean it.
+   * A drive changes files here only.
+   */
   workDir?: string;
+  /**
+   * What the file-reading tools may read: the working folder, the payload
+   * folder, the plugin folders the run mounted (a skill reads its own files and
+   * its Workflow script there). Absent = nothing.
+   */
+  readDirs?: string[];
+  /**
+   * The session's id. Claude Code files what a session spills over — a tool
+   * result too long to show, a background task's output — under
+   * `<root>/<project>/<sessionId>/`, and tells the session to read it there.
+   */
+  sessionId?: string;
+  /** Those roots: `projects` in Claude Code's config folder, its temp folder. */
+  sessionRoots?: string[];
 }
 
 /**
@@ -119,6 +137,137 @@ export function isWriteTool(toolName: string): boolean {
 
 /** Tools no agent run gets, whatever the list says: network, other shells. */
 const NEVER = new Set(["WebFetch", "WebSearch", "PowerShell", "REPL"]);
+
+/** Tools that read files: held to the run's own folders (`checkRead`). */
+const READ_TOOLS: ReadonlySet<string> = new Set(["Read", "Grep", "Glob", "LS", "NotebookRead"]);
+
+/**
+ * Tools that reach nothing outside the session: a skill's instructions, a
+ * deferred tool's schema, the session's task list, a sub-agent (whose own
+ * calls come through this guard too), a Workflow agent's structured answer.
+ * Any tool this file doesn't name is refused — one Claude Code adds later is
+ * judged here before an agent run gets it, whatever the list in Settings says.
+ */
+const SESSION_TOOLS: ReadonlySet<string> = new Set(["Skill", "Agent", "ToolSearch", "TaskCreate", "TaskUpdate", "StructuredOutput"]);
+
+/**
+ * Where a path really leads, or null when that can't be told. The guard's own
+ * check reads paths as written; the hook passes one that follows links on
+ * disk, so a link in the PR's branch (`docs/k -> ~/.ssh/id_rsa`) is judged by
+ * where it leads.
+ */
+export type RealPath = (p: string) => string | null;
+
+const asWritten: RealPath = (p) => p;
+
+function isAbsolutePath(p: string): boolean {
+  return /^([A-Za-z]:[\\/]|[\\/])/.test(p);
+}
+
+/**
+ * A path a file tool was given, as an absolute path with `.` segments
+ * dropped, or why it can't be judged: `~` (Claude Code expands it to your home
+ * folder), a network or device path (`\\host\share` — even looking one up
+ * makes Windows sign in to that host), a colon anywhere but after a drive
+ * letter (`C:x` is relative to a drive's own current folder), a relative path
+ * with no working folder.
+ */
+function readPath(p: string, workDir: string | undefined): { path: string } | { error: string } {
+  const t = p.trim();
+  if (t.startsWith("~")) return { error: "Agent runs don't read paths under ~ — name the file inside the run's folders." };
+  if (/^[\\/]{2}/.test(t)) return { error: "Agent runs don't read network or device paths." };
+  if (t.replace(/^[A-Za-z]:(?=[\\/])/, "").includes(":")) return { error: `${t}: a colon belongs only after a drive letter.` };
+  const abs = isAbsolutePath(t) ? t : workDir ? `${workDir.replace(/[\\/]+$/, "")}/${t}` : null;
+  if (!abs) return { error: "This run has no working folder to read relative paths in." };
+  return { path: abs.split(/[\\/]+/).filter((seg, i) => i === 0 || seg !== ".").join("/") || "/" };
+}
+
+/** A glob segment that matches more than itself. */
+const GLOB_SEGMENT = /[*?[\]{}]/;
+
+/**
+ * Where a Glob pattern starts reading. A relative one stays under its folder —
+ * once no segment steps out — but an absolute one names its own folder
+ * (`C:/Users/me/.ssh/*`), and so may a brace alternative (`{/etc/*,x}`).
+ */
+function globStart(pattern: string): { path: string | null } | { error: string } {
+  const p = pattern.trim();
+  const pieces = p.split(/[{},]/).map((x) => x.trim());
+  if (pieces.some((x) => x.startsWith("~"))) return { error: "Agent runs don't glob under ~." };
+  if (/^[\\/]{2}/.test(p) || p.replace(/^[A-Za-z]:(?=[\\/])/, "").includes(":")) return { error: "A Glob pattern takes no network path, and a colon only after a drive letter." };
+  if (pieces.some((x) => x.split(/[\\/]/).includes(".."))) return { error: "A Glob pattern can't step out of its folder with '..'." };
+  if (pieces.slice(1).some(isAbsolutePath)) return { error: "A Glob pattern's alternatives can't be absolute paths." };
+  if (!isAbsolutePath(p)) return { path: null };
+  const segs = p.split(/[\\/]/);
+  const firstGlob = segs.findIndex((s) => GLOB_SEGMENT.test(s));
+  const fixed = firstGlob < 0 ? segs : segs.slice(0, firstGlob);
+  return { path: fixed.join("/") || "/" };
+}
+
+/** What a read tool's call reads: its file, or the folder it searches. */
+function readTargets(toolName: string, input: unknown, workDir: string | undefined): { paths: string[] } | { error: string } {
+  const i = (input ?? {}) as Record<string, unknown>;
+  const given = (v: unknown) => (typeof v === "string" && v.trim() ? v : undefined);
+  const named = toolName === "Read" ? given(i.file_path) : toolName === "NotebookRead" ? given(i.notebook_path) : given(i.path);
+  // Read and NotebookRead name a file; Grep, Glob and LS search the working folder unless told otherwise.
+  if (!named && (toolName === "Read" || toolName === "NotebookRead")) return { error: `${toolName} needs a file path.` };
+  const where = readPath(named ?? ".", workDir);
+  if ("error" in where) return where;
+  const paths = [where.path];
+  if (toolName === "Glob") {
+    const start = globStart(typeof i.pattern === "string" ? i.pattern : "");
+    if ("error" in start) return start;
+    if (start.path) paths.push(start.path);
+  }
+  return { paths };
+}
+
+/** Whether `file` is `dir` or inside it, with no `..` segment that could step out. */
+function withinDir(file: string, dir: string): boolean {
+  return !file.split(/[\\/]/).includes("..") && (samePath(file, dir) || isInsideDir(file, dir));
+}
+
+/** Whether `file` is in Claude Code's own folder for this run's session: `<root>/<project>/<sessionId>/…`. */
+function inSessionFolder(file: string, run: GuardRun, real: RealPath): boolean {
+  const id = run.sessionId?.toLowerCase();
+  if (!id) return false;
+  return (run.sessionRoots ?? []).filter(isAbsolutePath).some((root) => {
+    const r = real(root);
+    if (!r || !isInsideDir(file, r) || file.split(/[\\/]/).includes("..")) return false;
+    const rest = gitBashPath(file).slice(gitBashPath(r).replace(/\/+$/, "").length + 1).split("/");
+    return rest.length >= 2 && rest[1].toLowerCase() === id;
+  });
+}
+
+/**
+ * The read tools read the run's own folders and nothing else: its working
+ * folder, payload folder and mounted plugins (`readDirs`), and Claude Code's
+ * folder for its session. A PR's text can tell a session to read
+ * `~/.config/gh/hosts.yml` and quote it in a review comment, which On posts
+ * unseen — `--restricted` keeps Read to the working folders today, but that is
+ * Claude Code's rule, not this app's, and it judges a link by its name.
+ */
+export function checkRead(toolName: string, input: unknown, run: GuardRun | null, real: RealPath = asWritten): GuardDecision {
+  const targets = readTargets(toolName, input, run?.workDir);
+  if ("error" in targets) return deny(targets.error);
+  // Absolute folders only: an empty or relative one would be read against wherever the check runs.
+  const dirs = (run?.readDirs ?? [])
+    .filter(isAbsolutePath)
+    .map((d) => real(d))
+    .filter((d): d is string => Boolean(d));
+  for (const target of targets.paths) {
+    const r = real(target);
+    if (!r) return deny(`${target} is a link to nowhere; agent runs don't read through it.`);
+    if (dirs.some((d) => withinDir(r, d)) || (run && inSessionFolder(r, run, real))) continue;
+    const really = samePath(r, target) ? "" : ` (it really is ${r})`;
+    return deny(
+      dirs.length
+        ? `This run reads only its own folders (${dirs.join(", ")}); ${target}${really} is outside them.`
+        : "This run has no folders to read.",
+    );
+  }
+  return { allow: true };
+}
 
 function deny(reason: string): GuardDecision {
   return { allow: false, reason };
@@ -813,11 +962,20 @@ export function toolFilePath(input: unknown): string {
 /**
  * The decision for one tool call; `input` is the tool's input as Claude Code
  * reports it, `pr` the PR the run works on (its gh reads are held to it), `run`
- * what a review run may write (its wrapper and payload folder), if anything.
+ * what the run may reach (its folders, its wrapper and payload folder), if
+ * anything, and `real` how a read's path is followed to where it leads.
  */
-export function checkToolUse(kind: AgentRunKind, toolName: string, input: unknown, pr: GuardPr | null = null, run: GuardRun | null = null): GuardDecision {
+export function checkToolUse(
+  kind: AgentRunKind,
+  toolName: string,
+  input: unknown,
+  pr: GuardPr | null = null,
+  run: GuardRun | null = null,
+  real: RealPath = asWritten,
+): GuardDecision {
   if (NEVER.has(toolName)) return deny(`${toolName} is not available to agent runs.`);
   if (toolName === "Workflow") return checkWorkflow(input, run);
+  if (READ_TOOLS.has(toolName)) return checkRead(toolName, input, run, real);
   if (READ_ONLY.has(kind) && WRITE_TOOLS.has(toolName)) {
     // A review writes the payload files its publish step hands the wrapper —
     // new files in its own folder, nothing in the PR's checkout.
@@ -837,7 +995,8 @@ export function checkToolUse(kind: AgentRunKind, toolName: string, input: unknow
     if (!command.trim()) return deny("An empty command.");
     return checkBash(kind, command, pr, run);
   }
-  return { allow: true };
+  if (SESSION_TOOLS.has(toolName)) return { allow: true };
+  return deny(`${toolName || "That tool"} is not one of the tools agent runs may use.`);
 }
 
 const RUN_KINDS: readonly AgentRunKind[] = ["review", "brief", "rereview", "drive", "afterMerge"];
