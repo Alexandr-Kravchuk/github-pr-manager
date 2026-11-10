@@ -115,7 +115,8 @@ export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
     "The prompts: {prompts}. " +
     "When every session has reported, give me one summary: for each PR the link to its review, its decision and its Blocker and Major findings, " +
     "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently. " +
-    "Read each report whole with list_events (limit 4), since the note on a session's turn keeps only its first 400 characters. " +
+    "Read each report whole with list_events, paging back to the session's last message, since the note on a session's turn " +
+    "keeps only its first 400 characters. " +
     "A later decision on one PR — a review its session could not publish, an APPROVE — is mine to give in that PR's session: " +
     "link me to the session and leave my answer for me to type there, so each session hears it once and from me.",
 };
