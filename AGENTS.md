@@ -341,14 +341,20 @@ Three layers:
   re-approve's. The merge itself is not adapted yet: GitHub's
   synchronous merge API, which `gh pr merge` uses, does not support stacked
   PRs — the asynchronous `merge-async` endpoint does).
-  Keep any such
+  The header sky has its own: `weather.ts` (WMO weather code → one of
+  seven skies, and parsing Open-Meteo's geocoding and forecast answers;
+  `main/weather.ts` fetches them for the city in Settings — the only thing
+  that leaves the machine, so an empty city sends nothing and the header
+  keeps its snow — and caches the answer 30 min, a failure 5, keeping the
+  last good sky through a failed refresh; the `weather:get` channel takes no
+  argument, so the renderer cannot point the request elsewhere). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `jira-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
   `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`,
-  `agent-reapprove.js`, `agent-stack.js` and `agent-explain.js` stay free of `node:` builtin references, so the
+  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js` and `weather.js` stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
@@ -616,10 +622,14 @@ Three layers:
   fires — see `Buddy.tsx` (mood changes), `.live-beat` in `styles.css` (one
   blink per snapshot) and `.claude-glow` (three breaths of a PR card's glow
   when a Claude session on it starts working or waiting; only its own layer's
-  `opacity` animates, so nothing repaints per frame). The header snowfall is the one
-  animation that runs for as long as something holds it: it plays only while
-  the pointer is over the header and is `animation-play-state: paused`
-  otherwise (a test pins both rules), with a finite iteration count. Key it on something monotonic per event: `Buddy` uses a
+  `opacity` animates, so nothing repaints per frame). The header sky
+  (`HeaderSky.tsx`: snow, rain, thunder, clouds, fog, sun, stars — from the
+  weather) is the one animation that runs for as long as something holds it:
+  every moving part carries `.sky-anim`, which plays only while the pointer is
+  over the header and is `animation-play-state: paused` otherwise (a test pins
+  both rules and that each animated element carries the class), with a finite
+  iteration count. The play-state rules are two-class selectors on purpose:
+  the one-class `animation` shorthand resets the play state. Key it on something monotonic per event: `Buddy` uses a
   run counter and `App.tsx` a snapshot counter, because `snapshot.fetchedAt` is
   the *oldest* host's stamp and stalls. A guard test in `tests/run-tests.cjs`
   scans `.ts`/`.tsx`/`.css`/`.html` under `src/renderer` for

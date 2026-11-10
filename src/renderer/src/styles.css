@@ -275,29 +275,93 @@
 }
 
 /*
- * Header snowfall (components/Snowflakes.tsx) — runs only while the pointer is
- * over the header and is paused otherwise, so at rest it produces no
- * frames at all. The count is finite on purpose (~1.5 h of hovering at the
- * shortest cycle): the guard test bans `infinite`, and this keeps the rule
- * whole instead of carving an exception into it. Only `transform` animates,
- * on HTML columns, which the compositor moves without repainting the flakes.
+ * The header's sky (components/HeaderSky.tsx: snow, rain, thunder, clouds,
+ * fog, sun, stars — picked from the weather). Every moving part carries
+ * `.sky-anim`, which runs only while the pointer is over the header and is
+ * paused otherwise, so at rest the sky produces no frames at all. The two
+ * play-state rules are more specific than the one-class animation rules on
+ * purpose: the `animation` shorthand resets the play state, and a tie would be
+ * settled by stylesheet order. Counts are finite on purpose (hours of
+ * hovering): the guard test bans `infinite`, and this keeps the rule whole
+ * instead of carving an exception into it. Only `transform` and `opacity`
+ * animate, on HTML elements, which the compositor moves without repainting.
  */
-.snow-fall {
-  animation: snow-fall var(--snow-dur, 9s) linear 800;
+.sky-host .sky-anim {
   animation-play-state: paused;
 }
-.snow-host:hover .snow-fall {
+.sky-host:hover .sky-anim {
   animation-play-state: running;
 }
-@keyframes snow-fall {
+/* Falling (snow, rain): one strip height per cycle, see FallingColumn. */
+.sky-fall {
+  animation: sky-fall var(--sky-dur, 9s) linear 4000;
+}
+@keyframes sky-fall {
   0% {
     transform: translate(0, 0);
   }
   50% {
-    transform: translate(var(--snow-sway, 0px), 50%);
+    transform: translate(var(--sky-sway, 0px), 50%);
   }
   100% {
     transform: translate(0, 100%);
+  }
+}
+/* Drifting (clouds, fog): one strip width per cycle, the same trick sideways. */
+.sky-drift {
+  animation: sky-drift var(--sky-dur, 90s) linear 200;
+}
+@keyframes sky-drift {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+/* Stars and the sun's glints; a negative delay desyncs them, also at rest. */
+.sky-twinkle {
+  animation: sky-twinkle var(--sky-dur, 4s) ease-in-out var(--sky-delay, 0s) 4000;
+}
+@keyframes sky-twinkle {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.15;
+  }
+}
+.sky-spin {
+  animation: sky-spin 80s linear 200;
+}
+@keyframes sky-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* Lightning: dark at rest (offset 0), a double flash late in each cycle. */
+.sky-flash {
+  opacity: 0;
+  animation: sky-flash var(--sky-dur, 7s) linear 2000;
+}
+@keyframes sky-flash {
+  0%,
+  86%,
+  100% {
+    opacity: 0;
+  }
+  87% {
+    opacity: 1;
+  }
+  89% {
+    opacity: 0.2;
+  }
+  90% {
+    opacity: 0.8;
+  }
+  94% {
+    opacity: 0;
   }
 }
 
@@ -312,7 +376,7 @@
   .refresh-spin,
   .live-beat,
   .claude-glow,
-  .snow-fall {
+  .sky-anim {
     animation: none !important;
   }
 }

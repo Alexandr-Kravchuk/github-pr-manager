@@ -86,6 +86,18 @@ export interface SettingsHost {
  */
 export type ThemePreference = "system" | "light" | "dark";
 
+/** The header's sky picture, chosen from the current weather (shared/weather.ts). */
+export type WeatherKind = "clear-day" | "clear-night" | "clouds" | "fog" | "rain" | "snow" | "thunder";
+
+/**
+ * The header's weather. `off` while no city is set (the header keeps its
+ * snowfall); `error` when the city is not found or Open-Meteo did not answer.
+ */
+export type WeatherStatus =
+  | { state: "off" }
+  | { state: "ok"; kind: WeatherKind; place: string; temperatureC: number; fetchedAt: number }
+  | { state: "error"; message: string };
+
 /**
  * Jira connection for parent-task grouping — credential-free, like the rest of
  * settings. The API token is stored separately (encrypted via Electron
@@ -227,6 +239,13 @@ export interface Settings {
   jira?: JiraSettings;
   /** Claude session launcher (off by default). */
   claude: ClaudeSettings;
+  /**
+   * The city whose current weather the header draws ("Kyiv" or "Kyiv,
+   * Ukraine"). Empty turns it off and the header keeps its snowfall — the
+   * city is the only thing that leaves the machine, so nothing is sent
+   * until one is typed.
+   */
+  weatherCity?: string;
   /**
    * Days a PR stays open before it is marked stale and, when it is yours, can
    * be closed together with its Jira task. 0 switches it off. See `shared/stale.ts`.
@@ -1190,6 +1209,11 @@ export interface PrManagerApi {
   onAgentOpenCompanion(listener: () => void): () => void;
   /** Copy text (e.g. a PR URL) to the system clipboard. */
   copyText(text: string): Promise<void>;
+  /**
+   * The current weather in the city from Settings. Main caches it (30 min, or
+   * 5 min after a failure), so calling this often costs no request.
+   */
+  getWeather(): Promise<WeatherStatus>;
   /**
    * The Jira task of a stale PR of yours and the transitions Jira offers on it,
    * for the close dialog. Only the PR id crosses over; the issue key is read

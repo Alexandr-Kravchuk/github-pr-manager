@@ -42,7 +42,7 @@ import { StaleCloseDialog } from "./components/StaleCloseDialog";
 import { StaleCloseContext } from "./components/stale-close-context";
 import { BasePrContext } from "./components/base-pr-context";
 import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
-import { Snowflakes } from "./components/Snowflakes";
+import { HeaderSky } from "./components/HeaderSky";
 import {
   DEFAULT_TABLE_SORT,
   parseColumnWidths,
@@ -72,6 +72,7 @@ import type {
   PullRequest,
   RateLimitInfo,
   UpdateStatus,
+  WeatherStatus,
 } from "../../shared/types";
 
 type SortKey = "action" | "waiting" | "active" | "newest" | "name";
@@ -430,6 +431,18 @@ export function App() {
     window.api.getWhatsNew().then(setWhatsNew).catch(() => {});
     void loadJiraStatus();
   }, [loadJiraStatus]);
+
+  // The header's sky. Asked again on every return from Settings (the city may
+  // have changed) and every 10 minutes after; main caches the answer for 30,
+  // so most of these cost no request.
+  const [weather, setWeather] = useState<WeatherStatus | null>(null);
+  useEffect(() => {
+    if (view !== "dashboard") return;
+    const load = () => window.api.getWeather().then(setWeather).catch(() => {});
+    load();
+    const timer = window.setInterval(load, 10 * 60_000);
+    return () => window.clearInterval(timer);
+  }, [view]);
 
   // A sign-in done outside the app (`twg login` in a terminal) or a credential
   // that stopped working changes which grouping options exist — re-read the
@@ -1040,9 +1053,9 @@ export function App() {
           sticky header, so it already sits at top 0 and doesn't shift up by
           that gap on the first pixels of scrolling before it sticks. */}
       {/* No rule under the header: its lighter tone sets it off from the list
-          scrolling beneath it. The whole header hosts the snowfall. */}
-      <header className="snow-host sticky top-0 z-10 -mx-4 mb-2 bg-surface/70 px-4 pb-3 pt-2 backdrop-blur">
-        <Snowflakes />
+          scrolling beneath it. The whole header hosts the weather sky. */}
+      <header className="sky-host sticky top-0 z-10 -mx-4 mb-2 bg-surface/70 px-4 pb-3 pt-2 backdrop-blur">
+        <HeaderSky weather={weather} />
         <div className="relative flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <Buddy mood={buddyMood} />
@@ -1867,7 +1880,7 @@ type ChipTone = "sky" | "orange" | "amber" | "red" | "green";
 
 const CHIP_TONE_ACTIVE: Record<ChipTone, string> = {
   // The tint is mixed into the surface colour rather than laid over it at 15%
-  // alpha, so the chip stays opaque over the header's snowflakes.
+  // alpha, so the chip stays opaque over the header's sky.
   sky: "border-sky-500/60 bg-[color-mix(in_srgb,var(--color-sky-500)_15%,var(--surface))] text-sky-700 dark:text-sky-200",
   orange: "border-orange-500/60 bg-[color-mix(in_srgb,var(--color-orange-500)_15%,var(--surface))] text-orange-700 dark:text-orange-200",
   amber: "border-amber-500/60 bg-[color-mix(in_srgb,var(--color-amber-500)_15%,var(--surface))] text-amber-700 dark:text-amber-200",
@@ -1906,7 +1919,7 @@ const CHIP_TONE_IDLE_TEXT: Record<ChipTone, string> = {
 /**
  * The raised look shared by the filter chips and the header buttons: an inner
  * highlight on the top edge and a soft drop shadow. Fills are opaque — the
- * header's snowflakes fall behind the controls, and a translucent fill let
+ * header's sky (snow, rain, stars) moves behind the controls, and a translucent fill let
  * them show through the buttons.
  */
 const GLASS_BASE =
@@ -1946,7 +1959,7 @@ function FilterChip({
         "rounded-md border px-3 py-1.5 text-sm",
         GLASS_BASE,
         // Dimmed by its text, not by opacity: a half-transparent chip let the
-        // snowflakes behind it show through.
+        // sky behind it show through.
         active ? CHIP_TONE_ACTIVE[tone] : cn(GLASS_IDLE, empty ? "text-fg-faint" : CHIP_TONE_IDLE_TEXT[tone]),
       )}
     >

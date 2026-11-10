@@ -218,6 +218,9 @@ export function validateSettings(raw: unknown): Settings {
     claude: validateClaude(obj.claude),
     agent: validateAgent(obj.agent),
     staleAfterDays: validateStaleAfterDays(obj.staleAfterDays),
+    // A city name is free text; only its length is bounded, since it goes
+    // into a URL query and into the header's tooltip.
+    weatherCity: typeof obj.weatherCity === "string" ? obj.weatherCity.trim().slice(0, 100) : "",
   };
 }
 
@@ -487,6 +490,7 @@ export function defaultSettings(): Settings {
     claude: validateClaude(undefined),
     agent: validateAgent(undefined),
     staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
+    weatherCity: "",
   };
 }
 

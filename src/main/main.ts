@@ -32,6 +32,7 @@ import type {
   PullRequest,
   SaveSettingsResult,
   Settings,
+  WeatherStatus,
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
 import { createAgent, type Agent, type AgentNotice } from "./agent";
@@ -78,6 +79,7 @@ import {
   seenStatePath,
 } from "./settings";
 import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./updater";
+import { createWeatherService } from "./weather";
 
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
@@ -1048,6 +1050,19 @@ function registerIpc(): void {
     // would keep returning the PR for a while (see `forgetClosed`).
     if (result.prClosed) poller?.forgetClosed(id);
     return result;
+  });
+
+  // No argument: the city comes from the saved settings, so the renderer
+  // cannot point the request anywhere else.
+  const weather = createWeatherService();
+  ipcMain.handle("weather:get", async (): Promise<WeatherStatus> => {
+    let city = "";
+    try {
+      city = loadSettings().weatherCity ?? "";
+    } catch {
+      /* unreadable settings: the header keeps its snowfall */
+    }
+    return weather.get(city);
   });
 }
 

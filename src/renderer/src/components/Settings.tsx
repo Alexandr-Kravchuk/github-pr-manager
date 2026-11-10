@@ -10,6 +10,7 @@ import type {
   NotificationSettings,
   Settings,
   ThemePreference,
+  WeatherStatus,
 } from "../../../shared/types";
 // notify.ts is deliberately Electron/Node-free (unlike the rest of shared/), so
 // the renderer can value-import this default rather than mirroring it. Used
@@ -22,6 +23,7 @@ import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "../../../shared
 import { DEFAULT_AGENT_PROMPTS, DEFAULT_AGENT_SETTINGS } from "../../../shared/agent-defaults";
 import { DEFAULT_STALE_AFTER_DAYS, MAX_STALE_AFTER_DAYS } from "../../../shared/stale";
 import { createJiraStatusLoader } from "../../../shared/jira-status";
+import { describeWeather } from "../../../shared/weather";
 import {
   SETTINGS_TABS,
   searchSettings,
@@ -128,6 +130,11 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [trackComments, setTrackComments] = useState(true);
   const [staleAfterDays, setStaleAfterDays] = useState(DEFAULT_STALE_AFTER_DAYS);
   const [theme, setTheme] = useState<ThemePreference>("system");
+  const [weatherCity, setWeatherCity] = useState("");
+  // The weather main reports is for the SAVED city; it is shown only while the
+  // field still holds that city, or it would describe a place not typed there.
+  const [savedWeatherCity, setSavedWeatherCity] = useState("");
+  const [weather, setWeather] = useState<WeatherStatus | null>(null);
   const [notifications, setNotifications] = useState<NotificationSettings>(DEFAULT_NOTIFICATIONS);
   const [hosts, setHosts] = useState<DraftHost[]>([]);
   const [claude, setClaude] = useState<ClaudeSettings>(DEFAULT_CLAUDE_SETTINGS);
@@ -166,6 +173,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setTrackComments(s.trackComments);
         setStaleAfterDays(s.staleAfterDays ?? DEFAULT_STALE_AFTER_DAYS);
         setTheme(s.theme);
+        setWeatherCity(s.weatherCity ?? "");
+        setSavedWeatherCity(s.weatherCity ?? "");
         setNotifications(s.notifications ?? DEFAULT_NOTIFICATIONS);
         setHosts(
           s.hosts.map((h) => ({
@@ -188,6 +197,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       .catch((e) => setError((e as Error).message));
     loadGh();
     loadJira();
+    window.api.getWeather().then(setWeather).catch(() => {});
   }, [loadGh, loadJira]);
 
   const updateHost = (i: number, patch: Partial<DraftHost>) =>
@@ -256,6 +266,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         theme,
         trackComments,
         notifications,
+        weatherCity: weatherCity.trim(),
         hosts: hosts.map((h) => ({
           label: h.label,
           graphqlUrl: h.graphqlUrl,
@@ -326,6 +337,37 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         <p className="mt-1 text-xs text-fg-subtle">
           Follow the system theme, or force light or dark. Applies right away, without Save.
         </p>
+      </section>
+    ),
+    weather: (
+      <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
+        <div className="flex items-center justify-between gap-4">
+          <label className="text-sm font-semibold text-fg-secondary" htmlFor="weather-city">
+            Header weather
+          </label>
+          <input
+            id="weather-city"
+            type="text"
+            value={weatherCity}
+            maxLength={100}
+            placeholder="City, e.g. Kyiv"
+            onChange={(e) => setWeatherCity(e.target.value)}
+            className={cn(fieldCls, "w-56")}
+          />
+        </div>
+        <p className="mt-1 text-xs text-fg-subtle">
+          The header draws the current weather there — snow, rain, a thunderstorm, clouds, fog, the
+          sun or stars — and moves it while the pointer is over it. Add the country to pick among
+          same-named places (&quot;Paris, France&quot;). Only the city is sent, to Open-Meteo; empty
+          keeps the snowfall.
+        </p>
+        {weather && weather.state !== "off" && weatherCity.trim() === savedWeatherCity && (
+          <p className={cn("mt-1 text-xs", weather.state === "ok" ? "text-fg-muted" : "text-amber-700 dark:text-amber-300")}>
+            {weather.state === "ok"
+              ? `Now: ${describeWeather(weather.place, weather.kind, weather.temperatureC)}`
+              : weather.message}
+          </p>
+        )}
       </section>
     ),
     refresh: (

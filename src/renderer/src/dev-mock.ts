@@ -13,6 +13,8 @@ import type {
   AgentAction,
   AgentItem,
   AgentState,
+  WeatherKind,
+  WeatherStatus,
   ClaudeSessionInfo,
   DashboardResponse,
   JiraSource,
@@ -410,6 +412,12 @@ FIXTURES.agent = [...FIXTURES.showcase, ...FIXTURES.review];
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
 // `?jiraAuth=token` / `?jiraAuth=twg` shows the rejected-credentials banner and
 // the matching Settings state, which a working mock never reaches.
+// `?weather=rain` (any WeatherKind) previews a header sky; none keeps the snowfall.
+const weatherParam = new URLSearchParams(window.location.search).get("weather");
+const WEATHER: WeatherStatus = weatherParam
+  ? { state: "ok", kind: weatherParam as WeatherKind, place: "Kyiv, Ukraine", temperatureC: 4, fetchedAt: Date.now() }
+  : { state: "off" };
+
 const jiraAuthParam = new URLSearchParams(window.location.search).get("jiraAuth");
 const jiraAuth: JiraSource | null = jiraAuthParam === "token" || jiraAuthParam === "twg" ? jiraAuthParam : null;
 
@@ -1023,6 +1031,7 @@ const api: PrManagerApi = {
     prClosed: true,
     jira: options.jira.action === "keep" ? null : { ok: true, message: `Task: ${options.jira.action} (mock).` },
   }),
+  getWeather: async () => WEATHER,
   getWhatsNew: async () => null,
   dismissWhatsNew: async () => {},
   onSnapshot: (listener) => {

@@ -112,6 +112,7 @@ for (const mod of [
   "agent-explain.js",
   "stale.js",
   "jira-status.js",
+  "weather.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -198,14 +199,24 @@ for (const mod of [
     // which is a word character, so `linear_infinite` has no boundary to find.
     /\banimate-(?:pulse|spin|bounce|ping)\b|\banimate-\[[^\]]*infinite[^\]]*\]|\banimation(?:-iteration-count)?\s*:[^;{}]*\binfinite\b/g;
 
-  test("header snowfall is paused unless the header is hovered", () => {
+  test("header sky is paused unless the header is hovered", () => {
     const css = fs.readFileSync(path.join(rendererRoot, "src/styles.css"), "utf8");
     const rule = (sel) => {
       const m = css.match(new RegExp(`(?:^|\\n)${sel.replace(/[.:]/g, "\\$&")}\\s*\\{([^}]*)\\}`));
       return m ? m[1] : "";
     };
-    assert.match(rule(".snow-fall"), /animation-play-state:\s*paused/, "at rest the flakes must not animate");
-    assert.match(rule(".snow-host:hover .snow-fall"), /animation-play-state:\s*running/);
+    assert.match(rule(".sky-host .sky-anim"), /animation-play-state:\s*paused/, "at rest the sky must not animate");
+    assert.match(rule(".sky-host:hover .sky-anim"), /animation-play-state:\s*running/);
+    // The play state must win over each one-class `animation` shorthand, which
+    // resets it: two classes beat one whatever the order in the file.
+    for (const cls of ["sky-fall", "sky-drift", "sky-twinkle", "sky-spin", "sky-flash"]) {
+      assert.match(rule(`.${cls}`), /animation:/, `${cls} is defined`);
+    }
+    // Every animated element of the sky carries the pausing class.
+    const sky = fs.readFileSync(path.join(rendererRoot, "src/components/HeaderSky.tsx"), "utf8");
+    const animated = sky.match(/className="[^"]*\bsky-(?:fall|drift|twinkle|spin|flash)\b[^"]*"/g) ?? [];
+    assert.ok(animated.length >= 5, "found the animated elements");
+    for (const c of animated) assert.match(c, /\bsky-anim\b/, c);
   });
 
   test("infinite-animation detector matches what it claims", () => {
@@ -14676,6 +14687,134 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(src, /"stale:close"[\s\S]{0,200}validatePrId\)\(raw\)[\s\S]{0,120}validateCloseStaleOptions\)\(rawOptions\)/);
       assert.match(src, /"stale:jiraTask"[\s\S]{0,300}validatePrId\)\(raw\)/);
       assert.match(src, /closeStale\)\(snapshotPr\(id\)/);
+    });
+  }
+
+  {
+    const w = require(path.join(__dirname, "../dist/main/shared/weather.js"));
+    const svc = require(path.join(__dirname, "../dist/main/main/weather.js"));
+
+    test("weather: WMO codes map to the header's skies", () => {
+      assert.strictEqual(w.weatherKind(0, true), "clear-day");
+      assert.strictEqual(w.weatherKind(1, false), "clear-night");
+      assert.strictEqual(w.weatherKind(3, true), "clouds");
+      assert.strictEqual(w.weatherKind(45, true), "fog");
+      assert.strictEqual(w.weatherKind(61, true), "rain");
+      assert.strictEqual(w.weatherKind(81, true), "rain");
+      assert.strictEqual(w.weatherKind(73, true), "snow");
+      assert.strictEqual(w.weatherKind(86, false), "snow");
+      assert.strictEqual(w.weatherKind(95, true), "thunder");
+      assert.strictEqual(w.weatherKind(42, true), "clouds", "an unknown code is cloudy, not clear");
+    });
+
+    test("weather: the country after a comma picks among same-named places", () => {
+      const json = {
+        results: [
+          { name: "Paris", country: "United States", admin1: "Texas", latitude: 33.6, longitude: -95.5 },
+          { name: "Paris", country: "France", admin1: "Ile-de-France", latitude: 48.85, longitude: 2.35 },
+        ],
+      };
+      const { name, hint } = w.splitCity(" Paris , France ");
+      assert.strictEqual(name, "Paris");
+      assert.deepStrictEqual(w.parseGeocode(json, hint), { place: "Paris, France", latitude: 48.85, longitude: 2.35 });
+      assert.strictEqual(w.parseGeocode(json, "").place, "Paris, United States", "no hint → the first result");
+      assert.strictEqual(w.parseGeocode(json, "japan"), null);
+      assert.strictEqual(w.parseGeocode({}, ""), null, "no results");
+      assert.match(w.geocodeUrl("Paris"), /^https:\/\/geocoding-api\.open-meteo\.com\/v1\/search\?name=Paris&/);
+    });
+
+    test("weather: the current block of a forecast", () => {
+      assert.deepStrictEqual(
+        w.parseCurrent({ current: { temperature_2m: 3.6, weather_code: 61, is_day: 1 } }),
+        { kind: "rain", temperatureC: 3.6 },
+      );
+      assert.strictEqual(w.parseCurrent({ current: { weather_code: 0, is_day: 0, temperature_2m: -2 } }).kind, "clear-night");
+      assert.strictEqual(w.parseCurrent({ current: { weather_code: 0 } }), null, "a missing temperature");
+      assert.strictEqual(w.describeWeather("Kyiv, Ukraine", "rain", 3.6), "Kyiv, Ukraine · 4°C, Rain");
+    });
+
+    const geo = { results: [{ name: "Kyiv", country: "Ukraine", latitude: 50.45, longitude: 30.52 }] };
+    const forecast = (code) => ({ current: { temperature_2m: 4, weather_code: code, is_day: 1 } });
+
+    await atest("weather service: no city sends nothing", async () => {
+      const calls = [];
+      const s = svc.createWeatherService({ fetchJson: async (u) => (calls.push(u), geo) });
+      assert.deepStrictEqual(await s.get("  "), { state: "off" });
+      assert.deepStrictEqual(calls, []);
+    });
+
+    await atest("weather service: caches the answer and the coordinates", async () => {
+      let t = 1000;
+      const calls = [];
+      let code = 61;
+      const s = svc.createWeatherService({
+        now: () => t,
+        fetchJson: async (u) => (calls.push(u), u.includes("geocoding") ? geo : forecast(code)),
+      });
+      const first = await s.get("Kyiv");
+      assert.strictEqual(first.state, "ok");
+      assert.strictEqual(first.kind, "rain");
+      assert.strictEqual(first.place, "Kyiv, Ukraine");
+      assert.strictEqual(calls.length, 2, "geocode + forecast");
+      t += svc.WEATHER_TTL_MS - 1;
+      await s.get("Kyiv");
+      assert.strictEqual(calls.length, 2, "inside the TTL: no request");
+      t += 2;
+      code = 0;
+      assert.strictEqual((await s.get("Kyiv")).kind, "clear-day");
+      assert.strictEqual(calls.length, 3, "after the TTL: the forecast only, the coordinates are kept");
+    });
+
+    await atest("weather service: a failure keeps the last good sky and retries sooner", async () => {
+      let t = 0;
+      let fail = false;
+      let calls = 0;
+      const s = svc.createWeatherService({
+        now: () => t,
+        fetchJson: async (u) => {
+          calls++;
+          if (fail) throw new Error("offline");
+          return u.includes("geocoding") ? geo : forecast(71);
+        },
+      });
+      assert.strictEqual((await s.get("Kyiv")).kind, "snow");
+      fail = true;
+      t += svc.WEATHER_TTL_MS;
+      assert.strictEqual((await s.get("Kyiv")).kind, "snow", "the header does not drop back on a failed refresh");
+      const before = calls;
+      t += svc.WEATHER_ERROR_TTL_MS;
+      fail = false;
+      await s.get("Kyiv");
+      assert.ok(calls > before, "retried after the short TTL");
+    });
+
+    await atest("weather service: an unknown city is an error, not a sky", async () => {
+      const s = svc.createWeatherService({ fetchJson: async () => ({ results: [] }) });
+      const r = await s.get("Atlantis");
+      assert.strictEqual(r.state, "error");
+      assert.match(r.message, /Atlantis/);
+    });
+
+    await atest("weather service: callers asking together share one request", async () => {
+      let calls = 0;
+      const s = svc.createWeatherService({
+        fetchJson: async (u) => (calls++, u.includes("geocoding") ? geo : forecast(3)),
+      });
+      await Promise.all([s.get("Kyiv"), s.get("Kyiv"), s.get("Kyiv")]);
+      assert.strictEqual(calls, 2);
+    });
+
+    test("settings: the weather city is trimmed, bounded and defaults to empty", () => {
+      const cfg = require(path.join(__dirname, "../dist/main/shared/config.js"));
+      assert.strictEqual(cfg.validateSettings({}).weatherCity, "");
+      assert.strictEqual(cfg.validateSettings({ weatherCity: "  Kyiv " }).weatherCity, "Kyiv");
+      assert.strictEqual(cfg.validateSettings({ weatherCity: "x".repeat(300) }).weatherCity.length, 100);
+      assert.strictEqual(cfg.validateSettings({ weatherCity: 5 }).weatherCity, "");
+    });
+
+    test("main.js wiring: the weather city comes from saved settings, not the renderer", () => {
+      const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /"weather:get", async \(\) =>[\s\S]{0,200}loadSettings\)?\(\)\.weatherCity/);
     });
   }
 

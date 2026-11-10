@@ -14,6 +14,7 @@ export const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTabId; label: string }> 
 
 export type SettingsSectionId =
   | "appearance"
+  | "weather"
   | "refresh"
   | "behavior"
   | "notifications"
@@ -45,6 +46,12 @@ export interface SettingsSection {
 /** In display order — within a tab, and across tabs in the search results. */
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   { id: "appearance", tab: "general", title: "Appearance", keywords: ["theme", "dark", "light", "system", "mode"] },
+  {
+    id: "weather",
+    tab: "general",
+    title: "Header weather",
+    keywords: ["weather", "city", "location", "sky", "snow", "rain", "sun", "stars", "clouds", "fog", "open-meteo", "header"],
+  },
   {
     id: "refresh",
     tab: "general",
