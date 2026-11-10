@@ -775,9 +775,10 @@ export function App() {
     // Under "By name" the nested PRs of a group order by PR number, not by the
     // differing text after the shared Jira key — the key only decides which
     // group a PR sits in; within it, the number is the stable, meaningful rank.
+    // Reapply stack ordering after that sort to keep each stack bottom-first.
     const finalize = (clusters: Group[]): Group[] =>
       sortBy === "name"
-        ? clusters.map((g) => ({ ...g, prs: [...g.prs].sort((a, b) => a.number - b.number) }))
+        ? clusters.map((g) => ({ ...g, prs: orderStacks([...g.prs].sort((a, b) => a.number - b.number)) }))
         : clusters;
     if (groupBy === "repo") {
       const map = new Map<string, Group>();

@@ -173,8 +173,8 @@ export function basePrIndex(prs: readonly PullRequest[]): Map<string, PullReques
 /**
  * Puts the PRs of one stack next to each other, bottom first, at the place
  * where the list's ordering put the first of them. Every other PR keeps its
- * position. Applied before grouping, so it holds within each group too: a
- * group only filters this order, it never reorders it.
+ * position. Applied before grouping and again after a group's numeric sort
+ * under "By name", so that sort cannot split or reverse a stack.
  *
  * Two kinds of stack: a native GitHub stack, ordered by its positions, and a
  * hand-made one (`basePrIndex`), ordered by walking from the PR on a branch
