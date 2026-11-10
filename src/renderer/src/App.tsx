@@ -1049,7 +1049,7 @@ export function App() {
           <div className="flex items-center gap-3">
             <img src={logoUrl} alt="" aria-hidden width={44} height={44} draggable={false} className="h-11 w-11 shrink-0 select-none" />
             {/* The count sits on the title's line, after it: one row, not two. */}
-            <div className="flex items-baseline gap-2">
+            <div className="ml-1 flex items-baseline gap-3">
               <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
               <p className="text-xs text-fg-subtle">
                 {/* Only what the filter chips can't say. The attention / failing /
