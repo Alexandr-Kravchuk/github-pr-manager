@@ -1,4 +1,5 @@
 import type { CheckItem } from "../../../shared/types";
+import type { CheckBadgeItem } from "../../../shared/check-groups";
 import { checkStateClasses, checkStateIcon, cn } from "../format";
 
 /** Compact badge for a single CI check; clickable when a link is present. */
@@ -25,4 +26,23 @@ export function CheckBadge({ check }: { check: CheckItem }) {
     );
   }
   return <span className={className}>{content}</span>;
+}
+
+/** Several checks in one state as one badge; hover names them, a click opens the PR's checks. */
+export function CheckGroupBadge({ item, url }: { item: Extract<CheckBadgeItem, { kind: "group" }>; url: string }) {
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+      title={item.names.join("\n")}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium hover:brightness-125",
+        checkStateClasses(item.state),
+      )}
+    >
+      <span aria-hidden>{checkStateIcon(item.state)}</span>
+      <span>{item.label}</span>
+    </a>
+  );
 }

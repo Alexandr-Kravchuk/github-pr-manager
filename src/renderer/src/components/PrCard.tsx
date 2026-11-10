@@ -9,7 +9,8 @@ import { cn, relativeTime } from "../format";
 import { AuthorButton } from "./AuthorButton";
 import { BasePrContext } from "./base-pr-context";
 import { BasePrMarker } from "./BasePrMarker";
-import { CheckBadge } from "./CheckBadge";
+import { CheckBadge, CheckGroupBadge } from "./CheckBadge";
+import { collapseChecks } from "../../../shared/check-groups";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
 import { AgentStatusLine } from "./AgentStatus";
@@ -526,12 +527,14 @@ export function PrCard({
 
       {/* CI: failures first, then pending; otherwise a summary */}
       <div className="flex flex-wrap items-center gap-1.5">
-        {pr.failingChecks.map((c) => (
-          <CheckBadge key={`f-${c.name}`} check={c} />
-        ))}
-        {pr.pendingChecks.map((c) => (
-          <CheckBadge key={`p-${c.name}`} check={c} />
-        ))}
+        {/* Several checks in one state are one badge (shared/check-groups.ts). */}
+        {collapseChecks([...pr.failingChecks, ...pr.pendingChecks]).map((item) =>
+          item.kind === "one" ? (
+            <CheckBadge key={`c-${item.check.state}-${item.check.name}`} check={item.check} />
+          ) : (
+            <CheckGroupBadge key={`g-${item.state}`} item={item} url={`${pr.url}/checks`} />
+          ),
+        )}
 
         {pr.failingChecks.length === 0 && pr.pendingChecks.length === 0 && (
           <span className="text-xs text-fg-subtle">

@@ -113,6 +113,7 @@ for (const mod of [
   "stale.js",
   "jira-status.js",
   "weather.js",
+  "check-groups.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -14971,6 +14972,25 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         wn.parseWhatsNewRecord({ acknowledgedVersion: "2.10.0", seenVersion: "2.11.0", seenAt: "x" }),
         { acknowledgedVersion: "2.10.0" },
       );
+    });
+  }
+
+  {
+    const cg = require(path.join(__dirname, "../dist/main/shared/check-groups.js"));
+    const chk = (name, state) => ({ name, kind: "check", state, url: null });
+
+    test("check badges: several checks in one state collapse into one badge", () => {
+      const out = cg.collapseChecks([chk("a", "pending"), chk("b", "pending"), chk("c", "pending")]);
+      assert.deepStrictEqual(out, [{ kind: "group", state: "pending", label: "3 checks running", names: ["a", "b", "c"] }]);
+    });
+
+    test("check badges: a lone check keeps its own badge, beside another state's group", () => {
+      const lone = chk("lint", "failure");
+      const out = cg.collapseChecks([lone, chk("u1", "pending"), chk("u2", "pending")]);
+      assert.deepStrictEqual(out[0], { kind: "one", check: lone });
+      assert.strictEqual(out[1].label, "2 checks running");
+      assert.strictEqual(cg.collapseChecks([chk("x", "failure"), chk("y", "failure")])[0].label, "2 checks failing");
+      assert.deepStrictEqual(cg.collapseChecks([]), []);
     });
   }
 
