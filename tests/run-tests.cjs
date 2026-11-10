@@ -14991,6 +14991,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(out[1].label, "2 checks running");
       assert.strictEqual(cg.collapseChecks([chk("x", "failure"), chk("y", "failure")])[0].label, "2 checks failing");
       assert.deepStrictEqual(cg.collapseChecks([]), []);
+      assert.strictEqual(cg.checkGroupLabel("success", 12), "12 checks passed");
     });
   }
 

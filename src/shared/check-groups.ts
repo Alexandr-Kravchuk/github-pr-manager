@@ -13,6 +13,7 @@ export type CheckBadgeItem =
 const VERB: Partial<Record<CheckState, string>> = {
   failure: "failing",
   pending: "running",
+  success: "passed",
 };
 
 /** "3 checks failing", "15 checks running". */

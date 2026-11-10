@@ -538,11 +538,20 @@ export function PrCard({
           ),
         )}
 
-        {pr.failingChecks.length === 0 && pr.pendingChecks.length === 0 && (
-          <span className="text-xs text-fg-subtle">
-            {pr.ciState === "success" && passingCount > 0 ? `✓ CI passed (${passingCount})` : "CI: no failures"}
-          </span>
-        )}
+        {/* All green: the passed checks as a badge like the others ("12 checks passed"). */}
+        {pr.failingChecks.length === 0 &&
+          pr.pendingChecks.length === 0 &&
+          (pr.ciState === "success" && passingCount > 0 ? (
+            collapseChecks(pr.checks.filter((c) => c.state === "success")).map((item) =>
+              item.kind === "one" ? (
+                <CheckBadge key={`c-success-${item.check.name}`} check={item.check} />
+              ) : (
+                <CheckGroupBadge key="g-success" item={item} url={`${pr.url}/checks`} />
+              ),
+            )
+          ) : (
+            <span className="text-xs text-fg-subtle">CI: no failures</span>
+          ))}
         </div>
       )}
       {/* What the PR agent is doing with it; nothing while it has nothing here. */}
