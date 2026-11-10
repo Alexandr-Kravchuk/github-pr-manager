@@ -73,12 +73,14 @@ import { createTrayController } from "./tray";
 import {
   acknowledgeVersion,
   ignoredStatePath,
-  loadAcknowledgedVersion,
+  loadWhatsNewRecord,
+  saveWhatsNewRecord,
   loadSettings,
   persistSettings,
   seenStatePath,
 } from "./settings";
 import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./updater";
+import { whatsNewFor } from "../shared/whats-new";
 import { createWeatherService } from "./weather";
 
 let mainWindow: BrowserWindow | null = null;
@@ -1000,12 +1002,15 @@ function registerIpc(): void {
   ipcMain.handle("app:getVersion", async (): Promise<string> => app.getVersion());
 
   ipcMain.handle("app:getWhatsNew", async () => {
-    const acked = loadAcknowledgedVersion();
     const current = app.getVersion();
-    if (!acked || acked === current) return null;
+    const stored = loadWhatsNewRecord();
+    const { record, highlightUntil } = whatsNewFor(stored, current, Date.now());
+    if (JSON.stringify(record) !== JSON.stringify(stored)) saveWhatsNewRecord(record);
+    if (highlightUntil === null) return null;
     return {
       version: current,
       url: `https://github.com/Alexandr-Kravchuk/github-pr-manager/releases/tag/v${current}`,
+      highlightUntil,
     };
   });
 
@@ -1091,7 +1096,7 @@ function startApp(): void {
 
   // Seed the acknowledged version on first run so "What's new" doesn't flash
   // on a fresh install.
-  if (loadAcknowledgedVersion() === null) {
+  if (loadWhatsNewRecord() === null) {
     acknowledgeVersion(app.getVersion());
   }
 

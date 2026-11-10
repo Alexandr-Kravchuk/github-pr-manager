@@ -1223,7 +1223,7 @@ export interface PrManagerApi {
   /** Close a stale PR of yours and apply the chosen action to its Jira task. */
   closeStalePr(prId: string, options: CloseStaleOptions): Promise<CloseStaleResult>;
   /** Returns release info if a new version was installed since last ack, or null. */
-  getWhatsNew(): Promise<{ version: string; url: string } | null>;
+  getWhatsNew(): Promise<{ version: string; url: string; highlightUntil: number } | null>;
   /** Acknowledges the current version (hides "What's new"). */
   dismissWhatsNew(): Promise<void>;
   /** Subscribe to live snapshots. Returns an unsubscribe function. */

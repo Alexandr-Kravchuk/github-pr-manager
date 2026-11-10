@@ -307,7 +307,7 @@ export function App() {
   // bypasses per-host spacing and spends from an hourly GraphQL budget shared
   // with every other client on the same token.
   const lastForcedRefreshRef = useRef(0);
-  const [whatsNew, setWhatsNew] = useState<{ version: string; url: string } | null>(null);
+  const [whatsNew, setWhatsNew] = useState<{ version: string; url: string; highlightUntil: number } | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
 
   // Persisted view preferences, read once at mount (search stays transient).
@@ -430,6 +430,14 @@ export function App() {
     window.api.getWhatsNew().then(setWhatsNew).catch(() => {});
     void loadJiraStatus();
   }, [loadJiraStatus]);
+
+  // "What's new" is lit for its first half hour only (shared/whats-new.ts);
+  // past that the plain version label takes its place, even mid-session.
+  useEffect(() => {
+    if (!whatsNew) return;
+    const timer = window.setTimeout(() => setWhatsNew(null), Math.max(0, whatsNew.highlightUntil - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [whatsNew]);
 
   // The header's sky. Asked again on every return from Settings (the city may
   // have changed) and every 10 minutes after; main caches the answer for 30,

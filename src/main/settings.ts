@@ -4,6 +4,7 @@ import { app } from "electron";
 
 import { ConfigError, defaultSettings, toStoredSettings, validateSettings } from "../shared/config";
 import type { Settings } from "../shared/types";
+import { parseWhatsNewRecord, type WhatsNewRecord } from "../shared/whats-new";
 
 /** Path of the persisted settings file under the OS userData directory. */
 function settingsPath(): string {
@@ -46,24 +47,24 @@ export function whatsNewPath(): string {
   return path.join(app.getPath("userData"), "whats-new.json");
 }
 
-/** Returns the last version the user acknowledged in "What's new", or null. */
-export function loadAcknowledgedVersion(): string | null {
+/** The stored "What's new" record (see shared/whats-new.ts), or null. */
+export function loadWhatsNewRecord(): WhatsNewRecord | null {
   try {
-    const text = fs.readFileSync(whatsNewPath(), "utf8");
-    const parsed = JSON.parse(text);
-    return typeof parsed?.acknowledgedVersion === "string"
-      ? parsed.acknowledgedVersion
-      : null;
+    return parseWhatsNewRecord(JSON.parse(fs.readFileSync(whatsNewPath(), "utf8")));
   } catch {
     return null;
   }
 }
 
-/** Persists the current version as acknowledged (hides "What's new"). */
-export function acknowledgeVersion(version: string): void {
+export function saveWhatsNewRecord(record: WhatsNewRecord): void {
   const file = whatsNewPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ acknowledgedVersion: version }), "utf8");
+  fs.writeFileSync(file, JSON.stringify(record), "utf8");
+}
+
+/** Persists the current version as acknowledged (hides "What's new"). */
+export function acknowledgeVersion(version: string): void {
+  saveWhatsNewRecord({ acknowledgedVersion: version });
 }
 
 /** Validates and writes settings. Throws ConfigError on an invalid shape. */

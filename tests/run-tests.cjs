@@ -14931,6 +14931,49 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
   }
 
+  {
+    const wn = require(path.join(__dirname, "../dist/main/shared/whats-new.js"));
+    const MIN = 60_000;
+
+    test("what's new: a fresh install shows no news and records the version", () => {
+      const r = wn.whatsNewFor(null, "2.11.0", 1000);
+      assert.strictEqual(r.highlightUntil, null);
+      assert.deepStrictEqual(r.record, { acknowledgedVersion: "2.11.0" });
+    });
+
+    test("what's new: after an update it is lit for 30 min from the first look", () => {
+      const first = wn.whatsNewFor({ acknowledgedVersion: "2.10.0" }, "2.11.0", 1000);
+      assert.strictEqual(first.highlightUntil, 1000 + 30 * MIN);
+      assert.deepStrictEqual(first.record, { acknowledgedVersion: "2.10.0", seenVersion: "2.11.0", seenAt: 1000 });
+      // A later look (a restart) keeps the first look's clock.
+      const later = wn.whatsNewFor(first.record, "2.11.0", 1000 + 29 * MIN);
+      assert.strictEqual(later.highlightUntil, 1000 + 30 * MIN);
+    });
+
+    test("what's new: past 30 min it gives way to the plain version and is acknowledged", () => {
+      const rec = { acknowledgedVersion: "2.10.0", seenVersion: "2.11.0", seenAt: 1000 };
+      const r = wn.whatsNewFor(rec, "2.11.0", 1000 + 30 * MIN);
+      assert.strictEqual(r.highlightUntil, null);
+      assert.deepStrictEqual(r.record, { acknowledgedVersion: "2.11.0" });
+    });
+
+    test("what's new: a clock left from an older update starts over for the new one", () => {
+      const rec = { acknowledgedVersion: "2.9.0", seenVersion: "2.10.0", seenAt: 1000 };
+      const r = wn.whatsNewFor(rec, "2.11.0", 1000 + 90 * MIN);
+      assert.strictEqual(r.highlightUntil, 1000 + 120 * MIN);
+    });
+
+    test("what's new: a malformed record counts as none; the old one-field file still reads", () => {
+      assert.strictEqual(wn.parseWhatsNewRecord(null), null);
+      assert.strictEqual(wn.parseWhatsNewRecord({ acknowledgedVersion: 5 }), null);
+      assert.deepStrictEqual(wn.parseWhatsNewRecord({ acknowledgedVersion: "2.10.0" }), { acknowledgedVersion: "2.10.0" });
+      assert.deepStrictEqual(
+        wn.parseWhatsNewRecord({ acknowledgedVersion: "2.10.0", seenVersion: "2.11.0", seenAt: "x" }),
+        { acknowledgedVersion: "2.10.0" },
+      );
+    });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();
