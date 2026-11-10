@@ -220,7 +220,7 @@ export function PrCard({
       )}
     >
       <ClaudeGlow pr={pr} />
-      {/* Top row: repo/number + updated time */}
+      {/* Top row: repo/number, Jira key, the Claude button */}
       <div className="mb-1 flex items-center justify-between gap-2 text-xs text-fg-subtle">
         <div className="flex min-w-0 items-center gap-2">
           {hideRepo ? (
@@ -317,7 +317,6 @@ export function PrCard({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <span title={new Date(pr.updatedAt).toLocaleString()}>{relativeTime(pr.updatedAt)}</span>
           <ClaudeButton pr={pr} trackComments={trackComments} />
         </div>
       </div>
@@ -524,16 +523,24 @@ export function PrCard({
         )}
       </div>
 
-      {/* Reviewers, always the last row: the avatar rings say who has not reviewed yet, so no
-          separate "Waiting for" pill repeats it. */}
-      {pr.reviewers.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-fg-subtle">Reviewers:</span>
-          {pr.reviewers.map((r) => (
-            <ReviewerBadge key={r.login} r={r} />
-          ))}
-        </div>
-      )}
+      {/* Last row: the reviewers, and when the PR last changed in the corner.
+          The avatar rings say who has not reviewed yet, so no separate
+          "Waiting for" pill repeats it. */}
+      <div className="flex items-center justify-between gap-2">
+        {pr.reviewers.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-fg-subtle">Reviewers:</span>
+            {pr.reviewers.map((r) => (
+              <ReviewerBadge key={r.login} r={r} />
+            ))}
+          </div>
+        ) : (
+          <span />
+        )}
+        <span className="shrink-0 text-xs text-fg-subtle" title={new Date(pr.updatedAt).toLocaleString()}>
+          {relativeTime(pr.updatedAt)}
+        </span>
+      </div>
       {/* What the PR agent is doing with it; nothing while it has nothing here. */}
       <AgentStatusLine pr={pr} />
     </div>
