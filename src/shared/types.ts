@@ -940,6 +940,13 @@ export interface AgentItem {
   retryAt?: string;
   /** The failed run this one tries again, by its runId — a run that is a try again is not tried a third time. */
   retryOf?: string;
+  /**
+   * A drive's result from before the app last started: what it would push
+   * and its session going on with your answer are checked against what the
+   * app took in memory before the session, which a restart drops — so it can
+   * only be run again (or continued in your terminal).
+   */
+  needsRerun?: boolean;
   /** Your choice on each thread the author pushed back on (by its first comment's id): keep your comment, or drop it. */
   disputes?: Record<string, "keep" | "drop">;
   error?: string;

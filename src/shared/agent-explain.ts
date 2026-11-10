@@ -234,6 +234,23 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
   } else {
     owner = "you";
     const plan = read.plan;
+    /**
+     * A drive's result from before the app restarted (`needsRerun`): its push
+     * and its answer would only be refused, so the card offers what still
+     * works — running it again — and shows its question as what the new run
+     * will ask, not as buttons.
+     */
+    const rerunCard = (it: AgentItem) => {
+      const n = it.drive?.commits.length ?? 0;
+      now = `The app restarted after this run, so it can't push ${n > 0 ? `its ${plural(n, "commit")}` : "anything"} or go on with your answer any more.`;
+      ask = "Run it again — the new run redoes the work and asks you again if it still needs to.";
+      choices = [
+        { label: "Run again", primary: true, does: "Starts it over with a fresh session on the PR as it is now; its commits and questions come back here.", act: { type: "retry", runId } },
+        ...(it.sessionId && it.worktree ? [{ label: "Open in Claude", does: "Opens the old session in your terminal — its commits and pushes are then yours to make.", act: { type: "continue", runId } } as BoardChoice] : []),
+        { label: "Discard", does: "Drops it; the agent leaves this commit to you.", act: { type: "skip", runId } },
+      ];
+      next = "A new run starts; its result comes back here.";
+    };
     switch (kind) {
       case "send": {
         if (item?.scenario === "drive") {
@@ -329,6 +346,10 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         break;
       }
       case "push": {
+        if (item?.needsRerun) {
+          rerunCard(item);
+          break;
+        }
         const n = item?.drive?.commits.length ?? 0;
         const reasons = item?.reasons ?? [];
         const what = reasons.includes("self") ? "what its self-review found" : reasons.includes("ci") ? "the failing CI" : reasons.includes("conflicts") ? "the conflict" : "what reviewers asked";
@@ -344,6 +365,10 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         break;
       }
       case "decide": {
+        if (item?.scenario === "drive" && item.needsRerun) {
+          rerunCard(item);
+          break;
+        }
         const q = read.asks[0];
         now = `The agent needs your decision${read.asks.length > 1 ? ` on ${read.asks.length} questions` : q ? `: ${q.question}` : ""}.`;
         ask = "Answer below — only you can decide this.";

@@ -437,6 +437,11 @@ export function createAgent(deps: AgentDeps): Agent {
   // It goes on by itself once the PRs are known (`recoverInterrupted`).
   for (const item of store.data.items) {
     if (item.state === "working") markInterrupted(item, now().toISOString());
+    // A drive's result from before this start: its push and its answer are
+    // checked against what the app took in memory before the session
+    // (`pushTo`), and that is gone — it can only be run again. Its card says
+    // so instead of offering a push or an answer that would be refused.
+    else if (item.scenario === "drive" && item.state === "needsYou" && !item.interrupted && !item.pushTo) item.needsRerun = true;
   }
   void store.save();
 

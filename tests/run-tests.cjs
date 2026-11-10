@@ -10198,6 +10198,41 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: a drive's result from before a restart is marked to run again — what it would push and answer was checked in memory", async () => {
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const at = "2026-11-10T09:00:00.000Z";
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", queuedAt: at, finishedAt: at };
+      const wt = path.join(home, "wt");
+      nfsA.mkdirSync(wt, { recursive: true });
+      nfsA.mkdirSync(path.join(home, "agent"), { recursive: true });
+      nfsA.writeFileSync(
+        path.join(home, "agent", "state.json"),
+        JSON.stringify({
+          version: 1,
+          ledger: {},
+          day: "2026-11-10",
+          runsToday: 0,
+          items: [
+            { ...base, runId: "d1", key: "PR_R|drive|aaa111|comments@-", scenario: "drive", state: "needsYou", headline: "No commits — see what it found", reasons: ["comments"], sessionId: "s", worktree: wt },
+            { ...base, runId: "r1", key: "PR_R|review|aaa111", scenario: "review", state: "needsYou", headline: "Would post: comment" },
+            { ...base, runId: "d2", key: "PR_R|drive|aaa111|ci", scenario: "drive", state: "done", headline: "Pushed" },
+          ],
+          acceptedUnchanged: 0,
+          drive: {},
+          pushedHeads: {},
+          paused: false,
+        }),
+      );
+      const f = agentFixture({ home, script: keepWorking });
+      try {
+        assert.deepStrictEqual(only(f).map((i) => [i.runId, i.needsRerun ?? false]), [["d1", true], ["r1", false], ["d2", false]]);
+        // The refusal its card no longer leads you into.
+        assert.deepStrictEqual(await f.agent.act({ type: "answer", runId: "d1", text: "eng1" }), { ok: false, error: "Since the app restarted, a drive starts over — run it again, or answer in a session." });
+      } finally {
+        f.agent.stop();
+      }
+    });
+
     await atest("agent: a re-review you asked for covers the author's answers before it — only a later answer starts another", async () => {
       const iso = (min) => new Date(Date.now() + min * 60_000).toISOString();
       const pr = { ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), viewerReviewedAt: iso(-60), viewerReviewedHead: true, authorRepliedAt: null };
@@ -10509,6 +10544,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(d.choices.map((c) => [c.label, c.act?.type]), [["Send 1 reply as it is", "publish"], ["Discard", "skip"]], "answering is the question's own form");
       const noAnswers = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), result: ask })]);
       assert.deepStrictEqual(noAnswers.choices.map((c) => c.label), ["Discard"]);
+    });
+
+    test("agent board words: a drive's question or commits from before a restart offer Run again — never an answer or a push that would be refused", () => {
+      const mine = xPr();
+      const ask = { summary: "", asks: [{ question: "Which stand?", options: ["eng1", "eng2"] }], findings: [], authorQuestions: [], structured: true };
+      const asked = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), result: ask, sessionId: "s", worktree: "/w", needsRerun: true })]);
+      assert.deepStrictEqual([asked.owner, asked.stage.action.kind], ["you", "decide"]);
+      assert.strictEqual(asked.now, "The app restarted after this run, so it can't push anything or go on with your answer any more.");
+      assert.deepStrictEqual(asked.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
+        ["Run again", "retry", true],
+        ["Open in Claude", "continue", false],
+        ["Discard", "skip", false],
+      ]);
+      assert.deepStrictEqual(asked.read.asks.map((a) => a.question), ["Which stand?"], "its question still reads, as what the new run will ask");
+      const commits = xOne(mine, [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2), needsRerun: true })]);
+      assert.strictEqual(commits.stage.action.kind, "push");
+      assert.match(commits.now, /can't push its 2 commits/);
+      assert.deepStrictEqual(commits.choices.map((c) => c.label), ["Run again", "Discard"], "no Push, no session to open");
+      // The same run before any restart: its own question and push, as ever.
+      const live = xOne(mine, [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2) })]);
+      assert.strictEqual(live.choices[0].label, "Push 2 fixes");
     });
 
     test("agent board words: a review nobody started is the agent's to start — unless the agent is off", () => {

@@ -75,7 +75,9 @@ export function PrBoard({
     }, 50);
     return () => window.clearTimeout(t);
   }, [focus?.n, focus?.runId]);
-  const [notice, setNotice] = useState<string | null>(null);
+  // A refusal, with the PR it is about: shown on that PR's open card, where
+  // the click was — at the top it read as a click that did nothing.
+  const [notice, setNotice] = useState<{ text: string; prId: string | null } | null>(null);
 
   if (!state) {
     return <div className="rounded-lg border border-line bg-surface/40 p-8 text-center text-sm text-fg-subtle">The PR agent isn&apos;t available here.</div>;
@@ -84,7 +86,8 @@ export function PrBoard({
   const first = queueOrder(state.items.filter((i) => i.state === "queued"))[0]?.runId ?? null;
   const run: Run = async (action) => {
     const res = await act(action);
-    setNotice(res.ok ? null : res.error);
+    const prId = "prId" in action ? action.prId : "runId" in action ? (state.items.find((i) => i.runId === action.runId)?.prId ?? null) : null;
+    setNotice(res.ok ? null : { text: res.error, prId });
     // An approval given again changes GitHub's state, not an item: read it again so the card moves now.
     if (res.ok && action.type === "approveAgain") void window.api.refresh().catch(() => {});
     return res.ok;
@@ -97,13 +100,24 @@ export function PrBoard({
 
   return (
     <div className="mx-auto max-w-4xl space-y-7 pb-10">
-      <Overview state={state} yours={yours.length} agent={agent} others={others.length} done={done.length} earlier={earlier} hiddenReady={hiddenReady} onClearFilters={onClearFilters} notice={notice} run={run} />
+      <Overview
+        state={state}
+        yours={yours.length}
+        agent={agent}
+        others={others.length}
+        done={done.length}
+        earlier={earlier}
+        hiddenReady={hiddenReady}
+        onClearFilters={onClearFilters}
+        notice={notice && !yours.some((e) => e.prId === notice.prId) ? notice.text : null}
+        run={run}
+      />
 
       {yours.length > 0 && (
         <section aria-label="Your turn" className="space-y-4">
           <h2 className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">Your turn</h2>
           {yours.map((e, i) => (
-            <Decision key={e.prId} e={e} n={i + 1} run={run} onOpen={() => open(e)} />
+            <Decision key={e.prId} e={e} n={i + 1} run={run} onOpen={() => open(e)} notice={notice?.prId === e.prId ? notice.text : null} />
           ))}
         </section>
       )}
@@ -218,7 +232,7 @@ function Overview({
 }
 
 /** A decision, open: what happened, what to read, your move with what each button does, and what comes next. */
-function Decision({ e, n, run, onOpen }: { e: BoardEntry; n: number; run: Run; onOpen: () => void }) {
+function Decision({ e, n, run, onOpen, notice }: { e: BoardEntry; n: number; run: Run; onOpen: () => void; notice: string | null }) {
   const item = e.item;
   const primary = e.choices.find((c) => c.primary) ?? null;
   const rest = e.choices.filter((c) => c !== primary);
@@ -247,13 +261,20 @@ function Decision({ e, n, run, onOpen }: { e: BoardEntry; n: number; run: Run; o
         <ReadThis e={e} run={run} />
         <Row label="Your move">
           <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">{e.ask}</p>
-          {kind === "decide" && item && e.read.asks.length > 0 && <YourCall item={item} asks={e.read.asks} canAnswer={Boolean(item.sessionId)} run={run} />}
+          {(kind === "decide" || (item?.needsRerun && kind === "push")) && item && e.read.asks.length > 0 && (
+            <YourCall item={item} asks={e.read.asks} canAnswer={Boolean(item.sessionId) && !item.needsRerun} run={run} />
+          )}
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {primary && <ChoiceButton choice={primary} item={item} run={run} big />}
             {rest.map((c) => (
               <ChoiceButton key={c.label} choice={c} item={item} run={run} big />
             ))}
           </div>
+          {notice && (
+            <div role="alert" className="mt-2 rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 text-xs text-red-800 dark:text-red-200">
+              {notice}
+            </div>
+          )}
           {primary && (
             <p className="mt-2 text-xs text-fg-muted">
               <span className="font-medium text-fg-secondary">{primary.label}:</span> {primary.does}
@@ -321,7 +342,7 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
         )}
         {commits && item?.drive && (
           <div>
-            <div className="text-xs font-medium text-fg">What gets pushed</div>
+            <div className="text-xs font-medium text-fg">{item.needsRerun ? "What it committed — never pushed; the new run makes it again" : "What gets pushed"}</div>
             <DriveView drive={item.drive} />
             {item.plan && item.plan.replies.length > 0 && <PlanView plan={item.plan} />}
           </div>
@@ -751,7 +772,11 @@ function YourCall({ item, asks, canAnswer, run }: { item: AgentItem; asks: RunAs
         </button>
       )}
       <div className="mt-1.5 text-[11px] text-fg-faint">
-        {canAnswer ? "The same session goes on with your answer and comes back here." : "Answer it in the session: the dry run changes nothing by itself."}
+        {canAnswer
+          ? "The same session goes on with your answer and comes back here."
+          : item.needsRerun
+            ? "This can't be answered any more — the app restarted since. Run it again: the new run asks this again if it still needs to."
+            : "Answer it in the session: the dry run changes nothing by itself."}
       </div>
     </div>
   );

@@ -216,7 +216,13 @@ Three layers:
   idle comes from what the head's run really did (`ledgerIdle`): "Running"
   only while it is live, else how it ended, and every run's end plans
   again at once — except one taken over, cut short or ended by the
-  switch-off — so no reason waits for the next poll. A
+  switch-off — so no reason waits for the next poll. A drive's result
+  from before the app last started is marked `needsRerun` at start: its
+  push and its answer are checked against what the app took in memory
+  (`pushTo`), so its card offers Run again (and Open in Claude) instead of
+  a question's buttons or a Push that would only be refused, and shows the
+  question as what the new run will ask. A refused action's message shows
+  on the open card it came from, not only at the top of the Board. A
   move ready for you names itself wherever the PR shows — the Roomy line's
   button ("Send review →", "Push 2 fixes →") and the Cozy cell open its card
   on the Board, the one place it is sent from, since a bare "Open" left an
