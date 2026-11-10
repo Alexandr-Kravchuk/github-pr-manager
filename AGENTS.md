@@ -80,7 +80,10 @@ Three layers:
   whose head is its base (same host and repo), the card's umbrella then reads
   "on #N" and opens that PR — hovering it outlines that PR's card
   (`components/linked-pr.ts` toggles `.pr-linked` on its `data-pr-id` root, a
-  class rather than React state so a hover does not re-render the list) — the tile's `↳` carries the number, and the map is
+  class rather than React state so a hover does not re-render the list), and
+  when that card is not on screen — scrolled away (the band under the sticky
+  header counts, `linkedPrPlace`), filtered out or in a collapsed group —
+  `BasePrMarker` hangs a preview of the PR under the marker instead — the tile's `↳` carries the number, and the map is
   built from the whole snapshot (`BasePrContext`) so a filter cannot hide the
   base's number; GitHub merges a stack bottom-up only yet reports the PRs
   above the bottom as `CLEAN`, so `canBeMerged` in `github.ts` is gated on

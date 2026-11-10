@@ -1,3 +1,5 @@
+import { linkedPrPlace, type LinkedPrPlace } from "../../../shared/pr-group";
+
 /**
  * Lights up the card or tile of another PR while the pointer is on a marker
  * that names it — the "on #N" umbrella of a hand-made stacked PR. A class
@@ -7,13 +9,25 @@
  */
 const LINKED_CLASS = "pr-linked";
 
-function elementsOf(prId: string): NodeListOf<HTMLElement> {
-  return document.querySelectorAll<HTMLElement>(`[data-pr-id="${CSS.escape(prId)}"]`);
+function elementsOf(prId: string): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>(`[data-pr-id="${CSS.escape(prId)}"]`)];
 }
 
-/** Handlers for the marker: highlight on pointer or focus, clear on leave or blur. */
-export function linkedPrHandlers(prId: string) {
-  const on = () => elementsOf(prId).forEach((el) => el.classList.add(LINKED_CLASS));
-  const off = () => elementsOf(prId).forEach((el) => el.classList.remove(LINKED_CLASS));
-  return { onMouseEnter: on, onMouseLeave: off, onFocus: on, onBlur: off };
+export function setLinkedHighlight(prId: string, on: boolean): void {
+  for (const el of elementsOf(prId)) el.classList.toggle(LINKED_CLASS, on);
+}
+
+/**
+ * Where that PR is right now. The sticky header covers the top of the window,
+ * so a card scrolled under it is not "visible" even though it is in the
+ * viewport.
+ */
+export function locateLinkedPr(prId: string): LinkedPrPlace {
+  const header = document.querySelector("header");
+  const viewTop = header ? header.getBoundingClientRect().bottom : 0;
+  return linkedPrPlace(
+    elementsOf(prId).map((el) => el.getBoundingClientRect()),
+    viewTop,
+    window.innerHeight,
+  );
 }

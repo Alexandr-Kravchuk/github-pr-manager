@@ -8,7 +8,7 @@ import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/type
 import { cn, relativeTime } from "../format";
 import { AuthorButton } from "./AuthorButton";
 import { BasePrContext } from "./base-pr-context";
-import { linkedPrHandlers } from "./linked-pr";
+import { BasePrMarker } from "./BasePrMarker";
 import { CheckBadge } from "./CheckBadge";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
@@ -255,17 +255,16 @@ export function PrCard({
           {!pr.stack && !pr.baseIsDefaultBranch && (
             basePr ? (
               // A hand-made stack: name the PR under this one, which merges first.
-              <button
-                type="button"
-                onClick={() => onOpen(basePr)}
-                {...linkedPrHandlers(basePr.id)}
-                title={basePrTitle(pr, basePr)}
-                aria-label={`Based on pull request ${basePr.number}`}
+              <BasePrMarker
+                pr={pr}
+                base={basePr}
+                trackComments={trackComments}
+                onOpen={onOpen}
                 className="inline-flex shrink-0 items-center gap-0.5 rounded px-0.5 text-emerald-600 tabular-nums hover:bg-elevated dark:text-emerald-400"
               >
                 <UmbrellaIcon />
                 <span>on #{basePr.number}</span>
-              </button>
+              </BasePrMarker>
             ) : (
               <span
                 title={basePrTitle(pr, undefined)}
