@@ -1134,7 +1134,7 @@ export function App() {
         {/* Toolbar: view controls (row 1) and filters (row 2). Inside the sticky
             header so the filters stay on screen while the list scrolls. */}
         {!configError && (
-          <div className="mt-3 space-y-2 pt-3">
+          <div className="mt-2 space-y-2">
             {/* Row 1 — search + how the list is viewed (sort / group / scope). */}
             <div className="flex flex-wrap items-center gap-2">
               {/* A typed query hides rows as quietly as any chip, but unlike a chip
