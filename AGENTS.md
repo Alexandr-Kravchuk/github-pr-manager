@@ -206,7 +206,17 @@ Three layers:
   brief over (`takeBrief`: the brief closes, its questions for the author go
   into the review's prompt and its text onto the review's card, and the brief
   alone sends no toast). "Draft a review" is left for a brief no review
-  followed — reviews off, or the request gone. A
+  followed — reviews off, or the request gone. A run the agent planned
+  itself that fails (`fail`: a checkout the network refused, a crashed
+  session) is tried once more by itself `RETRY_AFTER_MS` later (`retryAt`
+  on the failed item, `dueRetry` in the plan; the new run carries
+  `retryOf` and is not tried a third time) while the plan still wants that
+  head — not a run you asked for, not one cut short again and again; the
+  card, the toast and the PR's reason say when. A PR's reason when it is
+  idle comes from what the head's run really did (`ledgerIdle`): "Running"
+  only while it is live, else how it ended, and every run's end plans
+  again at once — except one taken over, cut short or ended by the
+  switch-off — so no reason waits for the next poll. A
   move ready for you names itself wherever the PR shows — the Roomy line's
   button ("Send review →", "Push 2 fixes →") and the Cozy cell open its card
   on the Board, the one place it is sent from, since a bare "Open" left an

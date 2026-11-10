@@ -192,14 +192,28 @@ function runningHeadline(item: Pick<AgentItem, "scenario" | "reasons">): string 
   return item.reasons?.length ? `Driving — ${describeReasons(item.reasons)}` : workingHeadline(item.scenario);
 }
 
-/** Why a PR the agent would take shows as Idle: it already did, or you said no, for this head. */
+/**
+ * Why a PR the agent would take shows as Idle: it already did, or you said no,
+ * for this head — the fallbacks when no run of that head says more
+ * (`ledgerIdle`).
+ */
 const LEDGER_IDLE: Record<LedgerEntry["state"], string> = {
   started: "Running",
   prepared: "The agent already ran on this head",
   published: "Done for this head",
-  failed: "Its last run on this head failed — drag it to the queue to try again",
-  dismissed: "You took it out of the queue — drag it back to run it",
+  failed: "Its last run on this head failed",
+  dismissed: "You took it out of the queue for this head",
 };
+
+/** How long after a failure the agent tries a run it planned once more: long enough for a network or a busy clone to come back. */
+export const RETRY_AFTER_MS = 10 * 60_000;
+/** The runs a failure is tried again for — not offers, not the Jira dry run after a merge. */
+const RETRIED: ReadonlySet<AgentScenario> = new Set(["review", "brief", "rereview", "drive"]);
+
+/** "13:45": a time later today, as a card says it. */
+function clockTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+}
 
 /** The PR's host and "host/owner/name", for gh's GH_HOST and GH_REPO. */
 export function ghTarget(prUrl: string, repo: string): Record<string, string> {
@@ -652,6 +666,49 @@ export function createAgent(deps: AgentDeps): Agent {
     return asked.some((i) => i.scenario === "rereview" && (trigger === null || Date.parse(i.queuedAt) >= trigger));
   }
 
+  /** The closing lines of a run something else replaced or ended: they say nothing of how the head went. */
+  const CLOSING_LINES: ReadonlySet<string> = new Set(Object.values(AGENT_CLOSED));
+
+  /**
+   * How the head's run went, in its own last line: the ledger's run, or — when
+   * that one was only replaced or closed (run again, superseded) — the latest
+   * run on the same PR and head that says more.
+   */
+  function headOutcome(job: Pick<AgentJob, "prId" | "key">, run: AgentItemRecord | undefined): string | null {
+    const ended = (i: AgentItemRecord) => i.state !== "queued" && i.state !== "working" && !CLOSING_LINES.has(i.headline);
+    if (run && ended(run)) return run.headline;
+    const head = keyHead(job.key);
+    const last = store.data.items
+      .filter((i) => i.prId === job.prId && keyHead(i.key) === head && i.finishedAt && ended(i))
+      .sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""))[0];
+    return last?.headline ?? null;
+  }
+
+  /**
+   * Why the plan leaves a job to its ledger entry, in what really happened:
+   * "Running" only while that run is live — a run that ended in a way the
+   * ledger didn't follow (cut short, then replaced) says how it ended instead.
+   */
+  function ledgerIdle(job: Pick<AgentJob, "prId" | "key">, entry: LedgerEntry): string {
+    const run = store.data.items.find((i) => i.runId === entry.runId);
+    if (entry.state === "dismissed") return LEDGER_IDLE.dismissed;
+    if (entry.state === "started" && run && (run.state === "queued" || run.state === "working")) return LEDGER_IDLE.started;
+    const outcome = headOutcome(job, run);
+    if (entry.state === "failed" && run?.state === "error") {
+      if (run.retryAt) return `Its last run on this head failed (${run.headline}) — it tries again by itself at ${clockTime(run.retryAt)}`;
+      return run.retryOf ? `Its run on this head failed twice (${run.headline}) — over to you` : `${LEDGER_IDLE.failed} (${run.headline})`;
+    }
+    if (!outcome) return LEDGER_IDLE[entry.state === "started" ? "prepared" : entry.state];
+    return entry.state === "published" ? `Done for this head — ${outcome}` : `Its last run on this head ended: ${outcome}`;
+  }
+
+  /** The failed run of a ledger entry whose one try again is due now, or null. */
+  function dueRetry(entry: LedgerEntry): AgentItemRecord | null {
+    if (entry.state !== "failed") return null;
+    const run = store.data.items.find((i) => i.runId === entry.runId);
+    return run?.state === "error" && run.retryAt && Date.parse(run.retryAt) <= now().getTime() ? run : null;
+  }
+
   /** A brief of this head was written — the agent's own or one you asked for: the policy's `briefDone`. */
   function briefDone(pr: Pick<PullRequest, "id" | "headOid">): boolean {
     const key = jobKey(pr, "brief");
@@ -1047,9 +1104,11 @@ export function createAgent(deps: AgentDeps): Agent {
     const wanted = new Set(plan.jobs.map((j) => j.key));
     for (const job of plan.jobs) {
       const before = store.data.ledger[job.key];
-      if (before) {
+      // A run of this head failed and its one try again is due: it goes ahead as a new run.
+      const retryOf = before ? dueRetry(before) : null;
+      if (before && !retryOf) {
         // Shown only while the PR has no live item: then it is Idle, and this says why.
-        idle[job.prId] = LEDGER_IDLE[before.state];
+        idle[job.prId] = ledgerIdle(job, before);
         continue;
       }
       if (store.data.items.some((i) => i.key === job.key && (i.state === "queued" || i.state === "working"))) continue;
@@ -1059,13 +1118,28 @@ export function createAgent(deps: AgentDeps): Agent {
         idle[job.prId] = "You asked the agent about this head yourself";
         continue;
       }
+      if (retryOf) delete store.data.ledger[job.key];
       // A big PR's review follows its brief: closed first, so the review doesn't
       // merely supersede it, and what it found travels with the review.
       const brief = job.scenario === "review" ? takeBrief(job.prId, keyHead(job.key)) : null;
-      const item = newItem(job, byId.get(job.prId)!, brief ? "Queued: review — after its brief" : queuedHeadline(job));
+      const headline = brief ? "Queued: review — after its brief" : retryOf ? `Queued: trying again — the last run failed (${retryOf.headline})` : queuedHeadline(job);
+      const item = newItem(job, byId.get(job.prId)!, headline);
       if (brief) Object.assign(item, brief);
+      if (retryOf) {
+        // The failed run's result goes now (`supersede`), and this one is not tried a third time.
+        item.retryOf = retryOf.runId;
+        retryOf.retryAt = undefined;
+      }
       supersede(item);
       dirty = true;
+    }
+    // A failure the plan no longer points at — a new head, the request gone —
+    // won't be tried again: its card stops saying it will.
+    for (const item of store.data.items) {
+      if (item.state === "error" && item.retryAt && !wanted.has(item.key)) {
+        item.retryAt = undefined;
+        dirty = true;
+      }
     }
     // A queued job the PR no longer wants (you reviewed it, it went away) leaves
     // quietly — unless you asked for it yourself. The Jira dry run after a merge
@@ -1159,6 +1233,12 @@ export function createAgent(deps: AgentDeps): Agent {
       item.headline = headline;
       item.error = error;
       item.finishedAt = stamp();
+      // Tried once more by itself a while later — most failures are the network
+      // or a clone busy for a moment. Not your own ask (yours to repeat), not a
+      // run that is a try again already, not one cut short again and again.
+      if (RETRIED.has(item.scenario) && !item.key.endsWith("|asked") && !item.retryOf && !headline.startsWith("Cut short")) {
+        item.retryAt = new Date(now().getTime() + RETRY_AFTER_MS).toISOString();
+      }
       // Recorded even when the run never started, or every tick would queue the
       // same PR again; a new head commit is a new key and gets another try.
       store.data.ledger[item.key] = { state: "failed", at: item.finishedAt, runId: item.runId };
@@ -1540,17 +1620,27 @@ export function createAgent(deps: AgentDeps): Agent {
     } else if (pushNow) {
       // On: the app pushes the drive's commits, with the same checks as your Push.
       await pushItem(item, all);
-    } else if (item.state === "needsYou" && !item.interrupted) {
-      // A big PR's brief: planned again at once, its review takes it over —
-      // and that review is what comes to you. Only a brief no review follows
-      // (reviews off, the request gone) waits for you as it is.
-      if (item.scenario === "brief" && !stopped) {
-        const snapshot = deps.getSnapshot();
-        if (snapshot) onSnapshot(snapshot);
-      }
+    }
+    // Planned again at once, not at the next poll: the PR's reason says how
+    // this run ended instead of a stale "Running", and what follows starts — a
+    // big PR's review takes its brief over, so that review is what comes to
+    // you; only a brief no review follows (reviews off, the request gone)
+    // waits for you as it is. Not after a run you took over — the plan's
+    // worktree sweep could take its folder from under the session your
+    // terminal is still opening — nor one cut short, whose recovery is the
+    // next plan's (`recoverInterrupted`), nor one the agent's switching off ended.
+    if (!stopped && !entry.takeOver && !entry.offStop && !item.interrupted) {
+      const snapshot = deps.getSnapshot();
+      if (snapshot) onSnapshot(snapshot);
+    }
+    // Read afresh: the plan may have closed it (a brief its review took over).
+    const after = item.state as AgentItem["state"];
+    if (publishNow || pushNow) {
+      // Their own result says what went out.
+    } else if (after === "needsYou" && !item.interrupted) {
       // An interrupted run asks nothing of you: it goes on by itself.
-      if ((item.state as AgentItem["state"]) === "needsYou") announce(item, "needsYou");
-    } else if (item.state === "done" && !entry.takeOver && !entry.offStop && !outcome.stopped) {
+      announce(item, "needsYou");
+    } else if (after === "done" && ended === "done" && !entry.takeOver && !entry.offStop && !outcome.stopped) {
       // What you did yourself isn't news to you.
       announce(item, "finished");
     }

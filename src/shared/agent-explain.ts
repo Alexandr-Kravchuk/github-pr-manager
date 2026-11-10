@@ -362,8 +362,10 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         break;
       }
       case "fix": {
-        now = `The agent couldn't finish: ${lower(item?.headline ?? "it stopped")}.`;
-        ask = "See what went wrong, then try again — or leave it.";
+        // A run the agent planned itself is tried once more on its own (`retryAt`); a second failure is yours.
+        const retryAt = item?.retryAt ? new Date(item.retryAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : null;
+        now = `The agent couldn't finish: ${lower(item?.headline ?? "it stopped")}${retryAt ? ` — it tries again by itself at ${retryAt}` : item?.retryOf ? " — the second time in a row" : ""}.`;
+        ask = retryAt ? "Nothing needed — or see what went wrong and try again now." : "See what went wrong, then try again — or leave it.";
         const inClaude = stage.action?.label === "Open in Claude";
         choices = [
           { label: stage.action?.label ?? "Try again", primary: true, does: inClaude ? "Opens the session in your terminal where it stopped." : "Starts it over with a fresh session.", act: inClaude ? { type: "continue", runId } : { type: "retry", runId } },

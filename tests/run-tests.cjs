@@ -9854,7 +9854,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid } = {}) => {
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid, now } = {}) => {
       // `home`: the folder of an earlier fixture — the same app started again.
       const dir = home ?? nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
@@ -9900,6 +9900,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           return c;
         },
         tickMs,
+        // A test that waits out a delay sets the clock.
+        ...(now ? { now } : {}),
       });
       // Settings › Agent saved anew.
       const setAgent = (over) => {
@@ -10087,6 +10089,114 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     // A run that starts and then keeps working until it is told otherwise.
     const keepWorking = (c) => emit(c, { type: "system", subtype: "init", session_id: "s" });
     const only = (f) => f.agent.getState().items;
+
+    await atest("agent: a run the agent planned that fails is tried once more by itself, ten minutes on — a second failure is yours", async () => {
+      let t = Date.parse("2026-11-10T10:00:00Z");
+      const titles = [];
+      const f = agentFixture({
+        now: () => new Date(t),
+        notify: (n) => titles.push([n.kind, view.agentNoticeTitle(n.kind, n.item)]),
+        script: (c) => {
+          c.stderr.write("fatal: unable to access the remote\n");
+          setImmediate(() => c.emit("exit", 1));
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "error"));
+        const first = only(f)[0];
+        assert.strictEqual(first.retryAt, new Date(t + agentCore.RETRY_AFTER_MS).toISOString());
+        // Said as the run ends, not at the next poll.
+        await until(() => /^Its last run on this head failed \(The run failed\) — it tries again by itself at \d\d:\d\d$/.test(f.agent.getState().idle.PR_R ?? ""));
+        assert.match(titles.find(([k]) => k === "failed")[1], /^The agent couldn't finish #7 — it tries again at \d\d:\d\d$/);
+        // Not before its time.
+        t += agentCore.RETRY_AFTER_MS - 1000;
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 1);
+        t += 1000;
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).filter((i) => i.state === "error").length === 1 && only(f).length === 2 && f.children.length === 2);
+        const [old, again] = only(f);
+        assert.deepStrictEqual([old.state, old.headline, old.retryAt], ["done", view.AGENT_CLOSED.superseded, undefined], "the failed card leaves for the new run");
+        assert.deepStrictEqual([again.key, again.retryOf], [first.key, first.runId], "the same head's job, marked as its try again");
+        await until(() => only(f)[1].state === "error");
+        assert.strictEqual(only(f)[1].retryAt, undefined, "a try again isn't tried a third time");
+        await until(() => f.agent.getState().idle.PR_R === "Its run on this head failed twice (The run failed) — over to you");
+        t += 10 * agentCore.RETRY_AFTER_MS;
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a failure you asked for, or one the PR no longer wants, isn't tried again", async () => {
+      let t = Date.parse("2026-11-10T10:00:00Z");
+      const f = agentFixture({ pr: reviewPr({ requestedOfMe: false }), now: () => new Date(t), script: (c) => setImmediate(() => c.emit("exit", 1)) });
+      try {
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => only(f).some((i) => i.state === "error"));
+        assert.strictEqual(only(f)[0].retryAt, undefined, "your own ask is yours to repeat");
+      } finally {
+        f.agent.stop();
+      }
+      let t2 = Date.parse("2026-11-10T10:00:00Z");
+      const g = agentFixture({ now: () => new Date(t2), script: (c) => setImmediate(() => c.emit("exit", 1)) });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => only(g).some((i) => i.state === "error"));
+        assert.ok(only(g)[0].retryAt);
+        // You reviewed it yourself meanwhile: the plan wants nothing, and the card stops promising a try again.
+        g.snapshot.pullRequests[0] = { ...g.snapshot.pullRequests[0], roles: ["reviewed"], viewerHasReviewed: true, requestedOfMe: false };
+        t2 += 2 * agentCore.RETRY_AFTER_MS;
+        g.agent.onSnapshot(g.snapshot);
+        assert.deepStrictEqual([only(g)[0].retryAt, g.children.length], [undefined, 1]);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: an idle PR says how its head's run ended — at once, and never 'Running' with no run live", async () => {
+      const f = agentFixture({ script: succeed("Looked at it; nothing to say.") });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "done"));
+        // Without waiting for the next poll.
+        await until(() => f.agent.getState().idle.PR_R === "Its last run on this head ended: Reviewed — nothing to post");
+      } finally {
+        f.agent.stop();
+      }
+      // A run the app's closing cut short and that went on as another, asked run: the head's ledger entry still reads "started".
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const at = (m) => `2026-11-10T09:${String(m).padStart(2, "0")}:00.000Z`;
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", scenario: "review", mode: "shadow" };
+      nfsA.mkdirSync(path.join(home, "agent"), { recursive: true });
+      nfsA.writeFileSync(
+        path.join(home, "agent", "state.json"),
+        JSON.stringify({
+          version: 1,
+          ledger: { "PR_R|review|aaa111": { state: "started", at: at(0), runId: "r1" } },
+          day: "2026-11-10",
+          runsToday: 0,
+          items: [
+            { ...base, runId: "r1", key: "PR_R|review|aaa111", state: "done", headline: view.AGENT_CLOSED.rerun, queuedAt: at(0), finishedAt: at(5) },
+            { ...base, runId: "r2", key: "PR_R|review|aaa111|asked", state: "done", headline: "Stopped by you", queuedAt: at(5), finishedAt: at(9) },
+          ],
+          acceptedUnchanged: 0,
+          drive: {},
+          pushedHeads: {},
+          paused: false,
+        }),
+      );
+      const g = agentFixture({ home, script: keepWorking });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        assert.strictEqual(g.agent.getState().idle.PR_R, "Its last run on this head ended: Stopped by you");
+        assert.strictEqual(g.children.length, 0);
+      } finally {
+        g.agent.stop();
+      }
+    });
 
     await atest("agent: a re-review you asked for covers the author's answers before it — only a later answer starts another", async () => {
       const iso = (min) => new Date(Date.now() + min * 60_000).toISOString();

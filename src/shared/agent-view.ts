@@ -741,7 +741,11 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
  */
 export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item: AgentItem): string {
   const pr = `#${item.prNumber}`;
-  if (kind === "failed") return `The agent couldn't finish ${pr}`;
+  if (kind === "failed") {
+    // A run the agent planned is tried once more on its own: the toast says so, rather than asking you to.
+    const at = item.retryAt ? new Date(item.retryAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : null;
+    return at ? `The agent couldn't finish ${pr} — it tries again at ${at}` : `The agent couldn't finish ${pr}`;
+  }
   if (kind === "finished") {
     // Before `published`: what an offer gives is marked published too.
     if (item.scenario === "reapprove") return `Approved again: ${pr}`;

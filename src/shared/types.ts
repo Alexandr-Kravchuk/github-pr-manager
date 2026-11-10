@@ -932,6 +932,14 @@ export interface AgentItem {
   carry?: string[];
   /** The brief a big PR's review follows, kept on the review's card — the brief itself closes once the review is queued. */
   brief?: string;
+  /**
+   * A failed run the agent planned itself: when it tries it once more on its
+   * own, while the PR still wants it. Cleared once that try is queued or the
+   * PR no longer wants it.
+   */
+  retryAt?: string;
+  /** The failed run this one tries again, by its runId — a run that is a try again is not tried a third time. */
+  retryOf?: string;
   /** Your choice on each thread the author pushed back on (by its first comment's id): keep your comment, or drop it. */
   disputes?: Record<string, "keep" | "drop">;
   error?: string;
