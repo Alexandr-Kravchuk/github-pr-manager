@@ -175,6 +175,10 @@ function isAbsolutePath(p: string): boolean {
 function readPath(p: string, workDir: string | undefined): { path: string } | { error: string } {
   const t = p.trim();
   if (t.startsWith("~")) return { error: "Agent runs don't read paths under ~ — name the file inside the run's folders." };
+  // Refused before anything resolves it: `path.resolve` drops `src/docs/..`
+  // as written, while the system follows `docs` first — a link the PR's
+  // branch carries out of the worktree — and steps up from where it leads.
+  if (t.split(/[\\/]/).includes("..")) return { error: "Agent runs don't read paths with '..' — name the file inside the run's folders." };
   if (/^[\\/]{2}/.test(t)) return { error: "Agent runs don't read network or device paths." };
   if (t.replace(/^[A-Za-z]:(?=[\\/])/, "").includes(":")) return { error: `${t}: a colon belongs only after a drive letter.` };
   const abs = isAbsolutePath(t) ? t : workDir ? `${workDir.replace(/[\\/]+$/, "")}/${t}` : null;
@@ -195,7 +199,13 @@ function globStart(pattern: string): { path: string | null } | { error: string }
   const pieces = p.split(/[{},]/).map((x) => x.trim());
   if (pieces.some((x) => x.startsWith("~"))) return { error: "Agent runs don't glob under ~." };
   if (/^[\\/]{2}/.test(p) || p.replace(/^[A-Za-z]:(?=[\\/])/, "").includes(":")) return { error: "A Glob pattern takes no network path, and a colon only after a drive letter." };
-  if (pieces.some((x) => x.split(/[\\/]/).includes(".."))) return { error: "A Glob pattern can't step out of its folder with '..'." };
+  // Off Windows a backslash escapes the next character, so the glob engine
+  // reads `\.\./` and `.\./` as `../`: the escapes are dropped and the
+  // pattern judged again, as well as split at both separators as written.
+  const unescaped = (x: string) => x.replace(/\\(.)/g, "$1");
+  if (pieces.some((x) => x.split(/[\\/]/).includes("..") || unescaped(x).split("/").includes(".."))) {
+    return { error: "A Glob pattern can't step out of its folder with '..'." };
+  }
   if (pieces.slice(1).some(isAbsolutePath)) return { error: "A Glob pattern's alternatives can't be absolute paths." };
   if (!isAbsolutePath(p)) return { path: null };
   const segs = p.split(/[\\/]/);

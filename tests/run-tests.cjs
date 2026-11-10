@@ -9214,6 +9214,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ["Grep", { pattern: "x", path: `C:/Users/me/.claude/projects/C--wt/${SID}/tool-results/b1.txt` }],
         ["Glob", { pattern: "**/*.ts" }],
         ["Glob", { pattern: "{CLAUDE.md,AGENTS.md,.ai/**/*.md}" }],
+        ["Glob", { pattern: "src\\**\\*.ts" }],
         ["Glob", { pattern: `${PLUGIN}/skills/creatio-code-review/*` }],
         ["Glob", { pattern: "*", path: "C:/T/prd-agent/r/out" }],
         ["LS", { path: "src" }],
@@ -9261,6 +9262,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ["Glob", { pattern: "../*" }],
         ["Glob", { pattern: "src/../../*" }],
         ["Glob", { pattern: "**/../../*" }],
+        // Off Windows the glob engine drops the escapes and reads `../`.
+        ["Glob", { pattern: "\\.\\./*" }],
+        ["Glob", { pattern: ".\\./*" }],
+        ["Glob", { pattern: "src/\\.\\./\\.\\./*" }],
+        ["Glob", { pattern: "{x,\\.\\./*}" }],
         ["Glob", { pattern: "{/etc/*,x}" }],
         ["Glob", { pattern: "{x,C:/Users/me/.ssh/*}" }],
         ["Glob", { pattern: "~/.ssh/*" }],
@@ -10944,6 +10950,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // Links the PR's branch could carry: followed to where they lead, and refused.
       nfsA.symlinkSync(path.join(home, ".ssh"), path.join(workDir, "src", "docs"), "junction");
       refused("Read", { file_path: path.join(workDir, "src", "docs", "id_rsa") }, "out of the worktree through a link");
+      // As written it is the worktree's own src/x.ts; the system follows `docs` out first and steps up from there.
+      refused("Read", { file_path: `${path.join(workDir, "src", "docs")}${path.sep}..${path.sep}x.ts` }, "a .. after a link out");
+      refused("Grep", { pattern: "x", path: `src/docs/../` }, "a search root with a .. after a link out");
       refused("Grep", { pattern: "PRIVATE KEY", path: path.join(workDir, "src", "docs") }, "a search through a link");
       refused("Glob", { pattern: "*", path: "src/docs" }, "a listing through a link");
       nfsA.symlinkSync(path.join(home, ".ssh"), path.join(spill, "k"), "junction");
