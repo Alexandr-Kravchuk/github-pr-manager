@@ -261,6 +261,26 @@ export function basePrTitle(pr: PullRequest, base: PullRequest | undefined): str
   return `Based on #${base.number} · ${base.title} (${pr.baseRefName}). Merge #${base.number} first — click to open it`;
 }
 
+/** Where the PR an "on #N" marker names is, as the user sees the list now. */
+export type LinkedPrPlace = "visible" | "above" | "below" | "absent";
+
+/**
+ * Decides whether the marker's own outline is enough or a preview has to show
+ * the PR: `rects` are the vertical extents of its rendered cards (none when a
+ * filter or a collapsed group keeps it out of the list), `viewTop`/`viewBottom`
+ * the part of the window the list is visible in — below the sticky header. A
+ * card counts as visible when any of it is in that band.
+ */
+export function linkedPrPlace(
+  rects: readonly { top: number; bottom: number }[],
+  viewTop: number,
+  viewBottom: number,
+): LinkedPrPlace {
+  if (rects.length === 0) return "absent";
+  if (rects.some((r) => r.bottom > viewTop && r.top < viewBottom)) return "visible";
+  return rects.every((r) => r.bottom <= viewTop) ? "above" : "below";
+}
+
 /** The tooltip on a PR's stack badge. */
 export function stackTitle(pr: PullRequest): string {
   if (!pr.stack) return "";

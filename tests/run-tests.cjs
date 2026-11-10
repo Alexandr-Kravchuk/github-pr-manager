@@ -2527,6 +2527,15 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     const list = [cpr(1, "a", "b", { baseIsDefaultBranch: false }), cpr(2, "b", "a", { baseIsDefaultBranch: false })];
     assert.deepStrictEqual(prGroup.orderStacks(list).map((p) => p.number).sort(), [1, 2]);
   });
+  test("linkedPrPlace: on screen, scrolled away, or not rendered at all", () => {
+    // The band the list is visible in: under a 100px sticky header, to 800px.
+    assert.strictEqual(prGroup.linkedPrPlace([], 100, 800), "absent");
+    assert.strictEqual(prGroup.linkedPrPlace([{ top: 300, bottom: 400 }], 100, 800), "visible");
+    assert.strictEqual(prGroup.linkedPrPlace([{ top: 50, bottom: 150 }], 100, 800), "visible"); // partly under the header
+    assert.strictEqual(prGroup.linkedPrPlace([{ top: -200, bottom: 90 }], 100, 800), "above"); // hidden by the header
+    assert.strictEqual(prGroup.linkedPrPlace([{ top: 900, bottom: 1000 }], 100, 800), "below");
+    assert.strictEqual(prGroup.linkedPrPlace([{ top: -500, bottom: -400 }, { top: 900, bottom: 1000 }], 100, 800), "below");
+  });
   test("basePrTitle: names the base PR, or the branch when none is listed", () => {
     const [top, base] = chain();
     assert.match(prGroup.basePrTitle(top, base), /^Based on #4043 · T4043 \(h4043\)\. Merge #4043 first/);

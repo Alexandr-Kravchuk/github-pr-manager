@@ -7,6 +7,7 @@ import { cn, relativeTime } from "../format";
 import { basePrTitle } from "../../../shared/pr-group";
 import { AuthorButton } from "./AuthorButton";
 import { BasePrContext } from "./base-pr-context";
+import { BasePrMarker } from "./BasePrMarker";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StaleCloseButton } from "./StaleCloseDialog";
 import { StackBadge } from "./StackBadge";
@@ -113,6 +114,7 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
 
   return (
     <div
+      data-pr-id={pr.id}
       title={tileTooltip(pr, Date.now())}
       className={cn(
         // Hover darkens every side but the left: that one is the accent stripe,
@@ -184,12 +186,24 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
         )}
         <StackBadge pr={pr} />
         {!pr.stack && !pr.baseIsDefaultBranch && (
-          <span
-            title={basePrTitle(pr, basePr)}
-            className="shrink-0 text-emerald-600 tabular-nums dark:text-emerald-400"
-          >
-            ↳{basePr ? `#${basePr.number}` : ""}
-          </span>
+          basePr ? (
+            <BasePrMarker
+              pr={pr}
+              base={basePr}
+              trackComments={trackComments}
+              onOpen={onOpen}
+              className="relative z-10 shrink-0 rounded text-emerald-600 tabular-nums hover:bg-elevated dark:text-emerald-400"
+            >
+              ↳#{basePr.number}
+            </BasePrMarker>
+          ) : (
+            <span
+              title={basePrTitle(pr, undefined)}
+              className="shrink-0 text-emerald-600 dark:text-emerald-400"
+            >
+              ↳
+            </span>
+          )
         )}
         {pr.hasNewActivity && (
           <span
