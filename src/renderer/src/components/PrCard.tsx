@@ -493,45 +493,44 @@ export function PrCard({
             </button>
           </span>
         )}
+        {/* CI with the other tags: failures first, then pending; when all is
+            green, the passed ones. No checks at all, no tag. */}
+        {pr.checks.length > 0 && (
+          <>
+            {/* Several checks in one state are one badge (shared/check-groups.ts). */}
+            {collapseChecks([...pr.failingChecks, ...pr.pendingChecks]).map((item) =>
+              item.kind === "one" ? (
+                <CheckBadge key={`c-${item.check.state}-${item.check.name}`} check={item.check} />
+              ) : (
+                <CheckGroupBadge key={`g-${item.state}`} item={item} url={`${pr.url}/checks`} />
+              ),
+            )}
+
+            {/* All green: the passed checks as a badge like the others ("12 checks passed"). */}
+            {pr.failingChecks.length === 0 &&
+              pr.pendingChecks.length === 0 &&
+              (pr.ciState === "success" && passingCount > 0 ? (
+                collapseChecks(pr.checks.filter((c) => c.state === "success")).map((item) =>
+                  item.kind === "one" ? (
+                    <CheckBadge key={`c-success-${item.check.name}`} check={item.check} />
+                  ) : (
+                    <CheckGroupBadge key="g-success" item={item} url={`${pr.url}/checks`} />
+                  ),
+                )
+              ) : (
+                <span className="text-xs text-fg-subtle">CI: no failures</span>
+              ))}
+          </>
+        )}
       </div>
 
-      {/* Reviewers: the avatar rings say who has not reviewed yet, so no
+      {/* Reviewers, always the last row: the avatar rings say who has not reviewed yet, so no
           separate "Waiting for" pill repeats it. */}
       {pr.reviewers.length > 0 && (
-        <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-xs text-fg-subtle">Reviewers:</span>
           {pr.reviewers.map((r) => (
             <ReviewerBadge key={r.login} r={r} />
-          ))}
-        </div>
-      )}
-
-      {/* CI: failures first, then pending; otherwise a summary. A PR with no
-          checks at all gets no row: "No checks" said nothing worth the space. */}
-      {pr.checks.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-        {/* Several checks in one state are one badge (shared/check-groups.ts). */}
-        {collapseChecks([...pr.failingChecks, ...pr.pendingChecks]).map((item) =>
-          item.kind === "one" ? (
-            <CheckBadge key={`c-${item.check.state}-${item.check.name}`} check={item.check} />
-          ) : (
-            <CheckGroupBadge key={`g-${item.state}`} item={item} url={`${pr.url}/checks`} />
-          ),
-        )}
-
-        {/* All green: the passed checks as a badge like the others ("12 checks passed"). */}
-        {pr.failingChecks.length === 0 &&
-          pr.pendingChecks.length === 0 &&
-          (pr.ciState === "success" && passingCount > 0 ? (
-            collapseChecks(pr.checks.filter((c) => c.state === "success")).map((item) =>
-              item.kind === "one" ? (
-                <CheckBadge key={`c-success-${item.check.name}`} check={item.check} />
-              ) : (
-                <CheckGroupBadge key="g-success" item={item} url={`${pr.url}/checks`} />
-              ),
-            )
-          ) : (
-            <span className="text-xs text-fg-subtle">CI: no failures</span>
           ))}
         </div>
       )}
