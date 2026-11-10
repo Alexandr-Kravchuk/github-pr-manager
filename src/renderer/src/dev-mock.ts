@@ -614,6 +614,9 @@ function mockAgentState(): AgentState {
       worktree: "/tmp/agent-clio-929",
       runFolder: "/tmp/prd-agent/929",
       output: "Prepared a review: request changes, one inline comment, one reply.",
+      // A big PR: the review followed its brief on its own, and keeps the brief readable.
+      brief:
+        "Problem: renaming an entity loses its Usr prefix.\nApproach: keep the static prefix in the designer and guard the rename.\nRisky parts: the schema column rebuilds its name from the caption.\n\nDecisions for you:\n1. Should existing renamed columns be migrated?",
       plan: {
         event: "REQUEST_CHANGES",
         body: "**Summary.** The rename keeps the static prefix in the designer now, but the schema column still drops it when the entity is renamed (AC-2).\n\n**Requirement coverage.** AC-1 covered, AC-2 missing, AC-3 covered.",

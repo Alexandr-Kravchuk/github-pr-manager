@@ -282,6 +282,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 /** What to read before deciding: the summary and findings first, then what goes out, the commits, the brief, what went wrong. */
 function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
   const [full, setFull] = useState(false);
+  const [briefOpen, setBriefOpen] = useState(false);
   const item = e.item;
   const r = e.read;
   const kind = e.stage.action?.kind ?? null;
@@ -292,7 +293,7 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
   const answers = kind === "decide" && !commits && item?.scenario === "drive" && plan && plan.replies.length > 0;
   const brief = kind === "draftReview";
   const report = (brief || kind === "fix") && r.report;
-  const any = r.summary || r.findings.length > 0 || sends || commits || answers || r.error || r.questions.length > 0 || report || item?.diagrams;
+  const any = r.summary || r.findings.length > 0 || sends || commits || answers || r.error || r.questions.length > 0 || report || r.brief || item?.diagrams;
   if (!any) return null;
   return (
     <Row label="Read this">
@@ -331,6 +332,14 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
               {full ? "Hide the full report" : brief ? "▸ Read the whole brief" : "▸ The full report"}
             </button>
             {full && <div className="mt-1 max-h-96 overflow-y-auto whitespace-pre-wrap rounded border border-line bg-elevated/40 p-2 text-xs text-fg-secondary">{report}</div>}
+          </div>
+        )}
+        {r.brief && (
+          <div>
+            <button type="button" onClick={() => setBriefOpen((v) => !v)} aria-expanded={briefOpen} className={LINK}>
+              {briefOpen ? "Hide the brief" : "▸ The brief it wrote first"}
+            </button>
+            {briefOpen && <div className="mt-1 max-h-96 overflow-y-auto whitespace-pre-wrap rounded border border-line bg-elevated/40 p-2 text-xs text-fg-secondary">{r.brief}</div>}
           </div>
         )}
         {item?.diagrams && <AgentDiagrams diagrams={item.diagrams} posts={Boolean(sends && plan.diagrams)} />}

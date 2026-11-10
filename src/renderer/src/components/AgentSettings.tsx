@@ -167,12 +167,12 @@ function ScenariosSection({ agent, setAgent, inputCls, onEditPrompts }: SectionP
             onMode={(mode) => patch("review", { mode })}
           >
             <div className="flex flex-wrap items-center gap-2 text-sm text-fg-secondary">
-              Review it on its own when it has at most
+              Review it straight away when it has at most
               <Num bound="maxLines" value={sc.review.maxLines} onChange={(maxLines) => patch("review", { maxLines })} unit="lines" />
               and
               <Num bound="maxFiles" value={sc.review.maxFiles} onChange={(maxFiles) => patch("review", { maxFiles })} unit="files" />
             </div>
-            <p className="mt-1 text-xs text-fg-faint">A bigger PR gets the brief below instead, and nothing is posted.</p>
+            <p className="mt-1 text-xs text-fg-faint">A bigger PR gets the brief below first; the review follows on its own.</p>
             <div className="mt-2 space-y-2">
               <Check
                 checked={sc.review.teamRequests}
@@ -197,7 +197,8 @@ function ScenariosSection({ agent, setAgent, inputCls, onEditPrompts }: SectionP
             onMode={(mode) => patch("brief", { mode: mode === "on" ? "on" : "off" })}
           >
             <p className="text-xs text-fg-faint">
-              Writes a brief — the problem, the approach, the risky parts and the decisions for you. Nothing is posted in either mode.
+              Writes a brief first — the problem, the approach, the risky parts and the decisions for you — then the review above starts on its own,
+              asking the author the brief&apos;s questions. The brief posts nothing. Off: a big PR goes straight to the review.
             </p>
           </Scenario>
 

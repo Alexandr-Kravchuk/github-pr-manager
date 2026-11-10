@@ -928,8 +928,10 @@ export interface AgentItem {
   result?: import("./agent-result").RunResultCard;
   /** Your answer to its question, queued: the next run continues the session with it. */
   answer?: string;
-  /** A brief's questions for the author, carried into the review "Draft a review" queues. */
+  /** A brief's questions for the author, carried into the review that follows it (on its own, or on "Draft a review"). */
   carry?: string[];
+  /** The brief a big PR's review follows, kept on the review's card — the brief itself closes once the review is queued. */
+  brief?: string;
   /** Your choice on each thread the author pushed back on (by its first comment's id): keep your comment, or drop it. */
   disputes?: Record<string, "keep" | "drop">;
   error?: string;

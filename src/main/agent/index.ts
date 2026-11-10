@@ -156,7 +156,7 @@ export function describeReasons(reasons: readonly string[]): string {
 function queuedHeadline(job: Pick<AgentJob, "scenario" | "key" | "reasons">): string {
   switch (job.scenario) {
     case "brief":
-      return "Queued: a brief (too big to review on its own)";
+      return "Queued: a brief first — a big PR; the review follows";
     case "rereview":
       return job.key.includes("|asked@") ? "Queued: re-review — you were asked again" : "Queued: re-review — the author answered";
     case "drive":
@@ -638,16 +638,43 @@ export function createAgent(deps: AgentDeps): Agent {
    * A review or brief the plan wants on a head you already asked the agent to
    * review or brief — whatever came of it; or a re-review of a head whose
    * re-review you asked for after its trigger (the author's answer, the new
-   * request) — that run already saw it.
+   * request) — that run already saw it. A brief you asked for doesn't stop the
+   * review: on a big PR that review is the brief's next step.
    */
   const FRESH_REVIEW: ReadonlySet<AgentScenario> = new Set(["review", "brief"]);
   function askedOfHead(job: Pick<AgentJob, "prId" | "key" | "scenario">): boolean {
     const head = keyHead(job.key);
     const asked = store.data.items.filter((i) => i.prId === job.prId && i.key.endsWith("|asked") && keyHead(i.key) === head);
+    if (job.scenario === "review") return asked.some((i) => i.scenario === "review");
     if (FRESH_REVIEW.has(job.scenario)) return asked.some((i) => FRESH_REVIEW.has(i.scenario));
     if (job.scenario !== "rereview") return false;
     const trigger = keyCursorTime(job.key);
     return asked.some((i) => i.scenario === "rereview" && (trigger === null || Date.parse(i.queuedAt) >= trigger));
+  }
+
+  /** A brief of this head was written — the agent's own or one you asked for: the policy's `briefDone`. */
+  function briefDone(pr: Pick<PullRequest, "id" | "headOid">): boolean {
+    const key = jobKey(pr, "brief");
+    return [key, `${key}|asked`].some((k) => {
+      const state = store.data.ledger[k]?.state;
+      return state === "prepared" || state === "published";
+    });
+  }
+
+  /**
+   * The brief a big PR's review follows: its questions for the author go into
+   * the review's prompt, its text onto the review's card — so what it found
+   * stays readable once the review replaces it — and the brief itself closes.
+   * Null when no brief of that head waits.
+   */
+  function takeBrief(prId: string, head: string | null): Pick<AgentItem, "carry" | "brief"> | null {
+    const brief = store.data.items
+      .filter((i) => i.prId === prId && i.scenario === "brief" && i.state === "needsYou" && keyHead(i.key) === head)
+      .sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""))[0];
+    if (!brief) return null;
+    const questions = brief.result?.authorQuestions ?? [];
+    void closeAs(brief, AGENT_CLOSED.reviewed);
+    return { ...(questions.length > 0 ? { carry: questions } : {}), ...(brief.output?.trim() ? { brief: brief.output } : {}) };
   }
 
   /** Scenarios that are offers with a button, never a session. */
@@ -1003,6 +1030,7 @@ export function createAgent(deps: AgentDeps): Agent {
         return d && d.attempts >= s.scenarios.driveCi.maxAttempts ? `Yours — the agent tried ${d.attempts} time${d.attempts === 1 ? "" : "s"}; over to you` : null;
       },
       selfReviewed: (pr) => Boolean(store.data.ledger[jobKey(pr, "drive", "self")]) || (pr.headOid !== null && store.data.pushedHeads[pr.id] === pr.headOid),
+      briefDone,
       reapproveState,
       baseOnlyState,
       orchestrated: (pr) => {
@@ -1031,7 +1059,12 @@ export function createAgent(deps: AgentDeps): Agent {
         idle[job.prId] = "You asked the agent about this head yourself";
         continue;
       }
-      supersede(newItem(job, byId.get(job.prId)!, queuedHeadline(job)));
+      // A big PR's review follows its brief: closed first, so the review doesn't
+      // merely supersede it, and what it found travels with the review.
+      const brief = job.scenario === "review" ? takeBrief(job.prId, keyHead(job.key)) : null;
+      const item = newItem(job, byId.get(job.prId)!, brief ? "Queued: review — after its brief" : queuedHeadline(job));
+      if (brief) Object.assign(item, brief);
+      supersede(item);
       dirty = true;
     }
     // A queued job the PR no longer wants (you reviewed it, it went away) leaves
@@ -1503,8 +1536,15 @@ export function createAgent(deps: AgentDeps): Agent {
       // On: the app pushes the drive's commits, with the same checks as your Push.
       await pushItem(item, all);
     } else if (item.state === "needsYou" && !item.interrupted) {
+      // A big PR's brief: planned again at once, its review takes it over —
+      // and that review is what comes to you. Only a brief no review follows
+      // (reviews off, the request gone) waits for you as it is.
+      if (item.scenario === "brief" && !stopped) {
+        const snapshot = deps.getSnapshot();
+        if (snapshot) onSnapshot(snapshot);
+      }
       // An interrupted run asks nothing of you: it goes on by itself.
-      announce(item, "needsYou");
+      if ((item.state as AgentItem["state"]) === "needsYou") announce(item, "needsYou");
     } else if (item.state === "done" && !entry.takeOver && !entry.offStop && !outcome.stopped) {
       // What you did yourself isn't news to you.
       announce(item, "finished");
@@ -1993,7 +2033,14 @@ export function createAgent(deps: AgentDeps): Agent {
   }
 
   /** Puts a PR in the queue on your say-so; its key is its own, so the ledger of the automatic one doesn't stop it. */
-  function enqueueAsked(pr: PullRequest, s: AgentSettings, scenario: AgentScenario, reasons?: string[], before?: string | null, carry?: string[]): AgentActionResult {
+  function enqueueAsked(
+    pr: PullRequest,
+    s: AgentSettings,
+    scenario: AgentScenario,
+    reasons?: string[],
+    before?: string | null,
+    from?: Pick<AgentItem, "carry" | "brief">,
+  ): AgentActionResult {
     if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
       return { ok: false, error: "The agent is already on this PR." };
     }
@@ -2025,7 +2072,8 @@ export function createAgent(deps: AgentDeps): Agent {
       const rank = rankBefore(others, before);
       if (rank !== undefined) item.rank = rank;
     }
-    if (carry?.length) item.carry = carry;
+    if (from?.carry?.length) item.carry = from.carry;
+    if (from?.brief?.trim()) item.brief = from.brief;
     supersede(item);
     void store.save();
     changed();
@@ -2236,8 +2284,8 @@ export function createAgent(deps: AgentDeps): Agent {
         if (item.scenario !== "brief") return { ok: false, error: "Only a brief can be turned into a review." };
         const pr = snapshot?.pullRequests.find((p) => p.id === item.prId);
         if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
-        // The brief's questions for the author go into the review it drafts.
-        const queued = enqueueAsked(pr, all.agent, "review", undefined, undefined, item.result?.authorQuestions);
+        // The brief's questions for the author go into the review it drafts, its text onto the review's card.
+        const queued = enqueueAsked(pr, all.agent, "review", undefined, undefined, { carry: item.result?.authorQuestions, brief: item.output });
         if (queued.ok) await closeAs(item, AGENT_CLOSED.reviewed);
         return queued;
       }

@@ -68,6 +68,11 @@ export interface PlanContext {
    * instead of being queued only to fail, and to notify, on every new trigger.
    */
   noCheckout?: (pr: PullRequest) => string | null;
+  /**
+   * A brief of this head was written — a big PR's review then follows on its
+   * own. Absent: never, so a big PR gets its brief.
+   */
+  briefDone?: (pr: PullRequest) => boolean;
 }
 
 /** Why your PR gets no self-review now, or null when it should get one. */
@@ -355,10 +360,13 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
         skip("Reviewed — nothing new from the author since");
         continue;
       }
-      // Asked again with nothing new: your review is on this very head and the
-      // author hasn't answered since, so a re-review could only repeat it.
-      if (!since && pr.viewerReviewedHead) {
-        skip("Asked again — your review is on this head and the author hasn't answered since");
+      // Asked again with nothing new while your approval stands on this very
+      // head: a re-review could only approve again, and "Approve again" answers
+      // the request in one line. Asked again after a change request, it runs —
+      // the request is the author saying "look again", even with no push or
+      // thread reply the poll can see; once per head and request.
+      if (!since && pr.viewerReviewedHead && pr.viewerApproved) {
+        skip("Asked again — your approval stands on this head and the author hasn't answered since");
         continue;
       }
       if (pr.isDraft && !s.scenarios.review.drafts) {
@@ -407,24 +415,21 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
       skip("Your Claude session is on it");
       continue;
     }
+    // A big PR gets a brief first — the problem, the approach, the risky parts,
+    // the decisions for you — and once it is written, the review starts on its
+    // own, carrying the brief's questions for the author. Briefs off: straight
+    // to the review. Nothing waits for a click in between.
     const big = isBigPr(pr, s);
-    const scenario: AgentScenario = big ? "brief" : "review";
-    const mode = big ? s.scenarios.brief.mode : s.scenarios.review.mode;
-    if (mode === "off") {
-      skip(big ? "Too big to review on its own — briefs are off" : "Reviews are off");
+    if (big && s.scenarios.brief.mode !== "off" && !ctx.briefDone?.(pr)) {
+      jobs.push({ key: jobKey(pr, "brief"), prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario: "brief", kind: "brief", mode: "on", createdAt: pr.createdAt });
       continue;
     }
-    jobs.push({
-      key: jobKey(pr, scenario),
-      prId: pr.id,
-      prNumber: pr.number,
-      repo: pr.repo,
-      url: pr.url,
-      scenario,
-      kind: scenario === "brief" ? "brief" : "review",
-      mode: scenario === "brief" ? "on" : mode,
-      createdAt: pr.createdAt,
-    });
+    const mode = s.scenarios.review.mode;
+    if (mode === "off") {
+      skip(big && s.scenarios.brief.mode !== "off" ? "Reviews are off — a big PR gets its brief only" : "Reviews are off");
+      continue;
+    }
+    jobs.push({ key: jobKey(pr, "review"), prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario: "review", kind: "review", mode, createdAt: pr.createdAt });
   }
   // A session works in a clone of the PR's repository: without one the PR
   // waits and says so. Offers (merge, re-approve) need no session.

@@ -9359,12 +9359,25 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.notStrictEqual(policy.jobKey({ id: "PR_R", headOid: "bbb222" }, "review"), r.jobs[0].key, "a new head is a new key");
     });
 
-    test("agent policy: over the limit is a brief; a brief never posts", () => {
+    test("agent policy: over the limit is a brief first — it never posts — and then the review, on its own", () => {
       const r = policy.planJobs([reviewPr({ additions: 900 }), reviewPr({ id: "PR_F", changedFiles: 40 })], agentOn(), noSessions);
       assert.deepStrictEqual(r.jobs.map((j) => [j.scenario, j.mode]), [["brief", "on"], ["brief", "on"]]);
-      const off = policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { brief: { mode: "off" } } }), noSessions);
-      assert.deepStrictEqual(off.jobs, []);
-      assert.match(off.idle.get("PR_R"), /briefs are off/);
+      // The brief of this head is written: the review follows — no click in between.
+      const briefed = { ...noSessions, briefDone: (pr) => pr.id === "PR_R" };
+      const next = policy.planJobs([reviewPr({ additions: 900 }), reviewPr({ id: "PR_F", changedFiles: 40 })], agentOn(), briefed);
+      assert.deepStrictEqual(next.jobs.map((j) => [j.prId, j.scenario, j.mode, j.key]), [["PR_R", "review", "shadow", "PR_R|review|aaa111"], ["PR_F", "brief", "on", "PR_F|brief|aaa111"]]);
+      assert.strictEqual(policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { review: { mode: "on" } } }), briefed).jobs[0].mode, "on", "the review in its own mode");
+      // Briefs off: a big PR goes straight to the review.
+      const noBrief = policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { brief: { mode: "off" } } }), noSessions);
+      assert.deepStrictEqual(noBrief.jobs.map((j) => j.scenario), ["review"]);
+      // Reviews off: the brief is all a big PR gets.
+      const reviewsOff = agentOn({ scenarios: { review: { mode: "off" } } });
+      assert.deepStrictEqual(policy.planJobs([reviewPr({ additions: 900 })], reviewsOff, noSessions).jobs.map((j) => j.scenario), ["brief"]);
+      const done = policy.planJobs([reviewPr({ additions: 900 })], reviewsOff, briefed);
+      assert.deepStrictEqual(done.jobs, []);
+      assert.strictEqual(done.idle.get("PR_R"), "Reviews are off — a big PR gets its brief only");
+      const both = policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { review: { mode: "off" }, brief: { mode: "off" } } }), noSessions);
+      assert.deepStrictEqual([both.jobs, both.idle.get("PR_R")], [[], "Reviews are off"]);
     });
 
     test("agent policy: team requests, drafts, ignored, reviewed, your own session and other repos are left alone", () => {
@@ -9983,8 +9996,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
-    await atest("agent act: Review anyway turns a brief into a review; a review can't be turned again", async () => {
-      const f = agentFixture({ pr: reviewPr({ additions: 1200 }), script: succeed("Problem: … Decisions for you: …") });
+    await atest("agent act: Review anyway turns a brief no review followed (reviews off) into a review; a review can't be turned again", async () => {
+      const f = agentFixture({ pr: reviewPr({ additions: 1200 }), script: succeed("Problem: … Decisions for you: …"), agent: { scenarios: { review: { mode: "off" } } } });
       try {
         f.agent.onSnapshot(f.snapshot);
         await until(() => only(f).some((i) => i.state === "needsYou"));
@@ -11579,10 +11592,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.notStrictEqual(later, replied[0].key, "a later reply without a push is new work");
       const asked = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true })], agentOn(), noSessions).jobs[0];
       assert.match(asked.key, /\|asked@-$/);
-      // Asked again on the very head your review is on, with no answer from the author: nothing a re-review could add.
-      const same = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true, viewerReviewedHead: true })], agentOn(), noSessions);
-      assert.deepStrictEqual(same.jobs, []);
-      assert.strictEqual(same.idle.get("PR_R"), "Asked again — your review is on this head and the author hasn't answered since");
+      // Asked again on the very head your approval stands on, with no answer from the author: a re-review could only approve again.
+      const approved = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true, viewerReviewedHead: true, viewerApproved: true })], agentOn(), noSessions);
+      assert.deepStrictEqual(approved.jobs, []);
+      assert.strictEqual(approved.idle.get("PR_R"), "Asked again — your approval stands on this head and the author hasn't answered since");
+      // …after a change request on that head, the request itself is the author's "look again": the re-review runs, once per head and request.
+      const same = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true, viewerReviewedHead: true, viewerApproved: false })], agentOn(), noSessions);
+      assert.deepStrictEqual(same.jobs.map((j) => [j.scenario, j.mode, j.key]), [["rereview", "shadow", "PR_R|rereview|aaa111|asked@-"]]);
+      assert.strictEqual(same.idle.get("PR_R"), undefined);
+      assert.deepStrictEqual(policy.planJobs([rv({ roles: ["reviewed"], requestedOfMe: false, viewerReviewedHead: true })], agentOn(), noSessions).jobs, [], "not asked again: nothing new, nothing runs");
       const answered = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true, viewerReviewedHead: true, authorRepliedAt: at(7) })], agentOn(), noSessions).jobs[0];
       assert.strictEqual(answered.key, `PR_R|rereview|aaa111|asked@${at(7)}`, "an answer in a thread since your review is new work on the same head");
       assert.match(policy.planJobs([rv({ authorRepliedAt: at(7) })], agentOn({ scenarios: { rereview: { mode: "off" } } }), noSessions).idle.get("PR_R"), /re-reviews are off/);
@@ -13436,7 +13454,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await atest("agent brief: Review anyway carries the brief's questions for the author into the review it drafts", async () => {
       const big = reviewPr({ additions: 5000 });
       const text = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: ["Why drop the cache?"], asks: [] }) + "\n```";
-      const f = agentFixture({ pr: big, script: succeed(text) });
+      const f = agentFixture({ pr: big, script: succeed(text), agent: { scenarios: { review: { mode: "off" } } } });
       try {
         f.agent.onSnapshot(f.snapshot);
         await until(() => only(f).some((i) => i.scenario === "brief" && i.state === "needsYou"));
@@ -13445,6 +13463,45 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual(await f.agent.act({ type: "reviewAnyway", runId: brief.runId }), { ok: true });
         await until(() => f.children.length === 2);
         assert.match(f.children[1].written, /questions for its author[\s\S]*Why drop the cache\?/);
+        assert.match(only(f)[1].brief, /^Brief\./, "the brief's text stays on the review's card");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent brief: a big PR's review follows its brief on its own — the brief's questions in its prompt, its text on its card, no toast for the brief", async () => {
+      const big = reviewPr({ additions: 5000 });
+      const text = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: ["Why drop the cache?"], asks: [] }) + "\n```";
+      const notices = [];
+      const f = agentFixture({ pr: big, script: succeed(text), notify: (n) => notices.push([n.kind, n.item.scenario]) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+        const [brief, review] = only(f);
+        assert.deepStrictEqual([brief.scenario, brief.state, brief.headline], ["brief", "done", view.AGENT_CLOSED.reviewed], "the brief leaves Your move for the review");
+        assert.deepStrictEqual([review.scenario, review.key], ["review", `${big.id}|review|aaa111`], "planned by the agent, not asked by you");
+        assert.deepStrictEqual(review.carry, ["Why drop the cache?"]);
+        assert.match(review.brief, /^Brief\./);
+        assert.match(f.children[1].written, /questions for its author[\s\S]*Why drop the cache\?/);
+        await until(() => only(f)[1].state !== "queued" && only(f)[1].state !== "working");
+        assert.ok(!notices.some(([kind, scenario]) => kind === "needsYou" && scenario === "brief"), "the brief alone asks nothing of you: no toast for it");
+        // The head's brief and review are both in the ledger: another plan of the same head runs neither again.
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent brief: a brief you asked for on a big PR is followed by the review too", async () => {
+      const big = reviewPr({ additions: 5000 });
+      const f = agentFixture({ pr: big, script: succeed("Brief.") });
+      try {
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: big.id }), { ok: true });
+        await until(() => f.children.length === 2);
+        const [brief, review] = only(f);
+        assert.match(brief.key, /\|brief\|aaa111\|asked$/);
+        assert.deepStrictEqual([brief.headline, review.scenario], [view.AGENT_CLOSED.reviewed, "review"]);
       } finally {
         f.agent.stop();
       }

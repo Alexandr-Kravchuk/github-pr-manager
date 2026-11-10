@@ -57,6 +57,8 @@ export interface BoardEntry {
     questions: string[];
     /** The run's full report, when it says more than the summary. */
     report: string | null;
+    /** The brief a big PR's review followed: written first, kept readable on the review's card. */
+    brief: string | null;
   };
   choices: BoardChoice[];
   /** What happens after, whoever acts. */
@@ -150,6 +152,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
     error: item?.state === "error" ? (item.error ?? null) : null,
     questions: res?.authorQuestions ?? [],
     report,
+    brief: item?.brief?.trim() ? item.brief : null,
   };
   const runId = item?.runId ?? "";
   const prId = card.prId;
@@ -283,7 +286,8 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
       }
       case "draftReview": {
         const lines = pr ? pr.additions + pr.deletions : 0;
-        now = `Too big for a review on its own${lines ? ` (${lines.toLocaleString("en-US")} lines)` : ""} — the agent wrote a brief${read.questions.length > 0 ? ` with ${plural(read.questions.length, "question")} for the author` : ""}.`;
+        // A big PR's review follows its brief on its own; a brief waits here only when none did (reviews off, the request gone).
+        now = `A big PR${lines ? ` (${lines.toLocaleString("en-US")} lines)` : ""} — the agent wrote a brief${read.questions.length > 0 ? ` with ${plural(read.questions.length, "question")} for the author` : ""}; no review followed on its own.`;
         ask = "Read the brief, then let the agent draft the review — or review it yourself.";
         choices = [
           { label: "Draft a review", primary: true, does: "Starts a full review that carries the brief's questions; the draft comes back here for you to send.", act: { type: "reviewAnyway", runId } },

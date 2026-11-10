@@ -193,7 +193,16 @@ Three layers:
   `approveAgain` action on the PR, not an item: main reads the PR again and,
   only if that still holds at the same head, posts an APPROVE of that head
   with one line and the signature, logged as `run/approved-again`; a review
-  you ask for that finds the same says "Already approved on this head". A
+  you ask for that finds the same says "Already approved on this head".
+  Asked again after a change request of yours on that same head, the
+  re-review runs by itself (`planJobs`, once per head and request): the
+  request is the author's "look again". A review asked of you starts without
+  a click on a big PR too: its brief comes first, and once that brief of the
+  head is written (`briefDone`) the plan queues the review, which takes the
+  brief over (`takeBrief`: the brief closes, its questions for the author go
+  into the review's prompt and its text onto the review's card, and the brief
+  alone sends no toast). "Draft a review" is left for a brief no review
+  followed — reviews off, or the request gone. A
   move ready for you names itself wherever the PR shows — the Roomy line's
   button ("Send review →", "Push 2 fixes →") and the Cozy cell open its card
   on the Board, the one place it is sent from, since a bare "Open" left an
