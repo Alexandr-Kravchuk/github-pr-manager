@@ -436,11 +436,115 @@ export function shellWords(command: string): { words: string[] } | { error: stri
 
 /**
  * git flags that write a file or run a program even under a reading
- * subcommand, matched as prefixes so `--output=x` counts: `--output` writes
- * anywhere, `--ext-diff`/`--textconv` run configured programs, `--no-index`
- * reads outside the repository, the pack ones run a remote program.
+ * subcommand: `--output` writes anywhere, `--ext-diff`/`--textconv` run
+ * configured programs, `--no-index` reads outside the repository, the pack
+ * ones run a remote program. Matched by `gitLongOption`, so `--output=x` and
+ * an abbreviation git expands to one of them count too.
  */
 const GIT_DANGEROUS = ["--output", "--ext-diff", "--textconv", "--no-index", "--exec-path", "--upload-pack", "--receive-pack", "--exec"];
+
+/**
+ * git flags that read a file the command names, anywhere on disk: a commit
+ * message (`--file`, `--template`), blame's contents and ignore list, a
+ * pathspec or exclude list. The Read tool is held to the run's folders, but
+ * `git commit -F ~/.ssh/id_rsa` would carry that file into a commit the app
+ * then pushes — so the file such a flag names is held to the same folders
+ * (`checkGitFiles`). A drive writes its commit message into its payload
+ * folder and commits with `-F`, since the guard refuses `$(…)` and heredocs.
+ */
+const GIT_READS_FILE = ["--file", "--template", "--pathspec-from-file", "--contents", "--ignore-revs-file", "--exclude-from"];
+
+/**
+ * Real git options that happen to be a prefix of a flag above (`--text` of
+ * `--textconv`): an exact name is that option, never an abbreviation.
+ */
+const GIT_EXACT_OPTIONS = new Set(["--text", "--ignore-rev", "--exclude"]);
+
+/** The value-taking short options of the diff family (`-SFoo`: "Foo" is the value). */
+const GIT_DIFF_VALUE_SHORTS = "nSGLUlMCBXI";
+
+/**
+ * The short forms of `GIT_READS_FILE`, per subcommand — `-F` is a message
+ * file to commit and merge but `--fixed-strings` to log. `values` are the
+ * short options that take the rest of the word as their value, so `-mFix` is
+ * a message, while `-aF x` still reads x.
+ */
+const GIT_READS_FILE_SHORT: Record<string, { reads: string; values: string }> = {
+  commit: { reads: "Ft", values: "mcCSu" },
+  merge: { reads: "F", values: "mXsS" },
+  blame: { reads: "S", values: "LMC" },
+  diff: { reads: "O", values: GIT_DIFF_VALUE_SHORTS },
+  log: { reads: "O", values: GIT_DIFF_VALUE_SHORTS },
+  show: { reads: "O", values: GIT_DIFF_VALUE_SHORTS },
+  stash: { reads: "O", values: `m${GIT_DIFF_VALUE_SHORTS}` },
+  "ls-files": { reads: "X", values: "x" },
+};
+
+/**
+ * Whether `word` is one of `options` as git reads it: `--file`, `--file=x`,
+ * and any abbreviation git expands — commit, merge and blame take an
+ * unambiguous prefix (`--fil=x` is `--file=x`). An ambiguous prefix is
+ * refused too, which costs nothing: git refuses it as well.
+ */
+function gitLongOption(word: string, options: readonly string[]): boolean {
+  if (!word.startsWith("--")) return false;
+  const name = word.split("=", 1)[0];
+  if (name.length < 3 || GIT_EXACT_OPTIONS.has(name)) return false;
+  return options.some((o) => o.startsWith(name));
+}
+
+/**
+ * The short flags a `-abc` word sets, in order, up to and including the first
+ * one that takes a value, and that value when it is attached (`-Fmsg.txt`):
+ * the rest of the word.
+ */
+function gitShortFlags(word: string, values: string): { flags: string; attached: string } {
+  if (!/^-[^-]/.test(word)) return { flags: "", attached: "" };
+  for (let i = 1; i < word.length; i++) {
+    if (values.includes(word[i])) return { flags: word.slice(1, i + 1), attached: word.slice(i + 1) };
+  }
+  return { flags: word.slice(1), attached: "" };
+}
+
+/**
+ * The files the file-reading flags of `git <sub> <args>` name: `--file=x`,
+ * `--file x`, `-Fx`, `-F x`, `-aF x`. A flag with no value yields "", which
+ * no check lets through. `--` is not taken as the end of the flags: a word
+ * after it read as a flag can only be refused, never let through.
+ */
+function gitFlagFiles(sub: string, args: string[]): string[] {
+  const short = GIT_READS_FILE_SHORT[sub];
+  const files: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i];
+    if (gitLongOption(w, GIT_READS_FILE)) {
+      const eq = w.indexOf("=");
+      files.push(eq >= 0 ? w.slice(eq + 1) : (args[++i] ?? ""));
+      continue;
+    }
+    if (!short) continue;
+    // A reading flag takes a value too, so it ends the cluster: `-Ft` is the file "t".
+    const { flags, attached } = gitShortFlags(w, short.values + short.reads);
+    if (flags && short.reads.includes(flags[flags.length - 1])) files.push(attached || (args[++i] ?? ""));
+  }
+  return files;
+}
+
+/**
+ * A git flag reads only what the Read tool may read: the run's own folders,
+ * links followed to where they lead. The path must be absolute — git reads a
+ * relative one against the shell's current folder, which the guard can't see.
+ */
+function checkGitFiles(sub: string, args: string[], run: GuardRun | null, real: RealPath): GuardDecision {
+  for (const file of gitFlagFiles(sub, args)) {
+    if (!file || !isAbsolutePath(file)) {
+      return deny(`git ${sub} reads the file a flag names; give it by its absolute path inside the run's folders${file ? ` (not ${file})` : ""}, or give a commit message with -m.`);
+    }
+    const read = checkRead("Read", { file_path: file }, run, real);
+    if (!read.allow) return deny(`git ${sub} would read ${file}: ${read.reason}`);
+  }
+  return { allow: true };
+}
 
 /**
  * git subcommands a drive run may use. A list, not "anything but push": an
@@ -1003,7 +1107,7 @@ function checkWrapper(words: string[], pr: GuardPr | null, outDir: string, subs?
   return { allow: true };
 }
 
-function checkGit(kind: AgentRunKind, words: string[]): GuardDecision {
+function checkGit(kind: AgentRunKind, words: string[], run: GuardRun | null, real: RealPath): GuardDecision {
   // Not even the reading subcommands: `git diff` and `git log -p` run textconv
   // filters by default, and the PR's own .gitattributes picks which files go
   // through them. A read-only run takes the diff from `gh pr diff`.
@@ -1016,13 +1120,13 @@ function checkGit(kind: AgentRunKind, words: string[]): GuardDecision {
   // and the app pushes the branch itself after checking the commit.
   if (sub === "push") return deny("Agent runs don't push from the shell — the app pushes your branch itself.");
   if (!GIT_DRIVE.has(sub)) return deny(`git ${sub} is not one of the git commands agent runs may use.`);
-  if (words.some((w) => GIT_DANGEROUS.some((f) => w === f || w.startsWith(`${f}=`)))) {
+  if (words.some((w) => gitLongOption(w, GIT_DANGEROUS))) {
     return deny("That git flag writes files or runs programs; agent runs can't use it.");
   }
-  return { allow: true };
+  return checkGitFiles(sub, words.slice(2), run, real);
 }
 
-export function checkBash(kind: AgentRunKind, rawCommand: string, pr: GuardPr | null = null, run: GuardRun | null = null): GuardDecision {
+export function checkBash(kind: AgentRunKind, rawCommand: string, pr: GuardPr | null = null, run: GuardRun | null = null, real: RealPath = asWritten): GuardDecision {
   const split = shellWords(rawCommand);
   if ("error" in split) return deny(split.error);
   const words = split.words;
@@ -1030,7 +1134,7 @@ export function checkBash(kind: AgentRunKind, rawCommand: string, pr: GuardPr | 
   // `FOO=1 git push` would slip past a check on the program's name.
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])) return deny("Commands can't start with environment assignments in agent runs.");
   if (run?.wrapperPath && run.outDir && samePath(words[0], run.wrapperPath)) return checkWrapper(words, pr, run.outDir, run.subs);
-  if (words[0] === "git") return checkGit(kind, words);
+  if (words[0] === "git") return checkGit(kind, words, run, real);
   if (words[0] === "gh") return checkGh(words, pr);
   if (words[0] === "twg") return checkTwg(words);
   if (READ_ONLY.has(kind)) return deny("This run only reads: it doesn't run commands from the PR's repository.");
@@ -1077,7 +1181,7 @@ export function checkToolUse(
   if (toolName === "Bash") {
     const command = typeof (input as { command?: unknown } | null)?.command === "string" ? (input as { command: string }).command : "";
     if (!command.trim()) return deny("An empty command.");
-    return checkBash(kind, command, pr, run);
+    return checkBash(kind, command, pr, run, real);
   }
   if (SESSION_TOOLS.has(toolName)) return { allow: true };
   return deny(`${toolName || "That tool"} is not one of the tools agent runs may use.`);

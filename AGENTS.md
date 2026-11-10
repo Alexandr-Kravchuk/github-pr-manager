@@ -604,6 +604,13 @@ Three layers:
   `C:\…`, 8.3 short names resolved), so a link the PR's branch carries is
   judged by where it leads — `--restricted` already keeps Read to the working
   folders, but that is Claude Code's rule and it judges a link by its name.
+  A git flag that reads a file it names — `commit -F`/`-t`, `merge -F`,
+  `blame --contents`/`-S`, `--pathspec-from-file`, `diff -O`, `ls-files
+  --exclude-from`, any abbreviation git expands to one (`--fil=`) — is held
+  to the same rule (`checkGitFiles`, an absolute path only), or `git commit
+  -F ~/.ssh/id_rsa` would carry a key into a commit the app pushes; it is
+  not refused outright, since a drive writes its commit message into its
+  payload folder and commits with `-F` (`$(…)` and heredocs are refused).
   Any tool the guard doesn't name is refused (`SESSION_TOOLS` lists the
   harmless ones: `Skill`, `Agent`, `ToolSearch`, `TaskCreate`, `TaskUpdate`,
   and `StructuredOutput`, which a Workflow's agents answer through); a test

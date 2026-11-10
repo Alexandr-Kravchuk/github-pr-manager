@@ -9573,6 +9573,114 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(guard.checkToolUse("review", "Bash", {}).allow, false, "an empty command");
     });
 
+    // A drive's folders as the app writes them into its guard file.
+    const driveRun = { workDir: "C:/wt", outDir: "C:/T/prd-agent/r/out", readDirs: ["C:/wt", "C:/T/prd-agent/r/out"] };
+
+    test("agent guard: a git flag reads only a file the Read tool may read — not ~/.ssh into a commit", () => {
+      const key = "C:/Users/me/.ssh/id_rsa";
+      for (const cmd of [
+        `git commit -F ${key}`,
+        `git commit --file=${key}`,
+        `git commit --file ${key}`,
+        `git commit -F${key}`,
+        `git commit -aF ${key}`,
+        `git commit -aF${key}`,
+        `git commit -t ${key}`,
+        `git commit --template=${key}`,
+        `git commit '--file'=${key}`,
+        `git commit --amend -F "${key}"`,
+        // git expands an unambiguous prefix of a long option.
+        `git commit --fil=${key}`,
+        `git commit --templ=${key}`,
+        `git merge origin/main -F ${key}`,
+        `git merge --file=${key} origin/main`,
+        `git blame --contents ${key} src/x.ts`,
+        `git blame --cont=${key} src/x.ts`,
+        `git blame -S ${key} src/x.ts`,
+        `git blame -wS ${key} src/x.ts`,
+        `git blame --ignore-revs-file=${key} src/x.ts`,
+        `git add --pathspec-from-file=${key}`,
+        `git restore --pathspec-from-file=${key}`,
+        `git rm --pathspec-from-file ${key}`,
+        `git stash push --pathspec-from-file=${key}`,
+        `git diff -O${key}`,
+        `git log -p -O ${key}`,
+        `git show -pO${key}`,
+        `git ls-files --exclude-from=${key}`,
+        `git ls-files -X ${key}`,
+        "git commit -F /home/me/.config/gh/hosts.yml",
+        // Out of the folders by name, or not judged at all.
+        "git commit -F C:/wt/../Users/me/.ssh/id_rsa",
+        "git commit -F '~/.ssh/id_rsa'",
+        "git commit -F msg.txt",
+        "git commit -F -",
+        "git commit -F",
+        "git commit --file",
+        // The older flags are matched by their abbreviations too.
+        "git diff --outp=C:/wt/x",
+        "git log --ext-dif",
+      ]) {
+        assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: cmd }, gpr, driveRun).allow, false, cmd);
+      }
+      assert.match(guard.checkToolUse("drive", "Bash", { command: `git commit -F ${key}` }, gpr, driveRun).reason, /would read .*outside them/);
+      assert.match(guard.checkToolUse("drive", "Bash", { command: "git commit -F msg.txt" }, gpr, driveRun).reason, /absolute path/);
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "git commit -F C:/T/prd-agent/r/out/msg.txt" }, gpr, null).allow, false, "no guard file, no folders to read");
+      // A link in the worktree is judged by where it leads, as a Read is.
+      const real = (p) => (p === "C:/wt/notes.txt" ? key : p);
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "git commit -F C:/wt/notes.txt" }, gpr, driveRun, real).allow, false, "a link out of the worktree");
+    });
+
+    test("agent guard: a drive commits with a message file in its own folders, as real runs do", () => {
+      for (const cmd of [
+        // Taken from real drive runs: the message is written into the payload folder.
+        'git commit -F "C:/T/prd-agent/r/out/msg1.txt"',
+        'git commit --amend -F "C:/T/prd-agent/r/out/msg1.txt"',
+        "git commit -FC:/T/prd-agent/r/out/msg2.txt",
+        "git commit -aF C:/T/prd-agent/r/out/msg3.txt",
+        "git commit --file=C:/T/prd-agent/r/out/msg.txt",
+        "git commit -t C:/wt/.gitmessage",
+        "git blame --contents C:/wt/src/x.ts src/x.ts",
+        "git add --pathspec-from-file=C:/T/prd-agent/r/out/paths.txt",
+        "git diff -O C:/wt/order.txt",
+      ]) {
+        assert.deepStrictEqual(guard.checkToolUse("drive", "Bash", { command: cmd }, gpr, driveRun), { allow: true }, cmd);
+      }
+    });
+
+    test("agent guard: drive's everyday git keeps working next to the file-reading flags", () => {
+      for (const cmd of [
+        "git commit -m fix",
+        "git commit -mFix",
+        "git commit -am 'Fix the build'",
+        "git commit -sm 'Fix the build'",
+        "git commit --amend --no-edit",
+        "git commit --fixup=HEAD",
+        "git commit -C HEAD",
+        "git add -A",
+        "git add -- src/x.ts",
+        "git add --pathspec-file-nul src/x.ts",
+        "git merge origin/main -m 'Merge the base'",
+        "git merge --continue",
+        "git merge --no-ff -X theirs origin/main",
+        "git log -3",
+        "git log --oneline -20",
+        "git log -SFoo -p",
+        "git log -F --grep=fix",
+        "git log --exclude='refs/stash' --all",
+        "git diff -U5 --stat",
+        "git diff --text src/x.ts",
+        "git diff --no-ext-diff --no-textconv",
+        "git show -M50% HEAD",
+        "git blame -L 1,5 src/x.ts",
+        "git blame --ignore-rev abc123 src/x.ts",
+        "git ls-files -x '*.log' --others",
+        "git stash show -p",
+        "git branch -t topic origin/main",
+      ]) {
+        assert.deepStrictEqual(guard.checkToolUse("drive", "Bash", { command: cmd }, gpr), { allow: true }, cmd);
+      }
+    });
+
     test("agent guard: a refused gh api read says what to change — not \"another repository\" for this one", () => {
       const why = (cmd) => guard.checkToolUse("drive", "Bash", { command: cmd }, gpr).reason;
       assert.match(why("gh api repos/acme/widgets/branches/a%2Eb"), /takes letters, digits, '\.', '_', '-' and %2F/, "this PR's repository, an escape it doesn't take");
