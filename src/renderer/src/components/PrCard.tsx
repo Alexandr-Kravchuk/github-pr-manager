@@ -84,13 +84,6 @@ const REVIEWER_RING: Record<Reviewer["reviewState"], string> = {
   pending: "ring-amber-500",
 };
 
-function reviewerListLabel(reviewers: Reviewer[]): string {
-  if (reviewers.length === 0) return "";
-  const logins = reviewers.map((r) => r.login);
-  if (logins.length <= 2) return logins.join(", ");
-  return `${logins.slice(0, 2).join(", ")} +${logins.length - 2}`;
-}
-
 function ReviewerBadge({ r }: { r: Reviewer }) {
   const label = r.reviewState === "approved"
     ? "approved"
@@ -197,8 +190,6 @@ export function PrCard({
   // there — without it the title is the sole place the key appears.
   const displayTitle = jiraUrl ? stripLeadingIssueKey(pr.title, pr.issueKey) : pr.title;
   const passingCount = pr.checks.filter((c) => c.state === "success").length;
-  const pendingReviewers = pr.reviewers.filter((r) => r.reviewState === "pending");
-  const pendingReviewerNames = reviewerListLabel(pendingReviewers);
   // Age badge: flag PRs that have been waiting a while without an approval — the
   // "don't let reviews rot" cue. Suppressed for drafts and already-approved PRs.
   const ageDays = daysSince(pr.createdAt);
@@ -504,24 +495,14 @@ export function PrCard({
         )}
       </div>
 
-      {/* Reviewers */}
+      {/* Reviewers: the avatar rings say who has not reviewed yet, so no
+          separate "Waiting for" pill repeats it. */}
       {pr.reviewers.length > 0 && (
         <div className="mb-2 flex flex-wrap items-center gap-1.5">
           <span className="text-xs text-fg-subtle">Reviewers:</span>
           {pr.reviewers.map((r) => (
             <ReviewerBadge key={r.login} r={r} />
           ))}
-          {pendingReviewers.length > 0 && (
-            <span
-              className={cn(
-                pill,
-                "max-w-full border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-200",
-              )}
-              title={`Waiting for review from: ${pendingReviewers.map((r) => r.login).join(", ")}`}
-            >
-              Waiting for: <span className="truncate">{pendingReviewerNames}</span>
-            </span>
-          )}
         </div>
       )}
 
