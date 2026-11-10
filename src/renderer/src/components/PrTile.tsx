@@ -1,10 +1,12 @@
-import { useCallback, useState } from "react";
+import { useCallback, useContext, useState } from "react";
 
 import { prSignal, type PrSignal } from "../../../shared/pr-filter";
 import { ageDays, approvalTally, primaryRole, repoShortName, reviewRank } from "../../../shared/pr-table";
 import type { PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
+import { basePrTitle } from "../../../shared/pr-group";
 import { AuthorButton } from "./AuthorButton";
+import { BasePrContext } from "./base-pr-context";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
 
@@ -90,6 +92,7 @@ function tileTooltip(pr: PullRequest, now: number): string {
 }
 
 export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComments }: Props) {
+  const basePr = useContext(BasePrContext).get(pr.id);
   const [copied, setCopied] = useState(false);
   const copyUrl = useCallback(() => {
     window.api
@@ -180,10 +183,10 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
         <StackBadge pr={pr} />
         {!pr.stack && !pr.baseIsDefaultBranch && (
           <span
-            title={`Stacked on ${pr.baseRefName}, not on the default branch`}
-            className="shrink-0 text-emerald-600 dark:text-emerald-400"
+            title={basePrTitle(pr, basePr)}
+            className="shrink-0 text-emerald-600 tabular-nums dark:text-emerald-400"
           >
-            ↳
+            ↳{basePr ? `#${basePr.number}` : ""}
           </span>
         )}
         {pr.hasNewActivity && (

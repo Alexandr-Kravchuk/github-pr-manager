@@ -1,12 +1,13 @@
-import { useCallback, useState } from "react";
+import { useCallback, useContext, useState } from "react";
 
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
 import { isPassiveReviewed, prSignal, type PrSignal } from "../../../shared/pr-filter";
-import { hiddenParentOf } from "../../../shared/pr-group";
+import { basePrTitle, hiddenParentOf } from "../../../shared/pr-group";
 import { repoShortName } from "../../../shared/pr-table";
 import type { PullRequest, ReviewDecision, Reviewer } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { AuthorButton } from "./AuthorButton";
+import { BasePrContext } from "./base-pr-context";
 import { CheckBadge } from "./CheckBadge";
 import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
@@ -174,6 +175,7 @@ export function PrCard({
   parentGroupKey = null,
   trackComments,
 }: Props) {
+  const basePr = useContext(BasePrContext).get(pr.id);
   const review = reviewLabel(pr.reviewDecision);
   // Under an epic heading a subtask's PR would say nothing of the task it
   // belongs to; this line names it, linked to Jira when a site is set.
@@ -249,13 +251,27 @@ export function PrCard({
               replaces the umbrella, which stays for hand-made stacks. */}
           <StackBadge pr={pr} />
           {!pr.stack && !pr.baseIsDefaultBranch && (
-            <span
-              title={`Based on ${pr.baseRefName}`}
-              aria-label={`Based on branch ${pr.baseRefName}`}
-              className="shrink-0 text-emerald-600 dark:text-emerald-400"
-            >
-              <UmbrellaIcon />
-            </span>
+            basePr ? (
+              // A hand-made stack: name the PR under this one, which merges first.
+              <button
+                type="button"
+                onClick={() => onOpen(basePr)}
+                title={basePrTitle(pr, basePr)}
+                aria-label={`Based on pull request ${basePr.number}`}
+                className="inline-flex shrink-0 items-center gap-0.5 rounded px-0.5 text-emerald-600 tabular-nums hover:bg-elevated dark:text-emerald-400"
+              >
+                <UmbrellaIcon />
+                <span>on #{basePr.number}</span>
+              </button>
+            ) : (
+              <span
+                title={basePrTitle(pr, undefined)}
+                aria-label={`Based on branch ${pr.baseRefName}`}
+                className="shrink-0 text-emerald-600 dark:text-emerald-400"
+              >
+                <UmbrellaIcon />
+              </span>
+            )
           )}
           <button
             type="button"

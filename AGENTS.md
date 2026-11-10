@@ -75,7 +75,12 @@ Three layers:
   Jira enricher looks one level above a subtask's task (`grandparentKey`), and
   the card then names that skipped task (`hiddenParentOf`) — plus `orderStacks`, which
   keeps the PRs of one native GitHub stack together bottom-first in the
-  Roomy/Compact list; GitHub merges a stack bottom-up only yet reports the PRs
+  Roomy/Compact list — and so a hand-made stack, where each PR is opened on
+  the previous one's head branch: `basePrIndex` maps a PR to the listed PR
+  whose head is its base (same host and repo), the card's umbrella then reads
+  "on #N" and opens that PR, the tile's `↳` carries the number, and the map is
+  built from the whole snapshot (`BasePrContext`) so a filter cannot hide the
+  base's number; GitHub merges a stack bottom-up only yet reports the PRs
   above the bottom as `CLEAN`, so `canBeMerged` in `github.ts` is gated on
   `blockedByStack` and `prSignal` paints such a PR amber, not green; in the
   same way an approval that branch protection does not accept — GitHub still
