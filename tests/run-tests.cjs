@@ -8419,6 +8419,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(defaultReview, /low confidence is a ground for REQUEST_CHANGES only once it is checked/);
       assert.match(defaultReview, /Start your report with the link to the review you published/);
       assert.match(defaultReview, /for each PR the link to its review, its decision/);
+      // A session's turn note is cut at 400 characters; the summary needs the whole report.
+      assert.match(defaultReview, /Read each report whole with list_events/);
+      // An answer relayed by the parent reaches a session twice (the user often answers
+      // there too) and the auto mode classifier refuses it as not the user's.
+      assert.match(defaultReview, /is mine to give in that PR's session/);
       assert.match(review, /1\) \/my-review https:\/\/github\.com\/a\/b\/pull\/1 2\) \/my-review https:\/\/github\.com\/a\/b\/pull\/2/, "each PR's own review prompt");
       const placed = cl.renderGroupPrompt({}, "review", "ENG-7", prs, ["C:\\Projects\\core", null]);
       assert.match(placed, /start_session's cwd/);
