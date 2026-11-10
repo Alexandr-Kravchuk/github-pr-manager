@@ -1,5 +1,5 @@
 import type { CheckItem } from "../../../shared/types";
-import type { CheckBadgeItem } from "../../../shared/check-groups";
+import { checkDisplayName, type CheckBadgeItem } from "../../../shared/check-groups";
 import { checkStateClasses, checkStateIcon, cn } from "../format";
 
 /** Compact badge for a single CI check; clickable when a link is present. */
@@ -13,7 +13,7 @@ export function CheckBadge({ check }: { check: CheckItem }) {
     <>
       <span aria-hidden>{checkStateIcon(check.state)}</span>
       <span className="truncate" title={check.name}>
-        {check.name}
+        {checkDisplayName(check.name)}
       </span>
     </>
   );

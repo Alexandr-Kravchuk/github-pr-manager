@@ -14992,6 +14992,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(cg.collapseChecks([chk("x", "failure"), chk("y", "failure")])[0].label, "2 checks failing");
       assert.deepStrictEqual(cg.collapseChecks([]), []);
       assert.strictEqual(cg.checkGroupLabel("success", 12), "12 checks passed");
+      assert.strictEqual(cg.checkDisplayName("SonarCloud Code Analysis"), "Sonar");
+      assert.strictEqual(cg.checkDisplayName("SonarQube Code Analysis"), "Sonar");
+      assert.strictEqual(cg.checkDisplayName("Unit Test Shard (unit-1)"), "Unit Test Shard (unit-1)");
     });
   }
 

@@ -38,3 +38,12 @@ export function collapseChecks(checks: readonly CheckItem[]): CheckBadgeItem[] {
       : { kind: "group", state, label: checkGroupLabel(state, list.length), names: list.map((c) => c.name) },
   );
 }
+
+/**
+ * The name a check's badge shows. Sonar's checks carry long product names
+ * ("SonarCloud Code Analysis", "SonarQube Code Analysis") that say only
+ * "Sonar"; the full name stays in the tooltip.
+ */
+export function checkDisplayName(name: string): string {
+  return /^sonar(cloud|qube)?\b/i.test(name) ? "Sonar" : name;
+}
