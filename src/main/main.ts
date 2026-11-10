@@ -21,6 +21,7 @@ import type {
   FocusClaudeSessionResult,
   DashboardResult,
   GhStatus,
+  JiraHealth,
   JiraStatus,
   PullRequest,
   SaveSettingsResult,
@@ -31,11 +32,15 @@ import { launchClaude, launchGroup } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
 import { clearJiraCaches } from "../shared/jira";
+import { shouldNotifyJiraAuth } from "../shared/jira-health";
 import { buildJiraEnricher, getJiraStatus, setJiraToken } from "./jira-store";
+import { getTwgStatus, openTwgLogin } from "./twg";
+import { createTwgStatusCache } from "../shared/jira-twg";
 import {
   validateClipboardText,
   validateExternalUrl,
   validateIgnoredArgs,
+  validateJiraStatusMode,
   validateJiraToken,
   validateClaudeKind,
   validateGroupLaunchArgs,
@@ -216,6 +221,37 @@ function showOsNotification(title: string, body: string, silent: boolean, onClic
   n.on("failed", release);
   liveNotifications.add(n);
   n.show();
+}
+
+/** The Jira health of the last snapshot — the baseline for `shouldNotifyJiraAuth`. */
+let prevJiraHealth: JiraHealth | undefined;
+
+/**
+ * One OS notification when Jira or twg starts rejecting the credentials: the
+ * banner says it inside the app, but a tray-hidden app would otherwise lose
+ * grouping without anyone noticing. Fires on the transition only, under the
+ * same master switch and native toggle as the PR notifications.
+ */
+function handleJiraAuthNotification(health: JiraHealth | undefined): void {
+  const notify = shouldNotifyJiraAuth(prevJiraHealth, health);
+  prevJiraHealth = health;
+  if (!notify || !health) return;
+  let settings: Settings;
+  try {
+    settings = loadSettings();
+  } catch {
+    return;
+  }
+  if (!settings.notifications.enabled || !settings.notifications.native || !Notification.isSupported()) return;
+  const body =
+    health.source === "twg"
+      ? "twg is not signed in to Atlassian. Open PR Dashboard to sign in again."
+      : "Jira rejected your API token — it may have expired. Open PR Dashboard to replace it.";
+  try {
+    showOsNotification("PR Dashboard — Jira", body, false, focusMainWindow);
+  } catch (e) {
+    console.warn(`[notify] Jira auth toast failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /**
@@ -760,7 +796,27 @@ function registerIpc(): void {
     }
   });
 
-  ipcMain.handle("jira:status", async (): Promise<JiraStatus> => getJiraStatus(loadSettings));
+  // `cached` answers at once: the last twg status, or `checking` while the first
+  // `twg whoami` runs. `fresh` waits for a new one; concurrent reads share it.
+  const twgStatus = createTwgStatusCache(getTwgStatus);
+  ipcMain.handle("jira:status", async (_event, raw: unknown): Promise<JiraStatus> => {
+    const mode = validateJiraStatusMode(raw);
+    let twg = mode === "fresh" ? await twgStatus.refresh() : twgStatus.current();
+    if (!twg) {
+      void twgStatus.refresh();
+      twg = { state: "checking" };
+    }
+    return getJiraStatus(loadSettings, twg);
+  });
+
+  ipcMain.handle("jira:twgLogin", async () => {
+    try {
+      await openTwgLogin();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+  });
 
   ipcMain.handle("jira:setToken", async (_event, raw: unknown) => {
     const result = setJiraToken(validateJiraToken(raw));
@@ -843,6 +899,7 @@ function startApp(): void {
         sendToRenderer("snapshot", snapshot);
       }
       handleNotifications(snapshot.pullRequests);
+      handleJiraAuthNotification(snapshot.jiraHealth);
     },
     onConfigError: (message) => {
       if (process.env.PRD_DEBUG) console.error("[config-error]", message);

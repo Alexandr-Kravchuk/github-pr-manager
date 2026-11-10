@@ -18,6 +18,8 @@ const ignored = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
 const state = require(path.join(__dirname, "../dist/main/shared/state.js"));
 const jira = require(path.join(__dirname, "../dist/main/shared/jira.js"));
 const jiraHealth = require(path.join(__dirname, "../dist/main/shared/jira-health.js"));
+const jiraTwg = require(path.join(__dirname, "../dist/main/shared/jira-twg.js"));
+const jiraPass = require(path.join(__dirname, "../dist/main/shared/jira-pass.js"));
 const issueKey = require(path.join(__dirname, "../dist/main/shared/issue-key.js"));
 const prFilter = require(path.join(__dirname, "../dist/main/shared/pr-filter.js"));
 const singleInstance = require(path.join(__dirname, "../dist/main/main/single-instance.js"));
@@ -99,6 +101,7 @@ for (const mod of [
   "claude-sessions.js",
   "settings-search.js",
   "host-status.js",
+  "jira-status.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -1429,8 +1432,12 @@ test("validateSettings: valid jira normalized", () => {
   });
   assert.deepStrictEqual(s.jira, { baseUrl: "https://org.atlassian.net", email: "me@x.com" });
 });
-test("validateSettings: incomplete jira (no email) is dropped", () =>
-  assert.strictEqual(cfg.validateSettings({ hosts: [], jira: { baseUrl: "org.atlassian.net" } }).jira, undefined));
+test("validateSettings: jira without an email is kept — twg needs only the site", () =>
+  assert.deepStrictEqual(cfg.validateSettings({ hosts: [], jira: { baseUrl: "org.atlassian.net" } }).jira, {
+    baseUrl: "https://org.atlassian.net",
+  }));
+test("validateSettings: jira without a site is dropped", () =>
+  assert.strictEqual(cfg.validateSettings({ hosts: [], jira: { email: "me@x.com" } }).jira, undefined));
 test("validateSettings: absent jira is undefined", () =>
   assert.strictEqual(cfg.validateSettings({ hosts: [] }).jira, undefined));
 test("validateSettings: jira with invalid baseUrl throws", () =>
@@ -2800,10 +2807,41 @@ async function withTempStore(fn) {
 
 // --- jira-health: pure enrichment classification -----------------------------
 const JH_CFG = { baseUrl: "https://org.atlassian.net", email: "me@x.com" };
-test("enrichmentSkipReason: no-config when baseUrl/email missing", () => {
-  assert.strictEqual(jiraHealth.enrichmentSkipReason(undefined, true, 3), "no-config");
-  assert.strictEqual(jiraHealth.enrichmentSkipReason({ baseUrl: "https://org.atlassian.net" }, true, 3), "no-config");
-  assert.strictEqual(jiraHealth.enrichmentSkipReason({ email: "me@x.com" }, true, 3), "no-config");
+test("enrichmentSkipReason: no-config only when the site is missing", () => {
+  assert.strictEqual(jiraHealth.enrichmentSkipReason(undefined, 3), "no-config");
+  assert.strictEqual(jiraHealth.enrichmentSkipReason({ email: "me@x.com" }, 3), "no-config");
+  // A site without an email runs: twg needs nothing else.
+  assert.strictEqual(jiraHealth.enrichmentSkipReason({ baseUrl: "https://org.atlassian.net" }, 3), null);
+});
+test("canUseToken: needs the site, the email and a stored token", () => {
+  assert.strictEqual(jiraHealth.canUseToken(JH_CFG, true), true);
+  assert.strictEqual(jiraHealth.canUseToken(JH_CFG, false), false);
+  assert.strictEqual(jiraHealth.canUseToken({ baseUrl: "https://org.atlassian.net" }, true), false);
+  assert.strictEqual(jiraHealth.canUseToken(undefined, true), false);
+});
+test("jiraConfigured: an installed twg is enough, signed in or not; without twg the token fallback must be usable", () => {
+  const site = { baseUrl: "https://org.atlassian.net" };
+  assert.strictEqual(jiraHealth.jiraConfigured(site, { state: "signed-in" }, false), true);
+  // An expired twg session keeps grouping set up: losing it would reset the
+  // user's saved "Group by parent task" — the auth banner reports the expiry.
+  assert.strictEqual(jiraHealth.jiraConfigured(site, { state: "signed-out" }, false), true);
+  assert.strictEqual(jiraHealth.jiraConfigured(site, { state: "error" }, false), true);
+  assert.strictEqual(jiraHealth.jiraConfigured(site, { state: "not-installed" }, true), false); // no email
+  assert.strictEqual(jiraHealth.jiraConfigured(JH_CFG, { state: "not-installed" }, true), true);
+  assert.strictEqual(jiraHealth.jiraConfigured(JH_CFG, { state: "not-installed" }, false), false);
+  assert.strictEqual(jiraHealth.jiraConfigured(undefined, { state: "signed-in" }, true), false);
+});
+test("signInSource: twg only when signed in, else the token with its email, else none", () => {
+  const site = { baseUrl: "https://org.atlassian.net" };
+  assert.strictEqual(jiraHealth.signInSource(JH_CFG, { state: "signed-in" }, true), "twg");
+  assert.strictEqual(jiraHealth.signInSource(JH_CFG, { state: "signed-out" }, true), "token");
+  assert.strictEqual(jiraHealth.signInSource(JH_CFG, { state: "checking" }, true), "token");
+  assert.strictEqual(jiraHealth.signInSource(site, { state: "signed-out" }, true), null); // no email
+  assert.strictEqual(jiraHealth.signInSource(site, { state: "checking" }, false), null);
+  assert.strictEqual(jiraHealth.signInSource(undefined, { state: "signed-in" }, true), null);
+});
+test("jiraConfigured: a twg still being checked keeps grouping set up", () => {
+  assert.strictEqual(jiraHealth.jiraConfigured({ baseUrl: "https://org.atlassian.net" }, { state: "checking" }, false), true);
 });
 // jiraSiteState — the settings half of getJiraStatus, split out of the
 // Electron-bound jira-store so its fail-closed branch is reachable from here.
@@ -2819,14 +2857,10 @@ test("jiraSiteState: no jira block -> no config, no site", () =>
     hasConfig: false,
     baseUrl: null,
   }));
-test("jiraSiteState: half-filled config still yields its site, but hasConfig is false", () =>
-  // Pins the pure contract, not a reachable state: `validateJira` drops a jira
-  // block missing either half, so settings can't hold this. The two fields
-  // answer different questions — hasJiraConfig needs both, a link needs only
-  // the site — and that must stay true if validation ever loosens.
+test("jiraSiteState: a site without an email is a configured connection (twg needs only the site)", () =>
   assert.deepStrictEqual(
     jiraHealth.jiraSiteState(() => ({ jira: { baseUrl: "https://org.atlassian.net" } })),
-    { hasConfig: false, baseUrl: "https://org.atlassian.net" },
+    { hasConfig: true, baseUrl: "https://org.atlassian.net" },
   ));
 test("jiraSiteState: a throwing loadSettings fails closed instead of propagating", () =>
   assert.deepStrictEqual(
@@ -2836,12 +2870,10 @@ test("jiraSiteState: a throwing loadSettings fails closed instead of propagating
     { hasConfig: false, baseUrl: null },
   ));
 
-test("enrichmentSkipReason: no-token when config present but token absent", () =>
-  assert.strictEqual(jiraHealth.enrichmentSkipReason(JH_CFG, false, 3), "no-token"));
-test("enrichmentSkipReason: no-keys when config+token present but zero keys", () =>
-  assert.strictEqual(jiraHealth.enrichmentSkipReason(JH_CFG, true, 0), "no-keys"));
-test("enrichmentSkipReason: null (run) when config+token+keys all present", () =>
-  assert.strictEqual(jiraHealth.enrichmentSkipReason(JH_CFG, true, 2), null));
+test("enrichmentSkipReason: no-keys when configured but zero keys", () =>
+  assert.strictEqual(jiraHealth.enrichmentSkipReason(JH_CFG, 0), "no-keys"));
+test("enrichmentSkipReason: null (run) when config and keys are present", () =>
+  assert.strictEqual(jiraHealth.enrichmentSkipReason(JH_CFG, 2), null));
 test("healthFromResolution: ok when >=1 parent resolved", () =>
   assert.deepStrictEqual(jiraHealth.healthFromResolution(3, 2), { state: "ok", queried: 3, resolved: 2 }));
 test("healthFromResolution: empty when nothing resolved", () =>
@@ -2890,6 +2922,31 @@ test("healthFromError: stringifies a non-Error rejection", () =>
     queried: 1,
     resolved: 0,
   }));
+test("healthFromError: a JiraAuthError becomes the auth state, naming the rejected source", () => {
+  for (const source of ["token", "twg"]) {
+    const health = jiraHealth.healthFromError(2, new jira.JiraAuthError("rejected", source), "twg");
+    assert.deepStrictEqual(health, { state: "auth", message: "rejected", queried: 2, resolved: 0, source });
+  }
+});
+test("healthFromError: an ordinary error keeps the pass's source", () =>
+  assert.deepStrictEqual(jiraHealth.healthFromError(1, new Error("HTTP 500"), "twg"), {
+    state: "error",
+    message: "HTTP 500",
+    queried: 1,
+    resolved: 0,
+    source: "twg",
+  }));
+test("shouldNotifyJiraAuth: fires on entering auth, not on staying there", () => {
+  const auth = (source) => ({ state: "auth", queried: 1, resolved: 0, source });
+  const ok = { state: "ok", queried: 1, resolved: 1 };
+  assert.strictEqual(jiraHealth.shouldNotifyJiraAuth(ok, auth("token")), true);
+  assert.strictEqual(jiraHealth.shouldNotifyJiraAuth(undefined, auth("token")), true);
+  assert.strictEqual(jiraHealth.shouldNotifyJiraAuth(auth("token"), auth("token")), false);
+  // A different credential failing is news of its own.
+  assert.strictEqual(jiraHealth.shouldNotifyJiraAuth(auth("twg"), auth("token")), true);
+  assert.strictEqual(jiraHealth.shouldNotifyJiraAuth(auth("token"), ok), false);
+  assert.strictEqual(jiraHealth.shouldNotifyJiraAuth(ok, undefined), false);
+});
 
 // --- pr-filter: the reveal gate (Drafts/Ignored chips) ----------------------
 // Drafts and ignored PRs are hidden by default and each chip REVEALS its own
@@ -5672,10 +5729,128 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.strictEqual(again.get("ENG-100").summary, "Cached title");
   });
 
-  await atest("fetchIssues: throws when every base rejects (401)", async () => {
+  await atest("fetchIssues: every base answering 401 is a rejected token (JiraAuthError), not a plain HTTP error", async () => {
     jira.clearJiraCaches();
     global.fetch = async (url) => (isTenant(url) ? tenantOk() : errRes(401));
-    await assert.rejects(() => jira.fetchIssues(JIRA_CFG, "tok", ["ENG-5"]), /Jira HTTP 401/);
+    await assert.rejects(
+      () => jira.fetchIssues(JIRA_CFG, "tok", ["ENG-5"]),
+      (e) => e.name === "JiraAuthError" && e.source === "token" && /rejected the API token/.test(e.message),
+    );
+  });
+
+  // The site URL serves a bad API token anonymously: 200 with no issues. Only
+  // this header tells it apart from "no matches", so without it an expired
+  // token reads as "no parent tasks resolved".
+  const anonymousSite = () => ({
+    ...okJson({ issues: [], isLast: true }),
+    headers: { get: (name) => (name.toLowerCase() === "x-seraph-loginreason" ? "AUTHENTICATED_FAILED" : null) },
+  });
+
+  await atest("fetchIssues: an expired classic token (gateway 401, site anonymous 200) is a JiraAuthError", async () => {
+    jira.clearJiraCaches();
+    global.fetch = async (url) => {
+      if (isTenant(url)) return tenantOk();
+      if (url === GATEWAY) return errRes(401);
+      if (url === SITE) return anonymousSite();
+      throw new Error("unexpected url " + url);
+    };
+    await assert.rejects(
+      () => jira.fetchIssues(JIRA_CFG, "tok", ["ENG-7"]),
+      (e) => e.name === "JiraAuthError" && e.source === "token",
+    );
+  });
+
+  await atest("fetchIssues: a rejected token caches nothing — no pinned site base, no negative entries", async () => {
+    // Counted as a trusted classic-token answer, the anonymous 200 would pin the
+    // site base and write a negative entry per key for 10 minutes.
+    jira.clearJiraCaches();
+    let expired = true;
+    const searches = [];
+    global.fetch = async (url) => {
+      if (isTenant(url)) return tenantOk();
+      searches.push(url);
+      if (url === GATEWAY) return errRes(401);
+      if (url === SITE) {
+        return expired
+          ? anonymousSite()
+          : okJson({ issues: [{ key: "ENG-8", fields: { summary: "Eight" } }] });
+      }
+      throw new Error("unexpected url " + url);
+    };
+    await assert.rejects(() => jira.fetchIssues(JIRA_CFG, "tok", ["ENG-8"]));
+    expired = false; // a new token, same caches (as if setJiraToken had not cleared them)
+    searches.length = 0;
+    const map = await jira.fetchIssues(JIRA_CFG, "tok2", ["ENG-8"]);
+    assert.strictEqual(map.get("ENG-8").summary, "Eight"); // no negative entry served
+    assert.deepStrictEqual(searches, [GATEWAY, SITE]); // the site base was not pinned
+  });
+
+  await atest("fetchIssues: a token that expires after the site base was pinned still surfaces as JiraAuthError", async () => {
+    // The steady state takes the `pinned` path with a single base and never
+    // re-probes, so the header check must run there too.
+    jira.clearJiraCaches();
+    let expired = false;
+    global.fetch = async (url) => {
+      if (isTenant(url)) return tenantOk();
+      if (url === GATEWAY) return errRes(401);
+      if (url === SITE) {
+        return expired ? anonymousSite() : okJson({ issues: [{ key: "ENG-9", fields: { summary: "Nine" } }] });
+      }
+      throw new Error("unexpected url " + url);
+    };
+    await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-9"]); // pins the site base
+    expired = true;
+    await assert.rejects(
+      () => jira.fetchIssues(JIRA_CFG, "tok", ["ENG-99"]),
+      (e) => e.name === "JiraAuthError",
+    );
+  });
+
+  await atest("fetchIssues: a refusal on the site alone, with the gateway unchecked, is a plain error, not a rejection", async () => {
+    // cloudId unresolved: a scoped token reaches only the site, which refuses
+    // it as it refuses an expired one. That verdict can't tell the two apart.
+    jira.clearJiraCaches();
+    global.fetch = async (url) => {
+      if (isTenant(url)) return errRes(404);
+      if (url === SITE) return anonymousSite();
+      throw new Error("unexpected url " + url);
+    };
+    await assert.rejects(
+      () => jira.fetchIssues(JIRA_CFG, "tok", ["ENG-7"]),
+      (e) => e.name !== "JiraAuthError" && /gateway could not be checked/.test(e.message),
+    );
+  });
+
+  await atest("fetchIssues: a 401 from an already pinned gateway is a JiraAuthError", async () => {
+    jira.clearJiraCaches();
+    let revoked = false;
+    global.fetch = async (url) => {
+      if (isTenant(url)) return tenantOk();
+      if (url === GATEWAY) return revoked ? errRes(401) : okJson({ issues: [{ key: "ENG-6", fields: { summary: "Six" } }] });
+      throw new Error("unexpected url " + url);
+    };
+    await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-6"]); // pins the gateway
+    revoked = true;
+    await assert.rejects(
+      () => jira.fetchIssues(JIRA_CFG, "tok", ["ENG-66"]),
+      (e) => e.name === "JiraAuthError" && e.source === "token",
+    );
+  });
+
+  await atest("fetchIssues: a site response with an OK login reason is not a rejection", async () => {
+    // Only the failure values are matched — a valid token's response may carry
+    // another value or omit the header.
+    jira.clearJiraCaches();
+    global.fetch = async (url) => {
+      if (isTenant(url)) return tenantOk();
+      if (url === GATEWAY) return errRes(401);
+      return {
+        ...okJson({ issues: [{ key: "ENG-10", fields: { summary: "Ten" } }] }),
+        headers: { get: (n) => (n.toLowerCase() === "x-seraph-loginreason" ? "OK" : null) },
+      };
+    };
+    const map = await jira.fetchIssues(JIRA_CFG, "tok", ["ENG-10"]);
+    assert.strictEqual(map.get("ENG-10").summary, "Ten");
   });
 
   await atest("fetchIssues: recovers within the cloudId TTL after a transient blip (no 10-min negative poisoning)", async () => {
@@ -5995,6 +6170,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       fsSync.rmSync(userData, { recursive: true, force: true });
     }
   };
+  // Without an injected runner the enricher would spawn the machine's real
+  // `twg` — and, where it is signed in, query real Jira. These cases exercise
+  // the API-token path, so twg is "not installed" for them.
+  const NO_TWG = { runTwg: async () => ({ stdout: "", stderr: "", code: null, notFound: true }) };
   // Jira answers only the keys the JQL actually asked for, with the fields each
   // case gives them — so a case controls parentage per key, and a key it omits
   // is one Jira doesn't know.
@@ -6021,7 +6200,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         { issueKey: "ENG-3", issueSummary: null, parentKey: null, parentSummary: null },
         { issueKey: null, issueSummary: null, parentKey: null, parentSummary: null },
       ];
-      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }), NO_TWG)(prs);
       // The by-issue heading's input, on every PR that has a key — including the
       // parentless one, which the parent-only lookup used to drop entirely.
       assert.deepStrictEqual(
@@ -6036,7 +6215,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // `resolved` is 2, not the 3 issues that resolved: the regression the
       // parent-only count exists to prevent, caught through the enricher's own
       // output rather than through its source text.
-      assert.deepStrictEqual(health, { state: "ok", queried: 3, resolved: 2 });
+      assert.deepStrictEqual(health, { state: "ok", queried: 3, resolved: 2, source: "token" });
     });
   });
 
@@ -6053,12 +6232,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         { issueKey: "ENG-4", issueSummary: null, parentKey: null, parentSummary: null },
         { issueKey: "ENG-5", issueSummary: null, parentKey: null, parentSummary: null },
       ];
-      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }), NO_TWG)(prs);
       assert.deepStrictEqual(
         prs.map((p) => p.issueSummary),
         ["Four", "Five"],
       );
-      assert.deepStrictEqual(health, { state: "empty", queried: 2, resolved: 0 });
+      assert.deepStrictEqual(health, { state: "empty", queried: 2, resolved: 0, source: "token" });
     });
   });
 
@@ -6075,7 +6254,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await withMockedElectron(async (store) => {
       assert.strictEqual(store.setJiraToken("").ok, true); // clears any stored token
       const prs = [{ issueKey: "ENG-6", issueSummary: null, parentKey: null, parentSummary: null }];
-      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }), NO_TWG)(prs);
       assert.strictEqual(health, undefined);
       assert.strictEqual(prs[0].issueSummary, null);
       assert.strictEqual(calls, 0);
@@ -6104,7 +6283,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await withMockedElectron(async (store) => {
       assert.strictEqual(store.setJiraToken("tok").ok, true);
       const prs = [blankPr("ENG-11"), blankPr("ENG-12")];
-      await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }), NO_TWG)(prs);
       assert.strictEqual(prs[0].parentKey, "ENG-10");
       assert.strictEqual(prs[0].grandparentKey, "ENG-1");
       assert.strictEqual(prs[0].grandparentSummary, "Stepper");
@@ -6123,7 +6302,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await withMockedElectron(async (store) => {
       assert.strictEqual(store.setJiraToken("tok").ok, true);
       const prs = [blankPr("ENG-31")];
-      await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }), NO_TWG)(prs);
       assert.strictEqual(prs[0].grandparentKey, "ENG-3");
       assert.strictEqual(prs[0].grandparentSummary, "Epic");
     });
@@ -6141,12 +6320,457 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await withMockedElectron(async (store) => {
       assert.strictEqual(store.setJiraToken("tok").ok, true);
       const prs = [blankPr("ENG-21")];
-      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }))(prs);
+      const health = await store.buildJiraEnricher(() => ({ jira: JIRA_CFG }), NO_TWG)(prs);
       assert.strictEqual(prs[0].issueSummary, "Sub");
       assert.strictEqual(prs[0].parentKey, "ENG-20");
       assert.strictEqual(prs[0].grandparentKey, null);
-      assert.deepStrictEqual(health, { state: "ok", queried: 1, resolved: 1 });
+      assert.deepStrictEqual(health, { state: "ok", queried: 1, resolved: 1, source: "token" });
     });
+  });
+
+  await atest("buildJiraEnricher: through twg, a subtask's PR reaches the epic above its task", async () => {
+    jira.clearJiraCaches();
+    global.fetch = async () => {
+      throw new Error("the API token must not be used while twg answers");
+    };
+    const twgIssues = {
+      "ENG-81": { key: "ENG-81", summary: "Sub", parent: { key: "ENG-80", fields: { summary: "Task" } }, issuetype: { subtask: true } },
+      "ENG-80": { key: "ENG-80", summary: "Task", parent: { key: "ENG-1", fields: { summary: "Epic" } }, issuetype: { subtask: false } },
+    };
+    const runTwg = async (args) => {
+      const asked = args.join(" ").match(/[A-Z]+-\d+/g) || [];
+      return { stdout: JSON.stringify({ data: { issues: asked.filter((k) => twgIssues[k]).map((k) => twgIssues[k]) } }), stderr: "", code: 0 };
+    };
+    await withMockedElectron(async (store) => {
+      const prs = [{ issueKey: "ENG-81", issueSummary: null, parentKey: null, parentSummary: null }];
+      const health = await store.buildJiraEnricher(() => ({ jira: { baseUrl: JIRA_CFG.baseUrl } }), { runTwg })(prs);
+      assert.deepStrictEqual(health, { state: "ok", queried: 1, resolved: 1, source: "twg" });
+      assert.strictEqual(prs[0].parentKey, "ENG-80");
+      assert.strictEqual(prs[0].grandparentKey, "ENG-1");
+      assert.strictEqual(prs[0].grandparentSummary, "Epic");
+    });
+  });
+
+  await atest("buildJiraEnricher: a signed-out twg and no token is auth health naming twg", async () => {
+    jira.clearJiraCaches();
+    const runTwg = async () => ({ stdout: JSON.stringify({ ok: false, error: { code: "AUTH_REQUIRED", message: "sign in" } }), stderr: "", code: 1 });
+    await withMockedElectron(async (store) => {
+      assert.strictEqual(store.setJiraToken("").ok, true);
+      const prs = [{ issueKey: "ENG-82", issueSummary: null, parentKey: null, parentSummary: null }];
+      const health = await store.buildJiraEnricher(() => ({ jira: { baseUrl: JIRA_CFG.baseUrl } }), { runTwg })(prs);
+      assert.strictEqual(health.state, "auth");
+      assert.strictEqual(health.source, "twg");
+    });
+  });
+
+  await atest("getJiraStatus: maps the twg state, the token and the email onto the setup status", async () => {
+    await withMockedElectron(async (store) => {
+      const site = { jira: { baseUrl: "https://org.atlassian.net" } };
+      const status = async (settings, twg) => store.getJiraStatus(() => settings, twg);
+
+      assert.strictEqual(store.setJiraToken("").ok, true);
+      let s = await status(site, { state: "signed-in", account: "Ann" });
+      assert.deepStrictEqual(
+        { configured: s.configured, twg: s.twg, hasConfig: s.hasConfig, hasEmail: s.hasEmail, hasToken: s.hasToken, baseUrl: s.baseUrl },
+        { configured: true, twg: { state: "signed-in", account: "Ann" }, hasConfig: true, hasEmail: false, hasToken: false, baseUrl: "https://org.atlassian.net" },
+      );
+      assert.strictEqual(s.signInSource, "twg");
+      // A signed-out twg stays configured (the saved grouping survives), but can't sign in.
+      s = await status(site, { state: "signed-out" });
+      assert.strictEqual(s.configured, true);
+      assert.strictEqual(s.signInSource, null);
+      // While whoami runs the status answers at once, still configured.
+      s = await status(site, { state: "checking" });
+      assert.deepStrictEqual([s.configured, s.baseUrl, s.twg.state], [true, "https://org.atlassian.net", "checking"]);
+      // No twg and no token: nothing is set up.
+      assert.strictEqual((await status(site, { state: "not-installed" })).configured, false);
+      // No twg, but a token with its email: set up through the fallback.
+      assert.strictEqual(store.setJiraToken("tok").ok, true);
+      s = await status({ jira: JIRA_CFG }, { state: "not-installed" });
+      assert.strictEqual(s.configured, true);
+      assert.strictEqual(s.hasEmail, true);
+      assert.strictEqual(s.hasToken, true);
+      assert.strictEqual(s.signInSource, "token");
+      // A broken settings file fails closed.
+      s = store.getJiraStatus(
+        () => {
+          throw new Error("bad settings");
+        },
+        { state: "signed-in" },
+      );
+      assert.strictEqual(s.configured, false);
+      assert.strictEqual(s.hasConfig, false);
+    });
+  });
+
+  await atest("createJiraStatusLoader: cached first, fresh while twg is checking; a stale answer never wins", async () => {
+    const loaderMod = require(path.join(__dirname, "../dist/main/shared/jira-status.js"));
+    const st = (state) => ({ twg: { state }, baseUrl: "https://org.atlassian.net" });
+    const calls = [];
+    const pending = [];
+    const shown = [];
+    const load = loaderMod.createJiraStatusLoader(
+      (mode) => new Promise((resolve) => (calls.push(mode), pending.push(resolve))),
+      (s) => shown.push(s.twg.state),
+    );
+    const first = load();
+    pending.shift()(st("checking"));
+    await new Promise((r) => setImmediate(r));
+    assert.deepStrictEqual(calls, ["cached", "fresh"], "a checking twg is read again, fresh");
+    const slowFresh = pending.shift();
+    const second = load(true); // e.g. Check again, while the first fresh read still runs
+    pending.shift()(st("signed-in"));
+    await second;
+    slowFresh(st("signed-out")); // the older answer arrives last
+    await first;
+    assert.deepStrictEqual(shown, ["checking", "signed-in"], "the older answer must not overwrite the newer one");
+    // A cached answer that is already known needs no second read.
+    const third = load();
+    pending.shift()(st("signed-in"));
+    await third;
+    assert.deepStrictEqual(calls, ["cached", "fresh", "fresh", "cached"]);
+  });
+
+  // --- the twg source and how a pass picks between twg and the API token ----
+  // twg prints the issue fields flat on the issue (the REST search nests them
+  // under `fields`) and reports failures as `{ ok: false, error: { code } }`.
+  const twgOk = (issues) => ({ stdout: JSON.stringify({ apiVersion: "v2", data: { issues } }), stderr: "", code: 0 });
+  const twgErr = (code, message) => ({
+    stdout: JSON.stringify({ ok: false, error: { code, message } }),
+    stderr: "",
+    code: 1,
+  });
+  const TWG_NOT_INSTALLED = { stdout: "", stderr: "", code: null, notFound: true };
+
+  test("twgQueryArgs: forces plain JSON output and targets the configured site", () => {
+    const args = jiraTwg.twgQueryArgs("https://org.atlassian.net", ["ENG-1", "ENG-2"]);
+    // `--mode user` overrides an inherited TWG_AGENT_DEFAULTS; `--output-summary
+    // none` keeps the agent YAML envelope off stdout.
+    for (const pair of [["--mode", "user"], ["--output", "json"], ["--output-summary", "none"], ["--site", "org.atlassian.net"]]) {
+      const i = args.indexOf(pair[0]);
+      assert.ok(i >= 0 && args[i + 1] === pair[1], `missing ${pair.join(" ")}`);
+    }
+    assert.strictEqual(args[args.indexOf("--jql") + 1], "key in (ENG-1,ENG-2)");
+    assert.strictEqual(args[args.indexOf("--fields") + 1], "summary,parent,issuetype");
+  });
+  test("classifyTwgRun: success, missing binary, AUTH_* codes, other errors", () => {
+    assert.strictEqual(jiraTwg.classifyTwgRun(twgOk([])), null);
+    assert.deepStrictEqual(jiraTwg.classifyTwgRun(TWG_NOT_INSTALLED), { kind: "not-installed" });
+    assert.deepStrictEqual(jiraTwg.classifyTwgRun(twgErr("AUTH_REQUIRED", "Run twg login")), {
+      kind: "auth",
+      message: "Run twg login",
+    });
+    assert.strictEqual(jiraTwg.classifyTwgRun(twgErr("AUTH_PROFILE_MISSING", "No profile")).kind, "auth");
+    assert.deepStrictEqual(jiraTwg.classifyTwgRun(twgErr("RATE_LIMITED", "slow down")), {
+      kind: "error",
+      message: "twg: slow down",
+    });
+    assert.strictEqual(jiraTwg.classifyTwgRun({ stdout: "", stderr: "", code: null }).message, "twg: timed out");
+    assert.match(jiraTwg.classifyTwgRun({ stdout: "not json", stderr: "boom\nmore", code: 2 }).message, /code 2: boom$/);
+  });
+  test("parseTwgAccount: the whoami display name", () => {
+    assert.strictEqual(jiraTwg.parseTwgAccount(JSON.stringify({ data: { name: "Ann", email: "a@x" } })), "Ann");
+    assert.strictEqual(jiraTwg.parseTwgAccount("{}"), null);
+  });
+
+  test("twgWhoamiArgs: forces user mode, JSON output and no summary envelope", () => {
+    const args = jiraTwg.twgWhoamiArgs();
+    assert.ok(args.includes("whoami"));
+    for (const [flag, value] of [["--mode", "user"], ["--output", "json"], ["--output-summary", "none"]]) {
+      assert.strictEqual(args[args.indexOf(flag) + 1], value, flag);
+    }
+  });
+  test("twgStatusFrom: signed in (with the account), signed out, not installed, error", () => {
+    const whoami = { stdout: JSON.stringify({ data: { name: "Ann" } }), stderr: "", code: 0 };
+    assert.deepStrictEqual(jiraTwg.twgStatusFrom(whoami), { state: "signed-in", account: "Ann" });
+    assert.deepStrictEqual(jiraTwg.twgStatusFrom({ stdout: "{}", stderr: "", code: 0 }), { state: "signed-in" });
+    assert.strictEqual(jiraTwg.twgStatusFrom(twgErr("AUTH_REQUIRED", "sign in")).state, "signed-out");
+    assert.deepStrictEqual(jiraTwg.twgStatusFrom(TWG_NOT_INSTALLED), { state: "not-installed" });
+    assert.deepStrictEqual(jiraTwg.twgStatusFrom({ stdout: "", stderr: "", code: null }), { state: "error", message: "twg: timed out" });
+  });
+  await atest("createTwgStatusCache: no value before the first read; concurrent refreshes share one read", async () => {
+    let reads = 0;
+    let release;
+    const cache = jiraTwg.createTwgStatusCache(
+      () => new Promise((resolve) => (reads++, (release = () => resolve({ state: "signed-in", account: "Ann" })))),
+    );
+    assert.strictEqual(cache.current(), null);
+    const a = cache.refresh();
+    const b = cache.refresh();
+    assert.strictEqual(reads, 1, "a second caller must not start another whoami");
+    release();
+    assert.deepStrictEqual(await a, await b);
+    assert.deepStrictEqual(cache.current(), { state: "signed-in", account: "Ann" });
+    const c = cache.refresh();
+    assert.strictEqual(reads, 2, "once settled, a refresh reads again");
+    release();
+    await c;
+  });
+  await atest("createTwgStatusCache: a read that throws becomes an error status, never a rejection", async () => {
+    const cache = jiraTwg.createTwgStatusCache(async () => {
+      throw new Error("boom");
+    });
+    assert.deepStrictEqual(await cache.refresh(), { state: "error", message: "boom" });
+    assert.strictEqual(cache.current().state, "error");
+  });
+  await atest("runTwg: no twg on PATH is notFound, which the status reads as not installed", async () => {
+    const twgMain = require(path.join(__dirname, "../dist/main/main/twg.js"));
+    const empty = require("node:fs").mkdtempSync(path.join(os.tmpdir(), "prd-no-twg-"));
+    const pathKey = Object.keys(process.env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
+    const saved = process.env[pathKey];
+    process.env[pathKey] = empty;
+    try {
+      const run = await twgMain.runTwg(["whoami"]);
+      assert.strictEqual(run.notFound, true);
+      assert.deepStrictEqual(jiraTwg.twgStatusFrom(run), { state: "not-installed" });
+    } finally {
+      process.env[pathKey] = saved;
+      require("node:fs").rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  await atest("resolveIssues(twg): reads twg's flat fields — summary, parent and its summary, subtask flag", async () => {
+    jira.clearJiraCaches();
+    const run = async () =>
+      twgOk([
+        {
+          key: "ENG-41",
+          summary: "Sub",
+          issuetype: { subtask: true, hierarchyLevel: -1 },
+          parent: { key: "ENG-40", fields: { summary: "Task" } },
+        },
+      ]);
+    const map = await jira.resolveIssues({ kind: "twg", baseUrl: "https://org.atlassian.net", run }, ["ENG-41", "ENG-42"]);
+    assert.deepStrictEqual(map.get("ENG-41"), {
+      summary: "Sub",
+      parentKey: "ENG-40",
+      parentSummary: "Task",
+      isSubtask: true,
+    });
+    assert.strictEqual(map.has("ENG-42"), false);
+  });
+
+  await atest("resolveIssues(twg): AUTH_* is a JiraAuthError from twg; a missing binary is TwgNotInstalledError", async () => {
+    jira.clearJiraCaches();
+    const lookup = (result) => ({ kind: "twg", baseUrl: "https://org.atlassian.net", run: async () => result });
+    await assert.rejects(
+      () => jira.resolveIssues(lookup(twgErr("AUTH_REQUIRED", "sign in")), ["ENG-1"]),
+      (e) => e.name === "JiraAuthError" && e.source === "twg",
+    );
+    await assert.rejects(
+      () => jira.resolveIssues(lookup(TWG_NOT_INSTALLED), ["ENG-1"]),
+      (e) => e.name === "TwgNotInstalledError",
+    );
+  });
+
+  const passDeps = (over) => ({
+    runTwg: async () => TWG_NOT_INSTALLED,
+    hasToken: () => true,
+    readToken: () => "tok",
+    ...over,
+  });
+
+  await atest("createJiraPass: twg answers first and the API token is never sent", async () => {
+    jira.clearJiraCaches();
+    let fetched = 0;
+    global.fetch = async () => {
+      fetched++;
+      throw new Error("token path must not run");
+    };
+    const pass = jiraPass.createJiraPass(
+      passDeps({ runTwg: async () => twgOk([{ key: "ENG-51", summary: "S", parent: { key: "ENG-50" } }]) }),
+    );
+    const result = await pass(JIRA_CFG, ["ENG-51"]);
+    assert.deepStrictEqual(result.health, { state: "ok", queried: 1, resolved: 1, source: "twg" });
+    assert.strictEqual(fetched, 0);
+  });
+
+  await atest("createJiraPass: twg not installed -> the API token, with no twg trace in the health", async () => {
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({ "ENG-52": { summary: "S", parent: { key: "ENG-50" } } });
+    const result = await jiraPass.createJiraPass(passDeps())(JIRA_CFG, ["ENG-52"]);
+    assert.deepStrictEqual(result.health, { state: "ok", queried: 1, resolved: 1, source: "token" });
+  });
+
+  await atest("createJiraPass: twg signed out and a working token -> the token's result", async () => {
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({ "ENG-53": { summary: "S", parent: { key: "ENG-50" } } });
+    const pass = jiraPass.createJiraPass(passDeps({ runTwg: async () => twgErr("AUTH_REQUIRED", "sign in") }));
+    const result = await pass(JIRA_CFG, ["ENG-53"]);
+    assert.strictEqual(result.health.state, "ok");
+    assert.strictEqual(result.health.source, "token");
+  });
+
+  await atest("createJiraPass: twg signed out and no token -> auth health naming twg", async () => {
+    jira.clearJiraCaches();
+    const pass = jiraPass.createJiraPass(
+      passDeps({ runTwg: async () => twgErr("AUTH_REQUIRED", "sign in"), hasToken: () => false, readToken: () => null }),
+    );
+    const result = await pass({ baseUrl: JIRA_CFG.baseUrl }, ["ENG-54"]);
+    assert.deepStrictEqual(result.health, { state: "auth", message: "sign in", queried: 1, resolved: 0, source: "twg" });
+  });
+
+  await atest("createJiraPass: no twg and no usable token -> undefined (nothing to do)", async () => {
+    jira.clearJiraCaches();
+    const noToken = jiraPass.createJiraPass(passDeps({ hasToken: () => false, readToken: () => null }));
+    assert.strictEqual(await noToken(JIRA_CFG, ["ENG-55"]), undefined);
+    // A token but no email can't sign in either — and the keychain isn't touched.
+    let read = 0;
+    const noEmail = jiraPass.createJiraPass(passDeps({ readToken: () => (read++, "tok") }));
+    assert.strictEqual(await noEmail({ baseUrl: JIRA_CFG.baseUrl }, ["ENG-55"]), undefined);
+    assert.strictEqual(read, 0);
+  });
+
+  await atest("createJiraPass: a rejected token is not sent again until it changes", async () => {
+    jira.clearJiraCaches();
+    let searches = 0;
+    let tokenWorks = false;
+    global.fetch = async (url, init) => {
+      if (isTenant(url)) return tenantOk();
+      searches++;
+      if (url === GATEWAY) return errRes(401);
+      return tokenWorks
+        ? jiraAnswers({ "ENG-56": { summary: "S", parent: { key: "ENG-50" } } })(url, init)
+        : anonymousSite();
+    };
+    let token = "expired";
+    const pass = jiraPass.createJiraPass(passDeps({ readToken: () => token }));
+    const first = await pass(JIRA_CFG, ["ENG-56"]);
+    assert.strictEqual(first.health.state, "auth");
+    assert.strictEqual(first.health.source, "token");
+    const sent = searches;
+    const second = await pass(JIRA_CFG, ["ENG-56"]);
+    assert.deepStrictEqual(second.health, first.health);
+    assert.strictEqual(searches, sent, "the rejected token must not reach Jira again");
+    // A new token is tried at once.
+    token = "fresh";
+    tokenWorks = true;
+    const third = await pass(JIRA_CFG, ["ENG-56"]);
+    assert.strictEqual(third.health.state, "ok");
+    assert.strictEqual(third.issues.get("ENG-56").parentKey, "ENG-50");
+  });
+
+  await atest("createJiraPass: a corrected email or site retries the same rejected token", async () => {
+    // A wrong account email is one of the causes the rejection message names;
+    // fixing it in Settings must not leave the stale rejection in force.
+    for (const fix of [{ email: "right@x.com" }, { baseUrl: "https://other.atlassian.net" }]) {
+      jira.clearJiraCaches();
+      let searches = 0;
+      global.fetch = async (url) => {
+        if (isTenant(url)) return tenantOk();
+        searches++;
+        return url === GATEWAY ? errRes(401) : anonymousSite();
+      };
+      const pass = jiraPass.createJiraPass(passDeps({ readToken: () => "same-token" }));
+      assert.strictEqual((await pass(JIRA_CFG, ["ENG-61"])).health.state, "auth");
+      const sent = searches;
+      await pass(JIRA_CFG, ["ENG-61"]);
+      assert.strictEqual(searches, sent, "unchanged credential: not resent");
+      await pass({ ...JIRA_CFG, ...fix }, ["ENG-61"]);
+      assert.ok(searches > sent, `changed ${Object.keys(fix)[0]}: the token is sent again`);
+    }
+  });
+
+  await atest("createJiraPass: both sources rejected -> the health names twg, the primary fix", async () => {
+    jira.clearJiraCaches();
+    global.fetch = async (url) => (isTenant(url) ? tenantOk() : url === GATEWAY ? errRes(401) : anonymousSite());
+    const pass = jiraPass.createJiraPass(passDeps({ runTwg: async () => twgErr("AUTH_REQUIRED", "sign in") }));
+    for (let i = 0; i < 2; i++) {
+      // The second pass takes the "token already rejected" branch — same answer.
+      const result = await pass(JIRA_CFG, ["ENG-58"]);
+      assert.strictEqual(result.health.state, "auth");
+      assert.strictEqual(result.health.source, "twg");
+    }
+  });
+
+  await atest("createJiraPass: a hung twg is skipped for the next passes, however far apart they are", async () => {
+    // The backoff is counted in passes: the next tick starts a whole poll
+    // interval after this one ends, so a wall-clock window would already have
+    // run out and the hung twg would cost every tick its timeout again.
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({ "ENG-59": { summary: "S" } });
+    let runs = 0;
+    let hung = true;
+    const pass = jiraPass.createJiraPass(
+      passDeps({
+        runTwg: async () => (runs++, hung ? { stdout: "", stderr: "", code: null } : twgOk([{ key: "ENG-59", summary: "S" }])),
+      }),
+    );
+    await pass(JIRA_CFG, ["ENG-59"]);
+    assert.strictEqual(runs, 1);
+    for (let i = 0; i < jiraPass.TWG_BACKOFF_PASSES; i++) {
+      const skipped = await pass(JIRA_CFG, ["ENG-59"]);
+      assert.strictEqual(skipped.health.source, "token", "the token answers while twg is skipped");
+    }
+    assert.strictEqual(runs, 1, "a timed-out twg must not run again inside the backoff");
+    hung = false;
+    const after = await pass(JIRA_CFG, ["ENG-59"]);
+    assert.strictEqual(runs, 2, "after the backoff twg is tried again");
+    assert.strictEqual(after.health.source, "twg");
+  });
+
+  await atest("createJiraPass: a signed-out twg is retried every pass (no backoff)", async () => {
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({ "ENG-60": { summary: "S" } });
+    let runs = 0;
+    const pass = jiraPass.createJiraPass(
+      passDeps({ runTwg: async () => (runs++, twgErr("AUTH_REQUIRED", "sign in")) }),
+    );
+    await pass(JIRA_CFG, ["ENG-60"]);
+    await pass(JIRA_CFG, ["ENG-60"]);
+    assert.strictEqual(runs, 2, "a terminal sign-in must be picked up on the next pass");
+  });
+
+  await atest("createJiraPass: a twg that hangs only on the subtask parents is backed off too", async () => {
+    // The issue itself comes from twg's cache on the next passes, so only the
+    // parent lookup would run — and time out — every pass.
+    jira.clearJiraCaches();
+    global.fetch = async () => {
+      throw new Error("the token is not used here");
+    };
+    let runs = 0;
+    const pass = jiraPass.createJiraPass(
+      passDeps({
+        hasToken: () => false,
+        runTwg: async (args) => {
+          runs++;
+          return args.join(" ").includes("ENG-71")
+            ? twgOk([{ key: "ENG-71", summary: "Sub", parent: { key: "ENG-70" }, issuetype: { subtask: true } }])
+            : { stdout: "", stderr: "", code: null };
+        },
+      }),
+    );
+    const first = await pass(JIRA_CFG, ["ENG-71"]);
+    assert.strictEqual(first.health.state, "ok", "the resolved issues still count");
+    assert.strictEqual(runs, 2);
+    for (let i = 0; i < jiraPass.TWG_BACKOFF_PASSES; i++) {
+      const skipped = await pass(JIRA_CFG, ["ENG-71"]);
+      assert.strictEqual(skipped.health.state, "error", "no token: the backoff reports twg's failure");
+      assert.strictEqual(skipped.health.source, "twg");
+    }
+    assert.strictEqual(runs, 2, "twg must not run during the backoff");
+  });
+
+  await atest("createJiraPass: per-source caches — the token's negative entry doesn't hide a key from twg", async () => {
+    // A scoped token may see fewer issues than the account. Its "not found" for
+    // a key, cached for 10 minutes, must not stop twg — once signed in — from
+    // resolving that key on the very next pass.
+    jira.clearJiraCaches();
+    global.fetch = jiraAnswers({}); // the token sees nothing
+    let twgInstalled = false;
+    const pass = jiraPass.createJiraPass(
+      passDeps({
+        runTwg: async () =>
+          twgInstalled ? twgOk([{ key: "ENG-57", summary: "Seen by twg" }]) : TWG_NOT_INSTALLED,
+      }),
+    );
+    const first = await pass(JIRA_CFG, ["ENG-57"]);
+    assert.strictEqual(first.health.source, "token");
+    assert.strictEqual(first.issues.has("ENG-57"), false);
+    twgInstalled = true;
+    const second = await pass(JIRA_CFG, ["ENG-57"]);
+    assert.strictEqual(second.health.source, "twg");
+    assert.strictEqual(second.issues.get("ENG-57").summary, "Seen by twg");
   });
 
   global.fetch = realFetch;
@@ -7773,6 +8397,34 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     test("main.js wiring: claude:launchGroup validates, then reads the PRs from the snapshot", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
       assert.match(src, /"claude:launchGroup"[\s\S]{0,300}validateGroupLaunchArgs[\s\S]{0,200}getSnapshot\(\)/);
+    });
+  }
+
+  // --- Jira auth wiring in the main process -----------------------------------
+  // The decisions are pure and tested above (shouldNotifyJiraAuth, createJiraPass,
+  // getJiraStatus); these pin that main.js actually routes through them.
+  {
+    const readDist = (rel) => require("node:fs").readFileSync(path.join(__dirname, "../dist/main", rel), "utf8");
+
+    test("main.js wiring: every snapshot feeds the Jira auth notification", () => {
+      assert.match(readDist("main/main.js"), /onSnapshot:[\s\S]{0,1500}handleJiraAuthNotification\(snapshot\.jiraHealth\)/);
+    });
+    test("main.js wiring: the Jira auth notification fires on the transition, under the notification switches", () => {
+      const src = readDist("main/main.js");
+      const fn = src.slice(src.indexOf("function handleJiraAuthNotification"));
+      assert.match(fn, /shouldNotifyJiraAuth\)?\(prevJiraHealth, health\)/);
+      assert.match(fn, /notifications\.enabled[\s\S]{0,80}notifications\.native[\s\S]{0,80}isSupported\(\)/);
+    });
+    test("main.js wiring: jira:twgLogin opens the sign-in and reports a failure instead of throwing", () => {
+      assert.match(
+        readDist("main/main.js"),
+        /"jira:twgLogin"[\s\S]{0,200}openTwgLogin\)?\(\)[\s\S]{0,120}ok: true[\s\S]{0,120}ok: false, error:/,
+      );
+    });
+    test("twg.js: the sign-in terminal goes through the shared launcher, not its own spawn", () => {
+      const src = readDist("main/twg.js");
+      assert.match(src, /openTerminalWith\)?\(/);
+      assert.doesNotMatch(src, /cmd\.exe|osascript|\bspawn\b/);
     });
   }
 

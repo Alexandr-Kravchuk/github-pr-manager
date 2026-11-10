@@ -95,7 +95,8 @@ Three layers:
   PR" button: which prompt a PR's state picks — blocked → drive, review due →
   review, own mergeable → close, else the bare link — plus the shell quoting;
   the renderer imports it for the tooltip, while finding the checkout by git
-  remote and opening the terminal live in `main/claude-launch.ts`, and the
+  remote live in `main/claude-launch.ts` and opening the terminal in
+  `main/terminal.ts`, and the
   renderer sends only the PR id so nothing it supplies reaches the shell; a
   Jira-key group heading also has a split Claude button beside its PR count
   with two group launches — "Explain all" (one session that explains the
@@ -150,12 +151,15 @@ Three layers:
   colour of a header host pill's dot — red on a failed fetch, amber on a spent
   or low GraphQL budget, green otherwise; the pills replaced the raw budget
   number and, with two or more hosts, the "All hosts" dropdown, since clicking a
-  pill toggles that host's filter). Keep any such
+  pill toggles that host's filter) and `jira-status.ts` (how the renderer
+  loads the Jira status: the cached answer first, a fresh `twg whoami` only
+  while twg is still `checking` or on Check again, and every answer to a load
+  that a later one replaced is dropped). Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
-  `settings-search.js` and `host-status.js`
+  `settings-search.js`, `host-status.js` and `jira-status.js`
   stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
@@ -259,6 +263,43 @@ Three layers:
   in-progress edit (a half-typed Jira token) was rejected instead.
 - Settings never contain tokens; tokens are resolved per host via `gh` at fetch
   time (`config.ts`).
+- Jira is read through the Atlassian `twg` CLI first, the API token second —
+  the `gh` model again: twg signs in with OAuth and refreshes itself, so there
+  is nothing to expire. `shared/jira-pass.ts` picks the source per pass (twg
+  not installed → token silently; twg signed out → token, reported only when
+  the token can't run) and is unit-tested with an injected twg runner. A twg
+  that hung or failed is skipped for a number of *passes*, not seconds: the
+  next tick starts a full poll interval after this one ends, so any time
+  window shorter than that interval has always expired by then.
+  `main/twg.ts` owns the processes, `shared/jira-twg.ts` the arguments, output
+  parsing and failure classes. The sign-in terminal opens through
+  `openTerminalWith` in `main/terminal.ts`, the one terminal launcher.
+  `jira:status` never waits on `twg whoami` (it can take many seconds while
+  twg renews its session): it answers with the last known twg status, or
+  `checking` before the first, and one shared `whoami` refreshes it
+  (`createTwgStatusCache`). A twg that fails on the subtask parents backs off
+  as well, since the issues themselves then come from the cache. Every twg run passes `--mode user --output json
+  --output-summary none`, or an inherited `TWG_AGENT_DEFAULTS` swaps the JSON
+  for a YAML envelope. Tests must inject a runner (`buildJiraEnricher(…, {
+  runTwg })`): the default spawns the machine's real twg. The issue caches are
+  per source, so one source's "not found" never hides a key from the other.
+- A rejected API token is NOT a 401 on the site URL: Jira serves it
+  anonymously as `200 {"issues":[]}` and says so only in
+  `X-Seraph-LoginReason: AUTHENTICATED_FAILED`. `fetchTokenChunk` checks that
+  header (failure values only) on every response, pinned base included, and
+  throws `JiraAuthError` before anything is cached — only on a trusted answer
+  (`resultIsTrustworthy`): a scoped token that reached the site alone because
+  the gateway was skipped is refused there too, so that is a plain error,
+  retried next pass — counted as a trusted
+  answer, the anonymous 200 would pin the site base, write a negative entry per
+  key and show as "no parent tasks resolved". The `auth` health drives a banner in every grouping, one OS
+  notification on the transition into it, and the pass stops sending that
+  credential until the token, the account email or the site changes. The
+  Settings header names the source that can sign in now (`signInSource`: twg
+  signed in, or a token with its email), never `configured`, which stays true for a
+  signed-out twg so the saved grouping survives. Atlassian has no API that creates a user's API
+  token, so the banner can only link to id.atlassian.com (or start
+  `twg login --force` in a terminal).
 - Window size/position persist in `userData/window-state.json`
   (`main/window-state.ts`), **not** in `settings.json`: `loadSettings()` throws
   `ConfigError` on an unexpected shape and the poller surfaces that, so a stray

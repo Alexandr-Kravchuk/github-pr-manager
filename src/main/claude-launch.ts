@@ -1,12 +1,10 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import {
-  ITERM_BUNDLE_ID,
   claudeDesktopUrl,
-  launcherEnv,
   normalizeRemote,
   claudeKindsFor,
   pickClaudeLaunch,
@@ -17,7 +15,6 @@ import {
   groupLaunchPrs,
   renderGroupPrompt,
   type GroupLaunchKind,
-  terminalScript,
 } from "../shared/claude-launch";
 import type {
   ClaudeGroupLaunchResult,
@@ -26,6 +23,7 @@ import type {
   ClaudeTerminal,
   PullRequest,
 } from "../shared/types";
+import { openTerminalWith } from "./terminal";
 
 /** Expands a leading `~` to the home directory. */
 export function expandHome(p: string): string {
@@ -102,51 +100,24 @@ export function findCheckout(
   return null;
 }
 
-function run(cmd: string, args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    execFile(cmd, args, { timeout: 15_000, env: launcherEnv(process.env) }, (err) =>
-      err ? reject(err) : resolve(),
-    );
-  });
-}
-
-/** Whether iTerm2 is installed — asked of Launch Services, so any install location counts. */
-function hasITerm(): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    execFile("mdfind", [`kMDItemCFBundleIdentifier == '${ITERM_BUNDLE_ID}'`], { timeout: 5_000 }, (err, out) =>
-      resolve(!err && out.trim().length > 0),
-    );
-  }).then((found) => found || isDir("/Applications/iTerm.app"));
-}
-
 /** Opens a new terminal window in `dir` running `claude <prompt>`. */
 async function openTerminal(
   dir: string,
   prompt: string,
   terminal: Exclude<ClaudeTerminal, "desktop">,
 ): Promise<void> {
-  if (process.platform === "darwin") {
-    const app = terminal === "auto" ? ((await hasITerm()) ? "iterm" : "terminal") : terminal;
-    const lines = terminalScript(app, posixLaunchCommand(dir, prompt));
-    await run("osascript", lines.flatMap((l) => ["-e", l]));
-    return;
+  // cmd.exe has no quoting that survives every character, so the prompt must
+  // not carry one that would end the argument early.
+  if (process.platform === "win32" && /["%^&|<>]/.test(prompt)) {
+    throw new Error(`The prompt contains a character Windows can't pass to claude: ${prompt}`);
   }
-  if (process.platform === "win32") {
-    // cmd.exe has no quoting that survives every character, so the prompt must
-    // not carry one that would end the argument early.
-    if (/["%^&|<>]/.test(prompt)) {
-      throw new Error(`The prompt contains a character Windows can't pass to claude: ${prompt}`);
-    }
-    const child = spawn("cmd.exe", ["/c", "start", '""', "/D", `"${dir}"`, "cmd", "/k", "claude", `"${prompt}"`], {
-      detached: true,
-      stdio: "ignore",
-      env: launcherEnv(process.env),
-      windowsVerbatimArguments: true,
-    });
-    child.unref();
-    return;
-  }
-  throw new Error("Starting a Claude session is supported on macOS and Windows only.");
+  await openTerminalWith(
+    {
+      posix: posixLaunchCommand(dir, prompt),
+      windows: ["/D", `"${dir}"`, "cmd", "/k", "claude", `"${prompt}"`],
+    },
+    { terminal, unsupported: "Starting a Claude session is supported on macOS and Windows only." },
+  );
 }
 
 /**

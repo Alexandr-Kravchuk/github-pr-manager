@@ -267,18 +267,19 @@ export function validateClaude(raw: unknown): ClaudeSettings {
 
 /**
  * Validates the optional Jira connection. Returns undefined when absent or
- * incomplete (missing baseUrl/email) — an incomplete config just means Jira
- * grouping stays off, not a hard error. The baseUrl is normalized to an origin.
+ * without a site — that just means Jira grouping stays off, not a hard error.
+ * The email is optional: only the API-token fallback needs it, `twg` signs in on
+ * its own. The baseUrl is normalized to an origin.
  */
 function validateJira(raw: unknown): JiraSettings | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
   const obj = raw as Record<string, unknown>;
   const email = typeof obj.email === "string" ? obj.email.trim() : "";
   const rawUrl = typeof obj.baseUrl === "string" ? obj.baseUrl.trim() : "";
-  if (!email || !rawUrl) return undefined;
+  if (!rawUrl) return undefined;
   const baseUrl = normalizeJiraBaseUrl(rawUrl);
   if (!baseUrl) throw new ConfigError(`settings: jira.baseUrl is not a valid URL: ${rawUrl}`);
-  return { baseUrl, email };
+  return email ? { baseUrl, email } : { baseUrl };
 }
 
 /**

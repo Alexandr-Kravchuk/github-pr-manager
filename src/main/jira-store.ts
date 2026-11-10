@@ -14,12 +14,16 @@ import { makeDebug } from "../shared/debug";
 import {
   enrichmentSkipReason,
   hasJiraConfig,
-  jiraSiteState,
   healthFromError,
-  healthFromIssues,
+  jiraConfigured,
+  jiraSiteState,
+  signInSource,
 } from "../shared/jira-health";
-import { clearJiraCaches, fetchIssues, fetchSubtaskParents } from "../shared/jira";
-import type { JiraHealth, JiraStatus, PullRequest, Settings } from "../shared/types";
+import { clearJiraCaches } from "../shared/jira";
+import { createJiraPass } from "../shared/jira-pass";
+import type { TwgRunner } from "../shared/jira-twg";
+import { runTwg } from "./twg";
+import type { JiraHealth, JiraStatus, PullRequest, Settings, TwgStatus } from "../shared/types";
 
 function jiraTokenPath(): string {
   return path.join(app.getPath("userData"), "jira-token.enc");
@@ -82,16 +86,29 @@ export function getJiraToken(): string | null {
   }
 }
 
-/** Setup state for the settings UI and the grouping gate. */
-export function getJiraStatus(loadSettings: () => Settings): JiraStatus {
+/**
+ * Setup state for the settings UI and the grouping gate. The twg status is
+ * passed in — read from the cache in `main.ts` — so this never waits on a
+ * `twg whoami`.
+ */
+export function getJiraStatus(loadSettings: () => Settings, twg: TwgStatus): JiraStatus {
   // Both settings-derived fields come from `jiraSiteState`, which is pure and
   // therefore unit-tested — including its fail-closed branch, which is what
   // makes a broken settings file degrade to "no Jira" instead of a broken badge.
   const { hasConfig, baseUrl } = jiraSiteState(loadSettings);
+  let jira: Settings["jira"];
+  try {
+    jira = loadSettings().jira;
+  } catch {
+    jira = undefined;
+  }
   const hasToken = hasJiraToken();
   return {
-    configured: hasConfig && hasToken,
+    configured: jiraConfigured(jira, twg, hasToken),
+    twg,
+    signInSource: signInSource(jira, twg, hasToken),
     hasConfig,
+    hasEmail: Boolean(hasConfig && jira?.email),
     hasToken,
     baseUrl,
     encryptionAvailable: encryptionAvailable(),
@@ -102,14 +119,23 @@ export function getJiraStatus(loadSettings: () => Settings): JiraStatus {
  * Builds the poller's Jira enricher: resolves the PRs' issue keys and sets
  * `issueSummary` (the by-issue heading) plus `parentKey` / `parentSummary` (the
  * by-parent heading) on each. Returns a `JiraHealth` describing the pass so the
- * UI can explain an empty/failed result instead of showing silent empty groups;
- * returns `undefined` when there was nothing to do (Jira off, no token, or no
- * issue keys). Best-effort — never throws.
+ * UI can explain an empty/failed/rejected result instead of showing silent empty
+ * groups; returns `undefined` when there was nothing to do (Jira off, no source
+ * that can sign in, or no issue keys). Which source runs — twg, else the API
+ * token — is decided by `createJiraPass` (pure, unit-tested). Best-effort —
+ * never throws.
  */
 export function buildJiraEnricher(
   loadSettings: () => Settings,
+  opts: { runTwg?: TwgRunner } = {},
 ): (prs: PullRequest[]) => Promise<JiraHealth | undefined> {
   const debug = makeDebug("[jira]");
+  const pass = createJiraPass({
+    runTwg: opts.runTwg ?? runTwg,
+    hasToken: hasJiraToken,
+    readToken: getJiraToken,
+    debug: (line) => debug(line),
+  });
   return async (prs: PullRequest[]) => {
     let jira: Settings["jira"];
     try {
@@ -119,24 +145,25 @@ export function buildJiraEnricher(
       return undefined;
     }
 
-    // Resolve the token only when the connection is configured (avoid a needless
-    // keychain decrypt). The skip decision itself lives in the pure, tested
-    // `enrichmentSkipReason` so its ordering can't drift untested; the re-checks
-    // in the `if` are redundant at runtime but let the compiler narrow
-    // `jira`/`token` instead of trusting `!` assertions.
-    const token = hasJiraConfig(jira) ? getJiraToken() : null;
+    // The skip decision lives in the pure, tested `enrichmentSkipReason` so its
+    // ordering can't drift untested; the re-check in the `if` is redundant at
+    // runtime but lets the compiler narrow `jira` instead of trusting `!`.
     const keys = [...new Set(prs.map((p) => p.issueKey).filter((k): k is string => Boolean(k)))];
-    const skip = enrichmentSkipReason(jira, Boolean(token), keys.length);
-    if (skip || !hasJiraConfig(jira) || !token) {
-      debug(() => `skip: ${skip} (hasFile=${hasJiraToken()} encryptionAvailable=${encryptionAvailable()} prs=${prs.length})`);
+    const skip = enrichmentSkipReason(jira, keys.length);
+    if (skip || !hasJiraConfig(jira)) {
+      debug(() => `skip: ${skip} (prs=${prs.length})`);
       return undefined;
     }
 
     debug(() => `resolving ${keys.length} keys: ${keys.join(", ")}`);
     try {
-      const issues = await fetchIssues(jira, token, keys);
-      debug(() => `resolved ${issues.size} issues: ${[...issues.entries()].map(([k, i]) => `${k}->${i.parentKey ?? "(no parent)"}`).join(", ") || "(none)"}`);
-      const tasks = await fetchSubtaskParents(jira, token, issues.values());
+      const result = await pass(jira, keys);
+      if (!result) {
+        debug(() => `skip: no source — twg not installed and no usable API token (hasFile=${hasJiraToken()} encryptionAvailable=${encryptionAvailable()})`);
+        return undefined;
+      }
+      const { issues, tasks } = result;
+      debug(() => `${result.health.source ?? "?"} ${result.health.state}: ${[...issues.entries()].map(([k, i]) => `${k}->${i.parentKey ?? "(no parent)"}`).join(", ") || "(none)"}`);
       for (const pr of prs) {
         const issue = pr.issueKey ? issues.get(pr.issueKey) : undefined;
         const task = issue?.isSubtask && issue.parentKey ? tasks.get(issue.parentKey) : undefined;
@@ -149,7 +176,7 @@ export function buildJiraEnricher(
       // Counted in `healthFromIssues` (pure, and unit-tested for it): `resolved`
       // means parents, not issues — see the rule there for why the distinction
       // is load-bearing for the banner.
-      return healthFromIssues(keys.length, issues.values());
+      return result.health;
     } catch (e) {
       if (process.env.PRD_DEBUG) console.warn("[jira] issue resolution failed:", (e as Error).message);
       return healthFromError(keys.length, e);
