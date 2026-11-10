@@ -111,7 +111,11 @@ function checkWorkflow(input: unknown, run: GuardRun | null): GuardDecision {
 const READ_ONLY: ReadonlySet<AgentRunKind> = new Set(["review", "brief", "rereview", "afterMerge"]);
 
 /** File tools that change files — never in a read-only run. */
-const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const WRITE_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+
+export function isWriteTool(toolName: string): boolean {
+  return WRITE_TOOLS.has(toolName);
+}
 
 /** Tools no agent run gets, whatever the list says: network, other shells. */
 const NEVER = new Set(["WebFetch", "WebSearch", "PowerShell", "REPL"]);
@@ -801,7 +805,7 @@ export function checkBash(kind: AgentRunKind, rawCommand: string, pr: GuardPr | 
 }
 
 /** The path a file tool is about to write, as Claude Code reports it. */
-function toolFilePath(input: unknown): string {
+export function toolFilePath(input: unknown): string {
   const i = (input ?? {}) as { file_path?: unknown; notebook_path?: unknown };
   return typeof i.file_path === "string" ? i.file_path : typeof i.notebook_path === "string" ? i.notebook_path : "";
 }

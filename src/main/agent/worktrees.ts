@@ -4,12 +4,19 @@ import path from "node:path";
 
 import { launcherEnv, normalizeRemote, prRemoteKey } from "../../shared/claude-launch";
 import type { PullRequest } from "../../shared/types";
+import { safeGit, withNoHooks } from "./drive";
 
 // Each agent run gets its own git worktree on the PR's head commit, so your
 // checkout — its branch, its uncommitted work — is never touched. Detached
 // HEAD: the PR's branch may already be checked out in your checkout, and git
 // refuses the same branch in two worktrees. `pull/N/head` is fetched rather
 // than the branch name, which also covers PRs from forks.
+//
+// No hook of the clone runs on the way: `worktree add` runs post-checkout and
+// reference-transaction from the new worktree, and a relative core.hooksPath
+// (husky's `.husky/_`) resolves inside it — to scripts the PR itself brings,
+// before any guard or session exists. Every command here goes through
+// `safeGit` with a fresh empty hooks folder, as the drive's own git does.
 
 /** `[remote "name"]` sections of a git config file: name and url. */
 export function parseRemotes(configText: string): Array<{ name: string; url: string }> {
@@ -63,12 +70,13 @@ export function worktreeBase(setting: string, checkout: string): string {
   return setting.trim() ? setting.trim() : path.join(checkout, ".claude", "worktrees");
 }
 
-/** The git commands that set a run's worktree up, in order. */
-export function prepareCommands(remote: string, pr: Pick<PullRequest, "number" | "headOid">, dir: string): string[][] {
+/** The git commands that set a run's worktree up, in order — hooks off (`hooksDir` is a fresh empty folder). */
+export function prepareCommands(remote: string, pr: Pick<PullRequest, "number" | "headOid">, dir: string, hooksDir: string): string[][] {
   if (!pr.headOid) throw new Error("The PR has no head commit to check out.");
+  const off = safeGit(hooksDir);
   return [
-    ["fetch", "--no-tags", remote, `pull/${pr.number}/head`],
-    ["worktree", "add", "--detach", "--force", dir, pr.headOid],
+    [...off, "fetch", "--no-tags", remote, `pull/${pr.number}/head`],
+    [...off, "worktree", "add", "--detach", "--force", dir, pr.headOid],
   ];
 }
 
@@ -93,16 +101,21 @@ export async function prepareWorktree(
   const dir = worktreeDir(opts.base, opts.pr, opts.runId);
   if (fs.existsSync(dir)) await removeWorktree(git, opts.checkout, dir);
   fs.mkdirSync(opts.base, { recursive: true });
-  for (const args of prepareCommands(opts.remote, opts.pr, dir)) await git(args, opts.checkout);
+  await withNoHooks(async (hooksDir) => {
+    for (const args of prepareCommands(opts.remote, opts.pr, dir, hooksDir)) await git(args, opts.checkout);
+  });
   return dir;
 }
 
 export async function removeWorktree(git: GitRunner, checkout: string, dir: string): Promise<void> {
-  try {
-    await git(["worktree", "remove", "--force", dir], checkout);
-  } catch {
-    // Not a registered worktree any more (removed by hand): drop the folder.
-    fs.rmSync(dir, { recursive: true, force: true });
-    await git(["worktree", "prune"], checkout).catch(() => {});
-  }
+  await withNoHooks(async (hooksDir) => {
+    const off = safeGit(hooksDir);
+    try {
+      await git([...off, "worktree", "remove", "--force", dir], checkout);
+    } catch {
+      // Not a registered worktree any more (removed by hand): drop the folder.
+      fs.rmSync(dir, { recursive: true, force: true });
+      await git([...off, "worktree", "prune"], checkout).catch(() => {});
+    }
+  });
 }

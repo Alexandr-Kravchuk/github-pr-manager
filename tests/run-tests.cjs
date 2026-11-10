@@ -9131,6 +9131,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const idleGate = require(path.join(__dirname, "../dist/main/shared/idle-gate.js"));
     const hookJs = path.join(__dirname, "../dist/main/main/agent/hook.js");
     const hookMod = require(hookJs);
+    /** A git command past its global options. */
+    const gitSub = (all) => {
+      let i = 0;
+      for (;;) {
+        if (all[i] === "-c") i += 2;
+        else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+        else break;
+      }
+      return all.slice(i);
+    };
 
     // Not value-imported by the renderer (yet), but kept Node-free all the same;
     // the ones it does import are in the list at the top of this file.
@@ -9574,11 +9584,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         "agent-b-7-abcdef0123-1a2b3c4d",
         "each run its own folder: a second run on the same head never touches the first one's",
       );
-      assert.deepStrictEqual(wt.prepareCommands("upstream", { number: 7, headOid: "abcdef0123456789" }, target), [
+      const cmds = wt.prepareCommands("upstream", { number: 7, headOid: "abcdef0123456789" }, target, "/nohooks");
+      assert.deepStrictEqual(cmds.map(gitSub), [
         ["fetch", "--no-tags", "upstream", "pull/7/head"],
         ["worktree", "add", "--detach", "--force", target, "abcdef0123456789"],
       ]);
-      assert.throws(() => wt.prepareCommands("o", { number: 7, headOid: null }, target));
+      for (const c of cmds) {
+        // worktree add runs post-checkout from the new worktree: hooks of the PR's own, with a relative hooksPath.
+        assert.ok(c.join(" ").includes("-c core.hooksPath=/nohooks"), c.join(" "));
+        assert.ok(c.join(" ").includes("-c core.fsmonitor=false"), c.join(" "));
+      }
+      assert.throws(() => wt.prepareCommands("o", { number: 7, headOid: null }, target, "/nohooks"));
       assert.strictEqual(wt.worktreeBase("", "/co"), path.join("/co", ".claude", "worktrees"));
       assert.strictEqual(wt.worktreeBase(" /mine ", "/co"), "/mine");
     });
@@ -9633,7 +9649,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       nfsA.mkdirSync(path.join(co, ".git"), { recursive: true });
       nfsA.writeFileSync(path.join(co, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
       const snapshot = { pullRequests: [pr], errors: [], rateLimits: [], fetchedAt: "", version: "" };
+      // The commands as git reads them past the app's global options (-c …,
+      // --git-dir, --work-tree) — and as they were passed, options and all.
       const gitCalls = [];
+      const rawGitCalls = [];
       const children = [];
       // Diagrams and re-approve off unless a test asks: both call gh of their own.
       const quiet = (over) => ({ diagrams: { enabled: false }, ...over, scenarios: { reapprove: { mode: "off", askReviewers: true }, ...(over.scenarios ?? {}) } });
@@ -9658,7 +9677,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         hookScript: hookJs,
         execPath: process.execPath,
         plugins: () => [],
-        git: async (args, cwd) => (gitCalls.push(args), gitImpl ? gitImpl(args, cwd) : ""),
+        git: async (args, cwd) => (rawGitCalls.push(args), gitCalls.push(gitSub(args)), gitImpl ? gitImpl(args, cwd) : ""),
         spawner: (args, cwd, env) => {
           const c = fakeChild();
           c.args = args;
@@ -9674,7 +9693,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const setAgent = (over) => {
         settings = cfg.validateSettings({ hosts: [], agent: quiet(over) });
       };
-      return { agent, snapshot, gitCalls, children, dir, setAgent };
+      return { agent, snapshot, gitCalls, rawGitCalls, children, dir, setAgent };
     };
 
     const captureJs = path.join(__dirname, "../dist/main/main/agent/capture.js");
@@ -10662,6 +10681,92 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(hookMod.readGuardFile(path.join(runDir, "missing.json")), null);
     });
 
+    test("agent guard hook: a drive's guard file survives the round trip — edits in its worktree, replies only", () => {
+      const pubG = require(path.join(__dirname, "../dist/main/shared/agent-publish.js"));
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-hookd-"));
+      const workDir = path.join(runDir, "wt");
+      const outDir = path.join(runDir, "out");
+      const outside = path.join(runDir, "elsewhere");
+      for (const d of [path.join(workDir, "src"), path.join(workDir, ".git"), outDir, outside]) nfsA.mkdirSync(d, { recursive: true });
+      const wrapperPath = path.join(runDir, "bin", "pr-review-publish.sh");
+      const guardFile = path.join(runDir, "guard.json");
+      const written = { wrapperPath, outDir, subs: ["reply"], workDir, workflowDirs: [] };
+      runner.writeGuardFile(guardFile, written);
+      assert.deepStrictEqual(hookMod.readGuardFile(guardFile), written, "everything the app wrote comes back");
+      const call = (tool_name, tool_input) =>
+        spawnSync(process.execPath, [hookJs, "drive", "https://github.com/a/b/pull/7", guardFile], {
+          input: JSON.stringify({ tool_name, tool_input }),
+          encoding: "utf8",
+        }).status;
+      assert.strictEqual(call("Edit", { file_path: path.join(workDir, "src", "x.ts") }), 0, "its own worktree");
+      assert.strictEqual(call("Write", { file_path: path.join(workDir, "src", "new", "y.ts") }), 0, "a new file in a new folder");
+      assert.strictEqual(call("Edit", { file_path: path.join(workDir, ".git", "hooks", "pre-push") }), 2);
+      assert.strictEqual(call("Edit", { file_path: path.join(outside, "a.ts") }), 2);
+      const w = pubG.gitBashPath(wrapperPath);
+      const reply = pubG.gitBashPath(path.join(outDir, "reply.txt"));
+      assert.strictEqual(call("Bash", { command: `'${w}' reply a/b 7 77 '${reply}'` }), 0);
+      assert.strictEqual(call("Bash", { command: `'${w}' resolve PRRT_x` }), 2, "a drive only replies");
+      assert.strictEqual(call("Bash", { command: `'${w}' review a/b 7 '${pubG.gitBashPath(path.join(outDir, "r.json"))}'` }), 2);
+
+      // A link the branch carries leads the write elsewhere: followed, and refused.
+      nfsA.symlinkSync(outside, path.join(workDir, "src", "docs"), "junction");
+      assert.strictEqual(call("Write", { file_path: path.join(workDir, "src", "docs", "evil.txt") }), 2, "out of the worktree through a link");
+      nfsA.symlinkSync(path.join(workDir, ".git"), path.join(workDir, "src", "g"), "junction");
+      assert.strictEqual(call("Write", { file_path: path.join(workDir, "src", "g", "hooks", "pre-commit") }), 2, "into git's folder through a link");
+      nfsA.symlinkSync(path.join(runDir, "missing"), path.join(workDir, "src", "dangling"), "junction");
+      assert.strictEqual(call("Write", { file_path: path.join(workDir, "src", "dangling", "z.txt") }), 2, "a link to nowhere");
+
+      // A guard file that names its subcommands wrongly gives nothing beyond reading: absent would mean all of them.
+      for (const bad of [{ subs: "reply" }, { subs: ["reply", "merge"] }, { subs: [1] }, { workDir: "" }, { workDir: 7 }]) {
+        runner.writeGuardFile(guardFile, { ...written, ...bad });
+        assert.strictEqual(hookMod.readGuardFile(guardFile), null, JSON.stringify(bad));
+      }
+      runner.writeGuardFile(guardFile, { ...written, subs: [] });
+      assert.deepStrictEqual(hookMod.readGuardFile(guardFile).subs, [], "an empty list stays empty — no subcommand");
+    });
+
+    await atest("agent worktrees: setting a run's worktree up runs no hook — not even one the PR brings through a relative hooksPath", async () => {
+      const base = nfsA.realpathSync.native(nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-wthook-")));
+      const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+      const g = (cwd, ...args) => spawnSync("git", args, { cwd, encoding: "utf8", env });
+      const origin = path.join(base, "origin");
+      nfsA.mkdirSync(origin);
+      g(origin, "init", "-q");
+      nfsA.writeFileSync(path.join(origin, "a.txt"), "1\n");
+      g(origin, "add", "a.txt");
+      g(origin, "commit", "-q", "-m", "base");
+      // The PR: hooks in husky's folder, which write where the test can see.
+      const marker = path.join(base, "hook-ran").replace(/\\/g, "/");
+      g(origin, "checkout", "-q", "-b", "pr");
+      nfsA.mkdirSync(path.join(origin, ".husky", "_"), { recursive: true });
+      for (const hook of ["post-checkout", "reference-transaction"]) {
+        nfsA.writeFileSync(path.join(origin, ".husky", "_", hook), `#!/bin/sh\necho ${hook} >> "${marker}"\n`, { mode: 0o755 });
+      }
+      g(origin, "add", ".husky");
+      g(origin, "update-index", "--chmod=+x", ".husky/_/post-checkout", ".husky/_/reference-transaction");
+      g(origin, "commit", "-q", "-m", "pr");
+      const head = g(origin, "rev-parse", "HEAD").stdout.trim();
+      g(origin, "update-ref", "refs/pull/7/head", head);
+      g(origin, "checkout", "-q", "-");
+      const clone = path.join(base, "clone");
+      g(base, "clone", "-q", "--no-local", origin, clone);
+      // husky v9's setting: relative, so a worktree's own .husky/_ is what runs there.
+      g(clone, "config", "core.hooksPath", ".husky/_");
+      // Sanity: plain git does run the PR's hook here — else this test proves nothing.
+      const probe = path.join(base, "probe");
+      g(clone, "fetch", "-q", "--no-tags", "origin", "pull/7/head");
+      g(clone, "worktree", "add", "-q", "--detach", probe, head);
+      const hooksRun = nfsA.existsSync(marker);
+      g(clone, "worktree", "remove", "--force", probe);
+      nfsA.rmSync(marker, { force: true });
+      const dir = await wt.prepareWorktree(wt.runGit, { checkout: clone, remote: "origin", base: path.join(base, "wts"), pr: { repo: "a/b", number: 7, headOid: head }, runId: "r1" });
+      assert.strictEqual(g(dir, "rev-parse", "HEAD").stdout.trim(), head, "the PR's head is checked out");
+      await wt.removeWorktree(wt.runGit, clone, dir);
+      assert.ok(!nfsA.existsSync(dir));
+      assert.ok(hooksRun, "the sanity check: plain git runs the PR's post-checkout here");
+      assert.ok(!nfsA.existsSync(marker), `a hook ran: ${nfsA.existsSync(marker) ? nfsA.readFileSync(marker, "utf8") : ""}`);
+    });
+
     test("agent guard: a Workflow runs only a skill's own script from a mounted plugin — never the PR's, never by name", () => {
       const plugin = "C:/Users/me/.claude/plugins/cache/x/creatio-development/1.7.142";
       const run = { workflowDirs: [plugin] };
@@ -10785,6 +10890,26 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(mergeMod.chooseMergeMethod({ mergeMethods: { suggested: null, allowed: [] } }, "github"), null);
       assert.deepStrictEqual(mergeMod.mergeArgs("https://github.com/a/b/pull/7", "squash", SHA, true), ["pr", "merge", "https://github.com/a/b/pull/7", "--squash", "--match-head-commit", SHA, "--delete-branch"]);
       assert.ok(!mergeMod.mergeArgs("u", "merge", SHA, false).includes("--delete-branch"));
+    });
+
+    test("agent merge: the branch other open PRs build on stays — stack layers above, or a PR based on it", () => {
+      const base = { id: "P1", repo: "a/b", hostLabel: "h", headRefName: "feat/x", stack: null };
+      assert.deepStrictEqual(mergeMod.builtOn(base, [{ id: "P1", repo: "a/b", hostLabel: "h", baseRefName: "main", number: 1 }]), []);
+      const onTop = [
+        { id: "P2", repo: "A/B", hostLabel: "h", baseRefName: "feat/x", number: 2 },
+        { id: "P3", repo: "a/b", hostLabel: "other", baseRefName: "feat/x", number: 3 },
+        { id: "P4", repo: "a/c", hostLabel: "h", baseRefName: "feat/x", number: 4 },
+      ];
+      assert.deepStrictEqual(mergeMod.builtOn(base, onTop), [2], "same host and repository only");
+      const layered = {
+        ...base,
+        stack: { number: 9, position: 1, size: 3, baseRefName: "main", entries: [
+          { number: 1, position: 1, state: "OPEN" },
+          { number: 5, position: 2, state: "OPEN" },
+          { number: 6, position: 3, state: "MERGED" },
+        ] },
+      };
+      assert.deepStrictEqual(mergeMod.builtOn(layered, onTop), [2, 5], "an open layer above; a merged one isn't");
     });
 
     test("agent policy: your PR is offered for merge only when ready, and each switch only narrows it", () => {
@@ -11680,15 +11805,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       ]) {
         assert.throws(() => driveMod.pushArgs(url, o, branch, "/nohooks"), /isn't a/, `${url} ${o} ${branch}`);
       }
-      // The session's git: no network, no credentials.
-      const NO = runner.NO_PUSH_ENV;
-      const keys = Array.from({ length: Number(NO.GIT_CONFIG_COUNT) }, (_, i) => [NO[`GIT_CONFIG_KEY_${i}`], NO[`GIT_CONFIG_VALUE_${i}`]]);
+      // The session's git: no hooks, no network, no credentials.
+      const configOf = (env) => Array.from({ length: Number(env.GIT_CONFIG_COUNT) }, (_, i) => [env[`GIT_CONFIG_KEY_${i}`], env[`GIT_CONFIG_VALUE_${i}`]]);
+      const NO = runner.sessionGitEnv("/run/no-hooks", true);
+      const keys = configOf(NO);
       for (const prefix of ["https://", "http://", "git@", "ssh://", "git://"]) {
         assert.ok(keys.some(([k, v]) => k === "url.pr-agent-no-push://.insteadOf" && v === prefix), prefix);
       }
       assert.ok(keys.some(([k, v]) => k === "credential.helper" && v === ""), "the credential helpers are reset");
+      assert.ok(keys.some(([k, v]) => k === "core.hooksPath" && v === "/run/no-hooks"), "a commit runs no hook of the repository");
+      assert.ok(keys.some(([k, v]) => k === "core.fsmonitor" && v === "false"));
       assert.strictEqual(NO.GIT_SSH_COMMAND, "pr-agent-no-ssh");
       assert.strictEqual(NO.GIT_TERMINAL_PROMPT, "0");
+      // A review's session runs no git of its own, but Claude Code's own `git status` may write the index (post-index-change).
+      const review = runner.sessionGitEnv("/run/no-hooks", false);
+      assert.deepStrictEqual(configOf(review), [["core.hooksPath", "/run/no-hooks"], ["core.fsmonitor", "false"]]);
+      assert.strictEqual(review.GIT_SSH_COMMAND, undefined, "a review keeps its network");
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-run-"));
+      nfsA.mkdirSync(path.join(runDir, "no-hooks"));
+      nfsA.writeFileSync(path.join(runDir, "no-hooks", "pre-commit"), "#!/bin/sh\n");
+      const fresh = runner.freshHooksDir(runDir);
+      assert.deepStrictEqual(nfsA.readdirSync(fresh), [], "made afresh: nothing put there before survives");
     });
 
     await atest("drive: a fingerprint of everything git reads for a push — config files and includes, hooks, the worktree's links", async () => {

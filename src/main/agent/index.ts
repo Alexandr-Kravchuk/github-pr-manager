@@ -26,7 +26,7 @@ import type {
   PullRequest,
   Settings,
 } from "../../shared/types";
-import { chooseMergeMethod, mergeArgs } from "./merge";
+import { builtOn, chooseMergeMethod, mergeArgs } from "./merge";
 import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
 import {
   ghApiArgs,
@@ -46,7 +46,7 @@ import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
-import { cutShort, hookCommand, NO_PUSH_ENV, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
+import { cutShort, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
 import { approveAgainRequest, checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
 import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
@@ -979,18 +979,24 @@ export function createAgent(deps: AgentDeps): Agent {
     }
     const claudeSettings = loadAll()?.claude;
     const badges: Record<string, { key: string; stage: string | null }> = {};
-    // One look for a clone per repository and plan: the search reads every folder's git config.
-    const clones = new Map<string, boolean>();
+    // One look for a clone per repository and plan: the search reads every
+    // folder's git config. The SDLC roots likewise, once per clone.
+    const clones = new Map<string, string | null>();
+    const cloneOf = (pr: PullRequest): string | null => {
+      const repoUrl = pr.url.replace(/\/pull\/\d+.*$/, "");
+      if (!clones.has(repoUrl)) clones.set(repoUrl, claudeSettings ? deps.findCheckout(pr, claudeSettings) : null);
+      return clones.get(repoUrl) ?? null;
+    };
+    const rootsByClone = new Map<string | null, string[]>();
+    const sdlcRun = (pr: PullRequest): OrchestratorRun | null => {
+      if (!claudeSettings) return null;
+      const clone = cloneOf(pr);
+      let roots = rootsByClone.get(clone);
+      if (!roots) rootsByClone.set(clone, (roots = orchestratorRoots(clone, claudeSettings)));
+      return orchestratorRunFor(roots, pr.url);
+    };
     const plan = planJobs(snapshot.pullRequests, s, {
-      noCheckout: (pr) => {
-        const repoUrl = pr.url.replace(/\/pull\/\d+.*$/, "");
-        let has = clones.get(repoUrl);
-        if (has === undefined) {
-          has = claudeSettings ? deps.findCheckout(pr, claudeSettings) !== null : false;
-          clones.set(repoUrl, has);
-        }
-        return has ? null : noCheckoutWhy(pr.repo);
-      },
+      noCheckout: (pr) => (cloneOf(pr) ? null : noCheckoutWhy(pr.repo)),
       hasOwnSession: (pr) => sessionsForPr(pr, sessions).length > 0,
       driveExhausted: (pr) => {
         const d = store.data.drive[pr.id];
@@ -1000,7 +1006,7 @@ export function createAgent(deps: AgentDeps): Agent {
       reapproveState,
       baseOnlyState,
       orchestrated: (pr) => {
-        const run = orchestratorRun(pr, claudeSettings);
+        const run = sdlcRun(pr);
         if (!run) return null;
         badges[pr.id] = { key: run.key, stage: run.stage ? run.stage.replace(/_/g, " ") : null };
         return describeOrchestratorRun(run);
@@ -1185,14 +1191,18 @@ export function createAgent(deps: AgentDeps): Agent {
         // network), and what a push will need — the remote's URL now, and a
         // fingerprint of what git would run code from.
         try {
-          if (isPlainBranch(pr.baseRefName)) {
-            await git(["fetch", "--no-tags", remote, `+refs/heads/${pr.baseRefName}:refs/remotes/${remote}/${pr.baseRefName}`], checkout).catch(() => {});
-          }
-          const url = (await git(["remote", "get-url", "--push", remote], checkout)).trim();
-          const [commonDir, worktreeGitDir] = await withNoHooks(async (h) => [
-            path.resolve(dir, (await git([...safeGit(h), "rev-parse", "--git-common-dir"], dir)).trim()),
-            path.resolve(dir, (await git([...safeGit(h), "rev-parse", "--git-dir"], dir)).trim()),
-          ]);
+          // Hooks off here too: a fetch runs reference-transaction.
+          const clone = checkout;
+          const [url, commonDir, worktreeGitDir] = await withNoHooks(async (h) => {
+            if (isPlainBranch(pr.baseRefName)) {
+              await git([...safeGit(h), "fetch", "--no-tags", remote, `+refs/heads/${pr.baseRefName}:refs/remotes/${remote}/${pr.baseRefName}`], clone).catch(() => {});
+            }
+            return [
+              (await git([...safeGit(h), "remote", "get-url", "--push", remote], clone)).trim(),
+              path.resolve(dir, (await git([...safeGit(h), "rev-parse", "--git-common-dir"], dir)).trim()),
+              path.resolve(dir, (await git([...safeGit(h), "rev-parse", "--git-dir"], dir)).trim()),
+            ];
+          });
           const place: GitPlace = { workTree: dir, gitDir: worktreeGitDir };
           // An SSH remote: your SSH settings resolved now, kept in memory — no file a session could reach.
           const ssh = snapshotSsh(url, deps.sshResolve ?? ((args) => execFileSync("ssh", args, { encoding: "utf8", timeout: 15_000, env: launcherEnv(process.env), stdio: ["ignore", "pipe", "ignore"] })));
@@ -1230,6 +1240,7 @@ export function createAgent(deps: AgentDeps): Agent {
     const pluginDirs = [...fromPlugins.pluginDirs, ...mine.pluginDirs];
     const settingsFile = path.join(runDir, "settings.json");
     const guardFile = path.join(runDir, "guard.json");
+    const hooksDir = freshHooksDir(runDir);
     // A skill's Workflow may run its script from the plugins this run mounted — never one from the PR.
     writeGuardFile(guardFile, {
       ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),
@@ -1293,8 +1304,9 @@ export function createAgent(deps: AgentDeps): Agent {
         settingsFile,
         timeoutMs: s.limits.maxMinutes * 60_000,
         env: {
-          // No push from anywhere in a drive session: the app pushes after checking the commits.
-          ...(kind === "drive" ? NO_PUSH_ENV : {}),
+          // No hook of the repository in any session; and no push from anywhere
+          // in a drive session: the app pushes after checking the commits.
+          ...sessionGitEnv(hooksDir, kind === "drive"),
           // gh reads this PR's own host and repository. It can't tell them from
           // git in a drive (every remote URL is rewritten there), and without
           // a host it would ask github.com — the wrong place for an Enterprise PR.
@@ -1865,9 +1877,12 @@ export function createAgent(deps: AgentDeps): Agent {
       }
       const method = chooseMergeMethod(pr, s.scenarios.merge.method, picked);
       if (!method) return { ok: false, error: "The repository allows none of merge, squash and rebase." };
+      // Not the branch other open PRs are built on: their base would go with it.
+      const dependents = s.scenarios.merge.deleteBranch ? builtOn(pr, deps.getSnapshot()?.pullRequests ?? []) : [];
+      const deleteBranch = s.scenarios.merge.deleteBranch && dependents.length === 0;
       item.headline = `Merging (${method})…`;
       changed();
-      const r = await gh(mergeArgs(item.url, method, head, s.scenarios.merge.deleteBranch));
+      const r = await gh(mergeArgs(item.url, method, head, deleteBranch));
       if (r.code !== 0) {
         logRun(item, "not-merged", { headOid: head, detail: clip(ghError(r)) });
         item.headline = `GitHub refused the merge — ${ghError(r)}`;
@@ -1878,7 +1893,8 @@ export function createAgent(deps: AgentDeps): Agent {
       const queued = /merge queue/i.test(`${r.stdout}\n${r.stderr}`);
       item.state = "done";
       item.mergeMethod = method;
-      item.headline = queued ? "Added to the merge queue" : `Merged (${method})${s.scenarios.merge.deleteBranch ? ", branch deleted" : ""}`;
+      const kept = dependents.length ? `, branch kept — ${dependents.map((n) => `#${n}`).join(", ")} build${dependents.length === 1 ? "s" : ""} on it` : "";
+      item.headline = queued ? "Added to the merge queue" : `Merged (${method})${deleteBranch ? ", branch deleted" : kept}`;
       item.finishedAt = stamp();
       store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
       logRun(item, queued ? "queued-to-merge" : "merged", { headOid: head, detail: method });
@@ -1896,8 +1912,8 @@ export function createAgent(deps: AgentDeps): Agent {
   }
 
   /** Plans again with the last snapshot when the agent's settings changed since the last plan. */
-  function replanIfSettingsChanged(): boolean {
-    if (JSON.stringify(settings()) === plannedWith) return false;
+  function replanIfSettingsChanged(all: Settings | null = loadAll()): boolean {
+    if (JSON.stringify(all?.agent ?? null) === plannedWith) return false;
     const snapshot = deps.getSnapshot();
     if (!snapshot) return false;
     onSnapshot(snapshot);
@@ -1907,9 +1923,9 @@ export function createAgent(deps: AgentDeps): Agent {
 
   function tick(): void {
     if (stopped) return;
-    // A plan ends in a tick of its own.
-    if (replanIfSettingsChanged()) return;
+    // One read of settings.json per tick. A plan ends in a tick of its own.
     const all = loadAll();
+    if (replanIfSettingsChanged(all)) return;
     const s = all?.agent;
     if (!all || !s?.enabled) {
       if (!s?.enabled) stopRunsForOff();

@@ -1,6 +1,7 @@
 // Merging one of your PRs on your click: which method, and the `gh` call that
 // can't merge anything but the commit you were shown.
 
+import { stackLayer } from "../../shared/agent-stack";
 import type { AgentSettings, MergeMethod, PullRequest } from "../../shared/types";
 
 /**
@@ -28,4 +29,23 @@ export function chooseMergeMethod(
  */
 export function mergeArgs(prUrl: string, method: MergeMethod, headOid: string, deleteBranch: boolean): string[] {
   return ["pr", "merge", prUrl, `--${method}`, "--match-head-commit", headOid, ...(deleteBranch ? ["--delete-branch"] : [])];
+}
+
+/**
+ * The open PRs built on `pr`'s branch: the layers above it in its GitHub
+ * stack, and any PR of its repository whose base is its head branch. GitHub
+ * retargets them when the branch is deleted after the merge — but gh's own
+ * delete can win that race and close them instead, so their branch stays
+ * (the repository's own "delete branch on merge" still applies).
+ */
+export function builtOn(
+  pr: Pick<PullRequest, "id" | "repo" | "hostLabel" | "headRefName" | "stack">,
+  prs: readonly Pick<PullRequest, "id" | "repo" | "hostLabel" | "baseRefName" | "number">[],
+): number[] {
+  const above = stackLayer(pr)?.above ?? [];
+  const repo = pr.repo.toLowerCase();
+  const based = prs
+    .filter((p) => p.id !== pr.id && p.hostLabel === pr.hostLabel && p.repo.toLowerCase() === repo && p.baseRefName === pr.headRefName)
+    .map((p) => p.number);
+  return [...new Set([...above, ...based])].sort((a, b) => a - b);
 }

@@ -1,6 +1,6 @@
 // A drive run's result, read by the app from the run's worktree, and the push
 // the app makes with it. The session commits; it never pushes — its guard
-// refuses `git push`, and its environment (NO_PUSH_ENV) takes away the means:
+// refuses `git push`, and its environment (`sessionGitEnv`) takes away the means:
 // no network, no credential helper, no SSH. The app pushes, as a
 // fast-forward only, the exact commit you were shown.
 //

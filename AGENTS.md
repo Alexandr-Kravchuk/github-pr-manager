@@ -519,6 +519,24 @@ Three layers:
   rather than the filtered ones, and only while the agent is on — pruning runs
   only then; their marks persist in `state.json` (`board`), so a restart logs
   what moved while the app was closed rather than every card again.
+- **No hook of a PR's repository runs for the agent.** A relative
+  `core.hooksPath` (husky v9's `.husky/_`) resolves inside the worktree, so a
+  hook there is the PR's own script. Every git command the app runs in a clone
+  or worktree goes through `safeGit` with a fresh empty hooks folder
+  (`withNoHooks`, `main/agent/drive.ts`) — the worktree's `fetch`, `worktree
+  add` (post-checkout, reference-transaction) and `remove` included — and
+  every session's environment carries `sessionGitEnv` (`main/agent/runner.ts`:
+  `core.hooksPath` at the run's own empty `no-hooks` folder, no fsmonitor, as
+  `GIT_CONFIG_*` entries that win over every config file), so neither a drive's
+  `git commit` nor Claude Code's own `git status` runs one. The guard hook
+  (`main/agent/hook.ts`) reads back every field of the guard file — a `subs`
+  or `workDir` that is there but malformed gives nothing beyond reading, since
+  a missing `subs` means every wrapper subcommand — and follows a drive's
+  write through links (`checkRealWrite`): `checkDriveWrite` alone is lexical,
+  and a link committed in the branch would lead it out of the worktree. A merge
+  keeps the branch while open PRs build on it (`builtOn` in
+  `main/agent/merge.ts`): gh's own delete can win the race with GitHub's
+  retargeting and close them.
 - **No always-running animation in the renderer.** An `infinite` CSS animation —
   including Tailwind's `animate-pulse` / `-spin` / `-bounce` / `-ping` — keeps the
   compositor producing frames for as long as the app is open, and Electron

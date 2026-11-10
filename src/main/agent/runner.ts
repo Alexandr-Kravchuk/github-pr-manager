@@ -46,28 +46,61 @@ export interface RunSpec {
 }
 
 /**
- * A drive session's git has no network and no credentials: every remote URL
- * — fetch and push, `url` and an explicit `pushurl` alike — is rewritten
- * (`insteadOf`) to a scheme git has no helper for; the credential helpers
- * are reset, SSH and the askpass programs point nowhere. Git's own
- * `GIT_CONFIG_*` variables, read by every git process the session starts.
- * The app fetches the base branch before the session and pushes after it.
- * Defence in depth, not the boundary: the guard refuses `git push`, and a
- * drive runs no code of yours unless you add test commands in Settings.
+ * Git config every session's git takes over the repository's — the
+ * `GIT_CONFIG_*` variables win over every config file, and every git process
+ * the session starts reads them, Claude Code's own `git status` included.
+ *
+ * Every session: no hooks — core.hooksPath at a fresh empty folder the app
+ * made in the run's own folder, where the session can't write — and no
+ * fsmonitor. A relative hooksPath (husky's `.husky/_`) resolves inside the
+ * worktree, so without this a drive's `git commit` (pre-commit, commit-msg)
+ * or any index write (post-index-change) would run scripts from the PR's
+ * branch with your environment and gh's token.
+ *
+ * A drive also has no network and no credentials: every remote URL — fetch
+ * and push, `url` and an explicit `pushurl` alike — is rewritten
+ * (`insteadOf`) to a scheme git has no helper for; the credential helpers are
+ * reset, SSH and the askpass programs point nowhere. The app fetches the base
+ * branch before the session and pushes after it. Defence in depth, not the
+ * boundary: the guard refuses `git push`, and a drive runs no code of yours
+ * unless you add test commands in Settings.
  */
 const NO_NET = ["https://", "http://", "git@", "ssh://", "git://"];
-export const NO_PUSH_ENV: Record<string, string> = {
-  GIT_CONFIG_COUNT: String(NO_NET.length + 1),
-  ...Object.fromEntries(NO_NET.flatMap((prefix, i) => [[`GIT_CONFIG_KEY_${i}`, "url.pr-agent-no-push://.insteadOf"], [`GIT_CONFIG_VALUE_${i}`, prefix]])),
-  // An empty value resets the helper list: no stored credential is handed out.
-  [`GIT_CONFIG_KEY_${NO_NET.length}`]: "credential.helper",
-  [`GIT_CONFIG_VALUE_${NO_NET.length}`]: "",
-  GIT_SSH_COMMAND: "pr-agent-no-ssh",
-  GIT_ASKPASS: "pr-agent-no-askpass",
-  SSH_ASKPASS: "pr-agent-no-askpass",
-  GCM_INTERACTIVE: "never",
-  GIT_TERMINAL_PROMPT: "0",
-};
+export function sessionGitEnv(hooksDir: string, drive: boolean): Record<string, string> {
+  const config: Array<[string, string]> = [
+    ["core.hooksPath", hooksDir],
+    ["core.fsmonitor", "false"],
+    ...(drive
+      ? [
+          ...NO_NET.map((prefix): [string, string] => ["url.pr-agent-no-push://.insteadOf", prefix]),
+          // An empty value resets the helper list: no stored credential is handed out.
+          ["credential.helper", ""] as [string, string],
+        ]
+      : []),
+  ];
+  return {
+    GIT_CONFIG_COUNT: String(config.length),
+    ...Object.fromEntries(config.flatMap(([key, value], i) => [[`GIT_CONFIG_KEY_${i}`, key], [`GIT_CONFIG_VALUE_${i}`, value]])),
+    ...(drive
+      ? {
+          GIT_SSH_COMMAND: "pr-agent-no-ssh",
+          GIT_ASKPASS: "pr-agent-no-askpass",
+          SSH_ASKPASS: "pr-agent-no-askpass",
+          GCM_INTERACTIVE: "never",
+        }
+      : {}),
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
+/** The run's empty hooks folder for `sessionGitEnv`: made afresh, so nothing can have been put there in advance. */
+export function freshHooksDir(runDir: string): string {
+  const dir = path.join(runDir, "no-hooks");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  if (fs.readdirSync(dir).length > 0) throw new Error("the empty hooks folder wasn't empty");
+  return dir;
+}
 
 /** Built-in tool names for `--tools`, from the `--allowedTools` rules ("Bash(gh pr view *)" → "Bash"). */
 export function builtInTools(allowedTools: readonly string[]): string[] {
