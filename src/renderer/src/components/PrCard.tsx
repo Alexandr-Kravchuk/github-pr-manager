@@ -525,8 +525,10 @@ export function PrCard({
         </div>
       )}
 
-      {/* CI: failures first, then pending; otherwise a summary */}
-      <div className="flex flex-wrap items-center gap-1.5">
+      {/* CI: failures first, then pending; otherwise a summary. A PR with no
+          checks at all gets no row: "No checks" said nothing worth the space. */}
+      {pr.checks.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
         {/* Several checks in one state are one badge (shared/check-groups.ts). */}
         {collapseChecks([...pr.failingChecks, ...pr.pendingChecks]).map((item) =>
           item.kind === "one" ? (
@@ -538,14 +540,11 @@ export function PrCard({
 
         {pr.failingChecks.length === 0 && pr.pendingChecks.length === 0 && (
           <span className="text-xs text-fg-subtle">
-            {pr.ciState === "success" && passingCount > 0
-              ? `✓ CI passed (${passingCount})`
-              : pr.checks.length === 0
-                ? "No checks"
-                : "CI: no failures"}
+            {pr.ciState === "success" && passingCount > 0 ? `✓ CI passed (${passingCount})` : "CI: no failures"}
           </span>
         )}
-      </div>
+        </div>
+      )}
       {/* What the PR agent is doing with it; nothing while it has nothing here. */}
       <AgentStatusLine pr={pr} />
     </div>
