@@ -674,8 +674,9 @@ function registerIpc(): void {
     await shell.openExternal(validateExternalUrl(url));
   });
 
-  // The renderer sends only the PR id: the PR's state, its repository and the
-  // prompt are all read here, so nothing from the renderer reaches the shell.
+  // The renderer sends only the PR id, a fixed kind and the in-terminal flag:
+  // the PR's state, its repository and the prompt are all read here, so
+  // nothing from the renderer reaches the shell.
   ipcMain.handle(
     "claude:launch",
     async (_event, raw: unknown, rawKind?: unknown, rawInTerminal?: unknown): Promise<ClaudeLaunchResult> => {

@@ -371,14 +371,13 @@ function ClaudeMark({ size }: { size: number }) {
 export function GroupClaudeButton({
   groupKey,
   prs,
-  desktop,
 }: {
   groupKey: string;
   prs: readonly PullRequest[];
-  /** Whether sessions open in Claude Desktop — "Review all" needs it. */
-  desktop: boolean;
 }) {
   const enabled = useContext(ClaudeEnabledContext);
+  // Whether sessions open in Claude Desktop — "Review all" needs it.
+  const desktop = useContext(ClaudeDesktopContext);
   const allSessions = useContext(ClaudeSessionsContext);
   const sessions = useMemo(() => sessionsForGroup(groupKey, allSessions), [groupKey, allSessions]);
   const [state, run] = useLaunchState();

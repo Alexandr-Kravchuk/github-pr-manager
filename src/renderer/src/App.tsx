@@ -1368,7 +1368,7 @@ export function App() {
                     )}
                   </button>
                   {groupBy !== "repo" && (
-                    <GroupClaudeButton groupKey={g.key} prs={g.prs} desktop={config?.claudeDesktop ?? false} />
+                    <GroupClaudeButton groupKey={g.key} prs={g.prs} />
                   )}
                   <div aria-hidden className="flex-1 self-stretch" onClick={() => toggleGroup(g.key)} />
                 </div>
