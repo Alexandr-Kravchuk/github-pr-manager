@@ -1139,7 +1139,7 @@ export function App() {
             {/* Row 1 — search + how the list is viewed (sort / group / scope). */}
             <div className="flex flex-wrap items-center gap-2">
               {/* A typed query hides rows as quietly as any chip, but unlike a chip
-                  it has no lit state of its own — so the box turns red while it
+                  it has no lit state of its own — so the box turns violet while it
                   narrows the list, and its ✕ stays put. Chromium's native cancel
                   button shows only on hover/focus, hence our own (styles.css hides
                   the native one). */}
@@ -1152,7 +1152,7 @@ export function App() {
                   className={cn(
                     "w-full rounded-md border py-1.5 pl-3 pr-8 text-sm text-fg placeholder:text-fg-faint focus:outline-none",
                     searchActive
-                      ? "border-red-500 bg-[color-mix(in_srgb,var(--color-red-500)_10%,var(--surface))] ring-1 ring-red-500/60 focus:border-red-500"
+                      ? "border-violet-500 bg-[color-mix(in_srgb,var(--color-violet-500)_10%,var(--surface))] ring-1 ring-violet-500/60 focus:border-violet-500"
                       : "border-line-strong bg-surface focus:border-sky-600",
                   )}
                 />
