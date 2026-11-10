@@ -195,10 +195,11 @@ const MAX_GLOB_ALTERNATIVES = 256;
 /**
  * The first brace group of `s` expanded one level — `a{b,c}d` → `abd`, `acd` —
  * or null when `s` has none. Escaped braces and commas stay literal; an
- * unclosed `{` is skipped. A group without a comma expands to its content: an
- * engine that keeps `{x}` literal reads a name no more than that.
+ * unclosed `{` is skipped. A group without a comma is refused (`{x}`, and the
+ * ranges some engines expand by character code — `{-../}` is `-`, `.`, `/`):
+ * the guard judges only what it can expand.
  */
-function expandFirstBrace(s: string): string[] | null {
+function expandFirstBrace(s: string): string[] | null | { error: string } {
   for (let i = 0; i < s.length; i++) {
     if (s[i] === "\\") {
       i++;
@@ -216,6 +217,7 @@ function expandFirstBrace(s: string): string[] | null {
       } else if (c === "," && depth === 1) {
         cuts.push(j);
       } else if (c === "}" && --depth === 0) {
+        if (cuts.length === 0) return { error: "A Glob pattern's braces need a comma: {a,b} — a single item or a range isn't taken." };
         const parts: string[] = [];
         let from = i + 1;
         for (const k of cuts) {
@@ -236,16 +238,17 @@ function expandFirstBrace(s: string): string[] | null {
  * text between brace characters alone missed what joins across them:
  * `.{.,}/*` is `../*`.
  */
-function expandBraces(pattern: string): string[] | null {
+function expandBraces(pattern: string): string[] | { error: string } {
   let out = [pattern];
   for (;;) {
     let changed = false;
     const next: string[] = [];
     for (const s of out) {
       const e = expandFirstBrace(s);
+      if (e && !Array.isArray(e)) return e;
       if (e) changed = true;
       next.push(...(e ?? [s]));
-      if (next.length > MAX_GLOB_ALTERNATIVES) return null;
+      if (next.length > MAX_GLOB_ALTERNATIVES) return { error: `A Glob pattern's braces can't stand for more than ${MAX_GLOB_ALTERNATIVES} patterns.` };
     }
     if (!changed) return out;
     out = next;
@@ -260,7 +263,7 @@ function expandBraces(pattern: string): string[] | null {
 function globStart(pattern: string): { path: string | null } | { error: string } {
   const p = pattern.trim();
   const expanded = expandBraces(p);
-  if (!expanded) return { error: `A Glob pattern's braces can't stand for more than ${MAX_GLOB_ALTERNATIVES} patterns.` };
+  if (!Array.isArray(expanded)) return expanded;
   const alts = expanded.map((x) => x.trim());
   // Off Windows a backslash escapes the next character, so the engine reads
   // `\.\./` and `.\./` as `../`: each alternative is judged as written and
@@ -270,8 +273,10 @@ function globStart(pattern: string): { path: string | null } | { error: string }
   if (alts.some((x) => /^[\\/]{2}/.test(x) || x.replace(/^[A-Za-z]:(?=[\\/])/, "").includes(":"))) {
     return { error: "A Glob pattern takes no network path, and a colon only after a drive letter." };
   }
-  if ([...alts, ...unescaped].some((x) => x.split(/[\\/]/).includes(".."))) {
-    return { error: "A Glob pattern can't step out of its folder with '..'." };
+  // Any `..` at all, not only a whole segment: what an engine might still read
+  // as one — a range, a sequence the expander doesn't model — fails closed.
+  if ([p, ...alts, ...unescaped].some((x) => x.includes(".."))) {
+    return { error: "A Glob pattern can't step out of its folder with '..' — and takes no '..' at all." };
   }
   if (!isAbsolutePath(p)) return alts.some(isAbsolutePath) ? { error: "A Glob pattern's alternatives can't be absolute paths." } : { path: null };
   const segs = p.split(/[\\/]/);

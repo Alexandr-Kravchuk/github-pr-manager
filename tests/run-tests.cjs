@@ -9328,6 +9328,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ["Glob", { pattern: "{x,{~,y}}/.ssh/*" }],
         ["Glob", { pattern: "{x,{y,/etc/*}}" }],
         ["Glob", { pattern: `${"{a,b}".repeat(9)}/*` }],
+        // What the expander doesn't model fails closed: a range by character code (`{-../}` is `-`, `.`, `/`), a single item, any `..`.
+        ["Glob", { pattern: ".{-../}/*" }],
+        ["Glob", { pattern: "src/{1..3}/*" }],
+        ["Glob", { pattern: "{x}/*" }],
+        ["Glob", { pattern: "a..b/*" }],
         ["Glob", { pattern: "{/etc/*,x}" }],
         ["Glob", { pattern: "{x,C:/Users/me/.ssh/*}" }],
         ["Glob", { pattern: "~/.ssh/*" }],
@@ -11032,7 +11037,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         const top = base.slice(3).split(path.sep)[0];
         const fromWorktree = spawnSync(process.execPath, [hookJs, "review", "https://github.com/a/b/pull/7", guardFile], {
           cwd: workDir,
-          input: JSON.stringify({ tool_name: "Glob", tool_input: { pattern: `${base[0]}:/{${top[0]}}${top.slice(1)}/**/id_rsa` } }),
+          input: JSON.stringify({ tool_name: "Glob", tool_input: { pattern: `${base[0]}:/{${top[0]},Q}${top.slice(1)}/**/id_rsa` } }),
           encoding: "utf8",
         });
         assert.strictEqual(fromWorktree.status, 2, `a glob from the drive's root: ${fromWorktree.stderr}`);
