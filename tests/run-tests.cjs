@@ -2490,6 +2490,44 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     const list = [spr(3), spr(1), spr(2)];
     assert.strictEqual(prGroup.orderStacks(list), list);
   });
+  // Exercise the actual grouping memo, including its numeric sort: testing
+  // orderStacks alone missed the later sort that split stacks again.
+  const appSource = require("node:fs").readFileSync(path.join(__dirname, "../src/renderer/src/App.tsx"), "utf8");
+  const groupingBody = appSource.match(/const groups = useMemo<Group\[\] \| null>\(\(\) => \{([\s\S]*?)\}, \[sorted, groupBy, viewMode, sortBy\]\);/);
+  assert.ok(groupingBody, "App.tsx grouping memo is available for regression tests");
+  const ts = require("typescript");
+  const groupingJs = ts.transpile(groupingBody[1], { target: ts.ScriptTarget.ES2022 });
+  const groupPrs = new Function(
+    "sorted", "groupBy", "viewMode", "sortBy", "helpers",
+    `const { orderStacks, supportsGrouping, parentGroupKeys, groupKeyOf, groupLabel } = helpers;
+     const OTHER_GROUP_KEY = "other";
+     ${groupingJs}`,
+  );
+  const groupingHelpers = {
+    ...prGroup,
+    supportsGrouping: require("../dist/main/shared/view-mode.js").supportsGrouping,
+  };
+  for (const [scenario, members, expected] of [
+    ["keeps native stack members adjacent", [spr(10, [7, 1]), spr(11), spr(12, [7, 2])], [10, 12, 11]],
+    ["uses stack position before PR number", [spr(10, [7, 2]), spr(11), spr(12, [7, 1])], [12, 10, 11]],
+    ["keeps a hand-made stack bottom-first", [
+      spr(10, null, { headRefName: "top", baseRefName: "bottom", baseIsDefaultBranch: false }),
+      spr(11),
+      spr(12, null, { headRefName: "bottom", baseRefName: "main", baseIsDefaultBranch: true }),
+    ], [12, 10, 11]],
+    ["sorts unstacked PRs numerically", [spr(12), spr(10), spr(11)], [10, 11, 12]],
+  ]) {
+    test(`grouped By name: ${scenario} in Roomy and Compact`, () => {
+      const prs = members.map((p) => ({ ...p, id: `pr${p.number}`, issueKey: "ENG-1", parentKey: "ENG-2" }));
+      for (const view of ["roomy", "compact"]) {
+        for (const mode of ["repo", "issue", "parent"]) {
+          const groups = groupPrs(prGroup.orderStacks(prs), mode, view, "name", groupingHelpers);
+          assert.deepStrictEqual(groups.map((g) => g.prs.map((p) => p.number)), [expected], `${view}/${mode}`);
+          assert.deepStrictEqual(prs.map((p) => p.number), members.map((p) => p.number), "does not mutate input");
+        }
+      }
+    });
+  }
   // A hand-made stack: each PR opened on the previous one's branch (creatio-ui
   // ENG-83532: #4028 <- #4040 <- #4041 <- #4043 <- #4045, no native stack field).
   const cpr = (number, head, base, over = {}) => ({
@@ -8201,6 +8239,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.strictEqual(loginLaunch.wasLaunchedAtLogin(["app"], true), true);
     assert.strictEqual(loginLaunch.wasLaunchedAtLogin(["app.exe"], undefined), false);
     assert.strictEqual(loginLaunch.wasLaunchedAtLogin(["app"], false), false);
+  });
+
+  test("main.js wiring: Save answers without waiting for the poll it starts", () => {
+    const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+    const start = src.indexOf('"settings:save"');
+    assert.ok(start !== -1, "the settings:save handler exists");
+    const body = src.slice(start, src.indexOf("ipcMain.handle(", start + 1));
+    assert.match(body, /void poller\?\.refresh\(\)/, "Save must start a fresh poll");
+    assert.doesNotMatch(body, /await poller\?\.refresh\(\)/, "Settings closes only on the reply, so the poll must not hold it");
   });
 
   test("main.js wiring: a login launch starts hidden, and shows the window if no tray icon appeared", () => {
@@ -14379,7 +14426,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(src, /agentPushTimer = null;\s*(?:\/\/[^\n]*\n\s*)?updateTrayAgent\(\);\s*if \(agent && mainWindow/, "before the visibility gate");
       assert.match(src, /trayController\.setAgent\(s && s\.enabled && s\.trayState \? \{ line: \(0, agent_view_1\.agentTrayLine\)\(s\), paused: s\.paused \} : null\)/);
       assert.match(src, /sendToRenderer\("agent-open-companion", null\)/);
-      assert.match(src, /await poller\?\.refresh\(\);\s*(?:\/\/[^\n]*\n\s*)*agent\?\.refresh\(\);/, "saving settings wakes the agent");
+      assert.match(src, /void poller\?\.refresh\(\);\s*(?:\/\/[^\n]*\n\s*)*agent\?\.refresh\(\);/, "saving settings wakes the agent, without waiting for the poll");
       assert.match(src, /all\.filter\(\(e\) => !\(0, agent_view_1\.agentTakesToast\)\(agentItems, e\)\)/);
       const preload = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
       assert.match(preload, /"agent-open-companion"/);

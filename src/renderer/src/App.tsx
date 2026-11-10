@@ -74,7 +74,7 @@ import type {
   UpdateStatus,
 } from "../../shared/types";
 
-type SortKey = "action" | "waiting" | "active" | "newest";
+type SortKey = "action" | "waiting" | "active" | "newest" | "name";
 type GroupMode = "none" | "repo" | "issue" | "parent";
 
 // Minimum time between forced polls from `refresh()`, regardless of trigger.
@@ -84,6 +84,7 @@ type GroupMode = "none" | "repo" | "issue" | "parent";
 const REFRESH_COOLDOWN_MS = 3000;
 
 const SORT_LABELS: Record<SortKey, string> = {
+  name: "By name",
   action: "Needs my action",
   waiting: "Longest waiting",
   active: "Recently active",
@@ -114,6 +115,36 @@ const ROLE_FILTER_TITLES: Record<RoleFilter, string> = {
   reviewed: "I already reviewed",
 };
 const ROLE_FILTERS = Object.keys(ROLE_FILTER_LABELS) as RoleFilter[];
+
+/**
+ * Natural ("numeric-aware") string compare: maximal digit runs are compared as
+ * numbers, so "ENG-85256" < "ENG-102776" (85 256 < 102 776) instead of the
+ * lexicographic "102776" < "85256" a plain localeCompare gives. Non-digit runs
+ * compare case-insensitively. Used by the "By name" sort, whose titles are
+ * usually led by a Jira key with a number.
+ */
+function naturalCompare(a: string, b: string): number {
+  const re = /(\d+)|(\D+)/g;
+  const pa = a.match(re) ?? [];
+  const pb = b.match(re) ?? [];
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const xa = pa[i];
+    const xb = pb[i];
+    if (xa === undefined) return -1;
+    if (xb === undefined) return 1;
+    const na = Number(xa);
+    const nb = Number(xb);
+    if (Number.isNaN(na) || Number.isNaN(nb)) {
+      // At least one run is non-numeric — compare the runs as text.
+      const r = xa.localeCompare(xb, undefined, { sensitivity: "base" });
+      if (r !== 0) return r;
+    } else if (na !== nb) {
+      return na - nb;
+    }
+  }
+  return 0;
+}
 
 /**
  * Priority for the "Needs my action" sort — lower sorts higher. Ranks the PRs that
@@ -226,7 +257,7 @@ function loadPrefs(): ViewPrefs {
       // zero-width column. `tablePrWidthRem` is the pre-2.1 key, when only the
       // Pull-request column could be dragged; its width carries over.
       tableColumnWidths: parseColumnWidths(p.tableColumnWidths ?? { pr: p.tablePrWidthRem }),
-      sortBy: oneOf(p.sortBy, ["action", "waiting", "active", "newest"] as const, "action"),
+      sortBy: oneOf(p.sortBy, ["action", "waiting", "active", "newest", "name"] as const, "action"),
       groupBy: oneOf(p.groupBy, ["none", "repo", "issue", "parent"] as const, "repo"),
       attentionOnly: Boolean(p.attentionOnly),
       failingOnly: Boolean(p.failingOnly),
@@ -828,6 +859,14 @@ export function App() {
       case "newest":
         arr.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
         break;
+      case "name":
+        // Natural (digit-aware) order by title — so a Jira key in the title
+        // sorts by its number (ENG-85256 before ENG-102776) — ties broken by PR
+        // number, which also keeps the order stable across refreshes.
+        arr.sort(
+          (a, b) => naturalCompare(a.title, b.title) || a.number - b.number,
+        );
+        break;
     }
     // A stack reads bottom-up wherever its first PR landed, so the PR GitHub
     // will merge first is always the one on top of the run.
@@ -849,6 +888,14 @@ export function App() {
     // of them") could not be asked.
     if (!supportsGrouping(viewMode)) return null;
     if (groupBy === "none") return null;
+    // Under "By name" the nested PRs of a group order by PR number, not by the
+    // differing text after the shared Jira key — the key only decides which
+    // group a PR sits in; within it, the number is the stable, meaningful rank.
+    // Reapply stack ordering after that sort to keep each stack bottom-first.
+    const finalize = (clusters: Group[]): Group[] =>
+      sortBy === "name"
+        ? clusters.map((g) => ({ ...g, prs: orderStacks([...g.prs].sort((a, b) => a.number - b.number)) }))
+        : clusters;
     if (groupBy === "repo") {
       const map = new Map<string, Group>();
       for (const pr of sorted) {
@@ -859,8 +906,8 @@ export function App() {
       }
       // Map insertion order = order of each group's first (top-sorted) PR, so the
       // group holding your most important PR under the active sort leads. Within
-      // a group, PRs already follow `sorted`.
-      return [...map.values()];
+      // a group, PRs already follow `sorted` (or by number — see finalize).
+      return finalize([...map.values()]);
     }
     // Issue / parent modes cluster only keys that actually have 2+ related PRs —
     // the point is to review related PRs together. Everything else (single-PR
@@ -902,8 +949,8 @@ export function App() {
     if (other.length > 0) {
       clusters.push({ key: OTHER_GROUP_KEY, label: "Other", hostLabel: null, prs: other });
     }
-    return clusters;
-  }, [sorted, groupBy, viewMode]);
+    return finalize(clusters);
+  }, [sorted, groupBy, viewMode, sortBy]);
 
   const allCollapsed =
     groups !== null && groups.length > 0 && groups.every((g) => collapsed.has(g.key));
@@ -1485,14 +1532,15 @@ export function App() {
               <section key={g.key} className={isCollapsed ? "mb-3" : "mb-8"}>
                 {/* "Explain all" sits right after the PR count but outside the
                     toggle: a button inside a button is invalid and its click
-                    would fold the group too. The empty rest of the row still
-                    folds it, as the whole row did before. */}
-                <div className="flex items-center gap-2 rounded-md hover:bg-elevated/40">
+                    would fold the group too. Only the heading button folds it:
+                    the empty rest of the row showed no pointer and no sign of
+                    being clickable, so a stray click there folded the group. */}
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => toggleGroup(g.key)}
                     aria-expanded={!isCollapsed}
-                    className="flex min-w-0 items-center gap-2 py-2 text-left"
+                    className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md py-2 pr-2 text-left hover:bg-elevated/40"
                   >
                     <ChevronIcon collapsed={isCollapsed} />
                     {g.hostLabel && (
@@ -1518,7 +1566,6 @@ export function App() {
                   {groupBy !== "repo" && (
                     <GroupClaudeButton groupKey={g.key} prs={g.prs} />
                   )}
-                  <div aria-hidden className="flex-1 self-stretch" onClick={() => toggleGroup(g.key)} />
                 </div>
                 {!isCollapsed && (
                   <PrList

@@ -917,10 +917,13 @@ function registerIpc(): void {
       }
       applyPreferences(saved);
       // Apply immediately: a fresh poll re-resolves tokens and re-fetches, and
-      // its snapshot/config-error is pushed to the renderer.
-      await poller?.refresh();
+      // its snapshot/config-error is pushed to the renderer. Not awaited: the
+      // poll hits every host and then Jira (twg can take seconds, and a changed
+      // site starts with empty caches), and Settings only closes on this reply.
+      void poller?.refresh();
       // The agent plans on snapshots, and the poller sends one only when the
       // PRs changed — switching the agent on must not wait for a PR to move.
+      // It plans on the snapshot it has; the fresh poll's lands as usual.
       agent?.refresh();
       // The tray preference is the one preference that can fail to take
       // effect (no usable icon, or the platform refused a tray). Saying
