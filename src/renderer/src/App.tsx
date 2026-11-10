@@ -34,12 +34,13 @@ import {
   type FilterState,
   type RoleFilter,
 } from "../../shared/pr-filter";
-import { groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
+import { basePrIndex, groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
 import { hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
 import { createJiraStatusLoader } from "../../shared/jira-status";
 import { AuthorFilterContext } from "./components/author-filter-context";
 import { StaleCloseDialog } from "./components/StaleCloseDialog";
 import { StaleCloseContext } from "./components/stale-close-context";
+import { BasePrContext } from "./components/base-pr-context";
 import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
 import { Snowflakes } from "./components/Snowflakes";
 import {
@@ -697,6 +698,9 @@ export function App() {
 
   const allPrs = useMemo(() => data?.pullRequests ?? [], [data]);
   const allPrIds = useMemo(() => new Set(allPrs.map((p) => p.id)), [allPrs]);
+  // Which PR each hand-made stacked PR sits on — from every PR, not the
+  // filtered ones, so a card names its base even while a filter hides it.
+  const basePrs = useMemo(() => basePrIndex(allPrs), [allPrs]);
 
   // Whether the unread-comment channel exists at all (the `trackComments`
   // setting). Off hides the chip and the header stat, drops a stored `newOnly`,
@@ -1454,6 +1458,7 @@ export function App() {
       <ClaudeSessionsContext.Provider value={claudeSessions}>
       <AuthorFilterContext.Provider value={authorFilter}>
       <StaleCloseContext.Provider value={setClosingPr}>
+      <BasePrContext.Provider value={basePrs}>
       {viewMode === "board" ? (
         <PrBoard prs={filtered} all={allPrs} onOpen={openPr} focus={boardFocus} onClearFilters={clearFilters} />
       ) : viewMode === "cozy" ? (
@@ -1544,6 +1549,7 @@ export function App() {
           onToggleIgnore={toggleIgnore}
         />
       )}
+      </BasePrContext.Provider>
       </StaleCloseContext.Provider>
       </AuthorFilterContext.Provider>
       {closingPr && (

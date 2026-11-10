@@ -302,9 +302,19 @@ const CASES: Record<string, () => PullRequest[]> = {
       title: "My PR waiting for someone's review",
       awaitingReview: true,
       reviewers: [reviewerPending],
-      // Stacked PR — based on a feature branch, not main.
+      // Stacked PR — based on a feature branch, not main. A hand-made stack:
+      // #300 below is the PR on that branch, so the card reads "on #300".
       baseRefName: "feature/base-work",
       baseIsDefaultBranch: false,
+      headRefName: "feature/waiting-work",
+    }),
+    pr({
+      id: "mock-waiting-base",
+      number: 300,
+      title: "Base work the waiting PR is stacked on",
+      awaitingReview: true,
+      reviewers: [reviewerPending],
+      headRefName: "feature/base-work",
     }),
     // A native GitHub stack: the bottom PR, and one above it that GitHub will
     // not merge until the bottom one is in — approved and green all the same.

@@ -2490,6 +2490,48 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     const list = [spr(3), spr(1), spr(2)];
     assert.strictEqual(prGroup.orderStacks(list), list);
   });
+  // A hand-made stack: each PR opened on the previous one's branch (creatio-ui
+  // ENG-83532: #4028 <- #4040 <- #4041 <- #4043 <- #4045, no native stack field).
+  const cpr = (number, head, base, over = {}) => ({
+    id: `n${number}`, number, title: `T${number}`, hostLabel: "GHE", repo: "e/ui", stack: null,
+    headRefName: head, baseRefName: base, baseIsDefaultBranch: base === "main", ...over,
+  });
+  const chain = () => [
+    cpr(4045, "h4045", "h4043"), cpr(4043, "h4043", "h4041"), cpr(4041, "h4041", "h4040"),
+    cpr(4040, "h4040", "h4028"), cpr(4028, "h4028", "feature/x"),
+  ];
+  test("basePrIndex: each PR maps to the PR whose head is its base", () => {
+    const idx = prGroup.basePrIndex(chain());
+    assert.deepStrictEqual(
+      Object.fromEntries([...idx].map(([id, base]) => [id, base.number])),
+      { n4045: 4043, n4043: 4041, n4041: 4040, n4040: 4028 },
+    );
+  });
+  test("basePrIndex: the same branch in another repo or host is not the base", () => {
+    const list = [cpr(2, "h2", "h1"), cpr(1, "h1", "main", { repo: "e/other" }), cpr(3, "h1", "main", { hostLabel: "GH" })];
+    assert.strictEqual(prGroup.basePrIndex(list).size, 0);
+  });
+  test("basePrIndex: a PR on the default branch or in a native stack has no hand-made base", () => {
+    const list = [cpr(1, "h1", "main"), cpr(2, "h2", "h1", { baseIsDefaultBranch: true }), cpr(3, "h3", "h1", { stack: { number: 1, position: 2 } })];
+    assert.strictEqual(prGroup.basePrIndex(list).size, 0);
+  });
+  test("orderStacks: a hand-made chain reads bottom first, where its first PR was", () => {
+    const list = [cpr(9, "h9", "main"), ...chain(), cpr(8, "h8", "main")];
+    assert.deepStrictEqual(prGroup.orderStacks(list).map((p) => p.number), [9, 4028, 4040, 4041, 4043, 4045, 8]);
+  });
+  test("orderStacks: two PRs on one base follow it, each with its own successors", () => {
+    const list = [cpr(3, "h3", "h1"), cpr(4, "h4", "h2"), cpr(2, "h2", "h1"), cpr(1, "h1", "main")];
+    assert.deepStrictEqual(prGroup.orderStacks(list).map((p) => p.number), [1, 3, 2, 4]);
+  });
+  test("orderStacks: a base cycle does not loop or drop PRs", () => {
+    const list = [cpr(1, "a", "b", { baseIsDefaultBranch: false }), cpr(2, "b", "a", { baseIsDefaultBranch: false })];
+    assert.deepStrictEqual(prGroup.orderStacks(list).map((p) => p.number).sort(), [1, 2]);
+  });
+  test("basePrTitle: names the base PR, or the branch when none is listed", () => {
+    const [top, base] = chain();
+    assert.match(prGroup.basePrTitle(top, base), /^Based on #4043 · T4043 \(h4043\)\. Merge #4043 first/);
+    assert.strictEqual(prGroup.basePrTitle(top, undefined), "Based on h4043, not on the default branch");
+  });
   test("stackTitle: names the PR that has to merge first", () => {
     const top = spr(14, null, { stack: { number: 7, position: 2, size: 2, bottom: { number: 13, url: "u" } } });
     assert.match(prGroup.stackTitle(top), /Stack #7: 2 of 2.*waits for #13/);

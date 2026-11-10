@@ -144,11 +144,42 @@ function stackKeyOf(pr: PullRequest): string | null {
   return pr.stack ? `${pr.hostLabel}/${pr.repo}#${pr.stack.number}` : null;
 }
 
+/** A branch of one repository on one host — what a base ref and a head ref meet on. */
+function branchKey(pr: PullRequest, branch: string): string {
+  return `${pr.hostLabel}/${pr.repo}@${branch}`;
+}
+
 /**
- * Puts the PRs of one native GitHub stack next to each other, bottom first, at
- * the place where the list's ordering put the first of them. Every other PR
- * keeps its position. Applied before grouping, so it holds within each group
- * too: a group only filters this order, it never reorders it.
+ * Hand-made stacks: for every PR outside a native stack whose base is not the
+ * default branch, the listed PR whose head branch is that base — the PR it
+ * waits for. A stack built by opening each PR on the previous one's branch is
+ * invisible to GitHub's `stack` field (creatio.ghe.com has no such field at
+ * all), so the umbrella alone said "based on some branch" and never which PR.
+ * Keyed by PR id. A PR whose base branch has no open PR in the list (the epic's
+ * feature branch, or a PR filtered out of the snapshot) has no entry.
+ */
+export function basePrIndex(prs: readonly PullRequest[]): Map<string, PullRequest> {
+  const byHead = new Map<string, PullRequest>();
+  for (const pr of prs) if (pr.headRefName) byHead.set(branchKey(pr, pr.headRefName), pr);
+  const out = new Map<string, PullRequest>();
+  for (const pr of prs) {
+    if (pr.stack || pr.baseIsDefaultBranch !== false || !pr.baseRefName) continue;
+    const base = byHead.get(branchKey(pr, pr.baseRefName));
+    if (base && base.id !== pr.id) out.set(pr.id, base);
+  }
+  return out;
+}
+
+/**
+ * Puts the PRs of one stack next to each other, bottom first, at the place
+ * where the list's ordering put the first of them. Every other PR keeps its
+ * position. Applied before grouping, so it holds within each group too: a
+ * group only filters this order, it never reorders it.
+ *
+ * Two kinds of stack: a native GitHub stack, ordered by its positions, and a
+ * hand-made one (`basePrIndex`), ordered by walking from the PR on a branch
+ * with no listed PR under it up through the PRs based on each one — depth
+ * first, so a PR's own successors follow it before a sibling's.
  */
 export function orderStacks(prs: PullRequest[]): PullRequest[] {
   const byStack = new Map<string, PullRequest[]>();
@@ -159,21 +190,75 @@ export function orderStacks(prs: PullRequest[]): PullRequest[] {
     if (list) list.push(pr);
     else byStack.set(key, [pr]);
   }
-  if (byStack.size === 0) return prs;
+
+  // Hand-made chains: each PR's bottom-most listed ancestor, and the PRs that
+  // sit directly on each PR in list order.
+  const basePr = basePrIndex(prs);
+  const above = new Map<string, PullRequest[]>();
+  for (const pr of prs) {
+    const base = basePr.get(pr.id);
+    if (!base) continue;
+    const list = above.get(base.id);
+    if (list) list.push(pr);
+    else above.set(base.id, [pr]);
+  }
+  const rootOf = (pr: PullRequest): PullRequest => {
+    const seen = new Set<string>([pr.id]);
+    let cur = pr;
+    for (let next = basePr.get(cur.id); next && !seen.has(next.id); next = basePr.get(cur.id)) {
+      seen.add(next.id);
+      cur = next;
+    }
+    return cur;
+  };
+  const chainOf = (root: PullRequest): PullRequest[] => {
+    const out: PullRequest[] = [];
+    const seen = new Set<string>();
+    const walk = (pr: PullRequest): void => {
+      if (seen.has(pr.id)) return;
+      seen.add(pr.id);
+      out.push(pr);
+      for (const up of above.get(pr.id) ?? []) walk(up);
+    };
+    walk(root);
+    return out;
+  };
+
+  if (byStack.size === 0 && basePr.size === 0) return prs;
   const out: PullRequest[] = [];
   const placed = new Set<string>();
+  const placedPrs = new Set<string>();
   for (const pr of prs) {
+    if (placedPrs.has(pr.id)) continue;
     const key = stackKeyOf(pr);
-    if (!key) {
+    if (key) {
+      if (placed.has(key)) continue;
+      placed.add(key);
+      const members = byStack.get(key) ?? [];
+      out.push(...[...members].sort((a, b) => (a.stack?.position ?? 0) - (b.stack?.position ?? 0)));
+      continue;
+    }
+    if (!basePr.has(pr.id) && !above.has(pr.id)) {
       out.push(pr);
       continue;
     }
-    if (placed.has(key)) continue;
-    placed.add(key);
-    const members = byStack.get(key) ?? [];
-    out.push(...[...members].sort((a, b) => (a.stack?.position ?? 0) - (b.stack?.position ?? 0)));
+    for (const member of chainOf(rootOf(pr))) {
+      // A native-stack PR under a hand-made one is placed with its own stack.
+      if (placedPrs.has(member.id) || member.stack) continue;
+      placedPrs.add(member.id);
+      out.push(member);
+    }
   }
   return out;
+}
+
+/**
+ * The tooltip on a hand-made stacked PR's marker: the PR under it when the list
+ * has one, the bare base branch otherwise.
+ */
+export function basePrTitle(pr: PullRequest, base: PullRequest | undefined): string {
+  if (!base) return `Based on ${pr.baseRefName}, not on the default branch`;
+  return `Based on #${base.number} · ${base.title} (${pr.baseRefName}). Merge #${base.number} first — click to open it`;
 }
 
 /** The tooltip on a PR's stack badge. */
