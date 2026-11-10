@@ -1,8 +1,11 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
 
-import { ConfigError, defaultSettings, getGhStatus, pickAppId, toHostConfigs, toPublicConfig } from "../shared/config";
+import { agentNoticeTitle, agentTakesToast, agentTrayLine } from "../shared/agent-view";
+import { ConfigError, defaultSettings, getGhStatus, pickAppId, resolveGhToken, toHostConfigs, toPublicConfig } from "../shared/config";
+import { closePullRequest, fetchPullRequest } from "../shared/github";
 import { planPolling } from "../shared/idle-gate";
 import type { PollPlan } from "../shared/idle-gate";
 import { setIgnored } from "../shared/ignored";
@@ -14,6 +17,9 @@ import {
 } from "../shared/notify";
 import { markSeen } from "../shared/state";
 import type {
+  AgentAction,
+  AgentActionResult,
+  AgentState,
   ClaudeGroupLaunchResult,
   ClaudeLaunchResult,
   ClaudeSessionInfo,
@@ -28,21 +34,27 @@ import type {
   Settings,
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
-import { launchClaude, launchGroup } from "./claude-launch";
+import { createAgent, type Agent, type AgentNotice } from "./agent";
+import { findCheckout, launchClaude, launchGroup, resumeClaudeSession } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
-import { clearJiraCaches } from "../shared/jira";
+import { clearJiraCaches, deleteTask, fetchTaskInfo, transitionTask } from "../shared/jira";
 import { shouldNotifyJiraAuth } from "../shared/jira-health";
-import { buildJiraEnricher, getJiraStatus, setJiraToken } from "./jira-store";
+import type { CloseStaleResult, JiraTaskInfo } from "../shared/stale";
+import { buildJiraEnricher, getJiraStatus, getJiraToken, setJiraToken } from "./jira-store";
+import { closeStale, staleJiraTask, type StaleCloseDeps } from "./stale-close";
 import { getTwgStatus, openTwgLogin } from "./twg";
 import { createTwgStatusCache } from "../shared/jira-twg";
 import {
   validateClipboardText,
+  validateCloseStaleOptions,
   validateExternalUrl,
   validateIgnoredArgs,
   validateJiraStatusMode,
   validateJiraToken,
+  validateAgentAction,
   validateClaudeKind,
+  validateDiagramsChecked,
   validateInTerminal,
   validateGroupLaunchArgs,
   validateClaudeSessionId,
@@ -69,6 +81,26 @@ import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./upd
 
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
+/** The PR agent; null in fixture mode (PRD_MOCK), where it would act on fake PRs. */
+let agent: Agent | null = null;
+let agentPushTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Pushes the agent's state at most every 250 ms — a run reports a step per
+ * tool call — and only to a visible window, like the snapshots; the renderer
+ * pulls `agent:get` again when it is shown.
+ */
+function scheduleAgentPush(): void {
+  if (agentPushTimer) return;
+  agentPushTimer = setTimeout(() => {
+    agentPushTimer = null;
+    // The tray shows the agent hidden or not — a hidden window is when it matters.
+    updateTrayAgent();
+    if (agent && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+      sendToRenderer("agent-state", agent.getState());
+    }
+  }, 250);
+}
 let systemSuspended = false;
 
 // Signals the first time createWindow() assigns mainWindow. The second-instance
@@ -133,6 +165,8 @@ function planDashboardPoll(settings: Settings): PollPlan {
     },
     notificationsActionable: () =>
       hasDeliverableNotifications(settings.notifications, Notification.isSupported()),
+    // The agent acts on what the poll sees, tray-hidden or not.
+    agentActive: () => agent?.isActive() ?? false,
   });
 }
 
@@ -140,6 +174,32 @@ function sendToRenderer(channel: string, payload: unknown): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+}
+
+/**
+ * The agent's diagrams are parsed in the renderer: a flowchart needs a DOM, and
+ * the window — hidden in the tray or not — is the only browser at hand. Only
+ * the sources go over and one yes/no per source comes back, so what is posted
+ * stays main's own text. No window, or no answer in time: null, and nothing is
+ * posted unchecked.
+ */
+const diagramChecks = new Map<string, (results: boolean[]) => void>();
+function checkMermaid(sources: string[]): Promise<boolean[] | null> {
+  const win = mainWindow;
+  if (!win || win.isDestroyed() || win.webContents.isLoading()) return Promise.resolve(null);
+  const requestId = randomUUID();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      diagramChecks.delete(requestId);
+      resolve(null);
+    }, 20_000);
+    diagramChecks.set(requestId, (results) => {
+      clearTimeout(timer);
+      diagramChecks.delete(requestId);
+      resolve(results.length === sources.length ? results : null);
+    });
+    win.webContents.send("agent-check-diagrams", { requestId, sources });
+  });
 }
 
 /** Brings the window back to the foreground (from minimized / hidden / behind). */
@@ -161,7 +221,26 @@ const trayController = createTrayController({
   open: () => focusMainWindow(),
   quit: () => app.quit(),
   hide: () => hideMainWindow(),
+  showAgent: () => showAgent(),
+  toggleAgentPause: () => {
+    if (!agent) return;
+    void agent.act({ type: agent.getState().paused ? "resumeAgent" : "pauseAgent" }).then((res) => {
+      if (!res.ok) console.warn(`[agent] ${res.error}`);
+    });
+  },
 });
+
+/** The tray's "Show agent": the window, with the agent's popover open (the Board when the header chip is off). */
+function showAgent(): void {
+  focusMainWindow();
+  sendToRenderer("agent-open-companion", null);
+}
+
+/** The agent's line in the tray, as Settings › Agent › Companion asks; null while the agent is off. */
+function updateTrayAgent(): void {
+  const s = agent?.getState();
+  trayController.setAgent(s && s.enabled && s.trayState ? { line: agentTrayLine(s), paused: s.paused } : null);
+}
 
 /**
  * Hides the window for close-to-tray. A macOS window in native full-screen
@@ -256,6 +335,35 @@ function handleJiraAuthNotification(health: JiraHealth | undefined): void {
 }
 
 /**
+ * What the PR agent tells you about, as Settings › Agent › notifications ask:
+ * a result waiting for you (a review to publish, a PR to merge), a failed run,
+ * a finished one. A click brings the window up on the Board, where the
+ * decision lives. Best-effort, like every notification.
+ */
+function handleAgentNotice({ kind, item }: AgentNotice): void {
+  try {
+    const s = loadSettings();
+    if (!s.agent.notifications[kind] || !Notification.isSupported()) return;
+    showOsNotification(agentNoticeTitle(kind, item), `${item.title}\n${item.headline}`, !s.notifications.sound, () => {
+      focusMainWindow();
+      sendToRenderer("agent-show-board", item.runId);
+    });
+  } catch (e) {
+    console.warn(`[agent] notification failed: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * The compiled scripts Claude Code runs as Node — the guard hook and the
+ * publish capture — from outside app.asar: electron-builder unpacks them
+ * (`asarUnpack`), and a program started by another process can't read into
+ * the archive.
+ */
+function unpackedScript(file: string): string {
+  return path.join(__dirname, "agent", file).replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
+}
+
+/**
  * Diffs the new snapshot against the last, then delivers desktop notifications
  * per the user's settings: a native OS notification (click opens the PR) and/or
  * a sound. Best-effort — a failure here must never break the poll loop, and the
@@ -287,7 +395,13 @@ function handleNotifications(prs: PullRequest[]): void {
   // any delivery failure — so a throwing deliverer degrades to a skipped tick
   // and never replays a backlog. That ordering guarantee is unit-tested on the
   // pure helper; this callback holds only the Electron delivery.
-  prevNotifyPrs = runNotifyCycle(prevNotifyPrs, prs, settings.notifications, (events) => {
+  prevNotifyPrs = runNotifyCycle(prevNotifyPrs, prs, settings.notifications, (all) => {
+    // A trigger the PR agent took in On mode: its own result is what you hear
+    // about, not this toast as well (`agentTakesToast`, unit-tested).
+    const agentState = agent?.getState();
+    const agentItems = agentState?.enabled ? agentState.items : [];
+    const events = all.filter((e) => !agentTakesToast(agentItems, e));
+    if (events.length < all.length) dbg(`the agent stands in for ${all.length - events.length} toast(s)`);
     if (!settings.notifications.enabled) {
       dbg("disabled in Settings — nothing fires (enable it under Notifications)");
       return;
@@ -389,6 +503,8 @@ function applyPreferences(settings: Settings): void {
   // Creates or removes the tray icon; a failure to create one leaves close
   // quitting (the controller says so) rather than hiding an unreachable window.
   trayController.setEnabled(settings.closeToTray);
+  // The agent switched on or off, or its tray line, in the settings just saved.
+  updateTrayAgent();
   applyThemeSource(settings.theme);
   claudeSessionsOn = settings.claude.enabled;
   void refreshClaudeSessions();
@@ -412,9 +528,13 @@ let claudeSessionsJson = "[]";
 /** Scans again and pushes the list when it changed. Empty while the integration is off. */
 async function refreshClaudeSessions(): Promise<ClaudeSessionInfo[]> {
   let next: ClaudeSessionInfo[] = [];
-  if (claudeSessionsOn) {
+  // The agent needs the list too — to stay off a PR you're working on.
+  if (claudeSessionsOn || agent?.isActive()) {
     try {
-      next = await claudeSessionScanner.scan();
+      // The agent's own runs are not "your" sessions: left in, the agent would
+      // find itself on the PR and stand down.
+      const own = agent?.ownSessionIds() ?? new Set<string>();
+      next = (await claudeSessionScanner.scan()).filter((s) => !own.has(s.id));
     } catch (e) {
       if (process.env.PRD_DEBUG) console.error("[claude-sessions]", e);
       return claudeSessions;
@@ -549,8 +669,13 @@ function createWindow({ show = true }: { show?: boolean } = {}): void {
   // Windows shutdown/restart/logout never emits `before-quit` (documented
   // Electron behavior), so the quit latch must come from the window's own
   // session-end signal — otherwise close-to-tray would intercept the OS's
-  // close and hold up the logout.
-  mainWindow.on("session-end", () => trayController.markQuitting());
+  // close and hold up the logout. The agent hears of it here for the same
+  // reason: its runs are written down as interrupted (and go on at the next
+  // start) before Windows ends their processes, rather than read as finished.
+  mainWindow.on("session-end", () => {
+    trayController.markQuitting();
+    agent?.stop();
+  });
 
   // Returning to the dashboard (focus / un-minimize / re-show) should refresh
   // immediately rather than wait out the parked idle cadence. A visible window
@@ -730,6 +855,37 @@ function registerIpc(): void {
 
   ipcMain.handle("claude:sessions", async (): Promise<ClaudeSessionInfo[]> => refreshClaudeSessions());
 
+  // The PR agent. The renderer names a run or a PR by id and an action from a
+  // fixed list; what a run does, where and with which tools stays in main.
+  ipcMain.handle("agent:get", (): AgentState | null => agent?.getState() ?? null);
+  ipcMain.handle("agent:action", async (_e, raw: unknown): Promise<AgentActionResult> => {
+    if (!agent) return { ok: false, error: "The agent is off in fixture mode." };
+    let action: AgentAction;
+    try {
+      action = validateAgentAction(raw);
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+    return agent.act(action);
+  });
+  // The agent's log in the file manager: one JSON line per thing it did and per
+  // card that moved on the Board — what to read back when something went wrong.
+  // Nothing crosses over: the path is main's own.
+  ipcMain.handle("agent:revealLog", async (): Promise<void> => {
+    const dir = path.join(app.getPath("userData"), "agent");
+    const log = path.join(dir, "log.jsonl");
+    if (fs.existsSync(log)) {
+      shell.showItemInFolder(log);
+      return;
+    }
+    fs.mkdirSync(dir, { recursive: true });
+    await shell.openPath(dir);
+  });
+  ipcMain.handle("agent:diagramsChecked", (_e, rawId: unknown, rawResults: unknown): void => {
+    const { requestId, results } = validateDiagramsChecked(rawId, rawResults);
+    diagramChecks.get(requestId)?.(results);
+  });
+
   // Only the session id crosses over: what to open for it — the Desktop link or
   // the terminal tab — comes from main's own scan of the registry.
   ipcMain.handle("claude:focusSession", async (_event, raw: unknown): Promise<FocusClaudeSessionResult> => {
@@ -765,6 +921,10 @@ function registerIpc(): void {
       // poll hits every host and then Jira (twg can take seconds, and a changed
       // site starts with empty caches), and Settings only closes on this reply.
       void poller?.refresh();
+      // The agent plans on snapshots, and the poller sends one only when the
+      // PRs changed — switching the agent on must not wait for a PR to move.
+      // It plans on the snapshot it has; the fresh poll's lands as usual.
+      agent?.refresh();
       // The tray preference is the one preference that can fail to take
       // effect (no usable icon, or the platform refused a tray). Saying
       // "saved" while close actually quits would strand the user believing
@@ -854,6 +1014,41 @@ function registerIpc(): void {
   ipcMain.handle("app:copyText", async (_event, text: unknown): Promise<void> => {
     clipboard.writeText(validateClipboardText(text));
   });
+
+  // Stale-PR close. As with the Claude launcher, only the PR id (and the
+  // dialog's choices) cross over: the host, the PR node id and the Jira key are
+  // read from the snapshot here, and `stale-close.ts` re-checks it is yours.
+  const staleDeps: StaleCloseDeps = {
+    loadSettings,
+    resolveGhToken,
+    getJiraToken,
+    closePullRequest,
+    fetchTaskInfo,
+    transitionTask,
+    deleteTask,
+  };
+  const snapshotPr = (id: string) => poller?.getSnapshot()?.pullRequests.find((p) => p.id === id);
+
+  ipcMain.handle(
+    "stale:jiraTask",
+    async (_event, raw: unknown): Promise<{ ok: true; task: JiraTaskInfo } | { ok: false; error: string }> => {
+      if (isMockMode()) return { ok: false, error: "Jira is not reachable in fixture mode." };
+      return staleJiraTask(snapshotPr(validatePrId(raw)), staleDeps);
+    },
+  );
+
+  ipcMain.handle("stale:close", async (_event, raw: unknown, rawOptions: unknown): Promise<CloseStaleResult> => {
+    const id = validatePrId(raw);
+    const options = validateCloseStaleOptions(rawOptions);
+    if (isMockMode()) {
+      return { ok: false, prClosed: false, jira: null, error: "Closing PRs is disabled in fixture mode." };
+    }
+    const result = await closeStale(snapshotPr(id), options, staleDeps);
+    // Take the card off now: the search index lags the close, so a poll alone
+    // would keep returning the PR for a while (see `forgetClosed`).
+    if (result.prClosed) poller?.forgetClosed(id);
+    return result;
+  });
 }
 
 // The primary instance's startup, run once the app is ready. Extracted from the
@@ -907,6 +1102,10 @@ function startApp(): void {
       if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
         sendToRenderer("snapshot", snapshot);
       }
+      // The agent first: a regular toast for a trigger it just took in On is
+      // left out (its own result is what you hear about), and it can only tell
+      // once it has taken it.
+      agent?.onSnapshot(snapshot);
       handleNotifications(snapshot.pullRequests);
       handleJiraAuthNotification(snapshot.jiraHealth);
     },
@@ -919,6 +1118,30 @@ function startApp(): void {
     ...(isMockMode() ? mockPollerOverrides(app.getPath("userData")) : {}),
   });
   poller.start();
+
+  if (!isMockMode()) {
+    agent = createAgent({
+      dir: path.join(app.getPath("userData"), "agent"),
+      loadSettings,
+      getSnapshot: () => poller?.getSnapshot() ?? null,
+      getSessions: () => claudeSessions,
+      findCheckout,
+      // Run by Claude Code before each tool call, as Node (ELECTRON_RUN_AS_NODE).
+      hookScript: unpackedScript("hook.js"),
+      // Behind each review's publish wrapper: records what the review would post.
+      captureScript: unpackedScript("capture.js"),
+      execPath: process.execPath,
+      openResume: (dir, sessionId) => resumeClaudeSession(dir, sessionId, loadSettings().claude.terminal),
+      fetchPr: async (pr) => {
+        const host = toHostConfigs(loadSettings()).find((h) => h.label === pr.hostLabel);
+        return host ? fetchPullRequest(host, pr.id, pr.roles) : null;
+      },
+      notify: handleAgentNotice,
+      onChange: scheduleAgentPush,
+      checkMermaid,
+    });
+    updateTrayAgent();
+  }
 
   // Pause polling across sleep; refresh on resume / unlock so the first thing
   // the user sees on return is current rather than stale.
@@ -984,7 +1207,9 @@ function startApp(): void {
   if (startInTray && !trayController.hidesToTray()) focusMainWindow();
 
   setInterval(() => {
-    if (claudeSessionsOn && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+    const visible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+    // While the agent is on it scans hidden too: it must see a session you open on its PR.
+    if ((claudeSessionsOn && visible) || agent?.isActive()) {
       void refreshClaudeSessions();
     }
   }, CLAUDE_SESSIONS_INTERVAL_MS);
@@ -1044,7 +1269,10 @@ if (isPrimaryInstance) {
   // session-end in createWindow). If a quit is cancelled at any stage, the
   // latch is re-armed when the window is next shown — a state-based reset
   // instead of second-guessing the quit pipeline's event timing.
-  app.on("before-quit", () => trayController.markQuitting());
+  app.on("before-quit", () => {
+    trayController.markQuitting();
+    agent?.stop();
+  });
 
   // electron-updater's quitAndInstall: emitted on Electron's native
   // autoUpdater by Squirrel.Mac (which closes all windows first and only

@@ -35,6 +35,7 @@ export type TableColumnKey =
   | "comments"
   | "age"
   | "updated"
+  | "agent"
   | "actions";
 
 export type SortDir = "asc" | "desc";
@@ -183,6 +184,17 @@ export const TABLE_COLUMNS: readonly TableColumn[] = [
     minWidthRem: 6.5,
   },
   {
+    // Shown only while the PR agent is on (`visibleColumns`). Not sortable: its
+    // content is the agent's state, which the comparators don't see.
+    key: "agent",
+    label: "Agent",
+    title: "What the PR agent is doing with it",
+    align: "left",
+    sortable: false,
+    defaultDir: "asc",
+    minWidthRem: 9,
+  },
+  {
     key: "actions",
     label: "",
     title: "Copy link, start Claude, ignore, mark as seen",
@@ -209,7 +221,12 @@ export const DEFAULT_TABLE_SORT: TableSort = { key: "signal", dir: "asc" };
  * table ignores a `min-width` on the cells themselves, which is why the floor
  * has to be enforced once, here, rather than once per column in the markup).
  */
-export const TABLE_MIN_WIDTH_REM = TABLE_COLUMNS.reduce((sum, col) => sum + col.minWidthRem, 0);
+export const TABLE_MIN_WIDTH_REM = TABLE_COLUMNS.filter((c) => c.key !== "agent").reduce((sum, col) => sum + col.minWidthRem, 0);
+
+/** The columns the table shows: the Agent column only while the PR agent is on. */
+export function visibleColumns(agentEnabled: boolean): readonly TableColumn[] {
+  return agentEnabled ? TABLE_COLUMNS : TABLE_COLUMNS.filter((c) => c.key !== "agent");
+}
 
 /**
  * Widths the user dragged, in rem, per column. A column absent from the map has
@@ -277,8 +294,8 @@ export function defaultColumnRem(key: TableColumnKey, claudeEnabled: boolean): n
  * where it has none. With no widths and no Claude button that is exactly
  * {@link TABLE_MIN_WIDTH_REM}.
  */
-export function tableMinWidthRem(widths: ColumnWidths, claudeEnabled: boolean): number {
-  return TABLE_COLUMNS.reduce(
+export function tableMinWidthRem(widths: ColumnWidths, claudeEnabled: boolean, agentEnabled = false): number {
+  return visibleColumns(agentEnabled).reduce(
     (sum, col) => sum + (widths[col.key] ?? defaultColumnRem(col.key, claudeEnabled)),
     0,
   );

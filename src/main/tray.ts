@@ -23,6 +23,25 @@ export interface TrayControllerDeps {
   quit(): void;
   /** Hide the dashboard window — the close-to-tray action itself. */
   hide(): void;
+  /** Bring the window back with the PR agent in view ("Show agent"). */
+  showAgent?(): void;
+  /** Pause the whole agent, or resume it ("Pause agent" / "Resume agent"). */
+  toggleAgentPause?(): void;
+}
+
+/** The PR agent as the tray shows it: its one line (`agentTrayLine`) and whether it is paused. */
+export interface TrayAgentStatus {
+  line: string;
+  paused: boolean;
+}
+
+/** Windows cuts a tray tooltip at 127 characters. */
+const TOOLTIP_MAX = 127;
+
+/** The tooltip: the app's name, and the agent's line under it while there is one. */
+export function trayTooltip(agent: TrayAgentStatus | null): string {
+  const text = agent ? `PR Dashboard\nAgent: ${agent.line}` : "PR Dashboard";
+  return text.length > TOOLTIP_MAX ? `${text.slice(0, TOOLTIP_MAX - 1)}…` : text;
 }
 
 /** The part of a window `close` event this module touches. */
@@ -61,6 +80,12 @@ export interface TrayController {
   cancelQuitting(): void;
   /** The window's `close` handler: hides to the tray, or lets the close through. */
   handleClose(event: CloseEvent): void;
+  /**
+   * The PR agent's state for the tooltip and the menu (its line, Show agent,
+   * Pause/Resume agent); null while the agent is off or Settings › Agent says
+   * not to show it in the tray. Kept while there is no icon, for the next one.
+   */
+  setAgent(status: TrayAgentStatus | null): void;
 }
 
 /**
@@ -78,6 +103,29 @@ export function createTrayController(deps: TrayControllerDeps): TrayController {
    * never be quit: every teardown path closes the window first.
    */
   let quitting = false;
+  let agent: TrayAgentStatus | null = null;
+
+  /** The tooltip and the menu, for the agent's current state. */
+  const render = (): void => {
+    if (!tray || tray.isDestroyed()) return;
+    tray.setToolTip(trayTooltip(agent));
+    tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: "Open PR Dashboard", click: () => deps.open() },
+        ...(agent
+          ? ([
+              { type: "separator" },
+              // A label, not an action: what the agent is doing right now.
+              { label: `Agent: ${agent.line}`, enabled: false },
+              { label: "Show agent", click: () => deps.showAgent?.() },
+              { label: agent.paused ? "Resume agent" : "Pause agent", click: () => deps.toggleAgentPause?.() },
+            ] as Electron.MenuItemConstructorOptions[])
+          : []),
+        { type: "separator" },
+        { label: "Quit PR Dashboard", click: () => deps.quit() },
+      ]),
+    );
+  };
 
   /** Creates the icon if it isn't there yet. False when none could be made. */
   const ensureTray = (): boolean => {
@@ -97,14 +145,7 @@ export function createTrayController(deps: TrayControllerDeps): TrayController {
       return false;
     }
 
-    tray.setToolTip("PR Dashboard");
-    tray.setContextMenu(
-      Menu.buildFromTemplate([
-        { label: "Open PR Dashboard", click: () => deps.open() },
-        { type: "separator" },
-        { label: "Quit PR Dashboard", click: () => deps.quit() },
-      ]),
-    );
+    render();
     // Windows/Linux only: a plain click should restore the window (the context
     // menu is the right-click gesture there). On macOS a left click opens the
     // context menu *and* still emits `click`, so registering these would reopen
@@ -157,6 +198,13 @@ export function createTrayController(deps: TrayControllerDeps): TrayController {
       if (quitting || !hidesToTray) return; // let the window close for real
       event.preventDefault();
       deps.hide();
+    },
+
+    setAgent(status: TrayAgentStatus | null): void {
+      // A run reports a step per tool call; the menu is rebuilt only when what it shows changed.
+      if (status?.line === agent?.line && status?.paused === agent?.paused) return;
+      agent = status ? { ...status } : null;
+      render();
     },
   };
 }

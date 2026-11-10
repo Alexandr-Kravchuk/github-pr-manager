@@ -101,6 +101,16 @@ for (const mod of [
   "claude-sessions.js",
   "settings-search.js",
   "host-status.js",
+  "agent-defaults.js",
+  "agent-stream.js",
+  "agent-view.js",
+  "agent-publish.js",
+  "agent-result.js",
+  "agent-diagrams.js",
+  "agent-reapprove.js",
+  "agent-stack.js",
+  "agent-explain.js",
+  "stale.js",
   "jira-status.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
@@ -687,9 +697,12 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     destroy() {
       this.destroyed = true;
     }
-    setToolTip() {}
+    setToolTip(text) {
+      this.tooltip = text;
+    }
     setContextMenu(menu) {
       this.menu = menu;
+      this.menus = (this.menus ?? 0) + 1;
     }
     on(event, cb) {
       this.handlers.push([event, cb]);
@@ -712,7 +725,7 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
       Tray: FakeTray,
     },
   };
-  const { createTrayController } = require(trayJs);
+  const { createTrayController, trayTooltip } = require(trayJs);
 
   // The failure paths log through console.error; keep the test output clean.
   const quiet = (fn) => {
@@ -731,11 +744,13 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     trays.length = 0;
     iconEmpty = false;
     trayThrows = false;
-    const calls = { open: 0, quit: 0, hide: 0 };
+    const calls = { open: 0, quit: 0, hide: 0, showAgent: 0, toggleAgent: 0 };
     const controller = createTrayController({
       open: () => calls.open++,
       quit: () => calls.quit++,
       hide: () => calls.hide++,
+      showAgent: () => calls.showAgent++,
+      toggleAgentPause: () => calls.toggleAgent++,
     });
     return { controller, calls };
   };
@@ -787,6 +802,41 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     tray.menu[2].click();
     assert.strictEqual(calls.open, 1);
     assert.strictEqual(calls.quit, 1);
+  });
+
+  test("tray controller: the PR agent's line goes in the tooltip and the menu, with Show agent and Pause/Resume agent", () => {
+    const { controller, calls } = setup();
+    controller.setEnabled(true);
+    const [tray] = trays;
+    assert.strictEqual(tray.tooltip, "PR Dashboard");
+    controller.setAgent({ line: "Reviewing #911 · 4/6", paused: false });
+    assert.strictEqual(tray.tooltip, "PR Dashboard\nAgent: Reviewing #911 · 4/6");
+    const labels = tray.menu.map((item) => item.label ?? item.type);
+    assert.deepStrictEqual(labels, ["Open PR Dashboard", "separator", "Agent: Reviewing #911 · 4/6", "Show agent", "Pause agent", "separator", "Quit PR Dashboard"]);
+    assert.strictEqual(tray.menu[2].enabled, false, "the status line is a label, not an action");
+    tray.menu[3].click();
+    tray.menu[4].click();
+    assert.deepStrictEqual([calls.showAgent, calls.toggleAgent, calls.open], [1, 1, 0]);
+    controller.setAgent({ line: "Paused", paused: true });
+    assert.strictEqual(tray.menu[4].label, "Resume agent");
+    // A run reports a step per tool call: the same line rebuilds nothing.
+    const built = tray.menus;
+    controller.setAgent({ line: "Paused", paused: true });
+    assert.strictEqual(tray.menus, built);
+    controller.setAgent(null);
+    assert.deepStrictEqual(tray.menu.map((item) => item.label ?? item.type), ["Open PR Dashboard", "separator", "Quit PR Dashboard"], "agent off: the plain menu");
+    assert.strictEqual(tray.tooltip, "PR Dashboard");
+  });
+
+  test("tray controller: the agent's state set while there is no icon shows on the next one; a long line is cut for Windows", () => {
+    const { controller } = setup();
+    controller.setAgent({ line: "2 queued", paused: false });
+    assert.strictEqual(trays.length, 0, "setting the agent's state creates no icon");
+    controller.setEnabled(true);
+    assert.strictEqual(trays[0].tooltip, "PR Dashboard\nAgent: 2 queued");
+    const long = trayTooltip({ line: "x".repeat(300), paused: false });
+    assert.strictEqual(long.length, 127);
+    assert.ok(long.endsWith("…"));
   });
 
   test("tray controller: Windows/Linux -> both click gestures reopen the dashboard", () => {
@@ -1726,6 +1776,54 @@ const rawPr = (overrides = {}) => ({
   commits: { nodes: [{ commit: { pushedDate: "2026-07-07T00:00:00Z", committedDate: "2026-07-07T00:00:00Z", statusCheckRollup: null } }] },
   ...overrides,
 });
+
+// --- the PR agent's inputs: head commit, size, merge methods -----------------
+test("mapPr: head oid, size and merge methods reach the PR", () => {
+  const pr = github.mapPr(
+    rawPr({
+      additions: 310,
+      deletions: 95,
+      changedFiles: 12,
+      repository: {
+        nameWithOwner: "a/b",
+        defaultBranchRef: { name: "main" },
+        viewerDefaultMergeMethod: "SQUASH",
+        squashMergeAllowed: true,
+        mergeCommitAllowed: true,
+        rebaseMergeAllowed: false,
+      },
+      commits: { nodes: [{ commit: { oid: "abc123", pushedDate: "2026-07-07T00:00:00Z", committedDate: "2026-07-07T00:00:00Z", statusCheckRollup: null } }] },
+    }),
+    "GH",
+    ["author"],
+    "auth",
+  );
+  assert.strictEqual(pr.headOid, "abc123");
+  assert.deepStrictEqual([pr.additions, pr.deletions, pr.changedFiles], [310, 95, 12]);
+  assert.deepStrictEqual(pr.mergeMethods, { suggested: "squash", allowed: ["merge", "squash"] });
+});
+test("mapPr: a PR without the new fields reads as zero size and no head", () => {
+  const pr = github.mapPr(rawPr(), "GH", ["author"], "auth");
+  assert.strictEqual(pr.headOid, null);
+  assert.deepStrictEqual([pr.additions, pr.deletions, pr.changedFiles], [0, 0, 0]);
+});
+test("mapMergeMethods: a suggestion the repo doesn't allow falls to the first allowed; no flags means all", () => {
+  const repo = (extra) => ({ nameWithOwner: "a/b", defaultBranchRef: null, ...extra });
+  assert.deepStrictEqual(
+    github.mapMergeMethods(repo({ viewerDefaultMergeMethod: "MERGE", squashMergeAllowed: true, mergeCommitAllowed: false, rebaseMergeAllowed: true })),
+    { suggested: "squash", allowed: ["squash", "rebase"] },
+  );
+  assert.deepStrictEqual(github.mapMergeMethods(repo({})), { suggested: "merge", allowed: ["merge", "squash", "rebase"] });
+  assert.deepStrictEqual(
+    github.mapMergeMethods(repo({ squashMergeAllowed: false, mergeCommitAllowed: false, rebaseMergeAllowed: false })),
+    { suggested: null, allowed: [] },
+  );
+});
+test("hashSnapshot: a new head commit alone re-emits", () => {
+  const a = github.mapPr(rawPr(), "GH", ["author"], "auth");
+  const snap = (pr) => ({ pullRequests: [pr], errors: [], rateLimits: [], fetchedAt: "", version: "" });
+  assert.notStrictEqual(poller.hashSnapshot(snap(a)), poller.hashSnapshot(snap({ ...a, headOid: "def456" })));
+});
 // Approval bodies have no resolvable-thread state: only reviewer clearance is
 // authoritative. Conservative unknown prose must never enter the merge queue.
 for (const body of ["", "LGTM!", "Looks good to me.", "Approved ✅", "Thanks!", "👍"]) {
@@ -2575,15 +2673,18 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
     assert.strictEqual(viewMode.DEFAULT_VIEW_MODE, "roomy");
     assert.strictEqual(viewMode.VIEW_MODES[0], "roomy");
   });
-  test("supportsGrouping / usesListSort: cozy is the only mode that opts out", () => {
-    // Cozy's table is flat and sorts by column, so BOTH header controls hand
-    // over to it. Roomy and Compact are the same list at two sizes and keep them.
+  test("supportsGrouping / usesListSort: cozy and board opt out", () => {
+    // Cozy's table is flat and sorts by column, and the Board lays PRs out by
+    // the agent's state, so BOTH header controls hand over to them. Roomy and
+    // Compact are the same list at two sizes and keep them.
+    assert.deepStrictEqual(viewMode.VIEW_MODES, ["roomy", "cozy", "compact", "board"]);
     assert.deepStrictEqual(
       viewMode.VIEW_MODES.map((m) => [viewMode.supportsGrouping(m), viewMode.usesListSort(m)]),
       [
         [true, true],
         [false, false],
         [true, true],
+        [false, false],
       ],
     );
   });
@@ -2636,28 +2737,40 @@ test("jiraBrowseUrl: rejects a key that isn't the shape github.ts parses", () =>
   });
   const rev = (login, reviewState) => ({ login, avatarUrl: "", reviewState });
 
-  test("TABLE_COLUMNS: eleven unique columns, only Reviewers and Actions unsortable", () => {
+  test("TABLE_COLUMNS: twelve unique columns, only Reviewers, Agent and Actions unsortable", () => {
     const keys = prTable.TABLE_COLUMNS.map((c) => c.key);
-    assert.strictEqual(keys.length, 11);
+    assert.strictEqual(keys.length, 12);
     assert.strictEqual(new Set(keys).size, keys.length, "duplicate column key");
     assert.ok(!keys.includes("role"), "the Role column was removed");
     assert.deepStrictEqual(
       prTable.TABLE_COLUMNS.filter((c) => !c.sortable).map((c) => c.key),
-      ["reviewers", "actions"],
+      ["reviewers", "agent", "actions"],
     );
+  });
+
+  test("visibleColumns: the Agent column shows only while the agent is on, just before Actions", () => {
+    const on = prTable.visibleColumns(true).map((c) => c.key);
+    const off = prTable.visibleColumns(false).map((c) => c.key);
+    assert.deepStrictEqual(on, prTable.TABLE_COLUMNS.map((c) => c.key));
+    assert.deepStrictEqual(on.slice(-2), ["agent", "actions"]);
+    assert.deepStrictEqual(off, on.filter((k) => k !== "agent"));
   });
 
   test("TABLE_MIN_WIDTH_REM: every column declares a minimum and the table's floor is their sum", () => {
     // The floor has to be enforced on the table, not on the cells — a
     // fixed-layout table ignores a cell `min-width` — so a column added without
     // a minimum would silently shrink the others instead of widening the table.
+    // The floor is the agent-off table's; the Agent column adds its own share.
     for (const col of prTable.TABLE_COLUMNS) {
       assert.ok(col.minWidthRem > 0, `${col.key} declares no minimum width`);
     }
     assert.strictEqual(
       prTable.TABLE_MIN_WIDTH_REM,
-      prTable.TABLE_COLUMNS.reduce((sum, c) => sum + c.minWidthRem, 0),
+      prTable.visibleColumns(false).reduce((sum, c) => sum + c.minWidthRem, 0),
     );
+    const agentMin = prTable.TABLE_COLUMNS.find((c) => c.key === "agent").minWidthRem;
+    assert.strictEqual(prTable.tableMinWidthRem({}, false, true), prTable.TABLE_MIN_WIDTH_REM + agentMin);
+    assert.strictEqual(prTable.tableMinWidthRem({ agent: 4 }, false, false), prTable.TABLE_MIN_WIDTH_REM, "a hidden column's width is not counted");
   });
 
   test("clampColumnWidth: a dragged width is held inside the bounds", () => {
@@ -3753,6 +3866,7 @@ test("activeFilterCount: every narrowing control at once", () =>
         newOnly: true,
         mergeableOnly: true,
         noReviewsOnly: true,
+        staleOnly: true,
       }),
     ),
     2 + prFilter.SOURCE_CHIPS.length,
@@ -6907,6 +7021,35 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     p.stop();
   });
 
+  // --- poller: a PR closed from the app leaves at once, despite the search lag --
+  await atest("Poller.forgetClosed: drops the card now and keeps a lagging search from bringing it back", async () => {
+    const snapshots = [];
+    const mk = (id) => ({
+      id, hostLabel: "GH", repo: "a/b", number: 1, title: id, updatedAt: "2026-01-01T00:00:00Z",
+      createdAt: "2026-01-01T00:00:00Z", roles: ["author"], failingChecks: [], pendingChecks: [], checks: [], reviewers: [],
+    });
+    const p = new poller.Poller({
+      loadSettings: () => ({ pollIntervalSeconds: 60, hosts: [{ label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"] }], staleAfterDays: 30 }),
+      toHostConfigs: () => [{ label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"], token: "t" }],
+      statePath: path.join(os.tmpdir(), "prd-poller-state-missing.json"),
+      ignoredStatePath: path.join(os.tmpdir(), "prd-poller-ignored-missing.json"),
+      appVersion: "test",
+      onSnapshot: (s) => snapshots.push(s),
+      onConfigError: () => {},
+      // The search still returns the closed PR — GitHub's index lags the close.
+      fetchHostFn: async () => ({ pullRequests: [mk("A"), mk("B")], rateLimit: { hostLabel: "GH", remaining: 5000, cost: 1, resetAt: "" } }),
+    });
+    await p.refresh();
+    assert.deepStrictEqual(p.getSnapshot().pullRequests.map((x) => x.id).sort(), ["A", "B"]);
+    const before = snapshots.length;
+    p.forgetClosed("A");
+    assert.deepStrictEqual(p.getSnapshot().pullRequests.map((x) => x.id), ["B"]);
+    assert.strictEqual(snapshots.length, before + 1, "pushed to the renderer at once");
+    await p.refresh();
+    assert.deepStrictEqual(p.getSnapshot().pullRequests.map((x) => x.id), ["B"], "a lagging search can't bring it back");
+    p.stop();
+  });
+
   // --- poller: fetchedAt is not a per-snapshot identity ----------------------
   // Why the header live-dot keys on a snapshot counter (App.tsx) and not on
   // `snapshot.fetchedAt`: the snapshot carries the *oldest* per-host timestamp
@@ -8218,6 +8361,90 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(ids("xyzzy"), []);
     });
 
+    test("settings search: the Agent tab's sections are found by their own words", () => {
+      const ss = require(path.join(__dirname, "../dist/main/shared/settings-search.js"));
+      const ids = (q) => ss.searchSettings(q).map((s) => s.id);
+      assert.deepStrictEqual(ss.sectionsOfTab("agent").map((s) => s.id), [
+        "agent",
+        "agentScenarios",
+        "agentLimits",
+        "agentPermissions",
+        "agentDiagrams",
+        "agentCompanion",
+        "agentNotifications",
+        "agentPolicy",
+      ]);
+      assert.deepStrictEqual(ids("mermaid"), ["agentDiagrams"]);
+      assert.deepStrictEqual(ids("quiet hours"), ["agentLimits"]);
+      assert.deepStrictEqual(ids("worktree"), ["agent"]);
+      assert.deepStrictEqual(ids("squash"), ["agentScenarios"]);
+      assert.deepStrictEqual(ids("tray icon"), ["agentCompanion"]);
+      assert.deepStrictEqual(ids("signature"), ["agentPolicy"]);
+      assert.deepStrictEqual(ids("triage"), ["claude"], "the agent's prompts are edited with the Claude button's");
+      assert.strictEqual(ss.toSettingsTab("agent"), "agent");
+    });
+
+    test("agent settings: off by default, every posting scenario starts in shadow, merge only offers", () => {
+      const ad = require(path.join(__dirname, "../dist/main/shared/agent-defaults.js"));
+      const a = cfg.defaultSettings().agent;
+      assert.strictEqual(a.enabled, false);
+      assert.deepStrictEqual(a, cfg.validateAgent(undefined));
+      assert.deepStrictEqual(a, ad.DEFAULT_AGENT_SETTINGS);
+      for (const k of ["review", "rereview", "driveCi", "driveComments"]) assert.strictEqual(a.scenarios[k].mode, "shadow", k);
+      assert.strictEqual(a.scenarios.merge.mode, "offer");
+      assert.deepStrictEqual([a.scenarios.review.maxLines, a.scenarios.review.maxFiles, a.limits.parallel, a.limits.perDay], [400, 15, 2, 30]);
+      for (const rule of a.permissions.tools.review) assert.ok(!/push|Edit|Write/.test(rule), `review must not write: ${rule}`);
+    });
+
+    test("agent settings: a settings file from before the agent reads as the defaults", () => {
+      const s = cfg.validateSettings({ hosts: [], claude: { enabled: true } });
+      assert.deepStrictEqual(s.agent, cfg.validateAgent(undefined));
+      assert.strictEqual(s.claude.agentPrompts.triage, cfg.validateClaude(undefined).agentPrompts.triage);
+    });
+
+    test("agent settings: numbers are clamped, enums and clock times fall back, repos must be owner/name", () => {
+      const a = cfg.validateAgent({
+        enabled: true,
+        effort: "extreme",
+        repos: ["acme/widgets", "not a repo", " acme/gadgets ", 7],
+        scenarios: {
+          review: { mode: "auto", maxLines: 0, maxFiles: "40" },
+          brief: { mode: "shadow" },
+          merge: { mode: "on", method: "fast-forward" },
+          driveCi: { maxAttempts: 99 },
+        },
+        limits: { parallel: -3, perDay: 1e6, maxMinutes: 2.6, quietHours: { enabled: true, from: "25:00", to: "07:30" } },
+        policy: { signature: "   ", logRetentionDays: 0 },
+      });
+      assert.strictEqual(a.enabled, true);
+      assert.strictEqual(a.effort, "");
+      assert.deepStrictEqual(a.repos, ["acme/widgets", "acme/gadgets"]);
+      assert.strictEqual(a.scenarios.review.mode, "shadow");
+      assert.deepStrictEqual([a.scenarios.review.maxLines, a.scenarios.review.maxFiles], [1, 40]);
+      assert.strictEqual(a.scenarios.brief.mode, "on", "a brief has no shadow mode — it posts nothing either way");
+      assert.strictEqual(a.scenarios.merge.mode, "offer", "there is no mode that merges by itself");
+      assert.strictEqual(a.scenarios.merge.method, "github");
+      assert.strictEqual(a.scenarios.driveCi.maxAttempts, 10);
+      assert.deepStrictEqual([a.limits.parallel, a.limits.perDay, a.limits.maxMinutes], [1, 500, 5]);
+      assert.deepStrictEqual(a.limits.quietHours, { enabled: true, from: "20:00", to: "07:30" });
+      assert.strictEqual(a.policy.signature, cfg.validateAgent(undefined).policy.signature, "the signature can't be blanked out");
+      assert.strictEqual(a.policy.logRetentionDays, 1);
+    });
+
+    test("agent settings: tool rules per run kind — a missing list takes the default, a given one is kept trimmed", () => {
+      const a = cfg.validateAgent({ permissions: { tools: { review: [" Read ", "", 5, "Bash(gh pr view *)"] }, pushOwnBranch: false } });
+      assert.deepStrictEqual(a.permissions.tools.review, ["Read", "Bash(gh pr view *)"]);
+      assert.deepStrictEqual(a.permissions.tools.drive, cfg.validateAgent(undefined).permissions.tools.drive);
+      assert.strictEqual(a.permissions.pushOwnBranch, false);
+    });
+
+    test("claude settings: the agent's prompts default, keep edits, and stay out of the button's kinds", () => {
+      const c = cfg.validateClaude({ agentPrompts: { rereview: "  /my-rereview {url} ", triage: "" } });
+      assert.strictEqual(c.agentPrompts.rereview, "/my-rereview {url}");
+      assert.strictEqual(c.agentPrompts.triage, cfg.validateClaude(undefined).agentPrompts.triage);
+      for (const k of Object.keys(c.agentPrompts)) assert.ok(!cl.CLAUDE_LAUNCH_KINDS.includes(k), `${k} must not be a launch kind`);
+    });
+
     test("claude launch: remotes normalize across https, scp and ssh:// forms", () => {
       for (const u of [
         "https://github.com/Acme/Widgets.git",
@@ -9029,6 +9256,5426 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(src, /"claude:sessions"[\s\S]{0,120}refreshClaudeSessions\(\)/);
       assert.match(src, /isVisible\(\)\)\s*\{\s*sendToRenderer\("claude-sessions"/);
       assert.match(src, /claudeSessionsOn = settings\.claude\.enabled/);
+    });
+  }
+
+  // --- the PR agent (stage 2: core, shadow only) ------------------------------
+  {
+    const nfsA = require("node:fs");
+    const { PassThrough } = require("node:stream");
+    const { EventEmitter } = require("node:events");
+    const { spawnSync } = require("node:child_process");
+    const guard = require(path.join(__dirname, "../dist/main/shared/agent-guard.js"));
+    const policy = require(path.join(__dirname, "../dist/main/shared/agent-policy.js"));
+    const stream = require(path.join(__dirname, "../dist/main/shared/agent-stream.js"));
+    const ad = require(path.join(__dirname, "../dist/main/shared/agent-defaults.js"));
+    const plugins = require(path.join(__dirname, "../dist/main/main/agent/plugins.js"));
+    const runner = require(path.join(__dirname, "../dist/main/main/agent/runner.js"));
+    const wt = require(path.join(__dirname, "../dist/main/main/agent/worktrees.js"));
+    const agentStore = require(path.join(__dirname, "../dist/main/main/agent/store.js"));
+    const agentCore = require(path.join(__dirname, "../dist/main/main/agent/index.js"));
+    const idleGate = require(path.join(__dirname, "../dist/main/shared/idle-gate.js"));
+    const hookJs = path.join(__dirname, "../dist/main/main/agent/hook.js");
+    const hookMod = require(hookJs);
+    /** A git command past its global options. */
+    const gitSub = (all) => {
+      let i = 0;
+      for (;;) {
+        if (all[i] === "-c") i += 2;
+        else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+        else break;
+      }
+      return all.slice(i);
+    };
+
+    // Not value-imported by the renderer (yet), but kept Node-free all the same;
+    // the ones it does import are in the list at the top of this file.
+    for (const mod of ["agent-guard.js", "agent-policy.js"]) {
+      test(`${mod} compiles free of node: builtin references`, () => {
+        const src = nfsA.readFileSync(path.join(__dirname, `../dist/main/shared/${mod}`), "utf8");
+        const hits = src.match(/require\(["'](?:node:[^"']+|fs|path|os|crypto|child_process)["']\)|from ["']node:[^"']+["']/g) || [];
+        assert.deepStrictEqual(hits, [], mod);
+      });
+    }
+
+    const gpr = guard.guardPrFromUrl("https://github.com/Acme/Widgets/pull/12");
+    test("agent guard: the PR a run works on is read from its URL", () => {
+      assert.deepStrictEqual(gpr, { url: "https://github.com/Acme/Widgets/pull/12", repo: "acme/widgets", number: 12, host: "github.com" });
+      assert.strictEqual(guard.guardPrFromUrl("https://Creatio.GHE.com/a/b/pull/3").host, "creatio.ghe.com");
+      assert.strictEqual(guard.guardPrFromUrl("https://github.com/acme/widgets/issues/12"), null);
+    });
+
+    test("agent guard: reads a review needs pass", () => {
+      for (const cmd of [
+        "gh pr view 12 --json title,body",
+        "gh pr view https://github.com/Acme/Widgets/pull/12 --json files",
+        "gh pr view 12 --repo acme/widgets --json title --jq .title",
+        "gh pr diff 12",
+        "gh pr checks 12",
+        "gh api repos/acme/widgets/pulls/12/reviews --jq '.[].state'",
+        "gh api repos/Acme/Widgets/pulls/12/comments --jq '.[] | select(.user.login == \"x\") | .body'",
+        "gh api /repos/acme/widgets/pulls/12/comments --paginate",
+        "gh api 'repos/acme/widgets/pulls/12/files?per_page=100'",
+        // A branch name with a slash: one segment, its slash written %2F — or the ref path, slashes and all.
+        "gh api repos/acme/widgets/branches/integration%2Fcaadt-2.0 --jq .name",
+        "gh api repos/acme/widgets/branches/release%2f2.0",
+        "gh api repos/acme/widgets/git/ref/heads/integration/caadt-2.0",
+        "gh pr view 12 -Racme/widgets --json title",
+        "gh pr view 12 --template '{{.title}}'",
+        "gh pr diff 12 --name-only",
+      ]) {
+        assert.deepStrictEqual(guard.checkToolUse("review", "Bash", { command: cmd }, gpr), { allow: true }, cmd);
+      }
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "src/x.ts" }, gpr, { workDir: "C:/wt", readDirs: ["C:/wt"] }).allow, true);
+      assert.strictEqual(guard.checkToolUse("review", "Skill", { skill: "x" }).allow, true);
+    });
+
+    // A review run as the app writes its guard file: the PR's worktree, the
+    // payload folder, one mounted plugin, and Claude Code's folders for the session.
+    const SID = "6250ec40-5c65-407c-8b04-61b1dba8fae7";
+    const PLUGIN = "C:/Users/me/.claude/plugins/cache/x/creatio-development/1.7.142";
+    const readRun = {
+      workDir: "C:/wt",
+      outDir: "C:/T/prd-agent/r/out",
+      readDirs: ["C:/wt", "C:/T/prd-agent/r/out", PLUGIN],
+      sessionId: SID,
+      sessionRoots: ["C:/Users/me/.claude/projects", "C:/Users/me/AppData/Local/Temp/claude"],
+    };
+
+    test("agent guard: the read tools read the run's own folders — worktree, payload, plugins, the session's spill-over", () => {
+      for (const [tool, input] of [
+        ["Read", { file_path: "src/x.ts" }],
+        ["Read", { file_path: "./src/x.ts" }],
+        ["Read", { file_path: "C:\\wt\\src\\x.ts" }],
+        ["Read", { file_path: "/c/wt/src/x.ts" }],
+        ["Read", { file_path: "C:/WT/README.md" }],
+        ["Read", { file_path: `${PLUGIN}/skills/creatio-code-review/SKILL.md` }],
+        ["Read", { file_path: "C:/T/prd-agent/r/out/review.json" }],
+        // A tool result too long to show, and a background Workflow's output: Claude Code tells the session to read them there.
+        ["Read", { file_path: `C:\\Users\\me\\.claude\\projects\\C--wt\\${SID}\\tool-results\\b1.txt`, offset: 300, limit: 20 }],
+        ["Read", { file_path: `C:/Users/me/AppData/Local/Temp/claude/C--wt/${SID.toUpperCase()}/tasks/w1.output` }],
+        ["Grep", { pattern: "x" }],
+        ["Grep", { pattern: "x", path: "src" }],
+        ["Grep", { pattern: "x", path: "C:/wt" }],
+        ["Grep", { pattern: "x", path: `C:/Users/me/.claude/projects/C--wt/${SID}/tool-results/b1.txt` }],
+        ["Glob", { pattern: "**/*.ts" }],
+        ["Glob", { pattern: "{CLAUDE.md,AGENTS.md,.ai/**/*.md}" }],
+        ["Glob", { pattern: "src\\**\\*.ts" }],
+        ["Glob", { pattern: "src/{a,{b,c}}/*.{ts,tsx}" }],
+        ["Glob", { pattern: "docs/\\{literal\\}/*.md" }],
+        ["Glob", { pattern: "C:\\wt\\src\\*.ts" }],
+        ["Glob", { pattern: `${PLUGIN}/skills/creatio-code-review/*` }],
+        ["Glob", { pattern: "*", path: "C:/T/prd-agent/r/out" }],
+        ["LS", { path: "src" }],
+        ["NotebookRead", { notebook_path: "C:/wt/nb/a.ipynb" }],
+      ]) {
+        assert.deepStrictEqual(guard.checkToolUse("review", tool, input, gpr, readRun), { allow: true }, `${tool} ${JSON.stringify(input)}`);
+      }
+      // The same rules for every kind of run: a drive reads what a review reads.
+      assert.deepStrictEqual(guard.checkToolUse("drive", "Read", { file_path: "src/x.ts" }, gpr, readRun), { allow: true });
+    });
+
+    test("agent guard: a read outside the run's folders is refused — secrets, .. escapes, ~, another session", () => {
+      for (const [tool, input] of [
+        ["Read", { file_path: "C:/Users/me/.ssh/id_rsa" }],
+        ["Read", { file_path: "~/.ssh/id_rsa" }],
+        ["Read", { file_path: "~" }],
+        ["Read", { file_path: "/home/me/.ssh/id_rsa" }],
+        ["Read", { file_path: "C:/Users/me/.config/gh/hosts.yml" }],
+        ["Read", { file_path: "C:/Users/me/AppData/Roaming/PR Dashboard/settings.json" }],
+        ["Read", { file_path: "C:/Users/me/.claude/settings.json" }],
+        ["Read", { file_path: "../../Users/me/.ssh/id_rsa" }],
+        ["Read", { file_path: "src/../../Users/me/.ssh/id_rsa" }],
+        ["Read", { file_path: "C:/wt/../Users/me/.ssh/id_rsa" }],
+        ["Read", { file_path: "C:/wt-other/x.ts" }],
+        ["Read", { file_path: "C:x.ts" }],
+        ["Read", { file_path: "src/x.ts:hidden" }],
+        ["Read", { file_path: "\\\\server\\share\\x" }],
+        ["Read", { file_path: "//server/share/x" }],
+        ["Grep", { pattern: "x", path: "\\\\?\\C:\\wt\\src" }],
+        ["Glob", { pattern: "C:*" }],
+        ["Glob", { pattern: "//server/share/*" }],
+        // The wrapper and the run's own files sit next to the payload folder, not in it.
+        ["Read", { file_path: "C:/T/prd-agent/r/bin/pr-review-publish.sh" }],
+        ["Read", { file_path: `${PLUGIN}/../../other-plugin/x` }],
+        // Another session's spill-over, and this session's transcript itself.
+        ["Read", { file_path: "C:/Users/me/.claude/projects/C--wt/11111111-2222-3333-4444-555555555555/tool-results/b1.txt" }],
+        ["Read", { file_path: `C:/Users/me/.claude/projects/C--wt/${SID}.jsonl` }],
+        ["Read", { file_path: `C:/Users/me/.claude/projects/C--wt/${SID}/../../other/${SID}/x` }],
+        ["Read", { file_path: `C:/Users/me/.claude/${SID}/x` }],
+        ["Read", {}],
+        ["Grep", { pattern: "token", path: "C:/Users/me" }],
+        ["Grep", { pattern: "token", path: ".." }],
+        ["Glob", { pattern: "C:/Users/me/.ssh/*" }],
+        ["Glob", { pattern: "/home/me/.ssh/*" }],
+        ["Glob", { pattern: "../*" }],
+        ["Glob", { pattern: "src/../../*" }],
+        ["Glob", { pattern: "**/../../*" }],
+        // Off Windows the glob engine drops the escapes and reads `../`.
+        ["Glob", { pattern: "\\.\\./*" }],
+        ["Glob", { pattern: ".\\./*" }],
+        ["Glob", { pattern: "src/\\.\\./\\.\\./*" }],
+        ["Glob", { pattern: "{x,\\.\\./*}" }],
+        // Braces join across their edges: each of these expands to a `../`.
+        ["Glob", { pattern: "{.,x}./*" }],
+        ["Glob", { pattern: "src/{x,.}./secret" }],
+        ["Glob", { pattern: ".{.,}/*" }],
+        ["Glob", { pattern: "{.}{.}/*" }],
+        ["Glob", { pattern: "src/.{.,x}/.{.,y}/*" }],
+        ["Glob", { pattern: "{a,.{.,b}}/*" }],
+        ["Glob", { pattern: "{x,{~,y}}/.ssh/*" }],
+        ["Glob", { pattern: "{x,{y,/etc/*}}" }],
+        ["Glob", { pattern: `${"{a,b}".repeat(9)}/*` }],
+        // What the expander doesn't model fails closed: a range by character code (`{-../}` is `-`, `.`, `/`), a single item, any `..`.
+        ["Glob", { pattern: ".{-../}/*" }],
+        ["Glob", { pattern: "src/{1..3}/*" }],
+        ["Glob", { pattern: "{x}/*" }],
+        ["Glob", { pattern: "a..b/*" }],
+        ["Glob", { pattern: "{/etc/*,x}" }],
+        ["Glob", { pattern: "{x,C:/Users/me/.ssh/*}" }],
+        ["Glob", { pattern: "~/.ssh/*" }],
+        ["Glob", { pattern: "*", path: "C:/Users/me/.claude/workflows" }],
+        ["LS", { path: "C:/Users/me" }],
+        ["NotebookRead", { notebook_path: "C:/Users/me/x.ipynb" }],
+      ]) {
+        assert.strictEqual(guard.checkToolUse("review", tool, input, gpr, readRun).allow, false, `${tool} ${JSON.stringify(input)}`);
+      }
+      assert.match(guard.checkToolUse("review", "Read", { file_path: "C:/Users/me/.ssh/id_rsa" }, gpr, readRun).reason, /reads only its own folders \(C:\/wt, .*\); C:\/Users\/me\/\.ssh\/id_rsa is outside them/);
+      // No guard file, or one that names nothing: nothing is read.
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "src/x.ts" }).allow, false, "no guard file");
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "C:/wt/x.ts" }, gpr, { workDir: "C:/wt" }).allow, false, "no readDirs");
+      assert.strictEqual(guard.checkToolUse("review", "Grep", { pattern: "x" }, gpr, { readDirs: ["C:/wt"] }).allow, false, "no working folder to search");
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "C:/x/y" }, gpr, { workDir: "C:/wt", readDirs: ["", "x", "C:/wt"] }).allow, false, "an empty or relative folder grants nothing");
+      const { sessionId, ...noSession } = readRun;
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: `C:/Users/me/.claude/projects/C--wt/${sessionId}/tool-results/b1.txt` }, gpr, noSession).allow, false, "no session id, no spill-over");
+    });
+
+    test("agent guard: a link is judged by where it leads, when the check is handed the disk's answer", () => {
+      // What a link in the PR's branch would do: C:/wt/docs/k leads to ~/.ssh/id_rsa.
+      const links = { "C:/wt/docs/k": "C:/Users/me/.ssh/id_rsa", "C:/wt/docs/dir": "C:/Users/me/.config/gh" };
+      const real = (p) => {
+        const g = p.replace(/\\/g, "/");
+        for (const [from, to] of Object.entries(links)) if (g === from || g.startsWith(`${from}/`)) return to + g.slice(from.length);
+        return g === "C:/wt/docs/dangling" ? null : g;
+      };
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: "docs/k" }, gpr, readRun, real).allow, false, "a link to a secret");
+      assert.match(guard.checkToolUse("review", "Read", { file_path: "C:/wt/docs/k" }, gpr, readRun, real).reason, /it really is C:\/Users\/me\/\.ssh\/id_rsa/);
+      assert.strictEqual(guard.checkToolUse("review", "Grep", { pattern: "oauth", path: "docs/dir" }, gpr, readRun, real).allow, false, "a link to a folder");
+      assert.strictEqual(guard.checkToolUse("review", "Glob", { pattern: "*", path: "docs/dir" }, gpr, readRun, real).allow, false);
+      assert.match(guard.checkToolUse("review", "Read", { file_path: "docs/dangling" }, gpr, readRun, real).reason, /link to nowhere/);
+      assert.deepStrictEqual(guard.checkToolUse("review", "Read", { file_path: "docs/plain.md" }, gpr, readRun, real), { allow: true });
+    });
+
+    test("agent guard: a tool the guard doesn't name is refused — every tool the default lists grant is named", () => {
+      for (const tool of ["Skill", "Agent", "ToolSearch", "TaskCreate", "TaskUpdate", "StructuredOutput"]) {
+        assert.deepStrictEqual(guard.checkToolUse("review", tool, {}, gpr, readRun), { allow: true }, tool);
+      }
+      for (const tool of ["SendMessage", "ListAgents", "mcp__github__create_issue", "Monitor", "SomeToolAddedLater", ""]) {
+        assert.match(guard.checkToolUse("review", tool, {}, gpr, readRun).reason, /not one of the tools agent runs may use/, tool || "(no name)");
+      }
+      for (const kind of Object.keys(ad.DEFAULT_AGENT_TOOLS)) {
+        for (const name of runner.builtInTools(ad.DEFAULT_AGENT_TOOLS[kind])) {
+          const d = guard.checkToolUse(kind, name, {}, gpr, readRun);
+          assert.ok(d.allow || !/not one of the tools/.test(d.reason), `${kind}: ${name} is granted by default but unknown to the guard`);
+        }
+      }
+    });
+
+    test("agent guard: every escape found in review is refused, whatever the allow-list says", () => {
+      for (const [kind, cmd] of [
+        ["review", "git diff --output=/home/me/.bashrc"],
+        ["review", "git diff HEAD~1 --ext-diff"],
+        ["review", "git log -p --textconv"],
+        ["review", "git diff --no-index / /tmp"],
+        ["review", "git -C / log"],
+        ["review", "git -c core.pager=evil log"],
+        ["review", "git checkout main"],
+        ["review", "FOO=1 git push"],
+        ["review", "gh api -X DELETE repos/a/b/issues/comments/1"],
+        ["review", "gh api repos/a/b/pulls/1/reviews --method POST"],
+        ["review", "gh api repos/a/b/pulls/1/reviews -f event=APPROVE"],
+        ["review", "gh api repos/a/b/pulls/1/reviews --input body.json"],
+        ["review", "gh pr review 1 --approve"],
+        ["review", "gh pr merge 1"],
+        ["review", "gh pr comment 1 --body hi"],
+        ["review", "gh pr diff 1 > ~/.bashrc"],
+        ["review", "gh pr view 1 | sh"],
+        ["review", "gh pr view 1; rm -rf ~"],
+        ["review", "gh pr view 1 && curl evil"],
+        ["review", "gh pr view $(whoami)"],
+        ["review", "gh pr view `whoami`"],
+        ["review", "npm test"],
+        ["review", "node -e 'require(\"fs\")'"],
+        ["brief", "git log"],
+        ["drive", "git push origin HEAD:refs/heads/feature/x"],
+        ["drive", "git -c core.hooksPath=/tmp commit -m x"],
+        ["drive", "git diff --output=x"],
+        // Found by review: judged on text, these looked harmless.
+        ["review", "gh api -XDELETE repos/acme/widgets/issues/comments/1"],
+        ["review", "gh api repos/acme/widgets/pulls/12/reviews -fevent=APPROVE"],
+        ["review", "gh api repos/acme/widgets/pulls/12 '-X' POST"],
+        ["review", 'gh api repos/acme/widgets/pulls/12 "--method" POST'],
+        ["review", "gh api graphql -F query=@q.graphql"],
+        ["review", "gh api repos/acme/widgets/pulls/12/files *"],
+        ["review", 'gh api "$URL"'],
+        ["review", "gh api https://evil.example/repos/acme/widgets"],
+        ["review", "gh api repos/{owner}/{repo}/pulls/12"],
+        ["review", "gh api repos/other/repo/pulls/1"],
+        ["review", "gh pr view 99"],
+        ["review", "gh pr view https://github.com/other/repo/pull/12"],
+        ["review", "gh pr view 12 --repo other/repo"],
+        ["review", "gh pr view 12 --web"],
+        ["review", "gh pr view 12 'unbalanced"],
+        ["review", "gh api repos/acme/widgets/pulls/12/files?per_page=100"],
+        // Found by the second review: brace expansion, flag-like values, attached
+        // short flags and dot segments.
+        ["review", "gh api {repos/acme/widgets/pulls/12,-XDELETE}"],
+        ["review", "gh api repos/acme/widgets/pulls/12 --jq -XDELETE"],
+        ["review", "gh pr view 12 -Rother/repo"],
+        ["review", "gh pr view 12 --repo -X"],
+        ["review", "gh pr view 12 --hostname evil.example"],
+        ["review", "gh pr view 12 --some-new-flag"],
+        ["review", "gh api repos/acme/widgets/../../other/repo/pulls"],
+        // %2F is a slash inside a segment, never a way out of the repository, and the only escape taken.
+        ["review", "gh api repos/acme/widgets/branches/..%2F..%2F..%2Fother%2Frepo"],
+        ["review", "gh api repos/acme/widgets/x/..%2f..%2f..%2fother/repo/pulls"],
+        ["review", "gh api repos/acme%2Fwidgets/pulls/12"],
+        ["review", "gh api repos/acme/widgets%2F..%2F..%2Fother/repo/pulls"],
+        ["review", "gh api repos/acme/widgets/%2E%2E/%2E%2E/other/repo/pulls"],
+        ["review", "gh api repos/acme/widgets/branches/a%252Fb"],
+        ["review", "gh api repos/other/repo/branches/a%2Fb"],
+        ["review", "gh pr view 12 ~"],
+        ["review", "gh pr view 12 #--repo other/repo"],
+        ["drive", "git diff '--output'=x"],
+        ["drive", "git '-c' core.pager=x log"],
+        ["drive", "git lg"],
+      ]) {
+        assert.strictEqual(guard.checkToolUse(kind, "Bash", { command: cmd }, gpr).allow, false, `${kind}: ${cmd}`);
+      }
+      for (const tool of ["Edit", "Write", "NotebookEdit"]) assert.strictEqual(guard.checkToolUse("review", tool, {}).allow, false, tool);
+      for (const tool of ["WebFetch", "WebSearch", "PowerShell"]) assert.strictEqual(guard.checkToolUse("drive", tool, {}).allow, false, tool);
+      assert.strictEqual(guard.checkToolUse("review", "Bash", {}).allow, false, "an empty command");
+    });
+
+    test("agent guard: a refused gh api read says what to change — not \"another repository\" for this one", () => {
+      const why = (cmd) => guard.checkToolUse("drive", "Bash", { command: cmd }, gpr).reason;
+      assert.match(why("gh api repos/acme/widgets/branches/a%2Eb"), /takes letters, digits, '\.', '_', '-' and %2F/, "this PR's repository, an escape it doesn't take");
+      assert.match(why("gh api repos/other/repo/branches/a%2Eb"), /Only GitHub REST reads of this PR's repository/);
+      assert.match(why("gh api repos/other/repo/pulls/1"), /reads acme\/widgets only/);
+      assert.match(why("gh api repos/acme/widgets/branches/..%2Fx"), /Dot segments/);
+      assert.match(why("gh api repos/acme/widgets/contents?ref=release"), /Quote the word/, "a query string is a wildcard to the shell");
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "gh api 'repos/acme/widgets/contents?ref=release'" }, gpr).allow, true, "quoted, it reads");
+    });
+
+    test("agent guard: drive may build, test and commit on its own PR", () => {
+      for (const cmd of ["npm test", "npm run typecheck", "git status", "git add src/x.ts", "git commit -m fix", "git log -3"]) {
+        assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: cmd }).allow, true, cmd);
+      }
+      const run = { workDir: "C:/wt", outDir: "C:/T/prd-agent/r/out", wrapperPath: "C:/T/prd-agent/r/bin/pr-review-publish.sh", subs: ["reply"] };
+      assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: "C:\\wt\\src\\x.ts" }, null, run).allow, true, "its own worktree");
+      assert.strictEqual(guard.checkToolUse("drive", "Write", { file_path: "C:/T/prd-agent/r/out/reply.txt" }, null, run).allow, true, "a reply file for its wrapper");
+      assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: "x" }).allow, false, "no guard file, no edits");
+      for (const file of ["C:/elsewhere/a.ts", "C:/wt/.git/hooks/pre-push", "C:/wt/.github/workflows/ci.yml", "C:/wt/.claude/settings.json", "C:/wt/.husky/pre-commit", "C:/wt/.npmrc", "C:/wt/sub/.gitattributes"]) {
+        assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: file }, null, run).allow, false, file);
+      }
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "git rebase origin/main" }).allow, false, "a rebase is never a fast-forward");
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "git fetch origin main" }).allow, false, "the app fetches the base; the session's git has no network");
+      for (const file of ["C:/wt/lefthook.yml", "C:/wt/.pre-commit-config.yaml", "C:/wt/.huskyrc.json"]) {
+        assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: file }, null, run).allow, false, file);
+      }
+      const w = "/c/T/prd-agent/r/bin/pr-review-publish.sh";
+      assert.strictEqual(guard.checkBash("drive", `${w} reply acme/widgets 12 77 C:/T/prd-agent/r/out/reply.txt`, gpr, run).allow, true);
+      assert.match(guard.checkBash("drive", `${w} resolve PRRT_x`, gpr, run).reason, /may not resolve/);
+      assert.match(guard.checkBash("drive", `${w} review acme/widgets 12 C:/T/prd-agent/r/out/r.json`, gpr, run).reason, /may not review/);
+    });
+
+    test("agent defaults: reads carry no git rule (its output and exec flags write and run)", () => {
+      for (const kind of ["review", "brief", "rereview", "afterMerge"]) {
+        for (const rule of ad.DEFAULT_AGENT_TOOLS[kind]) assert.ok(!/git /.test(rule) && !/Edit|Write/.test(rule), `${kind}: ${rule}`);
+      }
+    });
+
+    test("agent guard: shell words — quotes, escapes, and what the shell would do instead of running one program", () => {
+      assert.deepStrictEqual(guard.shellWords(`gh api 'a b' "c \\"d\\"" e\\ f`), { words: ["gh", "api", "a b", 'c "d"', "e f"] });
+      assert.deepStrictEqual(guard.shellWords("x '.[] | .a; $b'"), { words: ["x", ".[] | .a; $b"] }, "single quotes are literal");
+      for (const cmd of ["a | b", "a > f", "a; b", "a && b", "a $(b)", "a `b`", 'a "$HOME"', "a $HOME", "a *", "a ?", "a [x]", "a\nb", "a 'b", 'a "b', "a \\"]) {
+        assert.ok("error" in guard.shellWords(cmd), cmd);
+      }
+    });
+
+    test("agent guard hook: a refused call exits 2 with the reason, an allowed one exits 0", () => {
+      const url = "https://github.com/acme/widgets/pull/1";
+      const run = (kind, call, prUrl = url) => spawnSync(process.execPath, [hookJs, kind, prUrl], { input: JSON.stringify(call), encoding: "utf8" });
+      const bad = run("review", { tool_name: "Bash", tool_input: { command: "gh pr diff 1 > x" } });
+      assert.strictEqual(bad.status, 2);
+      assert.match(bad.stderr, /Shell operators/);
+      assert.strictEqual(run("review", { tool_name: "Bash", tool_input: { command: "gh pr view 1" } }).status, 0);
+      assert.strictEqual(run("review", { tool_name: "Bash", tool_input: { command: "gh pr view 2" } }).status, 2, "another PR");
+      assert.strictEqual(run("nonsense", { tool_name: "Read", tool_input: {} }).status, 2, "an unknown kind refuses everything");
+      assert.strictEqual(run("review", { tool_name: "Read", tool_input: {} }, "not a pr url").status, 2, "an unreadable PR refuses everything");
+      assert.strictEqual(spawnSync(process.execPath, [hookJs, "review", url], { input: "not json", encoding: "utf8" }).status, 2);
+    });
+
+    const agentOn = (extra = {}) => cfg.validateAgent({ enabled: true, ...extra });
+    const reviewPr = (over = {}) => ({
+      ...github.mapPr(
+        rawPr({
+          id: over.id ?? "PR_R",
+          number: over.number ?? 7,
+          url: "https://github.com/a/b/pull/7",
+          additions: over.additions ?? 50,
+          deletions: 10,
+          changedFiles: over.changedFiles ?? 3,
+          createdAt: over.createdAt ?? "2026-07-07T00:00:00Z",
+          commits: { nodes: [{ commit: { oid: over.headOid ?? "aaa111", pushedDate: "2026-07-07T00:00:00Z", committedDate: "2026-07-07T00:00:00Z", statusCheckRollup: null } }] },
+        }),
+        "GH",
+        [over.role ?? "reviewer"],
+        "me",
+      ),
+      requestedOfMe: over.requestedOfMe ?? true,
+      viewerHasReviewed: over.viewerHasReviewed ?? false,
+      isDraft: over.isDraft ?? false,
+      isIgnored: over.isIgnored ?? false,
+    });
+    const noSessions = { hasOwnSession: () => false };
+
+    test("agent policy: off plans nothing and says so", () => {
+      const r = policy.planJobs([reviewPr()], cfg.validateAgent(undefined), noSessions);
+      assert.deepStrictEqual(r.jobs, []);
+      assert.strictEqual(r.idle.get("PR_R"), "The agent is off");
+    });
+
+    test("agent policy: a review asked of you, within the limit, is a shadow review keyed on the head", () => {
+      const r = policy.planJobs([reviewPr()], agentOn(), noSessions);
+      assert.strictEqual(r.jobs.length, 1);
+      assert.deepStrictEqual(
+        [r.jobs[0].scenario, r.jobs[0].kind, r.jobs[0].mode, r.jobs[0].key],
+        ["review", "review", "shadow", "PR_R|review|aaa111"],
+      );
+      assert.notStrictEqual(policy.jobKey({ id: "PR_R", headOid: "bbb222" }, "review"), r.jobs[0].key, "a new head is a new key");
+    });
+
+    test("agent policy: over the limit is a brief first — it never posts — and then the review, on its own", () => {
+      const r = policy.planJobs([reviewPr({ additions: 900 }), reviewPr({ id: "PR_F", changedFiles: 40 })], agentOn(), noSessions);
+      assert.deepStrictEqual(r.jobs.map((j) => [j.scenario, j.mode]), [["brief", "on"], ["brief", "on"]]);
+      // The brief of this head is written: the review follows — no click in between.
+      const briefed = { ...noSessions, briefDone: (pr) => pr.id === "PR_R" };
+      const next = policy.planJobs([reviewPr({ additions: 900 }), reviewPr({ id: "PR_F", changedFiles: 40 })], agentOn(), briefed);
+      assert.deepStrictEqual(next.jobs.map((j) => [j.prId, j.scenario, j.mode, j.key]), [["PR_R", "review", "shadow", "PR_R|review|aaa111"], ["PR_F", "brief", "on", "PR_F|brief|aaa111"]]);
+      assert.strictEqual(policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { review: { mode: "on" } } }), briefed).jobs[0].mode, "on", "the review in its own mode");
+      // Briefs off: a big PR goes straight to the review.
+      const noBrief = policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { brief: { mode: "off" } } }), noSessions);
+      assert.deepStrictEqual(noBrief.jobs.map((j) => j.scenario), ["review"]);
+      // Reviews off: the brief is all a big PR gets.
+      const reviewsOff = agentOn({ scenarios: { review: { mode: "off" } } });
+      assert.deepStrictEqual(policy.planJobs([reviewPr({ additions: 900 })], reviewsOff, noSessions).jobs.map((j) => j.scenario), ["brief"]);
+      const done = policy.planJobs([reviewPr({ additions: 900 })], reviewsOff, briefed);
+      assert.deepStrictEqual(done.jobs, []);
+      assert.strictEqual(done.idle.get("PR_R"), "Reviews are off — a big PR gets its brief only");
+      const both = policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { review: { mode: "off" }, brief: { mode: "off" } } }), noSessions);
+      assert.deepStrictEqual([both.jobs, both.idle.get("PR_R")], [[], "Reviews are off"]);
+    });
+
+    test("agent policy: team requests, drafts, ignored, reviewed, your own session and other repos are left alone", () => {
+      const cases = [
+        [reviewPr({ requestedOfMe: false }), /team/],
+        [reviewPr({ isDraft: true }), /Draft/],
+        [reviewPr({ isIgnored: true }), /Ignored/],
+        [reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), /nothing new from the author/],
+        [reviewPr({ role: "author", isDraft: true }), /Yours — draft/],
+      ];
+      for (const [pr, why] of cases) {
+        const r = policy.planJobs([pr], agentOn(), noSessions);
+        assert.deepStrictEqual(r.jobs, [], String(why));
+        assert.match(r.idle.get(pr.id), why);
+      }
+      assert.match(policy.planJobs([reviewPr()], agentOn(), { hasOwnSession: () => true }).idle.get("PR_R"), /Your Claude session/);
+      assert.match(policy.planJobs([reviewPr()], agentOn({ repos: ["x/y"] }), noSessions).idle.get("PR_R"), /repositories/);
+      assert.strictEqual(policy.planJobs([reviewPr({ requestedOfMe: false })], agentOn({ scenarios: { review: { teamRequests: true } } }), noSessions).jobs.length, 1);
+      assert.strictEqual(policy.planJobs([reviewPr({ isDraft: true })], agentOn({ scenarios: { review: { drafts: true } } }), noSessions).jobs.length, 1);
+    });
+
+    test("agent policy: the queue runs oldest first", () => {
+      const r = policy.planJobs(
+        [reviewPr({ id: "NEW", createdAt: "2026-07-09T00:00:00Z" }), reviewPr({ id: "OLD", createdAt: "2026-07-01T00:00:00Z" })],
+        agentOn(),
+        noSessions,
+      );
+      assert.deepStrictEqual(r.jobs.map((j) => j.prId), ["OLD", "NEW"]);
+    });
+
+    // Events recorded from a real `claude -p` session (2.1.270), trimmed.
+    const recorded = [
+      { type: "system", subtype: "init", session_id: "s-1", tools: ["Read"] },
+      { type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: 1793899800 } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "ToolSearch", input: { query: "select:TaskCreate" } }] } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t2", name: "TaskCreate", input: { subject: "alpha", description: "First" } }] } },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t2", content: "Task #1 created successfully: alpha" }] } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t3", name: "TaskCreate", input: { subject: "beta" } }] } },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t3", content: [{ type: "text", text: "Task #2 created successfully: beta" }] }] } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t4", name: "TaskUpdate", input: { taskId: "1", status: "in_progress" } }] } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t5", name: "Bash", input: { command: "gh pr diff 7" } }] } },
+      { type: "assistant", message: { content: [{ type: "text", text: "Reviewing the diff." }] } },
+    ];
+    test("agent stream: the plan comes from TaskCreate/TaskUpdate, the live line from the last real tool", () => {
+      let p = stream.initialProgress();
+      for (const ev of recorded) p = stream.applyStreamEvent(p, ev);
+      assert.strictEqual(p.sessionId, "s-1");
+      assert.deepStrictEqual(p.steps, [
+        { id: "1", subject: "alpha", status: "in_progress" },
+        { id: "2", subject: "beta", status: "pending" },
+      ]);
+      assert.strictEqual(p.activity, "$ gh pr diff 7", "ToolSearch and the plan tools are not the live line");
+      assert.strictEqual(p.lastText, "Reviewing the diff.");
+      assert.deepStrictEqual(p.rateLimit, { status: "allowed", resetsAt: 1793899800 });
+      assert.strictEqual(stream.currentStep(p).subject, "alpha");
+      assert.strictEqual(p.result, null);
+      p = stream.applyStreamEvent(p, { type: "result", subtype: "success", is_error: false, result: "LGTM", permission_denials: [{}, {}] });
+      assert.deepStrictEqual(p.result, { subtype: "success", isError: false, text: "LGTM", denials: 2 });
+    });
+    test("agent stream: a result carries Claude's turns, cost, time, tokens and the refused tools by name", () => {
+      const p = stream.applyStreamEvent(stream.initialProgress(), {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "ok",
+        num_turns: 12,
+        total_cost_usd: 0.4321,
+        duration_ms: 95000,
+        usage: { input_tokens: 10, output_tokens: 2000, cache_read_input_tokens: 50000, cache_creation_input_tokens: 3000 },
+        permission_denials: [{ tool_name: "Bash", tool_use_id: "a" }, { tool_name: "Bash", tool_use_id: "b" }, { tool_name: "Edit", tool_use_id: "c" }],
+      });
+      assert.deepStrictEqual(p.result, {
+        subtype: "success",
+        isError: false,
+        text: "ok",
+        denials: 3,
+        deniedTools: ["Bash", "Edit"],
+        turns: 12,
+        costUsd: 0.4321,
+        durationMs: 95000,
+        tokens: { input: 10, output: 2000, cacheRead: 50000, cacheWrite: 3000 },
+      });
+    });
+    test("agent stream: junk lines and unknown events change nothing; TodoWrite still reads", () => {
+      assert.strictEqual(stream.parseStreamLine("not json"), null);
+      assert.strictEqual(stream.parseStreamLine("{broken"), null);
+      const p0 = stream.initialProgress();
+      assert.strictEqual(stream.applyStreamEvent(p0, { type: "control_response" }), p0);
+      const p = stream.applyStreamEvent(p0, {
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "x", name: "TodoWrite", input: { todos: [{ content: "a", status: "completed" }, { content: "b", status: "pending" }] } }] },
+      });
+      assert.deepStrictEqual(p.steps.map((s) => `${s.subject}:${s.status}`), ["a:completed", "b:pending"]);
+    });
+
+    test("agent plugins: a bare skill one plugin owns is qualified; others stay as written", () => {
+      const cat = [
+        { name: "creatio-development", installPath: "/p/cd", skills: ["creatio-code-review", "code-delivery", "validate-and-fix-review-comments"] },
+        { name: "other", installPath: "/p/o", skills: ["code-delivery-x", "shared"] },
+        { name: "third", installPath: "/p/t", skills: ["shared"] },
+      ];
+      const r = plugins.resolveSkillRefs("/creatio-code-review https://x/pull/1", cat);
+      assert.deepStrictEqual(r, { prompt: "/creatio-development:creatio-code-review https://x/pull/1", pluginDirs: ["/p/cd"] });
+      const q = plugins.resolveSkillRefs("/creatio-development:code-delivery fix it, check with /validate-and-fix-review-comments", cat);
+      assert.strictEqual(q.prompt, "/creatio-development:code-delivery fix it, check with /creatio-development:validate-and-fix-review-comments");
+      assert.deepStrictEqual(q.pluginDirs, ["/p/cd"]);
+      assert.strictEqual(plugins.resolveSkillRefs("/shared x", cat).prompt, "/shared x", "two owners: left as written");
+      assert.deepStrictEqual(plugins.resolveSkillRefs("see https://x/y/z and /nope", cat), { prompt: "see https://x/y/z and /nope", pluginDirs: [] });
+    });
+    test("agent plugins: read from Claude Code's registry, skills from each install", () => {
+      const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-plugins-"));
+      const inst = path.join(dir, "cache", "cd", "1.0");
+      nfsA.mkdirSync(path.join(inst, "skills", "creatio-code-review"), { recursive: true });
+      nfsA.mkdirSync(path.join(dir, "plugins"), { recursive: true });
+      nfsA.writeFileSync(
+        path.join(dir, "plugins", "installed_plugins.json"),
+        JSON.stringify({ version: 2, plugins: { "creatio-development@creatio-engineering": [{ scope: "user", installPath: inst }], "bad@x": "nope" } }),
+      );
+      assert.deepStrictEqual(plugins.readInstalledPlugins(dir), [{ name: "creatio-development", installPath: inst, skills: ["creatio-code-review"] }]);
+      assert.deepStrictEqual(plugins.readInstalledPlugins(path.join(dir, "missing")), []);
+    });
+
+    const spec = (over = {}) => ({
+      cwd: "/wt",
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      kind: "review",
+      prompt: "/x https://x/pull/1",
+      appendSystemPrompt: "rules",
+      allowedTools: ["Read", "Bash(gh pr view *)", "mcp__jira__get", "TaskCreate"],
+      pluginDirs: ["/p/cd"],
+      model: "",
+      effort: "low",
+      settingsFile: "/s/settings.json",
+      timeoutMs: 60_000,
+      ...over,
+    });
+    test("agent runner: the isolation flags are always there, and --allowedTools comes last", () => {
+      const a = runner.buildClaudeArgs(spec());
+      for (const flag of ["-p", "--verbose", "--restricted", "--strict-mcp-config"]) assert.ok(a.includes(flag), flag);
+      const at = (f) => a[a.indexOf(f) + 1];
+      assert.strictEqual(at("--input-format"), "stream-json");
+      assert.strictEqual(at("--output-format"), "stream-json");
+      assert.strictEqual(at("--permission-prompts"), "none");
+      assert.strictEqual(at("--settings"), "/s/settings.json");
+      assert.strictEqual(at("--plugin-dir"), "/p/cd");
+      assert.strictEqual(at("--tools"), "Read,Bash,TaskCreate", "MCP tools aren't built-in tools");
+      assert.ok(!a.includes("--model"), "no model flag means Claude Code's default");
+      assert.deepStrictEqual(a.slice(a.indexOf("--allowedTools")), ["--allowedTools", "Read", "Bash(gh pr view *)", "mcp__jira__get", "TaskCreate"]);
+      assert.strictEqual(
+        runner.hookCommand("C:\\App\\PR Dashboard.exe", "C:\\App\\hook.js", "review", "https://github.com/a/b/pull/7"),
+        '"C:/App/PR Dashboard.exe" "C:/App/hook.js" review "https://github.com/a/b/pull/7"',
+      );
+    });
+
+    const fakeChild = () => {
+      const c = new EventEmitter();
+      c.stdin = new PassThrough();
+      c.stdout = new PassThrough();
+      c.stderr = new PassThrough();
+      c.written = "";
+      c.stdin.on("data", (d) => (c.written += d.toString()));
+      c.ended = false;
+      c.stdin.on("finish", () => (c.ended = true));
+      c.kill = () => setImmediate(() => c.emit("exit", null));
+      return c;
+    };
+    const emit = (c, ev) => c.stdout.write(`${JSON.stringify(ev)}\n`);
+    const tickOnce = () => new Promise((r) => setImmediate(r));
+
+    await atest("agent runner: the prompt goes in first, stdin closes after a finished turn, not after an interrupt", async () => {
+      const c = fakeChild();
+      let env = null;
+      const h = runner.startRun(spec(), () => {}, (_a, _cwd, e) => ((env = e), c));
+      await tickOnce();
+      assert.match(c.written, /"type":"user"[\s\S]*https:\/\/x\/pull\/1/);
+      assert.strictEqual(env.ELECTRON_RUN_AS_NODE, "1");
+      assert.ok(!Object.keys(env).some((k) => k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")), "launcherEnv scrubs the parent session");
+      h.interrupt();
+      await tickOnce();
+      assert.match(c.written, /"subtype":"interrupt"/);
+      emit(c, { type: "result", subtype: "error_during_execution", is_error: true });
+      await tickOnce();
+      assert.strictEqual(c.ended, false, "an interrupted turn keeps the session");
+      h.hint("check the migration");
+      await tickOnce();
+      assert.match(c.written, /check the migration/);
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "done" });
+      await tickOnce();
+      assert.strictEqual(c.ended, true);
+      c.emit("exit", 0);
+      const out = await h.done;
+      assert.deepStrictEqual([out.exitCode, out.timedOut, out.progress.result.text], [0, false, "done"]);
+    });
+
+    await atest("agent runner: past its time a run is killed and says so", async () => {
+      const c = fakeChild();
+      const h = runner.startRun(spec({ timeoutMs: 20 }), () => {}, () => c);
+      const out = await h.done;
+      assert.strictEqual(out.timedOut, true);
+    });
+
+    test("agent worktrees: the PR's remote is found by URL; the head is fetched by pull ref and checked out detached", () => {
+      const cfgText = '[core]\n\tbare = false\n[remote "upstream"]\n\turl = git@github.com:a/b.git\n[remote "origin"]\n\turl = https://github.com/me/b.git\n[branch "main"]\n\tremote = origin\n';
+      assert.deepStrictEqual(wt.parseRemotes(cfgText), [
+        { name: "upstream", url: "git@github.com:a/b.git" },
+        { name: "origin", url: "https://github.com/me/b.git" },
+      ]);
+      const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-wt-"));
+      nfsA.mkdirSync(path.join(dir, ".git"));
+      nfsA.writeFileSync(path.join(dir, ".git", "config"), cfgText);
+      assert.strictEqual(wt.remoteFor(dir, { url: "https://github.com/a/b/pull/7", repo: "a/b" }), "upstream");
+      assert.strictEqual(wt.remoteFor(dir, { url: "https://github.com/x/y/pull/7", repo: "x/y" }), null);
+      const target = wt.worktreeDir("/base", { repo: "a/b", number: 7, headOid: "abcdef0123456789" });
+      assert.strictEqual(path.basename(target), "agent-b-7-abcdef0123");
+      assert.strictEqual(
+        path.basename(wt.worktreeDir("/base", { repo: "a/b", number: 7, headOid: "abcdef0123456789" }, "1a2b3c4d-5e6f-4000-8000-000000000000")),
+        "agent-b-7-abcdef0123-1a2b3c4d",
+        "each run its own folder: a second run on the same head never touches the first one's",
+      );
+      const cmds = wt.prepareCommands("upstream", { number: 7, headOid: "abcdef0123456789" }, target, "/nohooks");
+      assert.deepStrictEqual(cmds.map(gitSub), [
+        ["fetch", "--no-tags", "upstream", "pull/7/head"],
+        ["worktree", "add", "--detach", "--force", target, "abcdef0123456789"],
+      ]);
+      for (const c of cmds) {
+        // worktree add runs post-checkout from the new worktree: hooks of the PR's own, with a relative hooksPath.
+        assert.ok(c.join(" ").includes("-c core.hooksPath=/nohooks"), c.join(" "));
+        assert.ok(c.join(" ").includes("-c core.fsmonitor=false"), c.join(" "));
+      }
+      assert.throws(() => wt.prepareCommands("o", { number: 7, headOid: null }, target, "/nohooks"));
+      assert.strictEqual(wt.worktreeBase("", "/co"), path.join("/co", ".claude", "worktrees"));
+      assert.strictEqual(wt.worktreeBase(" /mine ", "/co"), "/mine");
+    });
+
+    test("agent store: atomic writes, a broken file starts empty, the log keeps only its retention", () => {
+      const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-store-"));
+      const file = path.join(dir, "state.json");
+      nfsA.writeFileSync(file, "{ broken");
+      assert.deepStrictEqual(agentStore.readStore(file, "2026-11-05"), agentStore.emptyStore("2026-11-05"));
+      agentStore.writeFileAtomic(file, JSON.stringify({ ...agentStore.emptyStore("2026-11-05"), runsToday: 3 }));
+      assert.strictEqual(agentStore.readStore(file, "x").runsToday, 3);
+      assert.deepStrictEqual(nfsA.readdirSync(dir), ["state.json"], "no temp file left behind");
+      const old = JSON.stringify({ at: "2026-01-01T00:00:00Z" });
+      const recent = JSON.stringify({ at: "2026-11-04T00:00:00Z" });
+      assert.strictEqual(agentStore.pruneLog(`${old}\n${recent}\nnot json\n`, Date.parse("2026-10-01T00:00:00Z")), `${recent}\n`);
+    });
+
+    test("agent rules: shadow and briefs tell the session to post nothing and to keep a plan", () => {
+      for (const [scenario, mode] of [["review", "shadow"], ["review", "on"], ["brief", "on"]]) {
+        const r = agentCore.agentRules(scenario, mode);
+        assert.match(r, /TaskCreate/);
+        assert.match(r, /[Pp]ost (NOTHING|nothing)/, `${scenario}/${mode}`);
+        assert.match(r, /Never push/);
+      }
+    });
+
+    test("agent: a host whose fetch failed or whose budget is nearly spent is held", () => {
+      const snap = { pullRequests: [], errors: [{ hostLabel: "A", message: "x" }], rateLimits: [{ hostLabel: "B", remaining: 10, limit: 5000, cost: 1, resetAt: "" }, { hostLabel: "C", remaining: 4000, limit: 5000, cost: 1, resetAt: "" }] };
+      assert.strictEqual(agentCore.hostHeld(snap, "A"), "Host unreachable");
+      assert.strictEqual(agentCore.hostHeld(snap, "B"), "Waiting for the GitHub budget");
+      assert.strictEqual(agentCore.hostHeld(snap, "C"), null);
+    });
+
+    test("idle gate: a hidden window keeps polling while the agent is on", () => {
+      const base = { systemSuspended: false, hasWindow: true, windowHidden: true, systemIdleSeconds: () => 0, notificationsActionable: () => false };
+      assert.deepStrictEqual(idleGate.planPolling(base), { mode: "park" });
+      assert.strictEqual(idleGate.planPolling({ ...base, agentActive: () => true }).mode, "run");
+      assert.deepStrictEqual(idleGate.planPolling({ ...base, systemSuspended: true, agentActive: () => true }), { mode: "park" }, "asleep still parks");
+    });
+
+    const until = async (cond, ms = 3000) => {
+      const t0 = Date.now();
+      while (!cond()) {
+        if (Date.now() - t0 > ms) throw new Error("timed out waiting");
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    };
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid, now } = {}) => {
+      // `home`: the folder of an earlier fixture — the same app started again.
+      const dir = home ?? nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const co = path.join(dir, "checkout");
+      nfsA.mkdirSync(path.join(co, ".git"), { recursive: true });
+      nfsA.writeFileSync(path.join(co, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
+      const snapshot = { pullRequests: [pr], errors: [], rateLimits: [], fetchedAt: "", version: "" };
+      // The commands as git reads them past the app's global options (-c …,
+      // --git-dir, --work-tree) — and as they were passed, options and all.
+      const gitCalls = [];
+      const rawGitCalls = [];
+      const children = [];
+      // Diagrams and re-approve off unless a test asks: both call gh of their own.
+      const quiet = (over) => ({ diagrams: { enabled: false }, ...over, scenarios: { reapprove: { mode: "off", askReviewers: true }, ...(over.scenarios ?? {}) } });
+      let settings = cfg.validateSettings({ hosts: [], agent: quiet({ enabled, ...agentOver }) });
+      const agent = agentCore.createAgent({
+        onChange,
+        openResume,
+        captureScript,
+        fetchPr,
+        gh,
+        notify,
+        checkMermaid,
+        // Not your real ~/.claude/skills: what a test mounts must not depend on the machine.
+        userSkillsDir: path.join(dir, "no-skills"),
+        dir: path.join(dir, "agent"),
+        loadSettings: () => settings,
+        getSnapshot: () => snapshot,
+        // Your live Claude sessions; a test changes the array in place.
+        getSessions: () => sessions,
+        // `checkout`: a flag, or a function when a test clones the repository midway.
+        findCheckout: () => ((typeof checkout === "function" ? checkout() : checkout) ? co : null),
+        hookScript: hookJs,
+        execPath: process.execPath,
+        plugins: () => [],
+        git: async (args, cwd) => (rawGitCalls.push(args), gitCalls.push(gitSub(args)), gitImpl ? gitImpl(args, cwd) : ""),
+        spawner: (args, cwd, env) => {
+          const c = fakeChild();
+          c.args = args;
+          c.cwd = cwd;
+          c.env = env;
+          children.push(c);
+          setImmediate(() => script(c));
+          return c;
+        },
+        tickMs,
+        // A test that waits out a delay sets the clock.
+        ...(now ? { now } : {}),
+      });
+      // Settings › Agent saved anew.
+      const setAgent = (over) => {
+        settings = cfg.validateSettings({ hosts: [], agent: quiet(over) });
+      };
+      return { agent, snapshot, gitCalls, rawGitCalls, children, dir, setAgent };
+    };
+
+    const captureJs = path.join(__dirname, "../dist/main/main/agent/capture.js");
+    // A review session as the skill runs it: write the review JSON, hand it to
+    // the run's wrapper (the real capture script), finish.
+    const reviewWithPlan = (event = "REQUEST_CHANGES", resultExtra = {}) => (c) => {
+      const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+      const runDir = path.dirname(outDir);
+      const run = JSON.parse(nfsA.readFileSync(path.join(runDir, "run.json"), "utf8"));
+      const file = path.join(outDir, "review.json");
+      nfsA.writeFileSync(file, JSON.stringify({ event, body: "Summary", comments: [{ path: "x.ts", line: 3, side: "RIGHT", body: "Major" }] }));
+      const r = spawnSync(process.execPath, [captureJs, runDir, "review", run.repo, String(run.number), file], { encoding: "utf8" });
+      if (r.status !== 0) throw new Error(r.stderr);
+      emit(c, { type: "system", subtype: "init", session_id: "s" });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review.", ...resultExtra });
+      setImmediate(() => c.emit("exit", 0));
+    };
+
+    await atest("agent: a review request becomes a shadow review waiting for you, run once per head", async () => {
+      const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().items.some((i) => i.state === "needsYou"));
+        const item = f.agent.getState().items[0];
+        assert.strictEqual(item.headline, "Would post: request changes, 1 inline comment");
+        assert.match(item.output, /Prepared the review/);
+        assert.ok(f.gitCalls.some((a) => a[0] === "fetch" && a[3] === "pull/7/head"));
+        assert.ok(f.children[0].args.includes("--restricted"));
+        const settingsFile = f.children[0].args[f.children[0].args.indexOf("--settings") + 1];
+        assert.match(nfsA.readFileSync(settingsFile, "utf8"), /PreToolUse[\s\S]*hook\.js[\s\S]*review/, "the run carries the guard hook");
+        f.agent.onSnapshot(f.snapshot);
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.agent.getState().items.length, 1, "the ledger keeps the same head from running again");
+        assert.strictEqual(f.children.length, 1);
+        const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+        assert.strictEqual(state.ledger["PR_R|review|aaa111"].state, "prepared");
+        assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"started"/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    const readLog = (f) =>
+      nfsA
+        .readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l));
+
+    await atest("agent log: a run's story — queued, started, its end with Claude's stats, every item state, the card's moves, your click", async () => {
+      const stats = { num_turns: 7, total_cost_usd: 0.21, duration_ms: 4000, usage: { input_tokens: 5, output_tokens: 600, cache_read_input_tokens: 9000, cache_creation_input_tokens: 100 } };
+      const f = agentFixture({ script: reviewWithPlan("COMMENT", stats), captureScript: captureJs });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().items.some((i) => i.state === "needsYou"));
+        const item = f.agent.getState().items[0];
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: item.runId }), { ok: true });
+        const log = readLog(f);
+        assert.ok(log.every((l) => typeof l.kind === "string" && typeof l.at === "string"), "every line says what it is about");
+        assert.deepStrictEqual(log[0].kind + ":" + log[0].event, "agent:start");
+
+        const run = log.filter((l) => l.kind === "run").map((l) => l.event);
+        assert.deepStrictEqual(run.slice(0, 3), ["queued", "started", "needsYou"]);
+        const queued = log.find((l) => l.kind === "run" && l.event === "queued");
+        assert.deepStrictEqual([queued.prNumber, queued.repo, queued.data.mode, queued.data.asked, queued.data.size], [7, "a/b", "shadow", false, { additions: 50, deletions: 10, files: 3 }]);
+        const started = log.find((l) => l.kind === "run" && l.event === "started");
+        assert.ok(started.sessionId && started.data.cwd && typeof started.data.waitedMs === "number", "where it ran and how long it waited");
+        const end = log.find((l) => l.kind === "run" && l.event === "needsYou");
+        assert.deepStrictEqual(
+          [end.data.turns, end.data.costUsd, end.data.claudeMs, end.data.tokens, end.data.exitCode, end.data.comments, typeof end.ms],
+          [7, 0.21, 4000, { input: 5, output: 600, cacheRead: 9000, cacheWrite: 100 }, 0, 1, "number"],
+        );
+
+        const states = log.filter((l) => l.kind === "item").map((l) => `${l.from}>${l.to}`);
+        assert.deepStrictEqual(states, ["null>queued", "queued>working", "working>needsYou", "needsYou>done"]);
+
+        const board = log.filter((l) => l.kind === "board").map((l) => [l.event, l.from, l.to, l.data.action]);
+        assert.deepStrictEqual(board, [
+          ["seen", null, "you", "review"],
+          ["move", "you", "agent", null],
+          ["move", "agent", "you", "send"],
+          ["action", "you", "you", "review"],
+        ]);
+
+        const click = log.find((l) => l.kind === "action");
+        assert.deepStrictEqual([click.event, click.runId, click.from, click.to, click.data.ok], ["skip", item.runId, "needsYou", "done", true]);
+        const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+        assert.deepStrictEqual([state.board.PR_R.column, state.board.PR_R.action], ["you", "review"], "the Board's marks are saved with the state");
+
+        // A refused click is logged with the refusal.
+        assert.strictEqual((await f.agent.act({ type: "publish", runId: item.runId })).ok, false);
+        const refused = readLog(f).filter((l) => l.kind === "action").pop();
+        assert.deepStrictEqual([refused.event, refused.data.ok, typeof refused.detail], ["publish", false, "string"]);
+
+        // Switched off: one line with what changed; the Board is no longer logged.
+        f.setAgent({ enabled: false });
+        f.agent.onSnapshot(f.snapshot);
+        const off = readLog(f).pop();
+        assert.deepStrictEqual([off.kind, off.event, off.data.changed.enabled], ["agent", "off", [true, false]]);
+        // Saved through the write chain: on disk a moment later.
+        await until(() => JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).board === undefined);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent log: the Board's marks outlive a restart — the same Board logs nothing again; a held queue says why", async () => {
+      const f = agentFixture({ script: () => {} });
+      // Paused before the first run starts: the queue is held, and says so once.
+      await f.agent.act({ type: "pauseAgent" });
+      f.agent.onSnapshot(f.snapshot);
+      assert.deepStrictEqual(readLog(f).filter((l) => l.kind === "plan" && l.event === "held").map((l) => l.to), ["paused"]);
+      f.agent.stop();
+      const g = agentFixture({ home: f.dir, script: () => {} });
+      try {
+        const before = readLog(g).length;
+        g.agent.onSnapshot(g.snapshot);
+        const fresh = readLog(g).slice(before);
+        assert.deepStrictEqual(fresh.filter((l) => l.kind === "board").map((l) => [l.event, l.from, l.to]), [], "no burst of 'seen' after a restart");
+        const holds = readLog(g).filter((l) => l.kind === "plan" && (l.event === "held" || l.event === "released"));
+        assert.deepStrictEqual(holds.map((l) => [l.event, l.to]).slice(-1), [["held", "paused"]]);
+        await g.agent.act({ type: "resumeAgent" });
+        assert.deepStrictEqual(readLog(g).filter((l) => l.kind === "plan" && l.event === "released").map((l) => l.from), ["paused"]);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: without a checkout the PR waits and says why — nothing queued, failed or notified, and asking for a run is refused", async () => {
+      let cloned = false;
+      const notices = [];
+      const f = agentFixture({ checkout: () => cloned, script: () => {}, notify: (n) => notices.push(n.kind) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        f.agent.onSnapshot(f.snapshot);
+        await new Promise((r) => setTimeout(r, 30));
+        assert.deepStrictEqual(f.agent.getState().items, []);
+        assert.strictEqual(f.agent.getState().idle.PR_R, "No checkout of a/b — set its folder in Settings › Claude");
+        assert.deepStrictEqual([f.children.length, notices], [0, []], "nothing started, no toast");
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: false, error: "No checkout of a/b — set its folder in Settings › Claude." });
+        assert.deepStrictEqual(f.agent.getState().items, [], "a refused ask leaves no failed card behind");
+        // The repository cloned (or its folder set): the next plan picks the PR up.
+        cloned = true;
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1);
+        assert.strictEqual(f.agent.getState().items[0].scenario, "review");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a run that fails reports it and drops its worktree", async () => {
+      const f = agentFixture({
+        script: (c) => {
+          c.stderr.write("boom\n");
+          emit(c, { type: "result", subtype: "error_max_turns", is_error: true, result: "" });
+          setImmediate(() => c.emit("exit", 1));
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().items.some((i) => i.state === "error"));
+        assert.strictEqual(f.agent.getState().items[0].headline, "The run failed");
+        await until(() => f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"));
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    // --- stage 3: what you can do with a run, and how the dashboard shows it ---
+    const view = require(path.join(__dirname, "../dist/main/shared/agent-view.js"));
+    /** The words of a result's one button on its Board card; null when it asks nothing. */
+    const actionLabel = (item) => view.resultAction(item, view.laneOfScenario(item.scenario))?.label ?? null;
+    const succeed = (text) => (c) => {
+      emit(c, { type: "system", subtype: "init", session_id: "s" });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: text });
+      setImmediate(() => c.emit("exit", 0));
+    };
+    // A run that starts and then keeps working until it is told otherwise.
+    const keepWorking = (c) => emit(c, { type: "system", subtype: "init", session_id: "s" });
+    const only = (f) => f.agent.getState().items;
+
+    await atest("agent: a run the agent planned that fails is tried once more by itself, ten minutes on — a second failure is yours", async () => {
+      let t = Date.parse("2026-11-10T10:00:00Z");
+      const titles = [];
+      const f = agentFixture({
+        now: () => new Date(t),
+        notify: (n) => titles.push([n.kind, view.agentNoticeTitle(n.kind, n.item)]),
+        script: (c) => {
+          c.stderr.write("fatal: unable to access the remote\n");
+          setImmediate(() => c.emit("exit", 1));
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "error"));
+        const first = only(f)[0];
+        assert.strictEqual(first.retryAt, new Date(t + agentCore.RETRY_AFTER_MS).toISOString());
+        // Said as the run ends, not at the next poll.
+        await until(() => /^Its last run on this head failed \(The run failed\) — it tries again by itself at \d\d:\d\d$/.test(f.agent.getState().idle.PR_R ?? ""));
+        assert.match(titles.find(([k]) => k === "failed")[1], /^The agent couldn't finish #7 — it tries again at \d\d:\d\d$/);
+        // Not before its time.
+        t += agentCore.RETRY_AFTER_MS - 1000;
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 1);
+        t += 1000;
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).filter((i) => i.state === "error").length === 1 && only(f).length === 2 && f.children.length === 2);
+        const [old, again] = only(f);
+        assert.deepStrictEqual([old.state, old.headline, old.retryAt], ["done", view.AGENT_CLOSED.superseded, undefined], "the failed card leaves for the new run");
+        assert.deepStrictEqual([again.key, again.retryOf], [first.key, first.runId], "the same head's job, marked as its try again");
+        await until(() => only(f)[1].state === "error");
+        assert.strictEqual(only(f)[1].retryAt, undefined, "a try again isn't tried a third time");
+        await until(() => f.agent.getState().idle.PR_R === "Its run on this head failed twice (The run failed) — over to you");
+        t += 10 * agentCore.RETRY_AFTER_MS;
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a failure you asked for, or one the PR no longer wants, isn't tried again", async () => {
+      let t = Date.parse("2026-11-10T10:00:00Z");
+      const f = agentFixture({ pr: reviewPr({ requestedOfMe: false }), now: () => new Date(t), script: (c) => setImmediate(() => c.emit("exit", 1)) });
+      try {
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => only(f).some((i) => i.state === "error"));
+        assert.strictEqual(only(f)[0].retryAt, undefined, "your own ask is yours to repeat");
+      } finally {
+        f.agent.stop();
+      }
+      let t2 = Date.parse("2026-11-10T10:00:00Z");
+      const g = agentFixture({ now: () => new Date(t2), script: (c) => setImmediate(() => c.emit("exit", 1)) });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => only(g).some((i) => i.state === "error"));
+        assert.ok(only(g)[0].retryAt);
+        // You reviewed it yourself meanwhile: the plan wants nothing, and the card stops promising a try again.
+        g.snapshot.pullRequests[0] = { ...g.snapshot.pullRequests[0], roles: ["reviewed"], viewerHasReviewed: true, requestedOfMe: false };
+        t2 += 2 * agentCore.RETRY_AFTER_MS;
+        g.agent.onSnapshot(g.snapshot);
+        assert.deepStrictEqual([only(g)[0].retryAt, g.children.length], [undefined, 1]);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: an idle PR says how its head's run ended — at once, and never 'Running' with no run live", async () => {
+      const f = agentFixture({ script: succeed("Looked at it; nothing to say.") });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "done"));
+        // Without waiting for the next poll.
+        await until(() => f.agent.getState().idle.PR_R === "Its last run on this head ended: Reviewed — nothing to post");
+      } finally {
+        f.agent.stop();
+      }
+      // A run the app's closing cut short and that went on as another, asked run: the head's ledger entry still reads "started".
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const at = (m) => `2026-11-10T09:${String(m).padStart(2, "0")}:00.000Z`;
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", scenario: "review", mode: "shadow" };
+      nfsA.mkdirSync(path.join(home, "agent"), { recursive: true });
+      nfsA.writeFileSync(
+        path.join(home, "agent", "state.json"),
+        JSON.stringify({
+          version: 1,
+          ledger: { "PR_R|review|aaa111": { state: "started", at: at(0), runId: "r1" } },
+          day: "2026-11-10",
+          runsToday: 0,
+          items: [
+            { ...base, runId: "r1", key: "PR_R|review|aaa111", state: "done", headline: view.AGENT_CLOSED.rerun, queuedAt: at(0), finishedAt: at(5) },
+            { ...base, runId: "r2", key: "PR_R|review|aaa111|asked", state: "done", headline: "Stopped by you", queuedAt: at(5), finishedAt: at(9) },
+          ],
+          acceptedUnchanged: 0,
+          drive: {},
+          pushedHeads: {},
+          paused: false,
+        }),
+      );
+      const g = agentFixture({ home, script: keepWorking });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        assert.strictEqual(g.agent.getState().idle.PR_R, "Its last run on this head ended: Stopped by you");
+        assert.strictEqual(g.children.length, 0);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: a drive's result from before a restart is marked to run again — what it would push and answer was checked in memory", async () => {
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const at = "2026-11-10T09:00:00.000Z";
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", queuedAt: at, finishedAt: at };
+      const wt = path.join(home, "wt");
+      nfsA.mkdirSync(wt, { recursive: true });
+      nfsA.mkdirSync(path.join(home, "agent"), { recursive: true });
+      nfsA.writeFileSync(
+        path.join(home, "agent", "state.json"),
+        JSON.stringify({
+          version: 1,
+          ledger: {},
+          day: "2026-11-10",
+          runsToday: 0,
+          items: [
+            { ...base, runId: "d1", key: "PR_R|drive|aaa111|comments@-", scenario: "drive", state: "needsYou", headline: "No commits — see what it found", reasons: ["comments"], sessionId: "s", worktree: wt },
+            { ...base, runId: "r1", key: "PR_R|review|aaa111", scenario: "review", state: "needsYou", headline: "Would post: comment" },
+            { ...base, runId: "d2", key: "PR_R|drive|aaa111|ci", scenario: "drive", state: "done", headline: "Pushed" },
+          ],
+          acceptedUnchanged: 0,
+          drive: {},
+          pushedHeads: {},
+          paused: false,
+        }),
+      );
+      const f = agentFixture({ home, script: keepWorking });
+      try {
+        assert.deepStrictEqual(only(f).map((i) => [i.runId, i.needsRerun ?? false]), [["d1", true], ["r1", false], ["d2", false]]);
+        // The refusal its card no longer leads you into.
+        assert.deepStrictEqual(await f.agent.act({ type: "answer", runId: "d1", text: "eng1" }), { ok: false, error: "Since the app restarted, a drive starts over — run it again, or answer in a session." });
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a re-review you asked for covers the author's answers before it — only a later answer starts another", async () => {
+      const iso = (min) => new Date(Date.now() + min * 60_000).toISOString();
+      const pr = { ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), viewerReviewedAt: iso(-60), viewerReviewedHead: true, authorRepliedAt: null };
+      const f = agentFixture({ pr, script: succeed("Re-reviewed.") });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(only(f).length, 0, "nothing new from the author: no re-review of its own");
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: pr.id }), { ok: true });
+        await until(() => only(f).length === 1 && !["queued", "working"].includes(only(f)[0].state));
+        // The dashboard learns of an answer the author gave before you asked: your run already saw it.
+        f.snapshot.pullRequests[0] = { ...pr, authorRepliedAt: iso(-30) };
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(only(f).length, 1);
+        assert.strictEqual(f.agent.getState().idle[pr.id], "You asked the agent about this head yourself");
+        // An answer after your ask is new work.
+        f.snapshot.pullRequests[0] = { ...pr, authorRepliedAt: iso(1) };
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).length === 2);
+        assert.match(only(f).find((i) => !i.key.endsWith("|asked")).key, /\|rereview\|aaa111\|reply@/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+
+    await atest("agent act: pause, hint and resume reach the running session; Stop leaves a note, not a decision", async () => {
+      const f = agentFixture({ script: keepWorking });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+        const runId = only(f)[0].runId;
+        const c = f.children[0];
+        assert.deepStrictEqual(await f.agent.act({ type: "pause", runId }), { ok: true });
+        await tickOnce();
+        assert.match(c.written, /"subtype":"interrupt"/, "pause is an interrupt on stdin, not a kill");
+        assert.strictEqual(f.agent.getState().running[0].paused, true);
+        assert.strictEqual(only(f)[0].headline, "Paused");
+        assert.strictEqual((await f.agent.act({ type: "pause", runId })).ok, false, "a paused run can't be paused again");
+
+        assert.deepStrictEqual(await f.agent.act({ type: "hint", runId, text: "look at retry.ts first" }), { ok: true });
+        await tickOnce();
+        assert.match(c.written, /A note from the user while you work: look at retry\.ts first/);
+        assert.ok(f.agent.getState().running[0].recent.some((r) => r.text === "You: look at retry.ts first"));
+
+        assert.deepStrictEqual(await f.agent.act({ type: "resume", runId }), { ok: true });
+        assert.strictEqual(f.agent.getState().running[0].paused, false);
+        assert.strictEqual((await f.agent.act({ type: "skip", runId })).ok, false, "a running run is stopped before it is dismissed");
+
+        assert.deepStrictEqual(await f.agent.act({ type: "stop", runId }), { ok: true });
+        await until(() => only(f)[0].state === "done");
+        assert.strictEqual(only(f)[0].headline, "Stopped by you");
+        await until(() => f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"));
+        assert.strictEqual((await f.agent.act({ type: "hint", runId, text: "x" })).ok, false, "a hint needs a running session");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent act: Take over stops the run and opens its session in your terminal", async () => {
+      const opened = [];
+      const f = agentFixture({ script: keepWorking, openResume: async (dir, sid) => void opened.push([dir, sid]) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+        const item = only(f)[0];
+        assert.deepStrictEqual(await f.agent.act({ type: "takeOver", runId: item.runId }), { ok: true });
+        await until(() => only(f)[0].state === "done");
+        assert.strictEqual(only(f)[0].headline, "You took it over in your terminal");
+        assert.deepStrictEqual(opened, [[only(f)[0].worktree, item.sessionId]]);
+        assert.ok(!f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"), "your session goes on in its folder");
+        assert.ok(f.children[0].args.includes(item.sessionId), "it resumes the very session the run used");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent act: Run again replaces a result, Dismiss closes it", async () => {
+      const opened = [];
+      const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, openResume: async (dir, sid) => void opened.push([dir, sid]) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const first = only(f)[0];
+
+        assert.strictEqual((await f.agent.act({ type: "continue", runId: first.runId })).ok, false, "no worktree on disk, nothing to continue");
+        nfsA.mkdirSync(first.worktree, { recursive: true });
+        assert.deepStrictEqual(await f.agent.act({ type: "continue", runId: first.runId }), { ok: true });
+        assert.deepStrictEqual(opened, [[first.worktree, first.sessionId]]);
+
+        assert.deepStrictEqual(await f.agent.act({ type: "retry", runId: first.runId }), { ok: true });
+        await until(() => only(f).filter((i) => i.state === "needsYou").length === 1 && only(f).length === 2);
+        const [old, again] = only(f);
+        assert.strictEqual(old.state, "done");
+        assert.strictEqual(old.headline, view.AGENT_CLOSED.rerun);
+        assert.match(again.key, /\|asked$/, "your own ask has its own ledger key, so the head's entry doesn't stop it");
+        assert.strictEqual(f.children.length, 2);
+
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: again.runId }), { ok: true });
+        assert.strictEqual(only(f)[1].headline, view.AGENT_CLOSED.dismissed);
+        assert.ok(f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"), "a dismissed result drops its worktree");
+        assert.strictEqual(view.boardStage(f.snapshot.pullRequests[0], only(f), { today: view.todayKey(new Date()) }).item, null, "the card shows nothing of the agent once it's all closed");
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: "00000000-0000-4000-8000-000000000999" }), { ok: false, error: "That run is gone." });
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent act: Review anyway turns a brief no review followed (reviews off) into a review; a review can't be turned again", async () => {
+      const f = agentFixture({ pr: reviewPr({ additions: 1200 }), script: succeed("Problem: … Decisions for you: …"), agent: { scenarios: { review: { mode: "off" } } } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const brief = only(f)[0];
+        assert.strictEqual(brief.scenario, "brief");
+        assert.strictEqual(actionLabel(brief), "Draft a review");
+        assert.deepStrictEqual(await f.agent.act({ type: "reviewAnyway", runId: brief.runId }), { ok: true });
+        await until(() => only(f).length === 2 && only(f)[1].state === "done");
+        assert.strictEqual(only(f)[1].headline, "Reviewed — nothing to post", "nothing captured to post: a note, not a decision");
+        assert.strictEqual(only(f)[0].headline, view.AGENT_CLOSED.reviewed, "the brief leaves Your move");
+        assert.strictEqual(only(f)[1].scenario, "review");
+        assert.ok(f.children[1].args.includes("--settings"));
+        const settingsFile = f.children[1].args[f.children[1].args.indexOf("--settings") + 1];
+        assert.match(nfsA.readFileSync(settingsFile, "utf8"), /hook\.js[\s\S]*review/, "the review runs under the review guard, not the brief's");
+        assert.strictEqual((await f.agent.act({ type: "reviewAnyway", runId: only(f)[1].runId })).ok, false);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent act: you can queue a PR you review, not your own, not twice, and not with the agent off", async () => {
+      const f = agentFixture({ pr: reviewPr({ requestedOfMe: false }), script: keepWorking });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(only(f).length, 0, "a team request isn't picked up on its own");
+        const prId = f.snapshot.pullRequests[0].id;
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId }), { ok: true });
+        await until(() => f.agent.getState().running.length === 1);
+        assert.strictEqual(only(f)[0].headline, "Reviewing");
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId }), { ok: false, error: "The agent is already on this PR." });
+        assert.strictEqual((await f.agent.act({ type: "enqueue", prId: "PR_GONE" })).ok, false);
+      } finally {
+        f.agent.stop();
+      }
+      const mine = agentFixture({ pr: reviewPr({ role: "author" }), script: keepWorking });
+      try {
+        // A clean PR of yours is queued for a self-review of its head.
+        assert.deepStrictEqual(await mine.agent.act({ type: "enqueue", prId: mine.snapshot.pullRequests[0].id }), { ok: true });
+        assert.deepStrictEqual(mine.agent.getState().items.map((i) => [i.scenario, i.reasons]), [["drive", ["self"]]], "a clean PR of yours gets a self-review");
+      } finally {
+        mine.agent.stop();
+      }
+      const off = agentFixture({ enabled: false, script: keepWorking });
+      try {
+        assert.match((await off.agent.act({ type: "enqueue", prId: off.snapshot.pullRequests[0].id })).error, /The agent is off/);
+        assert.strictEqual(off.agent.getState().enabled, false);
+      } finally {
+        off.agent.stop();
+      }
+    });
+
+    const ipcAgent = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+    test("ipc: an agent action is a known type on a run id; a hint is trimmed and bounded", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      const v = ipcAgent.validateAgentAction;
+      assert.deepStrictEqual(v({ type: "pause", runId: RID, extra: "dropped" }), { type: "pause", runId: RID });
+      assert.deepStrictEqual(v({ type: "hint", runId: RID, text: "  look at x.ts  " }), { type: "hint", runId: RID, text: "look at x.ts" });
+      assert.deepStrictEqual(v({ type: "enqueue", prId: "PR_kwDOA" }), { type: "enqueue", prId: "PR_kwDOA" });
+      assert.deepStrictEqual(v({ type: "approveAgain", prId: "PR_kwDOA", body: "anything", commit: "x" }), { type: "approveAgain", prId: "PR_kwDOA" }, "only the PR is named — what goes out is main's");
+      assert.throws(() => v({ type: "approveAgain", prId: 7 }));
+      for (const t of ["skip", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver"]) {
+        assert.strictEqual(v({ type: t, runId: RID }).type, t);
+      }
+      for (const gone of ["later", "ack", "resumeSession"]) assert.throws(() => v({ type: gone, runId: RID }), /unknown action/, gone);
+      for (const bad of [
+        null,
+        "pause",
+        {},
+        { type: "merge", runId: RID, method: "fast-forward" },
+        { type: "publishAll", runId: RID },
+        { type: "pause", runId: "../../etc" },
+        { type: "pause" },
+        { type: "hint", runId: RID, text: "   " },
+        { type: "hint", runId: RID, text: "x".repeat(ipcAgent.AGENT_HINT_MAX + 1) },
+        { type: "enqueue", prId: 3 },
+        { type: "enqueue", prId: "" },
+      ]) {
+        assert.throws(() => v(bad), /agentAction|PR id/, JSON.stringify(bad));
+      }
+    });
+
+    const vItem = (o) => ({
+      runId: o.runId ?? `00000000-0000-4000-8000-${String(Math.floor(Math.random() * 1e12)).padStart(12, "0")}`,
+      key: `${o.prId}|review|h`,
+      prNumber: 1,
+      repo: "a/b",
+      url: "https://github.com/a/b/pull/1",
+      title: "t",
+      hostLabel: "GH",
+      scenario: "review",
+      mode: "shadow",
+      headline: o.state,
+      queuedAt: "2026-11-05T08:00:00.000Z",
+      ...o,
+    });
+    // --- boardStage: the column is whose move it is -------------------------------
+    const sNow = Date.now();
+    const sAgo = (min) => new Date(sNow - min * 60_000).toISOString();
+    const sToday = view.todayKey(new Date(sNow));
+    const sPr = (o = {}) => ({
+      id: "P",
+      number: 1,
+      repo: "a/b",
+      roles: ["author"],
+      isDraft: false,
+      canBeMerged: false,
+      awaitingReview: true,
+      ciState: "success",
+      hasConflicts: false,
+      hasUnaddressedChangeRequest: false,
+      hasUnaddressedComments: false,
+      myReReviewDue: false,
+      viewerHasReviewed: false,
+      viewerApproved: false,
+      viewerReviewedAt: null,
+      createdAt: sAgo(3000),
+      updatedAt: sAgo(120),
+      lastCommitPushedAt: sAgo(240),
+      ...o,
+    });
+    const rPr = (o = {}) => sPr({ roles: ["reviewer"], ...o });
+    const sIt = (o) => vItem({ prId: "P", finishedAt: o.state === "queued" || o.state === "working" ? undefined : sAgo(5), ...o });
+    const plan = (event = "REQUEST_CHANGES", replies = 0) => ({ event, body: "b", comments: [{ path: "x.ts", line: 1, body: "c" }], replies: Array.from({ length: replies }, (_, i) => ({ replyTo: i + 1, body: "r" })), resolves: 0, escalations: [] });
+    const drive = (n) => ({ base: "a", head: "b", reasons: ["self"], commits: Array.from({ length: n }, (_, i) => ({ oid: `c${i}`, subject: `fix ${i}` })), stat: "", patch: "" });
+    /** A drive's plan: only its answers to the reviewers, no review of its own. */
+    const answers = (n) => ({ event: null, body: "", comments: [], replies: Array.from({ length: n }, (_, i) => ({ replyTo: i + 1, body: "r" })), resolves: 0, escalations: [] });
+    const stage = (pr, items = [], ctx = {}) => view.boardStage(pr, items, { today: sToday, ...ctx });
+    const where = (s) => (s ? [s.lane, s.column, s.action?.kind ?? null, s.action?.label ?? null, s.ready] : null);
+
+    // --- the Board in plain words (agent-explain) ---------------------------------
+    const ex = require(path.join(__dirname, "../dist/main/shared/agent-explain.js"));
+    const xPr = (o = {}) => sPr({ reviewers: [], unresolvedThreads: 0, requestedOfMe: false, title: `PR ${o.id ?? "P"}`, url: "https://github.com/a/b/pull/1", ...o });
+    const xState = (items, o = {}) => ({ items, enabled: true, running: [], ...o });
+    const xBoard = (prs, items = [], o = {}) => ex.explainBoard(prs, prs, xState(items, o), { today: sToday });
+    const xOne = (pr, items = [], o = {}) => xBoard([pr], items, o).entries[0];
+    const choice = (e, label) => e.choices.find((c) => c.label === label);
+
+    test("agent board words: Your turn first and readiest first, then the agent's, the others', done", () => {
+      const prs = [
+        xPr({ id: "R", roles: ["reviewer"], requestedOfMe: true }),
+        xPr({ id: "X" }),
+        xPr({ id: "M", canBeMerged: true, awaitingReview: false }),
+        xPr({ id: "A", roles: ["reviewer"] }),
+        xPr({ id: "W" }),
+      ];
+      const items = [
+        sIt({ prId: "X", scenario: "drive", state: "error", headline: "No checkout of a/b", error: "git said no" }),
+        sIt({ prId: "M", scenario: "merge", state: "needsYou", key: "M|merge|h" }),
+        sIt({ prId: "A", scenario: "review", state: "working" }),
+      ];
+      const b = xBoard(prs, items);
+      assert.deepStrictEqual(
+        b.entries.map((e) => [e.prId, e.owner]),
+        [
+          ["M", "you"],
+          ["X", "you"],
+          ["R", "you"],
+          ["A", "agent"],
+          ["W", "others"],
+        ],
+        "a merge in one click, then a failure, then a review nobody started",
+      );
+      const x = b.entries[1];
+      assert.strictEqual(x.now, "The agent couldn't finish: no checkout of a/b.");
+      assert.strictEqual(x.read.error, "git said no", "what went wrong is there to read");
+      assert.deepStrictEqual(x.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
+        ["Try again", "retry", true],
+        ["Leave it", "skip", false],
+      ]);
+    });
+
+    test("agent board words: a prepared review says what goes out, under whose name, and what comes after", () => {
+      const e = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: plan("APPROVE"), result: { summary: "Looks right.", asks: [], findings: [{ severity: "minor", text: "a nit", where: "x.ts:1" }], authorQuestions: [], structured: true } })]);
+      assert.deepStrictEqual([e.owner, e.laneLabel, e.now, e.ask], ["you", "You review", "The agent reviewed the latest commit and suggests approving.", "Read the summary, then approve — or discard it."]);
+      assert.deepStrictEqual([e.read.summary, e.read.findings.length, e.read.plan.event], ["Looks right.", 1, "APPROVE"]);
+      const send = e.choices[0];
+      assert.deepStrictEqual([send.label, send.act.type, send.primary], ["Approve", "publish", true]);
+      assert.match(send.does, /^Posts an approval on GitHub under your name, signed by the agent/);
+      assert.match(e.next, /author can merge/);
+      assert.ok(choice(e, "Discard"), "and a way out");
+      // Request changes, with the comments counted, and the re-review after.
+      const rc = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: plan("REQUEST_CHANGES") })]);
+      assert.strictEqual(rc.now, "The agent drafted a review that requests changes: 1 inline comment.");
+      assert.match(rc.choices[0].does, /Posts the review with 1 comment/);
+      assert.match(rc.next, /re-review/);
+    });
+
+    test("agent board words: your reviewers' answers with nothing to push go out by themselves — or as they are, next to a question", () => {
+      const mine = xPr();
+      const e = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(2), sessionId: "s", worktree: "/w" })]);
+      assert.deepStrictEqual([e.owner, e.now], ["you", "The agent answered the reviewers without changing the code: 2 replies, nothing to push."]);
+      assert.deepStrictEqual(e.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
+        ["Send 2 replies", "publish", true],
+        ["Open in Claude", "continue", false],
+        ["Discard", "skip", false],
+      ]);
+      assert.match(e.choices[0].does, /in the reviewers' threads under your name, signed by the agent\. Nothing is pushed\.$/);
+      const ask = { summary: "", asks: [{ question: "Retarget?", options: [] }], findings: [], authorQuestions: [], structured: true };
+      const d = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(1), result: ask })]);
+      assert.deepStrictEqual(d.choices.map((c) => [c.label, c.act?.type]), [["Send 1 reply as it is", "publish"], ["Discard", "skip"]], "answering is the question's own form");
+      const noAnswers = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), result: ask })]);
+      assert.deepStrictEqual(noAnswers.choices.map((c) => c.label), ["Discard"]);
+    });
+
+    test("agent board words: a drive's question or commits from before a restart offer Run again — never an answer or a push that would be refused", () => {
+      const mine = xPr();
+      const ask = { summary: "", asks: [{ question: "Which stand?", options: ["eng1", "eng2"] }], findings: [], authorQuestions: [], structured: true };
+      const asked = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), result: ask, sessionId: "s", worktree: "/w", needsRerun: true })]);
+      assert.deepStrictEqual([asked.owner, asked.stage.action.kind], ["you", "decide"]);
+      assert.strictEqual(asked.now, "The app restarted after this run, so it can't push anything or go on with your answer any more.");
+      assert.deepStrictEqual(asked.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
+        ["Run again", "retry", true],
+        ["Open in Claude", "continue", false],
+        ["Discard", "skip", false],
+      ]);
+      assert.deepStrictEqual(asked.read.asks.map((a) => a.question), ["Which stand?"], "its question still reads, as what the new run will ask");
+      const commits = xOne(mine, [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2), needsRerun: true })]);
+      assert.strictEqual(commits.stage.action.kind, "push");
+      assert.match(commits.now, /can't push its 2 commits/);
+      assert.deepStrictEqual(commits.choices.map((c) => c.label), ["Run again", "Discard"], "no Push, no session to open");
+      // The same run before any restart: its own question and push, as ever.
+      const live = xOne(mine, [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2) })]);
+      assert.strictEqual(live.choices[0].label, "Push 2 fixes");
+    });
+
+    test("agent board words: a review nobody started is the agent's to start — unless the agent is off", () => {
+      const pr = xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true });
+      const e = xOne(pr);
+      assert.deepStrictEqual([e.owner, e.choices[0].label, e.choices[0].act], ["you", "Let the agent review", { type: "enqueue", prId: "P" }]);
+      assert.ok(e.choices.some((c) => c.url && !c.act), "or on GitHub yourself");
+      const off = xOne(pr, [], { enabled: false });
+      assert.deepStrictEqual([off.choices.length, Boolean(off.choices[0].url), off.ask], [1, true, "Review it on GitHub."], "nothing that needs the agent while it is off");
+      // Your PR with red CI: the agent fixes it, on your say-so.
+      const red = xOne(xPr({ ciState: "failure", failingChecks: [{ name: "build" }] }));
+      assert.strictEqual(red.choices[0].label, "Let the agent fix it");
+      assert.match(red.now, /^CI failing: build\./);
+    });
+
+    test("agent board words: the agent's own, the others' and done each say what happens next and what you could do", () => {
+      const runId = "00000000-0000-4000-8000-0000000000aa";
+      const working = xOne(xPr({ roles: ["reviewer"] }), [sIt({ runId, state: "working", scenario: "rereview" })], {
+        running: [{ runId, paused: false, progress: { steps: [{ id: "1", subject: "Read the diff", status: "completed" }, { id: "2", subject: "Check the answers", status: "in_progress" }], activity: "Read x.ts" } }],
+      });
+      assert.deepStrictEqual([working.owner, working.now, working.progress], ["agent", "The agent is re-reviewing it.", { step: "Check the answers", done: 1, total: 2, activity: "Read x.ts" }]);
+      assert.deepStrictEqual(working.choices.map((c) => c.act.type), ["stop"]);
+      assert.match(working.next, /Nothing is posted on GitHub until you send it/);
+      const queued = xBoard([xPr({ id: "Q1", roles: ["reviewer"] }), xPr({ id: "Q2", roles: ["reviewer"] })], [sIt({ prId: "Q1", state: "queued", queuedAt: sAgo(10) }), sIt({ prId: "Q2", state: "queued", queuedAt: sAgo(5) })]).entries;
+      assert.deepStrictEqual(queued.map((e) => [e.prId, e.place, e.now]), [
+        ["Q1", 1, "The agent starts reviewing it next."],
+        ["Q2", 2, "The agent starts reviewing it after 1 other."],
+      ]);
+      const author = xOne(xPr({ roles: ["reviewed"], viewerHasReviewed: true, unresolvedThreads: 2, awaitingReview: false }));
+      assert.deepStrictEqual([author.owner, author.waitingOn, author.now], ["others", "The author", "You asked for changes · 2 threads open — the author's turn."]);
+      assert.deepStrictEqual(author.choices.map((c) => c.label), ["Re-review now"]);
+      const reviewers = xOne(xPr({ reviewers: [{ login: "anna", reviewState: "pending" }, { login: "oleg", reviewState: "approved" }] }));
+      assert.deepStrictEqual([reviewers.owner, reviewers.waitingOn, reviewers.now], ["others", "anna", "Waiting for anna to review."]);
+      const asked = xOne(xPr({ roles: ["reviewer", "reviewed"], requestedOfMe: true, viewerHasReviewed: true, viewerApproved: true, viewerReviewedHead: true, viewerReviewedAt: sAgo(60), authorRepliedAt: null }));
+      assert.deepStrictEqual([asked.owner, asked.choices[0].label, asked.choices[0].act.type], ["done", "Approve again", "approveAgain"]);
+    });
+
+    // --- the journal: what the agent did, and where each card went --------------
+    const journal = require(path.join(__dirname, "../dist/main/main/agent/journal.js"));
+    const jAt = (min) => new Date(Date.UTC(2026, 10, 6, 12, min)).toISOString();
+
+    test("agent journal: an item's state change is one line with how long the old state lasted; no change, no line", () => {
+      const a = sIt({ runId: "00000000-0000-4000-8000-00000000000a", state: "queued", headline: "Queued: review" });
+      let r = journal.diffItems(new Map(), [a], jAt(0));
+      assert.deepStrictEqual(r.entries.map((e) => [e.kind, e.event, e.from, e.to, e.prId, e.runId, e.scenario]), [["item", "state", null, "queued", "P", a.runId, "review"]]);
+      const same = journal.diffItems(r.marks, [a], jAt(1));
+      assert.deepStrictEqual(same.entries, []);
+      a.state = "working";
+      a.headline = "Drafting your review";
+      r = journal.diffItems(same.marks, [a], jAt(3));
+      assert.deepStrictEqual(r.entries.map((e) => [e.from, e.to, e.ms, e.detail]), [["queued", "working", 180_000, "Drafting your review"]], "timed from when it was queued, not from the last look");
+      assert.deepStrictEqual(journal.diffItems(r.marks, [], jAt(4)).entries, [], "pruned items leave without a line");
+    });
+
+    test("agent journal: a card's way across the Board — seen, moved with its time in the column, a new button, left; a failed host moves nothing", () => {
+      const pr = rPr({ hostLabel: "GH" });
+      const ctx = { today: sToday };
+      const look = (prev, prs, items, min, failed) => journal.diffBoard(prev, journal.boardNow(prs, items, ctx), jAt(min), failed);
+      const row = (e) => [e.kind, e.event, e.from, e.to, e.data?.lane, e.data?.action ?? null, e.ms ?? null];
+
+      let r = look(null, [pr], [], 0);
+      assert.deepStrictEqual(r.entries.map(row), [["board", "seen", null, "you", "review", "review", null]], "the first look ever: where each card stands");
+      assert.deepStrictEqual(look(r.marks, [pr], [], 1).entries, [], "nothing moved, nothing written");
+
+      const it = sIt({ state: "working", startedAt: jAt(2) });
+      r = look(r.marks, [pr], [it], 2);
+      assert.deepStrictEqual(r.entries.map(row), [["board", "move", "you", "agent", "review", null, 120_000]]);
+      assert.deepStrictEqual([r.entries[0].runId, r.entries[0].detail, r.entries[0].data.itemState], [it.runId, "Drafting your review", "working"]);
+
+      Object.assign(it, { state: "needsYou", finishedAt: jAt(9), plan: plan("COMMENT") });
+      r = look(r.marks, [pr], [it], 9);
+      assert.deepStrictEqual(r.entries.map(row), [["board", "move", "agent", "you", "review", "send", 420_000]]);
+      assert.deepStrictEqual([r.entries[0].detail, r.entries[0].data.ready], ["Comment · 1 comment", true]);
+
+      // The same column, another button: dismissed, the card is GitHub's again.
+      Object.assign(it, { state: "done", headline: "Dismissed" });
+      const before = r.marks.P.at;
+      r = look(r.marks, [pr], [], 12);
+      assert.deepStrictEqual(r.entries.map((e) => [e.event, e.data.fromAction, e.data.action, e.ms ?? null]), [["action", "send", "review", null]]);
+      assert.strictEqual(r.marks.P.at, before, "a new button isn't a new column: its time there goes on");
+
+      assert.deepStrictEqual(look(r.marks, [], [], 20, new Set(["GH"])).entries, [], "its host failed to load: the card didn't move");
+      const gone = look(r.marks, [], [], 20);
+      assert.deepStrictEqual(gone.entries.map(row), [["board", "left", "you", null, "review", null, 660_000]]);
+      assert.deepStrictEqual(gone.marks, {});
+    });
+
+    test("agent journal: why the agent leaves a PR alone, the settings that changed, a run's stats, an action's arguments", () => {
+      const prs = new Map([["A", { number: 1, repo: "a/b" }]]);
+      const idle = journal.diffIdle({}, { A: "Waiting for reviewers" }, jAt(0), prs);
+      assert.deepStrictEqual(idle.map((e) => [e.kind, e.event, e.prNumber, e.from, e.to]), [["plan", "idle", 1, null, "Waiting for reviewers"]]);
+      assert.deepStrictEqual(journal.diffIdle({ A: "x" }, { A: "x" }, jAt(0), prs), []);
+      assert.deepStrictEqual(journal.diffIdle({ A: "x" }, {}, jAt(0), prs), [], "taken up: its queued line says so");
+      assert.deepStrictEqual(journal.diffIdle({ A: "x" }, { A: "y" }, jAt(0), prs).map((e) => [e.from, e.to]), [["x", "y"]]);
+
+      const base = cfg.validateAgent({ enabled: true });
+      assert.strictEqual(journal.settingsDiff(base, cfg.validateAgent({ enabled: true })), null);
+      assert.deepStrictEqual(journal.settingsDiff(base, cfg.validateAgent({ enabled: true, scenarios: { review: { mode: "on" } } })), { "scenarios.review.mode": ["shadow", "on"] });
+
+      const progress = { ...stream.initialProgress(), toolCalls: 31, steps: [{ id: "1", subject: "a", status: "completed" }, { id: "2", subject: "b", status: "in_progress" }] };
+      const ok = journal.runStats({ startedAt: jAt(0) }, { progress: { ...progress, result: { subtype: "success", isError: false, text: "", denials: 1, deniedTools: ["Edit"], turns: 9, costUsd: 0.5, tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } } }, exitCode: 0, timedOut: false, stopped: false, stderr: "noise" }, jAt(4));
+      assert.deepStrictEqual(ok, { ms: 240_000, exitCode: 0, subtype: "success", turns: 9, costUsd: 0.5, tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }, toolCalls: 31, denials: 1, deniedTools: ["Edit"], steps: "1/2" });
+      const bad = journal.runStats({ startedAt: jAt(0) }, { progress, exitCode: 1, timedOut: true, stopped: false, stderr: "a\nb\nboom\n" }, jAt(1));
+      assert.deepStrictEqual([bad.timedOut, bad.stderr, "subtype" in bad], [true, "a\nb\nboom", false], "a failed run keeps the end of stderr");
+      assert.strictEqual(journal.runStats({}, { progress, exitCode: null, timedOut: false, stopped: true, stderr: "" }, jAt(1), { takeOver: true }).takenOver, true);
+
+      assert.deepStrictEqual(journal.actionArgs({ type: "hint", runId: "r", text: "x".repeat(600) }), { text: `${"x".repeat(499)}…` });
+      assert.deepStrictEqual(journal.actionArgs({ type: "merge", runId: "r", method: "squash" }), { method: "squash" });
+      assert.strictEqual(journal.actionArgs({ type: "skip", runId: "r" }), undefined);
+    });
+
+    test("boardStage: your PR without an orchestrator — each step of the journey in its column, with one button", () => {
+      const rows = [
+        ["a draft is yours, quietly", sPr({ isDraft: true }), [], ["mine", "you", "draft", "Open on GitHub", false]],
+        ["the self-review runs", sPr(), [sIt({ scenario: "drive", reasons: ["self"], state: "working", startedAt: sAgo(2) })], ["mine", "agent", null, null, false]],
+        ["a clean self-review: waiting on reviewers", sPr(), [sIt({ scenario: "drive", reasons: ["self"], state: "done", headline: "Self-review: clean" })], ["mine", "waiting", null, null, false]],
+        ["fixes ready to push", sPr(), [sIt({ scenario: "drive", reasons: ["self"], state: "needsYou", drive: drive(2) })], ["mine", "you", "push", "Push 2 fixes", true]],
+        ["one fix", sPr(), [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(1) })], ["mine", "you", "push", "Push 1 fix", true]],
+        ["fixes and answers to reviewers", sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(2), plan: plan("COMMENT", 1) })], ["mine", "you", "push", "Push & reply", true]],
+        ["answers to reviewers, nothing to push", sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(2), sessionId: "s" })], ["mine", "you", "send", "Send 2 replies", true]],
+        ["one answer, nothing to push", sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(1) })], ["mine", "you", "send", "Send reply", true]],
+        ["a product decision", sPr(), [sIt({ scenario: "drive", state: "needsYou", drive: drive(1), result: { summary: "s", asks: [{ question: "q", options: [] }], findings: [], authorQuestions: [], structured: true } })], ["mine", "you", "decide", "Your call", true]],
+        ["waiting on reviewers", sPr(), [], ["mine", "waiting", null, null, false]],
+        ["reviewer comments, the agent queued", sPr({ hasUnaddressedComments: true }), [sIt({ scenario: "drive", reasons: ["comments"], state: "queued" })], ["mine", "agent", null, null, false]],
+        ["it couldn't: no commits", sPr({ ciState: "failure" }), [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(0), sessionId: "s" })], ["mine", "you", "fix", "Open in Claude", true]],
+        ["it failed", sPr({ ciState: "failure" }), [sIt({ scenario: "drive", state: "error" })], ["mine", "you", "fix", "Try again", true]],
+        ["red CI with the agent not on it", sPr({ ciState: "failure" }), [], ["mine", "you", "fixYourself", "Open on GitHub", false]],
+        ["a conflict with the agent not on it", sPr({ hasConflicts: true }), [], ["mine", "you", "fixYourself", "Open on GitHub", false]],
+        ["the agent offers the merge", sPr({ canBeMerged: true, awaitingReview: false }), [sIt({ scenario: "merge", state: "needsYou" })], ["mine", "you", "merge", "Merge", true]],
+        ["ready on GitHub, no offer", sPr({ canBeMerged: true, awaitingReview: false }), [], ["mine", "you", "merge", "Merge on GitHub", false]],
+        ["ready but waits for the PR below", sPr({ canBeMerged: false, awaitingReview: false, blockedByStack: true }), [], ["mine", "waiting", null, null, false]],
+        ["merged by the agent, gone from the dashboard", null, [sIt({ scenario: "merge", state: "done", headline: "Merged (squash)" })], ["mine", "done", null, null, false]],
+        ["merged, the Jira dry run waits", null, [sIt({ scenario: "afterMerge", state: "needsYou", sessionId: "s" })], ["mine", "done", "updateJira", "Update Jira…", false]],
+      ];
+      for (const [name, pr, items, want] of rows) assert.deepStrictEqual(where(stage(pr, items)), want, name);
+    });
+
+    test("boardStage: a PR you review — requested, drafted, sent, answered, re-reviewed, approved", () => {
+      const sent = sIt({ state: "done", headline: "Published: request changes, 2 inline comments", published: true });
+      const rows = [
+        ["the agent drafts it", rPr(), [sIt({ state: "working", startedAt: sAgo(3) })], ["review", "agent", null, null, false]],
+        ["asked of you, the agent not on it", rPr(), [], ["review", "you", "review", "Open on GitHub", false]],
+        ["the draft is ready", rPr(), [sIt({ state: "needsYou", plan: plan() })], ["review", "you", "send", "Send review", true]],
+        ["a big PR's brief", rPr(), [sIt({ scenario: "brief", state: "needsYou", output: "brief" })], ["review", "you", "draftReview", "Draft a review", true]],
+        ["sent: the author's move", rPr({ roles: ["reviewed"], viewerHasReviewed: true, viewerReviewedAt: sAgo(4), updatedAt: sAgo(4) }), [sent], ["review", "waiting", null, null, false]],
+        ["sent, the snapshot not caught up yet", rPr({ updatedAt: sAgo(60) }), [sent], ["review", "waiting", null, null, false]],
+        ["the author answered, the agent queued", rPr({ roles: ["reviewed"], myReReviewDue: true, viewerHasReviewed: true }), [sIt({ scenario: "rereview", state: "queued" })], ["review", "agent", null, null, false]],
+        ["the re-review is ready", rPr({ roles: ["reviewed"], myReReviewDue: true }), [sIt({ scenario: "rereview", state: "needsYou", plan: plan("COMMENT") })], ["review", "you", "send", "Send re-review", true]],
+        ["everything fixed: approve", rPr({ roles: ["reviewed"], myReReviewDue: true }), [sIt({ scenario: "rereview", state: "needsYou", plan: plan("APPROVE") })], ["review", "you", "send", "Approve", true]],
+        ["the author answered, the agent not on it", rPr({ roles: ["reviewed"], myReReviewDue: true, viewerHasReviewed: true }), [], ["review", "you", "rereview", "Open on GitHub", false]],
+        ["asked again after your review", rPr({ viewerHasReviewed: true }), [], ["review", "you", "rereview", "Open on GitHub", false]],
+        ["a draft you were asked on: still the author's", rPr({ isDraft: true }), [], ["review", "waiting", null, null, false]],
+        ["you approved today", rPr({ roles: ["reviewed"], viewerApproved: true, viewerHasReviewed: true, viewerReviewedAt: sAgo(30) }), [], ["review", "done", null, null, false]],
+        ["it failed", rPr(), [sIt({ state: "error" })], ["review", "you", "fix", "Try again", true]],
+        ["gone from the dashboard after the agent's review today", null, [sent], ["review", "done", null, null, false]],
+      ];
+      for (const [name, pr, items, want] of rows) assert.deepStrictEqual(where(stage(pr, items)), want, name);
+      const old = stage(rPr({ roles: ["reviewed"], viewerApproved: true, viewerReviewedAt: "2026-01-02T10:00:00Z" }));
+      assert.deepStrictEqual([old.column, old.earlier], ["done", true], "an approval from an earlier day folds into +N earlier");
+    });
+
+    test("boardStage: a run that asks nothing is a note on its card, not a decision", () => {
+      for (const headline of ["Stopped by you", "You took it over in your terminal", "Stopped after 30 min", "Review ready — nothing to post"]) {
+        const s = stage(rPr(), [sIt({ state: "needsYou", headline })]);
+        assert.deepStrictEqual([s.column, s.action.kind, s.ready, s.note], ["you", "review", false, headline], headline);
+      }
+      const cut = stage(sPr(), [sIt({ scenario: "drive", state: "needsYou", interrupted: true, drive: drive(2), headline: "Interrupted — the app closed while it ran" })]);
+      assert.deepStrictEqual([cut.column, cut.ready, cut.note], ["waiting", false, "Interrupted — the app closed while it ran"]);
+      const published = stage(rPr(), [sIt({ state: "needsYou", plan: plan(), published: true })]);
+      assert.strictEqual(published.ready, false, "a plan already sent asks nothing");
+      // Housekeeping and yesterday say nothing.
+      assert.strictEqual(stage(sPr(), [sIt({ state: "done", headline: view.AGENT_CLOSED.superseded })]).note, null);
+      assert.strictEqual(stage(sPr(), [sIt({ state: "done", headline: "Pushed 2 commits", finishedAt: "2026-01-02T10:00:00Z" })]).note, null);
+      assert.strictEqual(stage(null, [sIt({ state: "done", headline: view.AGENT_CLOSED.offDashboard })]), null, "a PR that left with nothing done today has no card");
+      assert.strictEqual(stage(null, []), null);
+    });
+
+    test("boardStage: live work comes first; the agent's own why and the SDLC run's badge ride on the card", () => {
+      const both = stage(rPr(), [sIt({ state: "needsYou", plan: plan(), finishedAt: sAgo(10) }), sIt({ scenario: "rereview", state: "queued" })]);
+      assert.deepStrictEqual([both.column, both.item.state], ["agent", "queued"]);
+      const two = stage(sPr(), [sIt({ scenario: "drive", state: "queued", rank: 5 }), sIt({ scenario: "drive", state: "working", startedAt: sAgo(1) })]);
+      assert.strictEqual(two.item.state, "working");
+      assert.strictEqual(stage(sPr({ ciState: "failure" }), [], { idle: { P: "Your Claude session is on it" } }).why, "Your Claude session is on it");
+      assert.strictEqual(stage(sPr(), [], { idle: { P: "Yours — waiting for reviewers" } }).why, null, "only a card in Your move says why");
+      const sdlc = { P: { key: "ENG-93412", stage: "fixing review" } };
+      const rows = [
+        ["the run's work", sPr({ hasUnaddressedChangeRequest: true }), ["mine", "agent", null, null, false]],
+        ["a draft the run builds", sPr({ isDraft: true }), ["mine", "agent", null, null, false]],
+        ["with reviewers", sPr(), ["mine", "waiting", null, null, false]],
+        ["ready: the run waits for someone to merge", sPr({ canBeMerged: true, awaitingReview: false }), ["mine", "you", "merge", "Merge on GitHub", false]],
+      ];
+      for (const [name, pr, want] of rows) {
+        const s = stage(pr, [], { orchestrated: sdlc });
+        assert.deepStrictEqual(where(s), want, name);
+        assert.deepStrictEqual(s.sdlc, sdlc.P, name);
+      }
+    });
+
+    test("stageLine: a card says what goes out, what waits and what happened — in your words", () => {
+      const line = (pr, items) => view.stageLine(stage(pr, items), pr);
+      const esc = { ...plan("REQUEST_CHANGES", 1), escalations: [{ replyTo: 9, body: "b" }] };
+      assert.strictEqual(line(rPr(), [sIt({ state: "needsYou", plan: esc })]), "Request changes · 1 comment · 1 reply · 1 pushed back");
+      assert.strictEqual(line(sPr(), [sIt({ scenario: "drive", reasons: ["self"], state: "needsYou", drive: drive(2) })]), "Self-review: 2 fixes ready to push");
+      assert.strictEqual(
+        line(sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(1), plan: plan("COMMENT", 2) })]),
+        "Reviewers' comments: 1 fix and 2 answers ready to push",
+      );
+      assert.strictEqual(
+        line(sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(2) })]),
+        "Reviewers' comments: 2 replies ready to send, nothing to push",
+      );
+      const asks = [{ question: "Configurable?", options: [] }, { question: "Rename it?", options: [] }];
+      assert.strictEqual(line(sPr(), [sIt({ scenario: "drive", state: "needsYou", drive: drive(0), result: { summary: "", asks, findings: [], authorQuestions: [], structured: true } })]), "Your call: Configurable? (+1 more)");
+      const reviewers = [{ login: "anna", avatarUrl: "", reviewState: "approved" }, { login: "ivan", avatarUrl: "", reviewState: "pending" }];
+      assert.strictEqual(line(sPr({ canBeMerged: true, awaitingReview: false, reviewers: reviewers.slice(0, 1) }), []), "Approved by anna · CI green");
+      assert.strictEqual(line(sPr({ reviewers }), []), "anna ✓ · ivan pending");
+      assert.strictEqual(line(sPr({ reviewers: [] }), []), "Waiting for reviewers");
+      assert.strictEqual(
+        line(sPr({ ciState: "failure", failingChecks: [{ name: "lint" }, { name: "unit" }], hasConflicts: true }), []),
+        "CI failing: lint, unit · Conflicts with the base branch",
+      );
+      assert.strictEqual(line(rPr({ roles: ["reviewed"], viewerHasReviewed: true, unresolvedThreads: 3 }), []), "You asked for changes · 3 threads open");
+      assert.strictEqual(line(rPr({ requestedOfMe: false }), []), "Review requested of your team");
+      assert.strictEqual(view.workLine({ scenario: "drive", reasons: ["ci", "comments"] }), "Fixing CI · Answering reviewers' comments");
+      assert.strictEqual(view.workLine({ scenario: "rereview" }), "Re-reviewing — the author answered");
+      const run = sPr({ hasUnaddressedChangeRequest: true });
+      assert.strictEqual(view.stageLine(stage(run, [sIt({ scenario: "drive", reasons: ["comments"], state: "done", headline: "Stopped by you" })], { orchestrated: { P: { key: "ENG-1", stage: null } } }), run), "The SDLC run is on it", "not the agent: its last run is over");
+    });
+
+    test("one vocabulary: the tray's verb, a place in line and a notification's title say what the Board says", () => {
+      assert.deepStrictEqual(
+        [
+          view.itemVerb({ scenario: "review" }),
+          view.itemVerb({ scenario: "drive", reasons: ["self"] }),
+          view.itemVerb({ scenario: "drive", reasons: ["ci"] }),
+          view.itemVerb({ scenario: "drive", reasons: ["conflicts"] }),
+          view.itemVerb({ scenario: "drive", reasons: ["comments"] }),
+          view.itemVerb({ scenario: "drive", reasons: ["ci", "comments"] }),
+        ],
+        ["Drafting review", "Self-reviewing", "Fixing CI on", "Resolving the conflict on", "Answering reviewers on", "Fixing"],
+      );
+      assert.deepStrictEqual([1, 2, 3, 4, 11, 21, 112].map(view.inLine), ["Up next", "2nd in line", "3rd in line", "4th in line", "11th in line", "21st in line", "112th in line"]);
+      const t = (kind, o) => view.agentNoticeTitle(kind, sIt({ prNumber: 929, ...o }));
+      assert.strictEqual(t("needsYou", { state: "needsYou", plan: plan() }), "Review ready to send: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "rereview", plan: plan("COMMENT") }), "Re-review ready to send: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", plan: plan("APPROVE") }), "Approval ready to send: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(2) }), "2 fixes ready to push: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(1), plan: plan("COMMENT", 1) }), "Fixes and replies ready to push: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(0), plan: answers(2) }), "Replies to reviewers ready to send: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(0), plan: answers(1) }), "Reply to reviewers ready to send: #929");
+      assert.strictEqual(t("finished", { state: "done", scenario: "drive", drive: drive(0), plan: answers(2), published: true }), "Replies sent: #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "merge" }), "Ready to merge: #929");
+      const ask = { summary: "", asks: [{ question: "q", options: [] }], findings: [], authorQuestions: [], structured: true };
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "drive", drive: drive(0), result: ask }), "Your call on #929");
+      assert.strictEqual(t("needsYou", { state: "needsYou", scenario: "brief", output: "b" }), "Brief ready: #929");
+      assert.strictEqual(t("failed", { state: "error" }), "The agent couldn't finish #929");
+      assert.strictEqual(t("finished", { state: "done", published: true }), "Review sent: #929");
+      assert.strictEqual(t("finished", { state: "done", scenario: "drive", pushed: true }), "Fixes pushed: #929");
+    });
+
+    test("stageColumns: one card per PR, in its lane and column; filters hide cards but not the count of what's ready", () => {
+      const prs = [
+        sPr({ id: "D", isDraft: true }),
+        sPr({ id: "M", canBeMerged: true, awaitingReview: false }),
+        sPr({ id: "W1", lastCommitPushedAt: sAgo(600) }),
+        sPr({ id: "W2", lastCommitPushedAt: sAgo(6000) }),
+        rPr({ id: "R1" }),
+        rPr({ id: "R2" }),
+        rPr({ id: "R3" }),
+        rPr({ id: "A1", roles: ["reviewed"], viewerApproved: true, viewerReviewedAt: sAgo(10) }),
+        rPr({ id: "A0", roles: ["reviewed"], viewerApproved: true, viewerReviewedAt: "2026-01-02T10:00:00Z" }),
+        rPr({ id: "H", roles: ["reviewer"] }),
+      ];
+      const items = [
+        sIt({ prId: "M", scenario: "merge", state: "needsYou" }),
+        sIt({ prId: "R1", state: "needsYou", plan: plan() }),
+        sIt({ prId: "R2", state: "queued", rank: 2 }),
+        sIt({ prId: "R3", state: "queued", rank: 1 }),
+        sIt({ prId: "R3", state: "done", headline: "Published: comment", published: true, finishedAt: sAgo(300) }),
+        sIt({ prId: "H", state: "needsYou", plan: plan() }),
+        sIt({ prId: "GONE", scenario: "merge", state: "done", headline: "Merged (squash)", finishedAt: sAgo(1) }),
+        sIt({ prId: "GONE2", state: "done", headline: "Published: approve", finishedAt: sAgo(50) }),
+      ];
+      const shown = prs.filter((p) => p.id !== "H");
+      const b = view.stageColumns(shown, prs, { items }, { today: sToday });
+      const ids = (cards) => cards.map((c) => c.prId);
+      assert.deepStrictEqual(ids(b.mine.you), ["M", "D"], "the merge first, the draft last");
+      assert.deepStrictEqual(ids(b.mine.waiting), ["W2", "W1"], "the longest wait first");
+      assert.deepStrictEqual(ids(b.mine.done), ["GONE"]);
+      assert.deepStrictEqual(ids(b.review.you), ["R1"]);
+      assert.deepStrictEqual(ids(b.review.agent), ["R3", "R2"], "the queue in its order");
+      assert.deepStrictEqual(ids(b.review.done), ["A1", "GONE2"], "newest first");
+      assert.strictEqual(b.review.earlier, 1);
+      assert.strictEqual(b.hiddenReady, 1, "H's draft review is hidden by the filters, and said so");
+      const every = [b.mine, b.review].flatMap((l) => view.BOARD_COLUMNS.flatMap((c) => ids(l[c])));
+      assert.strictEqual(new Set(every).size, every.length, "a PR is in one column only");
+      assert.ok(!every.includes("H"));
+    });
+
+    test("agent view: todayKey is the local day, and finishedOn compares on it", () => {
+      // Built from local parts, so the answer is the same in every time zone.
+      const lateEvening = new Date(2026, 10, 5, 23, 30);
+      assert.strictEqual(view.todayKey(lateEvening), "2026-11-05");
+      assert.strictEqual(view.finishedOn({ finishedAt: lateEvening.toISOString() }, "2026-11-05"), true);
+      assert.strictEqual(view.finishedOn({ finishedAt: new Date(2026, 10, 4, 23, 59).toISOString() }, "2026-11-05"), false);
+      assert.strictEqual(view.finishedOn({}, "2026-11-05"), false);
+      assert.strictEqual(view.finishedOn({ finishedAt: "not a date" }, "2026-11-05"), false);
+    });
+    test("agent view: the one button names what a result asks of you; a result that asks nothing has none", () => {
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "error" })), "Try again");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "error", scenario: "drive", sessionId: "s" })), "Open in Claude", "your PR: carry on in the session");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "brief", output: "x" })), "Draft a review");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", sessionId: "s" })), null, "a review with nothing to send");
+      const asks = { summary: "s", asks: [{ question: "q?", options: [] }], findings: [], structured: true };
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", sessionId: "s", result: asks })), "Your call", "a question on your PR");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "working", sessionId: "s" })), null);
+    });
+
+    // --- stage 4: the publish wrapper, the app's own posting, merge, notifications ---
+    const pub = require(path.join(__dirname, "../dist/main/shared/agent-publish.js"));
+    const publishMod = require(path.join(__dirname, "../dist/main/main/agent/publish.js"));
+    const mergeMod = require(path.join(__dirname, "../dist/main/main/agent/merge.js"));
+    const SHA = "a".repeat(40);
+
+    test("publish plan: a review is rebuilt from the allowed fields only, the way the skill's own wrapper checks it", () => {
+      const r = pub.parseReview({ event: "APPROVE", body: "ok", commit_id: SHA, extra: 1, comments: [{ path: "a.ts", line: 3, side: "RIGHT", body: "x", junk: true }] });
+      assert.deepStrictEqual(r, { ok: true, value: { kind: "review", event: "APPROVE", body: "ok", commitId: SHA, comments: [{ path: "a.ts", line: 3, side: "RIGHT", body: "x" }] } });
+      for (const [bad, why] of [
+        [{ event: "DISMISS" }, /event must be/],
+        [{ event: "COMMENT", body: 3 }, /body must be a string/],
+        [{ event: "COMMENT", commit_id: "abc" }, /40-hex/],
+        [{ event: "COMMENT", comments: {} }, /must be an array/],
+        [{ event: "COMMENT", comments: [{ path: "a", body: "x", side: "UP" }] }, /side must be/],
+        [{ event: "COMMENT", comments: [{ path: "", body: "x" }] }, /needs a path/],
+        ["[]", /JSON object/],
+      ]) {
+        const p = pub.parseReview(bad);
+        assert.strictEqual(p.ok, false, JSON.stringify(bad));
+        assert.match(p.error, why);
+      }
+      assert.match(pub.parseFileComment({ path: "a.ts", body: "x", subject_type: "file" }).error, /needs commit_id/);
+      assert.strictEqual(pub.parseFileComment({ path: "a.ts", body: "x", subject_type: "file", commit_id: SHA }).ok, true);
+    });
+
+    test("publish plan: the wrapper's four calls, with its own argument checks", () => {
+      assert.deepStrictEqual(pub.parsePublishCall(["review", "a/b", "7", "/x/r.json"]).value, { sub: "review", repo: "a/b", number: 7, file: "/x/r.json" });
+      assert.deepStrictEqual(pub.parsePublishCall(["reply", "a/b", "7", "123", "/x/t.txt"]).value, { sub: "reply", repo: "a/b", number: 7, replyTo: 123, file: "/x/t.txt" });
+      assert.deepStrictEqual(pub.parsePublishCall(["resolve", "PRRT_abc"]).value, { sub: "resolve", threadId: "PRRT_abc" });
+      for (const bad of [[], ["delete", "a/b"], ["review", "a/b", "7"], ["review", "a/../b", "7", "f"], ["review", "a/b", "07", "f"], ["reply", "a/b", "7", "x", "f"], ["resolve", "MDU6abc"], ["resolve", "PRRT_a b"]]) {
+        assert.strictEqual(pub.parsePublishCall(bad).ok, false, bad.join(" "));
+      }
+    });
+
+    test("publish plan: paths compare in Git Bash form, and a payload must sit inside the run's folder", () => {
+      assert.strictEqual(pub.gitBashPath("C:\\Users\\me\\x.sh"), "/c/Users/me/x.sh");
+      assert.strictEqual(pub.gitBashPath("/usr/x"), "/usr/x");
+      assert.ok(pub.samePath("C:\\A\\b.sh", "/c/a/b.sh"));
+      assert.ok(pub.isInsideDir("C:/T/run/out/review.json", "C:\\T\\run\\out"));
+      assert.ok(!pub.isInsideDir("C:/T/run/outside/x.json", "C:\\T\\run\\out"), "a sibling with the same prefix is outside");
+      assert.ok(!pub.isInsideDir("C:/T/run/out/../settings.json", "C:\\T\\run\\out"));
+      assert.ok(!pub.isInsideDir("C:/T/run/out", "C:\\T\\run\\out"), "the folder itself is not a file in it");
+      assert.ok(pub.isUsableWrapperPath("C:\\Users\\v.kuvarzin\\AppData\\Local\\Temp\\prd-agent\\1\\bin\\pr-review-publish.sh"));
+      assert.ok(!pub.isUsableWrapperPath("C:\\Users\\VB641~1.KUV\\Temp\\bin\\pr-review-publish.sh"), "an 8.3 name with ~");
+      assert.ok(!pub.isUsableWrapperPath("/Users/me/Library/Application Support/PR Dashboard/bin/pr-review-publish.sh"), "a space");
+      assert.ok(!pub.isUsableWrapperPath("/tmp/bin/other.sh"));
+    });
+
+    test("publish plan: every posted body ends with the signature; a held approve becomes a comment", () => {
+      const steps = [
+        { kind: "comment", comment: { path: "f.ts", body: "file note", subjectType: "file" }, commitId: SHA },
+        { kind: "review", event: "APPROVE", body: "LGTM", commitId: SHA, comments: [{ path: "a.ts", line: 3, side: "RIGHT", body: "nit" }] },
+        { kind: "reply", replyTo: 42, body: "still applies" },
+        { kind: "resolve", threadId: "PRRT_x" },
+      ];
+      const ctx = { repo: "a/b", number: 7, signature: "— sig", holdApprove: false };
+      const reqs = pub.planRequests(steps, ctx);
+      assert.deepStrictEqual(reqs.map((r) => r.endpoint), ["repos/a/b/pulls/7/comments", "repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/42/replies", "graphql"]);
+      assert.strictEqual(reqs[0].body.body, "file note\n\n— sig");
+      assert.strictEqual(reqs[0].body.commit_id, SHA);
+      assert.strictEqual(reqs[0].body.subject_type, "file");
+      assert.strictEqual(reqs[1].body.event, "APPROVE");
+      assert.strictEqual(reqs[1].body.body, "LGTM\n\n— sig");
+      assert.deepStrictEqual(reqs[1].body.comments, [{ path: "a.ts", line: 3, side: "RIGHT", body: "nit" }], "inline comments sit under the signed review body");
+      assert.strictEqual(reqs[2].body.body, "still applies\n\n— sig");
+      assert.match(reqs[3].body.query, /^mutation\(\$id:ID!\)\{ resolveReviewThread/);
+      assert.deepStrictEqual(reqs[3].body.variables, { id: "PRRT_x" });
+      const held = pub.planRequests(steps, { ...ctx, holdApprove: true })[1];
+      assert.strictEqual(held.body.event, "COMMENT");
+      assert.ok(held.body.body.includes(pub.HELD_APPROVE_NOTE) && held.body.body.endsWith("— sig"));
+      assert.strictEqual(pub.signedBody("", "— sig"), "— sig");
+      assert.strictEqual(pub.describePlan(pub.summarizePlan(steps)), "approve, 2 inline comments, 1 reply, 1 resolve");
+      assert.deepStrictEqual(pub.readPlanLines(`${steps.map((x) => JSON.stringify(x)).join("\n")}\n{torn`), steps, "the plan file reads back as written; a torn line is dropped");
+    });
+
+    test("agent guard: the reads the review skill needs — gh api user, GraphQL reads of its PR, --hostname, Accept, auth status, twg", () => {
+      const ok = (cmd) => assert.deepStrictEqual(guard.checkBash("review", cmd, gpr), { allow: true }, cmd);
+      ok("gh api user --jq .login");
+      ok("gh api repos/acme/widgets/pulls/12/files --paginate --hostname github.com");
+      ok("gh api -H 'Accept: application/vnd.github.raw' 'repos/acme/widgets/contents/a.md?ref=abc'");
+      ok("gh api graphql --hostname github.com -f query='query($owner:String!,$repo:String!,$number:Int!){ repository(owner:$owner,name:$repo){ pullRequest(number:$number){ reviewThreads(first:100){ nodes{ id isResolved } } } } }' -F owner=Acme -F repo=Widgets -F number=12");
+      ok("gh api graphql -f query='{ viewer { login } }'");
+      // The review skill's own thread query, as its Context phase sends it.
+      ok("gh api graphql --hostname github.com -f query='query($owner:String!,$repo:String!,$number:Int!,$cursor:String){ repository(owner:$owner,name:$repo){ pullRequest(number:$number){ reviewThreads(first:100, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes{ id isResolved isOutdated viewerCanResolve path line originalLine head: comments(first:1){ nodes{ databaseId author{login} body createdAt } } tail: comments(last:10){ nodes{ author{login} body createdAt } } } } } } }' -F owner=Acme -F repo=Widgets -F number=12");
+      ok("gh api graphql -f query='query { repository(owner:\"acme\",name:\"widgets\"){ pullRequest(number:12){ reviews(last:5){ nodes{ author{ ... on User { login } } state submittedAt commit{ oid } } } } } rateLimit{ remaining } }'");
+      ok("gh auth status --hostname github.com");
+      ok("twg jira workitem get ENG-123 -o json --output-summary none");
+      ok("twg confluence content get 3895230648 --detail full --format md -o json --output-summary none");
+      ok("twg help describe 'jira workitem get'");
+      ok("twg jira workitem query --jql 'key = ENG-1' -o json");
+      ok("twg rovo search --query 'retry budget'");
+    });
+
+    test("agent guard: what a review must not do with those — write, read elsewhere, see the token, change Jira", () => {
+      const no = (cmd, why) => {
+        const d = guard.checkBash("review", cmd, gpr);
+        assert.strictEqual(d.allow, false, cmd);
+        if (why) assert.match(d.reason, why, cmd);
+      };
+      no(`gh api graphql -f query='mutation{ addComment(input:{subjectId:"x",body:"y"}){ clientMutationId } }'`, /only read/);
+      no(`gh api graphql -f query='query{ repository(owner:"evil",name:"secrets"){ id } }'`, /acme\/widgets only/);
+      no(`gh api graphql -f query='query($o:String!){ repository(owner:$o,name:"widgets"){ id } }' -F o=evil`, /acme\/widgets only/);
+      no(`gh api graphql -f query='{ search(query:"x",type:REPOSITORY,first:5){ nodes{ __typename } } }'`, /not from search/);
+      no("gh api graphql -f query='query($ids:[ID!]!){ nodes(ids:$ids){ ... on PullRequestReviewThread { id } } }' -F 'ids[]=PRRT_1'", /not from nodes/);
+      // Nested selections are walked too: nothing leads out of the PR.
+      no("gh api graphql -f query='{ viewer { repositories(first:5){ nodes{ name } } } }'", /viewer gives only/);
+      no(`gh api graphql -f query='{ user(login:"boss"){ login repositories(privacy:PRIVATE){ nodes{ name } } } }'`, /user gives only/);
+      no("gh api graphql -f query='query($o:String!,$r:String!){ repository(owner:$o,name:$r){ owner { ... on Organization { repositories(first:5){ nodes{ name } } } } } }' -F o=acme -F r=widgets", /not owner/);
+      no("gh api graphql -f query='query($o:String!,$r:String!){ repository(owner:$o,name:$r){ pullRequest(number:13){ title } } }' -F o=acme -F r=widgets", /PR #12 only/);
+      no("gh api graphql -f query='query($o:String!,$r:String!){ repository(owner:$o,name:$r){ pullRequest(number:12){ headRepository{ name } } } }' -F o=acme -F r=widgets", /headRepository is not one of the fields/);
+      no("gh api graphql -f query='{ ... on Query { search(query:\"x\",type:REPOSITORY,first:1){ nodes{ __typename } } } }'", /not from search/);
+      no("gh api graphql -f query='{ viewer @include(if:true) { login } }'", /directives/);
+      no(`gh api graphql -f query='{ viewer { login } } """ " mutation { x } " """'`, /couldn't be read/);
+      no("gh api graphql -f query='{ viewer { name(x:\"a\\\"b\") } }'", /couldn't be read/);
+      no("gh api graphql -f query='query{ ...F } fragment F on Query { viewer { login } }'", /fragment/i);
+      no("gh api graphql -F query=@q.graphql", /reads a file/);
+      no("gh api graphql --input q.json");
+      no("gh api repos/acme/widgets/issues/12/comments -f body=hi", /request body/);
+      no("gh api repos/acme/widgets/pulls --hostname evil.example.com", /github\.com only/);
+      no("gh api -H 'Authorization: token x' repos/acme/widgets/pulls", /Accept headers/);
+      no("gh api users/someone");
+      no("gh auth status --show-token");
+      no("gh auth token");
+      no("twg jira workitem update ENG-1 --summary x");
+      no("twg jira workitem transition ENG-1 Done");
+      no("twg api /rest/api/3/issue/ENG-1");
+      no("twg login");
+      no("twg jira workitem get ENG-1 --output-file /tmp/x", /writes or opens/);
+      no("twg jira workitem get -o json comment create ENG-1", /reads like a subcommand/);
+      no("twg jira workitem get ENG-1 --bogus", /not one of the flags/);
+      no("twg jira workitem get ENG-1 -o", /needs a value/);
+      no("twg help --output-file x", /writes or opens/);
+      no("twg help describe -x", /not one of the flags/);
+      no("twg jira workitem get ENG-1 -ojson", /short flags go on their own/);
+      no("twg jira workitem get ENG-1 --detail create", /reads like a subcommand/);
+      no("twg jira workitem query --fields summary", /reads like a subcommand/);
+      assert.deepStrictEqual(guard.checkBash("review", "twg jira workitem query --fields=summary --jql='key = ENG-1'", gpr), { allow: true }, "anything goes attached");
+      no("twg jira workitem comment create ENG-1 --body x");
+      no("twg confluence content update 123 --body x");
+      no("twg jira workitem get transition ENG-1", /not one of the reads/);
+    });
+
+    test("agent guard: a review writes only its payload files and calls only its own wrapper", () => {
+      const run = { wrapperPath: "C:\\T\\prd-agent\\r1\\bin\\pr-review-publish.sh", outDir: "C:\\T\\prd-agent\\r1\\out" };
+      const w = "/c/T/prd-agent/r1/bin/pr-review-publish.sh";
+      assert.deepStrictEqual(guard.checkBash("review", `${w} review acme/widgets 12 C:/T/prd-agent/r1/out/review.json`, gpr, run), { allow: true });
+      assert.deepStrictEqual(guard.checkBash("review", `${w} resolve PRRT_abc`, gpr, run), { allow: true });
+      assert.match(guard.checkBash("review", `${w} review acme/other 12 C:/T/prd-agent/r1/out/r.json`, gpr, run).reason, /acme\/widgets#12 only/);
+      assert.match(guard.checkBash("review", `${w} review acme/widgets 12 C:/Users/me/.bashrc`, gpr, run).reason, /under/);
+      assert.match(guard.checkBash("review", `${w} delete acme/widgets 12 x`, gpr, run).reason, /PUBLISH-REJECTED/);
+      assert.strictEqual(guard.checkBash("review", `${w} review acme/widgets 12 C:/T/prd-agent/r1/out/r.json`, gpr, null).allow, false, "no run, no wrapper");
+      assert.deepStrictEqual(guard.checkToolUse("review", "Write", { file_path: "C:\\T\\prd-agent\\r1\\out\\review.json" }, gpr, run), { allow: true });
+      for (const file of ["C:\\T\\prd-agent\\r1\\bin\\pr-review-publish.sh", "C:\\T\\prd-agent\\r1\\run.json", "C:\\work\\src\\a.ts"]) {
+        assert.strictEqual(guard.checkToolUse("review", "Write", { file_path: file }, gpr, run).allow, false, file);
+      }
+      assert.strictEqual(guard.checkToolUse("review", "Edit", { file_path: "C:\\T\\prd-agent\\r1\\out\\review.json" }, gpr, run).allow, false, "new files only: no Edit");
+      assert.strictEqual(guard.checkToolUse("brief", "Write", { file_path: "C:\\T\\prd-agent\\r1\\out\\x" }, gpr, null).allow, false);
+    });
+
+    test("agent guard hook: a review's guard file lets its payload files through, and nothing else", () => {
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-hook-"));
+      const outDir = path.join(runDir, "out");
+      const guardFile = path.join(runDir, "guard.json");
+      runner.writeGuardFile(guardFile, { outDir, wrapperPath: path.join(runDir, "bin", "pr-review-publish.sh"), workflowDirs: [] });
+      const write = (file, withRun = true) =>
+        spawnSync(process.execPath, [hookJs, "review", "https://github.com/a/b/pull/7", ...(withRun ? [guardFile] : [])], {
+          input: JSON.stringify({ tool_name: "Write", tool_input: { file_path: file } }),
+          encoding: "utf8",
+        }).status;
+      assert.strictEqual(write(path.join(outDir, "review.json")), 0);
+      assert.strictEqual(write(guardFile), 2, "not its own guard file");
+      assert.strictEqual(write(path.join(outDir, "x.json"), false), 2, "without the guard file nothing is writable");
+      assert.deepStrictEqual(hookMod.readGuardFile(path.join(runDir, "missing.json")), null);
+    });
+
+    test("agent guard hook: a drive's guard file survives the round trip — edits in its worktree, replies only", () => {
+      const pubG = require(path.join(__dirname, "../dist/main/shared/agent-publish.js"));
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-hookd-"));
+      const workDir = path.join(runDir, "wt");
+      const outDir = path.join(runDir, "out");
+      const outside = path.join(runDir, "elsewhere");
+      for (const d of [path.join(workDir, "src"), path.join(workDir, ".git"), outDir, outside]) nfsA.mkdirSync(d, { recursive: true });
+      const wrapperPath = path.join(runDir, "bin", "pr-review-publish.sh");
+      const guardFile = path.join(runDir, "guard.json");
+      const written = {
+        wrapperPath,
+        outDir,
+        subs: ["reply"],
+        workDir,
+        workflowDirs: [],
+        readDirs: [workDir, outDir],
+        sessionId: "6250ec40-5c65-407c-8b04-61b1dba8fae7",
+        sessionRoots: [path.join(runDir, "projects")],
+      };
+      runner.writeGuardFile(guardFile, written);
+      assert.deepStrictEqual(hookMod.readGuardFile(guardFile), written, "everything the app wrote comes back");
+      const call = (tool_name, tool_input) =>
+        spawnSync(process.execPath, [hookJs, "drive", "https://github.com/a/b/pull/7", guardFile], {
+          input: JSON.stringify({ tool_name, tool_input }),
+          encoding: "utf8",
+        }).status;
+      assert.strictEqual(call("Edit", { file_path: path.join(workDir, "src", "x.ts") }), 0, "its own worktree");
+      assert.strictEqual(call("Write", { file_path: path.join(workDir, "src", "new", "y.ts") }), 0, "a new file in a new folder");
+      assert.strictEqual(call("Edit", { file_path: path.join(workDir, ".git", "hooks", "pre-push") }), 2);
+      assert.strictEqual(call("Edit", { file_path: path.join(outside, "a.ts") }), 2);
+      const w = pubG.gitBashPath(wrapperPath);
+      const reply = pubG.gitBashPath(path.join(outDir, "reply.txt"));
+      assert.strictEqual(call("Bash", { command: `'${w}' reply a/b 7 77 '${reply}'` }), 0);
+      assert.strictEqual(call("Bash", { command: `'${w}' resolve PRRT_x` }), 2, "a drive only replies");
+      assert.strictEqual(call("Bash", { command: `'${w}' review a/b 7 '${pubG.gitBashPath(path.join(outDir, "r.json"))}'` }), 2);
+
+      // A link the branch carries leads the write elsewhere: followed, and refused.
+      nfsA.symlinkSync(outside, path.join(workDir, "src", "docs"), "junction");
+      assert.strictEqual(call("Write", { file_path: path.join(workDir, "src", "docs", "evil.txt") }), 2, "out of the worktree through a link");
+      nfsA.symlinkSync(path.join(workDir, ".git"), path.join(workDir, "src", "g"), "junction");
+      assert.strictEqual(call("Write", { file_path: path.join(workDir, "src", "g", "hooks", "pre-commit") }), 2, "into git's folder through a link");
+      nfsA.symlinkSync(path.join(runDir, "missing"), path.join(workDir, "src", "dangling"), "junction");
+      assert.strictEqual(call("Write", { file_path: path.join(workDir, "src", "dangling", "z.txt") }), 2, "a link to nowhere");
+
+      // A guard file that names its subcommands wrongly gives nothing beyond reading: absent would mean all of them.
+      for (const bad of [
+        { subs: "reply" },
+        { subs: ["reply", "merge"] },
+        { subs: [1] },
+        { workDir: "" },
+        { workDir: 7 },
+        { workDir: "relative/wt" },
+        { readDirs: workDir },
+        { sessionId: "../../x" },
+        { sessionId: "" },
+        { sessionId: 7 },
+        { sessionRoots: path.join(runDir, "projects") },
+      ]) {
+        runner.writeGuardFile(guardFile, { ...written, ...bad });
+        assert.strictEqual(hookMod.readGuardFile(guardFile), null, JSON.stringify(bad));
+      }
+      runner.writeGuardFile(guardFile, { ...written, subs: [] });
+      assert.deepStrictEqual(hookMod.readGuardFile(guardFile).subs, [], "an empty list stays empty — no subcommand");
+      runner.writeGuardFile(guardFile, { ...written, readDirs: ["", "relative", 7, workDir], sessionRoots: ["."] });
+      const kept = hookMod.readGuardFile(guardFile);
+      assert.deepStrictEqual([kept.readDirs, kept.sessionRoots], [[workDir], []], "a folder list keeps absolute folders only — '' or '.' would be the hook's own folder");
+    });
+
+    test("agent guard hook: reads follow links on disk — the run's folders and its session's spill-over, nothing else", () => {
+      const base = nfsA.realpathSync.native(nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-hookr-")));
+      const workDir = path.join(base, "wt");
+      const outDir = path.join(base, "run", "out");
+      const plugin = path.join(base, "plugins", "creatio-development");
+      const home = path.join(base, "home");
+      const sid = "6250ec40-5c65-407c-8b04-61b1dba8fae7";
+      const spill = path.join(home, ".claude", "projects", "proj", sid, "tool-results");
+      const tasks = path.join(base, "temp", "claude", "proj", sid, "tasks");
+      const other = path.join(home, ".claude", "projects", "proj", "11111111-2222-3333-4444-555555555555", "tool-results");
+      for (const d of [path.join(workDir, "src"), outDir, path.join(plugin, "skills", "s"), path.join(home, ".ssh"), spill, tasks, other]) nfsA.mkdirSync(d, { recursive: true });
+      const files = {
+        code: path.join(workDir, "src", "x.ts"),
+        payload: path.join(outDir, "review.json"),
+        skill: path.join(plugin, "skills", "s", "SKILL.md"),
+        key: path.join(home, ".ssh", "id_rsa"),
+        spilled: path.join(spill, "b1.txt"),
+        task: path.join(tasks, "w1.output"),
+        otherSession: path.join(other, "b1.txt"),
+      };
+      for (const f of Object.values(files)) nfsA.writeFileSync(f, "x");
+      const guardFile = path.join(base, "run", "guard.json");
+      runner.writeGuardFile(guardFile, {
+        workDir,
+        outDir,
+        wrapperPath: path.join(base, "run", "bin", "pr-review-publish.sh"),
+        readDirs: [workDir, outDir, plugin],
+        sessionId: sid,
+        sessionRoots: [path.join(home, ".claude", "projects"), path.join(base, "temp", "claude")],
+        workflowDirs: [plugin],
+      });
+      const call = (tool_name, tool_input, kind = "review") =>
+        spawnSync(process.execPath, [hookJs, kind, "https://github.com/a/b/pull/7", guardFile], { input: JSON.stringify({ tool_name, tool_input }), encoding: "utf8" });
+      for (const f of [files.code, files.payload, files.skill, files.spilled, files.task]) assert.strictEqual(call("Read", { file_path: f }).status, 0, f);
+      assert.strictEqual(call("Read", { file_path: "src/x.ts" }).status, 0, "relative to the worktree");
+      assert.strictEqual(call("Grep", { pattern: "x" }).status, 0, "no path: the worktree");
+      assert.strictEqual(call("Glob", { pattern: `${plugin.replace(/\\/g, "/")}/skills/*` }).status, 0, "an absolute pattern inside a plugin");
+      assert.strictEqual(call("Read", { file_path: files.code }, "drive").status, 0, "a drive reads its worktree too");
+
+      const refused = (tool_name, tool_input, why) => {
+        const r = call(tool_name, tool_input);
+        assert.strictEqual(r.status, 2, `${why}: ${r.stderr}`);
+        assert.match(r.stderr, /^PR agent guard: /, why);
+      };
+      refused("Read", { file_path: files.key }, "a key outside every folder");
+      refused("Read", { file_path: `${workDir}/../home/.ssh/id_rsa` }, "a .. escape");
+      refused("Read", { file_path: "../home/.ssh/id_rsa" }, "a relative .. escape");
+      refused("Read", { file_path: files.otherSession }, "another session's spill-over");
+      refused("Read", { file_path: guardFile }, "the run's own guard file");
+      refused("Glob", { pattern: `${path.join(home, ".ssh").replace(/\\/g, "/")}/*` }, "an absolute pattern outside");
+      refused("SendMessage", { to: "x", message: "y" }, "a tool the guard doesn't name");
+
+      // Links the PR's branch could carry: followed to where they lead, and refused.
+      nfsA.symlinkSync(path.join(home, ".ssh"), path.join(workDir, "src", "docs"), "junction");
+      refused("Read", { file_path: path.join(workDir, "src", "docs", "id_rsa") }, "out of the worktree through a link");
+      // As written it is the worktree's own src/x.ts; the system follows `docs` out first and steps up from there.
+      refused("Read", { file_path: `${path.join(workDir, "src", "docs")}${path.sep}..${path.sep}x.ts` }, "a .. after a link out");
+      refused("Grep", { pattern: "x", path: `src/docs/../` }, "a search root with a .. after a link out");
+      refused("Grep", { pattern: "PRIVATE KEY", path: path.join(workDir, "src", "docs") }, "a search through a link");
+      refused("Glob", { pattern: "*", path: "src/docs" }, "a listing through a link");
+      nfsA.symlinkSync(path.join(home, ".ssh"), path.join(spill, "k"), "junction");
+      refused("Read", { file_path: path.join(spill, "k", "id_rsa") }, "out of the session's folder through a link");
+      nfsA.symlinkSync(path.join(base, "missing"), path.join(workDir, "src", "dangling"), "junction");
+      refused("Read", { file_path: path.join(workDir, "src", "dangling", "x") }, "a link to nowhere");
+      // A link that stays inside the worktree reads as usual.
+      nfsA.symlinkSync(path.join(workDir, "src"), path.join(workDir, "alias"), "junction");
+      assert.strictEqual(call("Read", { file_path: path.join(workDir, "alias", "x.ts") }).status, 0);
+      if (process.platform === "win32") {
+        // Claude Code reads Git Bash's /c/… as C:\… — and so does the check.
+        const bash = `/${base[0].toLowerCase()}/${base.slice(3).replace(/\\/g, "/")}`;
+        assert.strictEqual(call("Read", { file_path: `${bash}/wt/src/x.ts` }).status, 0, "Git Bash spelling");
+        assert.strictEqual(call("Read", { file_path: `${bash}/home/.ssh/id_rsa` }).status, 2);
+        // A glob right after the drive starts at the drive's root — `C:` as written is the hook's own folder, here the worktree.
+        const top = base.slice(3).split(path.sep)[0];
+        const fromWorktree = spawnSync(process.execPath, [hookJs, "review", "https://github.com/a/b/pull/7", guardFile], {
+          cwd: workDir,
+          input: JSON.stringify({ tool_name: "Glob", tool_input: { pattern: `${base[0]}:/{${top[0]},Q}${top.slice(1)}/**/id_rsa` } }),
+          encoding: "utf8",
+        });
+        assert.strictEqual(fromWorktree.status, 2, `a glob from the drive's root: ${fromWorktree.stderr}`);
+      }
+    });
+
+    test("agent runner: Claude Code's session folders — projects in its config folder, its temp folder", () => {
+      const home = os.homedir();
+      assert.deepStrictEqual(runner.claudeSessionRoots({ TEMP: "C:\\T" }, "win32"), [path.join(home, ".claude", "projects"), path.join("C:\\T", "claude")]);
+      assert.deepStrictEqual(runner.claudeSessionRoots({ CLAUDE_CONFIG_DIR: "/cfg", CLAUDE_CODE_TMPDIR: "/ct" }, "darwin"), [path.join("/cfg", "projects"), path.join("/ct", "claude")]);
+      assert.ok(runner.claudeSessionRoots({}, "darwin").includes(path.join("/tmp", "claude")), "off Windows /tmp too");
+    });
+
+    await atest("agent worktrees: setting a run's worktree up runs no hook — not even one the PR brings through a relative hooksPath", async () => {
+      const base = nfsA.realpathSync.native(nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-wthook-")));
+      const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+      const g = (cwd, ...args) => spawnSync("git", args, { cwd, encoding: "utf8", env });
+      const origin = path.join(base, "origin");
+      nfsA.mkdirSync(origin);
+      g(origin, "init", "-q");
+      nfsA.writeFileSync(path.join(origin, "a.txt"), "1\n");
+      g(origin, "add", "a.txt");
+      g(origin, "commit", "-q", "-m", "base");
+      // The PR: hooks in husky's folder, which write where the test can see.
+      const marker = path.join(base, "hook-ran").replace(/\\/g, "/");
+      g(origin, "checkout", "-q", "-b", "pr");
+      nfsA.mkdirSync(path.join(origin, ".husky", "_"), { recursive: true });
+      for (const hook of ["post-checkout", "reference-transaction"]) {
+        nfsA.writeFileSync(path.join(origin, ".husky", "_", hook), `#!/bin/sh\necho ${hook} >> "${marker}"\n`, { mode: 0o755 });
+      }
+      g(origin, "add", ".husky");
+      g(origin, "update-index", "--chmod=+x", ".husky/_/post-checkout", ".husky/_/reference-transaction");
+      g(origin, "commit", "-q", "-m", "pr");
+      const head = g(origin, "rev-parse", "HEAD").stdout.trim();
+      g(origin, "update-ref", "refs/pull/7/head", head);
+      g(origin, "checkout", "-q", "-");
+      const clone = path.join(base, "clone");
+      g(base, "clone", "-q", "--no-local", origin, clone);
+      // husky v9's setting: relative, so a worktree's own .husky/_ is what runs there.
+      g(clone, "config", "core.hooksPath", ".husky/_");
+      // Sanity: plain git does run the PR's hook here — else this test proves nothing.
+      const probe = path.join(base, "probe");
+      g(clone, "fetch", "-q", "--no-tags", "origin", "pull/7/head");
+      g(clone, "worktree", "add", "-q", "--detach", probe, head);
+      const hooksRun = nfsA.existsSync(marker);
+      g(clone, "worktree", "remove", "--force", probe);
+      nfsA.rmSync(marker, { force: true });
+      const dir = await wt.prepareWorktree(wt.runGit, { checkout: clone, remote: "origin", base: path.join(base, "wts"), pr: { repo: "a/b", number: 7, headOid: head }, runId: "r1" });
+      assert.strictEqual(g(dir, "rev-parse", "HEAD").stdout.trim(), head, "the PR's head is checked out");
+      await wt.removeWorktree(wt.runGit, clone, dir);
+      assert.ok(!nfsA.existsSync(dir));
+      assert.ok(hooksRun, "the sanity check: plain git runs the PR's post-checkout here");
+      assert.ok(!nfsA.existsSync(marker), `a hook ran: ${nfsA.existsSync(marker) ? nfsA.readFileSync(marker, "utf8") : ""}`);
+    });
+
+    test("agent guard: a Workflow runs only a skill's own script from a mounted plugin — never the PR's, never by name", () => {
+      const plugin = "C:/Users/me/.claude/plugins/cache/x/creatio-development/1.7.142";
+      const run = { workflowDirs: [plugin] };
+      assert.deepStrictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: `${plugin}/skills/creatio-code-review/creatio-code-review-workflow.workflow.js`, args: "{}" }, gpr, run), { allow: true });
+      assert.deepStrictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: "C:\\Users\\ME\\.claude\\plugins\\cache\\x\\creatio-development\\1.7.142\\w.js" }, gpr, run), { allow: true }, "the Windows spelling of the same folder");
+      assert.strictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: "C:/work/pr/evil.workflow.js" }, gpr, run).allow, false, "a script the PR brings");
+      assert.strictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: `${plugin}/../../evil.js` }, gpr, run).allow, false, "no stepping out of the plugin");
+      assert.match(guard.checkToolUse("review", "Workflow", { name: "creatio-code-review-workflow" }, gpr, run).reason, /by its script path/, "a name could be the PR's .claude/workflows");
+      assert.strictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: "C:/x.js" }, gpr, null).allow, false, "no guard file, no workflow");
+    });
+
+    test("capture: the review's wrapper records a checked call and posts nothing", () => {
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-cap-"));
+      const outDir = path.join(runDir, "out");
+      nfsA.mkdirSync(outDir);
+      nfsA.writeFileSync(path.join(runDir, "run.json"), JSON.stringify({ repo: "a/b", number: 7, outDir, wrapperPath: "x" }));
+      const review = path.join(outDir, "review.json");
+      nfsA.writeFileSync(review, JSON.stringify({ event: "COMMENT", body: "hi", commit_id: SHA, comments: [], extra: true }));
+      const r = spawnSync(process.execPath, [captureJs, runDir, "review", "a/b", "7", review], { encoding: "utf8" });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.match(r.stdout, /Nothing was posted from here/);
+      const reply = path.join(outDir, "reply.txt");
+      nfsA.writeFileSync(reply, "still applies");
+      assert.strictEqual(spawnSync(process.execPath, [captureJs, runDir, "reply", "a/b", "7", "55", reply], { encoding: "utf8" }).status, 0);
+      const outside = path.join(runDir, "outside.json");
+      nfsA.writeFileSync(outside, "{}");
+      for (const args of [["review", "a/b", "7", outside], ["review", "a/c", "7", review], ["review", "a/b", "8", review], ["comment", "a/b", "7", review], ["resolve", "nope"]]) {
+        const bad = spawnSync(process.execPath, [captureJs, runDir, ...args], { encoding: "utf8" });
+        assert.strictEqual(bad.status, 2, args.join(" "));
+        assert.match(bad.stderr, /^PUBLISH-REJECTED: /, args.join(" "));
+      }
+      assert.deepStrictEqual(publishMod.readPlan(runDir), [
+        { kind: "review", event: "COMMENT", body: "hi", commitId: SHA, comments: [] },
+        { kind: "reply", replyTo: 55, body: "still applies" },
+      ]);
+    });
+
+    test("publish: a review run's folder — under a root the skill accepts, fresh, with a wrapper that only hands over", () => {
+      const base = nfsA.realpathSync.native(nfsA.mkdtempSync(path.join(os.tmpdir(), "prdroot")));
+      const bad = path.join(base, "with space");
+      const good = path.join(base, "ok");
+      const runId = "11111111-1111-4111-8111-111111111111";
+      const f = publishMod.prepareRunFolder([bad, good], runId, { repo: "a/b", number: 7 }, "C:\\Program Files\\PR Dashboard\\PR Dashboard.exe", "C:\\app\\capture.js");
+      assert.ok(f && f.runDir.startsWith(good), "a root with a space is skipped");
+      assert.ok(pub.isUsableWrapperPath(f.wrapperPath));
+      const script = nfsA.readFileSync(f.wrapperPath, "utf8");
+      assert.match(script, /^#!\/bin\/sh\n/);
+      assert.ok(script.includes(`ELECTRON_RUN_AS_NODE=1 exec 'C:/Program Files/PR Dashboard/PR Dashboard.exe' 'C:/app/capture.js' '${f.runDir.replace(/\\/g, "/")}' "$@"`), script);
+      assert.deepStrictEqual(JSON.parse(nfsA.readFileSync(path.join(f.runDir, "run.json"), "utf8")), { repo: "a/b", number: 7, outDir: f.outDir, wrapperPath: f.wrapperPath });
+      nfsA.writeFileSync(path.join(f.outDir, "stale.json"), "{}");
+      const again = publishMod.prepareRunFolder([good], runId, { repo: "a/b", number: 7 }, "node", "c.js");
+      assert.ok(!nfsA.existsSync(path.join(again.outDir, "stale.json")), "nothing from before is kept");
+      assert.strictEqual(publishMod.prepareRunFolder([bad], "x", { repo: "a/b", number: 7 }, "node", "c.js"), null);
+    });
+
+    await atest("publish: the plan goes out one write at a time, and a retry carries on where it stopped", async () => {
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-pub-"));
+      const steps = [
+        { kind: "review", event: "COMMENT", body: "b", commitId: SHA, comments: [] },
+        { kind: "reply", replyTo: 9, body: "r" },
+        { kind: "resolve", threadId: "PRRT_z" },
+      ];
+      nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), `${steps.map((x) => JSON.stringify(x)).join("\n")}\n`);
+      const calls = [];
+      let failAt = 1;
+      const gh = async (args, opts = {}) => {
+        // The ownership checks before anything is posted.
+        if (args[1] === "graphql" && opts.input.includes("node(id:$id)")) {
+          return { code: 0, stdout: JSON.stringify({ data: { node: { isResolved: false, pullRequest: { number: 7, repository: { nameWithOwner: "a/b" } }, comments: { nodes: [{ author: { login: "Me" } }] } } } }), stderr: "" };
+        }
+        if (/^repos\/a\/b\/pulls\/comments\/\d+$/.test(args[1])) return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://creatio.ghe.com/api/v3/repos/a/b/pulls/7", user: { login: "me" } }), stderr: "" };
+        calls.push({ args, input: JSON.parse(opts.input) });
+        return calls.length - 1 === failAt ? { code: 1, stdout: "", stderr: "HTTP 422: line is not part of the diff" } : { code: 0, stdout: "{}", stderr: "" };
+      };
+      const ctx = { repo: "a/b", number: 7, signature: "sig", holdApprove: false };
+      const url = "https://creatio.ghe.com/a/b/pull/7";
+      const first = await publishMod.publishPlan(runDir, url, ctx, { viewer: "me", mine: true }, gh);
+      assert.deepStrictEqual([first.ok, first.posted, first.total], [false, 1, 3]);
+      assert.match(first.error, /reply to comment 9: HTTP 422/);
+      assert.deepStrictEqual(calls[0].args, ["api", "repos/a/b/pulls/7/reviews", "--method", "POST", "--input", "-", "--hostname", "creatio.ghe.com"]);
+      assert.strictEqual(calls[0].input.body, "b\n\nsig");
+      failAt = -1;
+      calls.length = 0;
+      const second = await publishMod.publishPlan(runDir, url, ctx, { viewer: "me", mine: true }, gh);
+      assert.deepStrictEqual([second.ok, second.posted], [true, 3]);
+      assert.deepStrictEqual(calls.map((c) => c.args[1]), ["repos/a/b/pulls/7/comments/9/replies", "graphql"], "the review is not posted twice");
+      calls.length = 0;
+      await publishMod.publishPlan(runDir, url, ctx, { viewer: "me", mine: true }, gh);
+      assert.strictEqual(calls.length, 0, "an all-posted plan posts nothing");
+      assert.deepStrictEqual(publishMod.ghApiArgs({ endpoint: "graphql" }, "https://github.com/a/b/pull/1"), ["api", "graphql", "--method", "POST", "--input", "-"]);
+    });
+
+    await atest("publish: a thread or comment of another PR stops the whole plan before anything is posted", async () => {
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-pub-"));
+      const steps = [
+        { kind: "review", event: "COMMENT", body: "b", comments: [] },
+        { kind: "resolve", threadId: "PRRT_elsewhere" },
+      ];
+      nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), `${steps.map((x) => JSON.stringify(x)).join("\n")}\n`);
+      const posted = [];
+      const gh = async (args, opts = {}) => {
+        if (args[1] === "graphql" && opts.input.includes("node(id:$id)")) return { code: 0, stdout: JSON.stringify({ data: { node: { pullRequest: { number: 99, repository: { nameWithOwner: "x/secret" } } } } }), stderr: "" };
+        posted.push(args);
+        return { code: 0, stdout: "{}", stderr: "" };
+      };
+      const out = await publishMod.publishPlan(runDir, "https://github.com/a/b/pull/7", { repo: "a/b", number: 7, signature: "s", holdApprove: false }, { viewer: "me", mine: true }, gh);
+      assert.deepStrictEqual([out.ok, out.posted], [false, 0]);
+      assert.match(out.error, /PRRT_elsewhere is not on a\/b#7/);
+      assert.strictEqual(posted.length, 0, "not even the review goes out");
+      const reply = await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 5, body: "x" }], "https://github.com/a/b/pull/7", "a/b", 7, { viewer: "me", mine: true }, async () => ({ code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/8" }), stderr: "" }));
+      assert.match(reply, /comment 5 is not on a\/b#7/);
+    });
+
+    test("merge: the method you pick, else Settings', else GitHub's — only if the repository allows it", () => {
+      const pr = { mergeMethods: { suggested: "squash", allowed: ["merge", "squash"] } };
+      assert.strictEqual(mergeMod.chooseMergeMethod(pr, "github"), "squash");
+      assert.strictEqual(mergeMod.chooseMergeMethod(pr, "merge"), "merge");
+      assert.strictEqual(mergeMod.chooseMergeMethod(pr, "rebase"), "squash", "a method the repository forbids falls back to GitHub's");
+      assert.strictEqual(mergeMod.chooseMergeMethod(pr, "github", "merge"), "merge");
+      assert.strictEqual(mergeMod.chooseMergeMethod(pr, "github", "rebase"), "squash");
+      assert.strictEqual(mergeMod.chooseMergeMethod({ mergeMethods: { suggested: null, allowed: [] } }, "github"), null);
+      assert.deepStrictEqual(mergeMod.mergeArgs("https://github.com/a/b/pull/7", "squash", SHA, true), ["pr", "merge", "https://github.com/a/b/pull/7", "--squash", "--match-head-commit", SHA, "--delete-branch"]);
+      assert.ok(!mergeMod.mergeArgs("u", "merge", SHA, false).includes("--delete-branch"));
+    });
+
+    test("agent merge: the branch other open PRs build on stays — stack layers above, or a PR based on it", () => {
+      const base = { id: "P1", repo: "a/b", hostLabel: "h", headRefName: "feat/x", stack: null };
+      assert.deepStrictEqual(mergeMod.builtOn(base, [{ id: "P1", repo: "a/b", hostLabel: "h", baseRefName: "main", number: 1 }]), []);
+      const onTop = [
+        { id: "P2", repo: "A/B", hostLabel: "h", baseRefName: "feat/x", number: 2 },
+        { id: "P3", repo: "a/b", hostLabel: "other", baseRefName: "feat/x", number: 3 },
+        { id: "P4", repo: "a/c", hostLabel: "h", baseRefName: "feat/x", number: 4 },
+      ];
+      assert.deepStrictEqual(mergeMod.builtOn(base, onTop), [2], "same host and repository only");
+      const layered = {
+        ...base,
+        stack: { number: 9, position: 1, size: 3, baseRefName: "main", entries: [
+          { number: 1, position: 1, state: "OPEN" },
+          { number: 5, position: 2, state: "OPEN" },
+          { number: 6, position: 3, state: "MERGED" },
+        ] },
+      };
+      assert.deepStrictEqual(mergeMod.builtOn(layered, onTop), [2, 5], "an open layer above; a merged one isn't");
+    });
+
+    test("agent policy: your PR is offered for merge only when ready, and each switch only narrows it", () => {
+      const mine = (o = {}) => ({ ...reviewPr({ role: "author" }), ...o });
+      assert.strictEqual(policy.mergeBlocker(mine(), agentOn()), null, "the fixture is a clean, approved, green PR");
+      const r = policy.planJobs([mine()], agentOn(), noSessions);
+      assert.deepStrictEqual(r.merges.map((j) => [j.scenario, j.key]), [["merge", "PR_R|merge|aaa111"]]);
+      assert.strictEqual(r.jobs.length, 0);
+      for (const [o, why] of [
+        [{ isDraft: true }, /Draft/],
+        [{ blockedByStack: true }, /stack/],
+        [{ hasConflicts: true }, /conflicts/],
+        [{ ciState: "failure" }, /red/],
+        [{ ciState: "pending" }, /running/],
+        [{ awaitingReview: true }, /reviewers/],
+        [{ canBeMerged: false }, /Not mergeable/],
+      ]) {
+        assert.match(policy.mergeBlocker(mine(o), agentOn()), why, JSON.stringify(o));
+      }
+      const pendingReviewer = mine({ reviewers: [{ login: "x", avatarUrl: "", reviewState: "pending" }] });
+      assert.match(policy.mergeBlocker(pendingReviewer, agentOn()), /every requested reviewer/);
+      assert.strictEqual(policy.mergeBlocker(pendingReviewer, agentOn({ scenarios: { merge: { requireAllReviewers: false } } })), null);
+      assert.match(policy.mergeBlocker(mine({ unresolvedThreads: 2 }), agentOn()), /2 unresolved threads/);
+      assert.strictEqual(policy.mergeBlocker(mine({ unresolvedThreads: 2 }), agentOn({ scenarios: { merge: { requireThreadsResolved: false } } })), null);
+      assert.match(policy.planJobs([mine({ isDraft: true })], agentOn(), noSessions).idle.get("PR_R"), /^Yours — draft/);
+      assert.match(policy.planJobs([mine()], agentOn({ scenarios: { merge: { mode: "off" } } }), noSessions).idle.get("PR_R"), /merge offers are off/);
+    });
+
+    test("agent stream: a skill's Workflow — its phases are the plan, and it counts as a background task", () => {
+      let p = stream.initialProgress();
+      p = stream.applyStreamEvent(p, { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "w1" }] });
+      assert.strictEqual(p.backgroundTasks, 1);
+      p = stream.applyStreamEvent(p, {
+        type: "system",
+        subtype: "task_progress",
+        description: "Review: security",
+        workflow_progress: [
+          { type: "workflow_phase", index: 1, title: "Context" },
+          { type: "workflow_phase", index: 2, title: "Review" },
+          { type: "workflow_phase", index: 3, title: "Publish" },
+          { type: "workflow_agent", index: 1, phaseIndex: 1, state: "done" },
+          { type: "workflow_agent", index: 2, phaseIndex: 2, state: "start" },
+          { type: "workflow_agent", index: 3, phaseIndex: 2, state: "done" },
+        ],
+      });
+      assert.deepStrictEqual(p.steps.map((s) => [s.subject, s.status]), [["Context", "completed"], ["Review", "in_progress"], ["Publish", "pending"]]);
+      assert.strictEqual(p.activity, "Review: security");
+      assert.strictEqual(stream.currentStep(p).subject, "Review");
+      assert.strictEqual(stream.describeToolUse("Workflow", { scriptPath: "C:\\x\\creatio-code-review-workflow.workflow.js" }), "Running the creatio-code-review-workflow workflow");
+      p = stream.applyStreamEvent(p, { type: "system", subtype: "background_tasks_changed", tasks: [] });
+      assert.strictEqual(p.backgroundTasks, 0);
+    });
+
+    await atest("agent runner: a result while a workflow runs keeps stdin open; the one after it closes it", async () => {
+      const c = fakeChild();
+      const h = runner.startRun(spec(), () => {}, () => c);
+      emit(c, { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "w" }] });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "launched" });
+      await tickOnce();
+      assert.strictEqual(c.ended, false, "the workflow's notification starts another turn");
+      emit(c, { type: "system", subtype: "background_tasks_changed", tasks: [] });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "the review" });
+      await tickOnce();
+      assert.strictEqual(c.ended, true);
+      c.emit("exit", 0);
+      const out = await h.done;
+      assert.strictEqual(out.progress.result.text, "the review", "the last result is the run's");
+      const a = runner.buildClaudeArgs(spec({ addDirs: ["/o", "/p"] }));
+      assert.deepStrictEqual(a.slice(a.indexOf("--add-dir"), a.indexOf("--add-dir") + 4), ["--add-dir", "/o", "--add-dir", "/p"]);
+      assert.ok(a.indexOf("--add-dir") < a.indexOf("--allowedTools"), "--allowedTools stays last");
+    });
+
+    await atest("agent runner: a process ended before its session finished is cut short — Ctrl+C, a signal, or a workflow still running", async () => {
+      // A review launched its workflow in the background, ended that turn, and
+      // Windows restarted under it: the result it left is the waiting turn's.
+      const c = fakeChild();
+      const h = runner.startRun(spec(), () => {}, () => c);
+      emit(c, { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "w" }] });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "The review workflow is running in the background. I'll report once it completes." });
+      await tickOnce();
+      c.emit("exit", runner.STATUS_CONTROL_C_EXIT, null);
+      const out = await h.done;
+      assert.strictEqual(out.exitCode, 3221225786);
+      assert.match(runner.cutShort(out), /process was ended/);
+
+      const fin = { subtype: "success", isError: false, text: "the review", denials: 0 };
+      const at = (over, exitCode, signal = null) => runner.cutShort({ progress: { ...out.progress, ...over }, exitCode, signal });
+      assert.strictEqual(at({ backgroundTasks: 0, result: fin }, 0), null, "finished");
+      assert.strictEqual(at({ backgroundTasks: 0, result: fin }, runner.STATUS_CONTROL_C_EXIT), null, "its answer came before the end");
+      assert.match(at({ backgroundTasks: 0, result: null }, runner.STATUS_CONTROL_C_EXIT), /Ctrl\+C, or Windows shutting down/);
+      assert.match(at({ backgroundTasks: 0, result: null }, null, "SIGTERM"), /\(SIGTERM\)/);
+      assert.match(at({ backgroundTasks: 1 }, 0), /workflow was still running/, "it exited by itself with its workflow unfinished");
+      assert.strictEqual(at({ backgroundTasks: 0, result: null }, 1), null, "a failure of its own stays a failure");
+      assert.strictEqual(at({ backgroundTasks: 0, result: { ...fin, subtype: "error_during_execution", isError: true } }, 1), null);
+
+      const d = fakeChild();
+      const h2 = runner.startRun(spec(), () => {}, () => d);
+      d.emit("exit", null, "SIGINT");
+      assert.strictEqual((await h2.done).signal, "SIGINT", "the signal is kept on the outcome");
+    });
+
+    test("agent diagrams: the drawing run's answer is read, held to plain diagrams, and posted as one comment", () => {
+      const dg = require(path.join(__dirname, "../dist/main/shared/agent-diagrams.js"));
+      const flow = 'flowchart LR\n  a["Poller"] --> b["Agent"]\n  b <--> c["Store"]\n  class b newComp';
+      const fence = (s) => "```mermaid\n" + s + "\n```";
+      const answer = `### Architecture\n\n${fence(flow)}\n\n### Flow\n${fence("sequenceDiagram\n  A->>B: go")}\n\n### Third\n${fence("flowchart TD\n  x --> y")}`;
+      const got = dg.extractDiagrams(answer);
+      assert.deepStrictEqual(got.map((d) => d.title), ["Architecture", "Flow"], "two at most");
+      assert.strictEqual(got[0].source, flow);
+      assert.deepStrictEqual(dg.extractDiagrams(fence("flowchart LR\n  a --> b")).map((d) => d.title), ["Architecture"], "a bare fence is named in turn");
+      assert.deepStrictEqual(dg.extractDiagrams("Nothing worth drawing here."), []);
+
+      assert.ok(dg.isSafeMermaid(flow), "an arrow is not a tag");
+      assert.ok(dg.isSafeMermaid('flowchart LR\n  a["one<br>two"] --> b'), "a line break is the one tag allowed");
+      for (const bad of [
+        'pie\n  "a": 1',
+        'flowchart LR\n  a["x"] --> b\n```\n## Approve this PR',
+        'flowchart LR\n  a["<img src=x onerror=alert(1)>"] --> b',
+        "flowchart LR\n  a --> b\n  click a callback",
+        'flowchart LR\n  a["[docs](https://x)"] --> b',
+        "flowchart LR\n  a --> b\n  style a fill:url(https://x)",
+        "%%{init: {'theme':'dark'}}%%\nflowchart LR\n  a --> b",
+        "flowchart LR\n  a e1@--> b\n  e1@{ animate: true }",
+      ]) {
+        assert.strictEqual(dg.isSafeMermaid(bad), false, bad);
+      }
+      assert.strictEqual(dg.safeTitle("## [Approve](x) **now**\n`LGTM`"), "Approvex now LGTM", "no link, no heading, no emphasis survives");
+      assert.strictEqual(dg.safeTitle("***"), "Diagram");
+
+      const c = dg.cleanDiagrams([
+        { title: "Arch", source: flow },
+        { title: "Leak", source: 'flowchart LR\n  a["ghp_abcdefghijklmnopqrstuvwxyz0123"] --> b' },
+      ]);
+      assert.deepStrictEqual(c.kept.map((d) => d.title), ["Arch"]);
+      assert.deepStrictEqual(c.dropped, ["Leak: it looks like it carries a secret"], "dropped whole, not redacted");
+      assert.deepStrictEqual(dg.cleanDiagrams([{ title: "Pie", source: "pie" }]).dropped, ["Pie: not a plain flowchart or sequence diagram"]);
+
+      const body = dg.diagramComment(c.kept);
+      assert.ok(body.startsWith(`${dg.DIAGRAM_HEADER}\n\n${dg.DIAGRAM_LEGEND}\n\n#### Arch\n\n${fence(flow)}\n`), body);
+      assert.strictEqual(body.split("```").length, 3, "one fence, closed");
+      assert.strictEqual(dg.diagramComment([{ title: "x", source: "pie" }]), "", "nothing unsafe goes out");
+      assert.ok(dg.hasMermaid(`text\n${fence("flowchart LR")}`));
+      assert.ok(!dg.hasMermaid("```js\nmermaid()\n```"));
+
+      const diff = "diff --git a/src/a.ts b/src/a.ts\n+x\ndiff --git a/src/b.ts b/src/b.ts\n+y\n";
+      assert.match(
+        dg.diagramPrompt({ title: "Add  retry", summary: "Retries\nfetches.", diff }),
+        /^Pull request: Add retry\nWhat it does: Retries fetches\.\n\nChanged files \(2\):\n- src\/a\.ts\n- src\/b\.ts\n\nDiff:\n/,
+      );
+      assert.match(dg.diagramPrompt({ title: "t", diff: "x".repeat(dg.DIAGRAM_DIFF_MAX + 5) }), /\nDiff \(cut\):\n/);
+
+      const on = { enabled: true, minLines: 100, post: true, model: "" };
+      assert.strictEqual(dg.wantsDiagrams("review", { additions: 90, deletions: 10 }, on), true);
+      assert.strictEqual(dg.wantsDiagrams("review", { additions: 90, deletions: 9 }, on), false, "below the threshold");
+      assert.strictEqual(dg.wantsDiagrams("brief", { additions: 900, deletions: 0 }, on), true);
+      assert.strictEqual(dg.wantsDiagrams("rereview", { additions: 900, deletions: 0 }, on), false, "a re-review's PR was drawn with its first review");
+      assert.strictEqual(dg.wantsDiagrams("review", { additions: 900, deletions: 0 }, { ...on, enabled: false }), false);
+    });
+
+    test("agent diagrams: on by default from 100 lines and posted with the review; the model is a name only", () => {
+      assert.deepStrictEqual(cfg.validateAgent(undefined).diagrams, { enabled: true, minLines: 100, post: true, model: "sonnet" });
+      assert.deepStrictEqual(cfg.validateAgent({ diagrams: { enabled: false, minLines: -5, post: false, model: "" } }).diagrams, {
+        enabled: false,
+        minLines: 0,
+        post: false,
+        model: "",
+      });
+      assert.strictEqual(cfg.validateAgent({ diagrams: { model: "--dangerously-skip-permissions" } }).diagrams.model, "sonnet", "it goes on a command line");
+      assert.strictEqual(cfg.validateAgent({ diagrams: { model: "claude-sonnet-5-5" } }).diagrams.model, "claude-sonnet-5-5");
+    });
+
+    test("agent diagrams: the drawing run answers once, with no tools and nothing of yours loaded or saved", () => {
+      const md = require(path.join(__dirname, "../dist/main/main/agent/diagrams.js"));
+      const a = md.diagramArgs("sonnet");
+      for (const flag of ["-p", "--no-session-persistence", "--restricted", "--strict-mcp-config", "--disable-slash-commands"]) assert.ok(a.includes(flag), flag);
+      assert.strictEqual(a[a.indexOf("--tools") + 1], "", "no tools at all");
+      assert.strictEqual(a[a.indexOf("--output-format") + 1], "json");
+      assert.deepStrictEqual(a.slice(-2), ["--model", "sonnet"]);
+      assert.ok(!md.diagramArgs("").includes("--model"));
+    });
+
+    test("agent publish: a note is a comment in the PR's conversation, signed — never one a session records", () => {
+      const pubM = require(path.join(__dirname, "../dist/main/shared/agent-publish.js"));
+      const steps = [{ kind: "note", body: "### Diagrams of this change", label: "diagrams comment" }];
+      assert.deepStrictEqual(pubM.planRequests(steps, { repo: "a/b", number: 7, signature: "— sig", holdApprove: false }), [
+        { label: "diagrams comment", endpoint: "repos/a/b/issues/7/comments", body: { body: "### Diagrams of this change\n\n— sig" } },
+      ]);
+      assert.strictEqual(pubM.summarizePlan(steps).resolves, 0, "not counted as a resolve");
+      assert.strictEqual(pubM.describePlan({ ...pubM.summarizePlan([]), event: "COMMENT", diagrams: 2 }), "comment, 2 diagrams");
+      assert.deepStrictEqual(pubM.readPlanLines(JSON.stringify(steps[0])), [], "the plan file never yields one");
+    });
+
+    // --- re-approve: approvals a base-only push dismissed ---
+    const ra = require(path.join(__dirname, "../dist/main/shared/agent-reapprove.js"));
+    // A review's id is its author and submission time here; a dismissal names the review it dismissed by that id.
+    const review = (login, state, at, oid) => ({ __typename: "PullRequestReview", id: `R:${login}:${at}`, author: { login }, state, submittedAt: at, commit: { oid } });
+    const dismissal = (login, previousReviewState, at, oid) => ({ __typename: "ReviewDismissedEvent", previousReviewState, review: { id: `R:${login}:${at}`, author: { login }, commit: { oid } } });
+    // git as the base-only check calls it: the subcommand after the safeGit "-c" pairs.
+    const gitCmd = (args) => {
+      let i = 0;
+      while (args[i] === "-c") i += 2;
+      return args.slice(i);
+    };
+    // A clone where the approved head was followed by one clean merge of the base.
+    const cleanMergeGit = (o = {}) => async (args) => {
+      const a = gitCmd(args);
+      switch (a[0]) {
+        case "ls-remote":
+          return `base1\trefs/heads/${o.base ?? "master"}\n${o.head ?? "aaa111"}\trefs/pull/7/head\n`;
+        case "merge-base":
+          if (o.rewritten) throw new Error("git merge-base: exit 1");
+          return "";
+        case "rev-list":
+          return a[1] === "--parents" ? (o.own ?? "m1 old111 base1\n") : (o.chain ?? "m1\n");
+        case "rev-parse":
+          return "tree1\n";
+        case "merge-tree":
+          if (o.conflict) throw new Error("git merge-tree: CONFLICT (content): Merge conflict in a.txt");
+          return `${o.clean ?? "tree1"}\nAuto-merging a.txt\n`;
+        default:
+          return "";
+      }
+    };
+
+    test("agent re-approve: a dismissed approval is told from a dismissed change request, a later word and the current head", () => {
+      const t = [
+        review("Anna", "DISMISSED", "2026-11-01T10:00:00Z", "old111"),
+        dismissal("Anna", "APPROVED", "2026-11-01T10:00:00Z", "old111"),
+        review("ivan", "DISMISSED", "2026-11-01T11:00:00Z", "old111"),
+        dismissal("ivan", "CHANGES_REQUESTED", "2026-11-01T11:00:00Z", "old111"),
+        // An approval dismissed, then a change request on the same commit, dismissed too:
+        // the latest is the change request — author and commit alone would match the approval.
+        review("zoe", "DISMISSED", "2026-11-01T08:00:00Z", "old111"),
+        dismissal("zoe", "APPROVED", "2026-11-01T08:00:00Z", "old111"),
+        review("zoe", "DISMISSED", "2026-11-01T12:00:00Z", "old111"),
+        dismissal("zoe", "CHANGES_REQUESTED", "2026-11-01T12:00:00Z", "old111"),
+        review("olga", "DISMISSED", "2026-11-01T09:00:00Z", "old111"),
+        dismissal("olga", "APPROVED", "2026-11-01T09:00:00Z", "old111"),
+        review("olga", "COMMENTED", "2026-11-02T09:00:00Z", "new222"),
+        review("petr", "DISMISSED", "2026-11-01T09:00:00Z", "new222"),
+        dismissal("petr", "APPROVED", "2026-11-01T09:00:00Z", "new222"),
+        review("author1", "DISMISSED", "2026-11-01T09:00:00Z", "old111"),
+        dismissal("author1", "APPROVED", "2026-11-01T09:00:00Z", "old111"),
+        { __typename: "PullRequestReview", id: "R:draft", author: { login: "draft" }, state: "PENDING", submittedAt: null, commit: { oid: "old111" } },
+      ];
+      assert.deepStrictEqual(
+        ra.dismissedApprovals(t, "new222", ["AUTHOR1"]),
+        [{ login: "Anna", head: "old111" }],
+        "ivan's and zoe's latest were change requests, olga spoke since, petr's was on this head, the author is out",
+      );
+      assert.deepStrictEqual(ra.dismissedApprovals([], "new222"), []);
+    });
+
+    test("agent re-approve: the commits since the approval decide — merges of the base on the branch's own walk, nothing else", () => {
+      const chain = (...shas) => new Set(shas);
+      assert.deepStrictEqual(ra.baseMerges([["m2", "m1", "b2"], ["m1", "old", "b1"]], chain("m2", "m1")), {
+        merges: [
+          { sha: "m2", parents: ["m1", "b2"] },
+          { sha: "m1", parents: ["old", "b1"] },
+        ],
+      });
+      assert.deepStrictEqual(ra.baseMerges([], chain()), { why: "nothing new on the branch since the approval" });
+      assert.deepStrictEqual(ra.baseMerges([["m1", "old", "b1"], ["c1", "old"]], chain("m1")), { why: "the author pushed commits of their own since the approval" });
+      assert.deepStrictEqual(ra.baseMerges([["m1", "old", "b1", "x1"]], chain("m1")), { why: "an octopus merge since the approval" });
+      assert.deepStrictEqual(ra.baseMerges([["m1", "old", "x1"], ["x1", "old", "y1"]], chain("m1")), { why: "a merge brought in commits that aren't the base's" }, "a second parent that isn't the base's shows up as a commit of its own");
+      assert.deepStrictEqual(ra.baseMerges([["m1", "b9", "b1"]], chain("m1", "b9")), { why: "the branch took base commits without a merge" });
+      assert.strictEqual(ra.reapprovalBody("0123456789abcdef"), "Re-approved: only the base branch changed since my approval at `0123456` — the PR's own changes are the same.");
+    });
+
+    await atest("agent re-approve: in a real clone a clean merge of the base passes; a merge with changes of its own, an own commit, a rewrite and a conflict don't", async () => {
+      const md = require(path.join(__dirname, "../dist/main/main/agent/reapprove.js"));
+      const wt = require(path.join(__dirname, "../dist/main/main/agent/worktrees.js"));
+      const { execFileSync } = require("node:child_process");
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-reapprove-"));
+      const remote = path.join(root, "remote.git");
+      const co = path.join(root, "co");
+      const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+      const g = (...args) => execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", ...args], { cwd: co, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+      const write = (file, text) => nfsA.writeFileSync(path.join(co, file), text);
+      const lines = (over = {}) => Array.from({ length: 12 }, (_, i) => over[i + 1] ?? `line ${i + 1}`).join("\n") + "\n";
+      execFileSync("git", ["init", "--bare", "-b", "master", remote], { env, stdio: "ignore" });
+      execFileSync("git", ["clone", remote, co], { env, stdio: "ignore" });
+      g("checkout", "-b", "master");
+      write("a.txt", lines());
+      g("add", ".");
+      g("commit", "-m", "base");
+      g("push", "origin", "master");
+      g("checkout", "-b", "feature");
+      write("a.txt", lines({ 2: "the PR's line" }));
+      g("commit", "-am", "the PR");
+      const old = g("rev-parse", "HEAD");
+      const pushPr = () => {
+        g("push", "-f", "origin", "HEAD:refs/pull/1/head");
+        return g("rev-parse", "HEAD");
+      };
+      pushPr();
+      // The base moves, away from the PR's line, and is merged in cleanly.
+      g("checkout", "master");
+      write("b.txt", "the base's file\n");
+      g("add", ".");
+      g("commit", "-m", "base moves");
+      g("push", "origin", "master");
+      g("checkout", "feature");
+      g("merge", "--no-edit", "master");
+      const clean = pushPr();
+      const local = { git: wt.runGit, checkout: co, remote: "origin" };
+      const check = (head) => md.baseOnlyPush(local, { number: 1, baseRefName: "master" }, old, head);
+      assert.strictEqual(await check(clean), null, "a clean merge of the base");
+
+      // The same merge with one more change folded into it.
+      write("a.txt", lines({ 2: "the PR's line", 11: "slipped into the merge" }));
+      g("commit", "--amend", "-a", "--no-edit");
+      assert.strictEqual(await check(pushPr()), "a merge carries changes of its own");
+
+      // A commit of the author's after the clean merge.
+      g("reset", "--hard", clean);
+      write("c.txt", "more\n");
+      g("add", ".");
+      g("commit", "-m", "more");
+      assert.strictEqual(await check(pushPr()), "the author pushed commits of their own since the approval");
+
+      // The branch rebased onto the base instead of merging it.
+      g("checkout", "-B", "rebased", old);
+      g("rebase", "master");
+      assert.strictEqual(await check(pushPr()), "the branch was rewritten since the approval");
+
+      // The base changes the PR's line too; the conflict is resolved by hand.
+      g("checkout", "master");
+      write("a.txt", lines({ 2: "the base's own line 2" }));
+      g("commit", "-am", "base touches line 2");
+      g("push", "origin", "master");
+      g("checkout", "-B", "conflict", old);
+      try {
+        g("merge", "--no-edit", "master");
+      } catch {
+        // The conflict, as expected.
+      }
+      write("a.txt", lines({ 2: "the PR's line" }));
+      g("add", ".");
+      g("commit", "--no-edit");
+      const conflicted = pushPr();
+      assert.strictEqual(await check(conflicted), "a merge had conflicts resolved by hand");
+
+      await assert.rejects(check(clean), /newer head/, "the PR moved on since the dashboard saw it");
+      // Your clone behind the remote: the check fetches what it needs and moves none of its refs.
+      g("update-ref", "refs/remotes/origin/master", old);
+      assert.strictEqual(await check(conflicted), "a merge had conflicts resolved by hand");
+      assert.strictEqual(g("rev-parse", "refs/remotes/origin/master"), old, "the remote-tracking branch stays where it was");
+      assert.ok(!nfsA.existsSync(path.join(co, ".git", "FETCH_HEAD")), "and no FETCH_HEAD is written");
+    });
+
+    test("agent re-approve: the policy holds someone's PR while its head is checked, and re-asks beside driving your own", () => {
+      const s = agentOn();
+      assert.deepStrictEqual(s.scenarios.reapprove, { mode: "shadow", askReviewers: true }, "a scenario that posts starts in Shadow");
+      const theirs = reviewPr({ role: "reviewed" });
+      const at = (state) => policy.planJobs([theirs], s, { ...noSessions, reapproveState: () => state });
+      let r = at("unchecked");
+      assert.deepStrictEqual(r.reapprovals.map((j) => [j.scenario, j.key, j.mode]), [["reapprove", "PR_R|reapprove|aaa111", "shadow"]]);
+      assert.strictEqual(r.idle.get("PR_R"), "Checking whether only the base changed since your approval");
+      assert.strictEqual(at("same").idle.get("PR_R"), "Only the base changed since your approval");
+      r = at("pass");
+      assert.deepStrictEqual(r.reapprovals, []);
+      assert.notStrictEqual(r.idle.get("PR_R"), "Only the base changed since your approval", "the other rules decide");
+      assert.deepStrictEqual(policy.planJobs([theirs], s, noSessions).reapprovals, [], "no hook: pass");
+      assert.deepStrictEqual(policy.planJobs([{ ...theirs, viewerHasReviewed: true }], s, { ...noSessions, reapproveState: () => "unchecked" }).reapprovals, [], "your approval stands");
+      assert.deepStrictEqual(policy.planJobs([theirs], agentOn({ scenarios: { reapprove: { mode: "off" } } }), { ...noSessions, reapproveState: () => "unchecked" }).reapprovals, []);
+
+      // The fixture's PR carries an approval; the base took it away.
+      const mine = { ...reviewPr({ role: "author" }), hasHumanApproval: false };
+      r = policy.planJobs([mine], s, { ...noSessions, reapproveState: () => "unchecked" });
+      assert.deepStrictEqual(r.reapprovals.map((j) => j.scenario), ["reask"]);
+      assert.strictEqual(r.jobs.length + r.merges.length + (r.idle.has("PR_R") ? 1 : 0) > 0, true, "your PR still goes through its own rules");
+      assert.deepStrictEqual(policy.planJobs([mine], agentOn({ scenarios: { reapprove: { mode: "shadow", askReviewers: false } } }), { ...noSessions, reapproveState: () => "unchecked" }).reapprovals, []);
+      assert.deepStrictEqual(policy.planJobs([{ ...mine, hasHumanApproval: true }], s, { ...noSessions, reapproveState: () => "unchecked" }).reapprovals, [], "an approval stands");
+    });
+
+    await atest("agent re-approve: the check reads the timeline once, checks the push in your clone, and passes on whatever isn't a base-only push", async () => {
+      const md = require(path.join(__dirname, "../dist/main/main/agent/reapprove.js"));
+      const timeline = [review("me", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("me", "APPROVED", "2026-11-01T10:00:00Z", "old111")];
+      const fake = (o = {}) => {
+        const calls = [];
+        const gh = async (args, opts) => {
+          calls.push(args);
+          assert.strictEqual(args[1], "graphql", "nothing but the timeline is read from the API");
+          assert.match(JSON.parse(opts.input).query, /REVIEW_DISMISSED_EVENT/);
+          return { code: 0, stdout: JSON.stringify({ data: { viewer: { login: "me" }, node: { state: o.state ?? "OPEN", headRefOid: o.head ?? "aaa111", baseRefName: "release/8.3", author: { login: "author1" }, timelineItems: { nodes: o.timeline ?? timeline } } } }), stderr: "" };
+        };
+        return { gh, calls };
+      };
+      const gitCalls = [];
+      const local = (o = {}) => ({ git: async (args) => (gitCalls.push(gitCmd(args)), cleanMergeGit({ base: "release/8.3", ...o })(args)), checkout: "/co", remote: "origin" });
+      const target = { id: "PR_R", url: "https://github.com/a/b/pull/7", repo: "a/b", number: 7, headOid: "aaa111" };
+      const ok = fake();
+      assert.deepStrictEqual(await md.checkReapproval(ok.gh, target, "reapprove", local()), { verdict: "same", logins: ["me"], oldHead: "old111", note: "only merges of the base since old111" });
+      assert.deepStrictEqual(gitCalls.find((a) => a[0] === "fetch"), ["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", "refs/heads/release/8.3", "refs/pull/7/head"]);
+      assert.deepStrictEqual(gitCalls.find((a) => a[0] === "merge-tree"), ["merge-tree", "--write-tree", "old111", "base1"]);
+      const note = async (o, l = local()) => (await md.checkReapproval(fake(o).gh, target, "reapprove", l)).note;
+      assert.strictEqual(await note({}, local({ own: "c1 old111\n", chain: "c1\n" })), "the author pushed commits of their own since the approval");
+      assert.strictEqual(await note({}, local({ clean: "tree2" })), "a merge carries changes of its own");
+      assert.strictEqual(await note({}, local({ conflict: true })), "a merge had conflicts resolved by hand");
+      assert.strictEqual(await note({}, local({ rewritten: true })), "the branch was rewritten since the approval");
+      assert.strictEqual(await note({}, null), "no clone of the repository to check the push in");
+      assert.strictEqual((await md.checkReapproval(fake().gh, target, "reask", local())).note, "no dismissed approvals", "on your PR, your own approval is no reviewer's");
+      assert.strictEqual((await md.checkReapproval(fake({ state: "MERGED" }).gh, target, "reapprove", local())).verdict, "pass");
+      await assert.rejects(md.checkReapproval(fake({ head: "bbb222" }).gh, target, "reapprove", local()), /newer head/, "the dashboard is behind: checked again later");
+      await assert.rejects(md.checkReapproval(fake().gh, target, "reapprove", local({ head: "ccc333" })), /newer head/, "so is the remote");
+      assert.deepStrictEqual(md.reapproveRequest("a/b", 7, "aaa111", "old111", "— sig"), {
+        label: "approval",
+        endpoint: "repos/a/b/pulls/7/reviews",
+        body: { event: "APPROVE", commit_id: "aaa111", body: `${ra.reapprovalBody("old111")}\n\n— sig` },
+      });
+      assert.deepStrictEqual(md.reaskRequest("a/b", 7, ["anna"]).body, { reviewers: ["anna"] });
+    });
+
+    test("agent plugins: your own skills a prompt names are mounted as a plugin of the run's own", () => {
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-skills-"));
+      const skills = path.join(home, "skills");
+      nfsA.mkdirSync(path.join(skills, "twg-jira-resolve-merged-work"), { recursive: true });
+      nfsA.writeFileSync(path.join(skills, "twg-jira-resolve-merged-work", "SKILL.md"), "---\nname: twg-jira-resolve-merged-work\n---\n");
+      nfsA.mkdirSync(path.join(skills, "creatio-code-review"), { recursive: true });
+      nfsA.writeFileSync(path.join(skills, "creatio-code-review", "SKILL.md"), "x");
+      const owned = [{ name: "creatio-development", installPath: "/p", skills: ["creatio-code-review"] }];
+      const mount = path.join(home, "mount");
+      const r = plugins.mountUserSkills("/twg-jira-resolve-merged-work {url} and /creatio-code-review and /nope", owned, mount, skills);
+      assert.strictEqual(r.prompt, "/prd-user-skills:twg-jira-resolve-merged-work {url} and /creatio-code-review and /nope", "a plugin's skill and an unknown one stay as written");
+      assert.deepStrictEqual(r.pluginDirs, [mount]);
+      assert.strictEqual(JSON.parse(nfsA.readFileSync(path.join(mount, ".claude-plugin", "plugin.json"), "utf8")).name, "prd-user-skills");
+      assert.ok(nfsA.existsSync(path.join(mount, "skills", "twg-jira-resolve-merged-work", "SKILL.md")));
+      assert.ok(!nfsA.existsSync(path.join(mount, "skills", "creatio-code-review")), "only what the prompt names");
+      assert.deepStrictEqual(plugins.mountUserSkills("/nope", owned, mount, skills), { prompt: "/nope", pluginDirs: [] });
+    });
+
+    await atest("agent publish: a shadow review's writes are captured, then posted on your Publish — signed, once, at the head it saw", async () => {
+      const posted = [];
+      const notices = [];
+      let head = "aaa111";
+      const f = agentFixture({
+        script: reviewWithPlan(),
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: { ...reviewPr(), headOid: head }, state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => (posted.push({ args, body: JSON.parse(opts.input) }), { code: 0, stdout: "{}", stderr: "" }),
+        notify: (n) => notices.push([n.kind, n.item.headline]),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.headline, "Would post: request changes, 1 inline comment");
+        assert.strictEqual(actionLabel(item), "Send review");
+        assert.strictEqual(posted.length, 0, "Shadow posts nothing by itself");
+        assert.deepStrictEqual(notices, [["needsYou", item.headline]]);
+        const args = f.children[0].args;
+        assert.ok(args.includes("Write") && args.some((a) => /^Bash\(\/.*pr-review-publish\.sh \*\)$/.test(a)), "the wrapper's rule and Write are granted");
+        assert.match(args[args.indexOf("--append-system-prompt") + 1], /publishCommand: "\/.*pr-review-publish\.sh"/);
+        const sf = args[args.indexOf("--settings") + 1];
+        const g = JSON.parse(nfsA.readFileSync(path.join(path.dirname(sf), "guard.json"), "utf8"));
+        assert.ok(g.wrapperPath && g.outDir && Array.isArray(g.workflowDirs), "the guard knows the run's wrapper and payload folder");
+        assert.strictEqual(g.workDir, item.worktree, "a review's guard knows its worktree too");
+        assert.deepStrictEqual(g.readDirs.slice(0, 2), [item.worktree, g.outDir], "it reads its worktree and payload folder");
+        assert.strictEqual(g.sessionId, args[args.indexOf("--session-id") + 1], "and its own session's spill-over");
+        assert.ok(g.sessionRoots.length >= 2);
+        assert.match(nfsA.readFileSync(sf, "utf8"), /guard\.json/, "and the hook is handed that file");
+        head = "bbb222";
+        assert.match((await f.agent.act({ type: "publish", runId: item.runId })).error, /new commits/);
+        assert.strictEqual(posted.length, 0);
+        head = "aaa111";
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.strictEqual(posted.length, 1);
+        assert.strictEqual(posted[0].args[1], `repos/${item.repo}/pulls/7/reviews`);
+        assert.strictEqual(posted[0].body.event, "REQUEST_CHANGES");
+        assert.ok(posted[0].body.body.endsWith(ad.DEFAULT_AGENT_SIGNATURE), "the signature is the app's");
+        assert.deepStrictEqual([only(f)[0].state, only(f)[0].published], ["done", true]);
+        assert.strictEqual(f.agent.getState().acceptedUnchanged, 1);
+        assert.strictEqual((await f.agent.act({ type: "publish", runId: item.runId })).ok, false, "never twice");
+        assert.strictEqual(posted.length, 1);
+        const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+        assert.strictEqual(state.ledger[item.key].state, "published");
+        assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"published"/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent publish: in On the app posts right after the run, and holds an approve while someone else asks for changes", async () => {
+      const posted = [];
+      const f = agentFixture({
+        agent: { scenarios: { review: { mode: "on", holdApproveOnChangeRequest: true } } },
+        script: reviewWithPlan("APPROVE"),
+        captureScript: captureJs,
+        fetchPr: async () => ({
+          pr: { ...reviewPr(), reviewers: [{ login: "other", avatarUrl: "", reviewState: "changes_requested" }, { login: "me", avatarUrl: "", reviewState: "approved" }] },
+          state: "OPEN",
+          viewer: "me",
+        }),
+        gh: async (_args, opts) => (posted.push(JSON.parse(opts.input)), { code: 0, stdout: "", stderr: "" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "done"));
+        assert.strictEqual(posted.length, 1);
+        assert.strictEqual(posted[0].event, "COMMENT");
+        assert.ok(posted[0].body.includes(pub.HELD_APPROVE_NOTE));
+        assert.match(only(f)[0].headline, /^Published: comment, 1 inline comment \(approve held\)$/);
+        assert.strictEqual(f.agent.getState().acceptedUnchanged, 0, "only your own Publish counts toward the On hint");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent merge: your ready PR gets an offer; the click merges that head only, then the Jira dry run runs", async () => {
+      const ghCalls = [];
+      const notices = [];
+      const mine = { ...reviewPr({ role: "author" }), mergeMethods: { suggested: "squash", allowed: ["squash", "merge"] } };
+      const f = agentFixture({
+        pr: mine,
+        script: succeed("Would resolve ENG-1."),
+        fetchPr: async () => ({ pr: mine, state: "OPEN", viewer: "me" }),
+        gh: async (args) => (ghCalls.push(args), { code: 0, stdout: "✓ Squashed and merged", stderr: "" }),
+        notify: (n) => notices.push(n.kind),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const offer = only(f)[0];
+        assert.deepStrictEqual([offer.scenario, offer.state, offer.headline, offer.mergeMethod], ["merge", "needsYou", "Ready to merge — squash", "squash"]);
+        assert.strictEqual(f.children.length, 0, "an offer starts no session");
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(only(f).length, 1, "one offer per head");
+        assert.deepStrictEqual(await f.agent.act({ type: "merge", runId: offer.runId, method: "merge" }), { ok: true });
+        assert.deepStrictEqual(ghCalls[0], ["pr", "merge", mine.url, "--merge", "--match-head-commit", "aaa111", "--delete-branch"]);
+        assert.match(only(f)[0].headline, /^Merged \(merge\), branch deleted$/);
+        // The PR leaves the dashboard; its Jira dry run still runs and still shows.
+        f.snapshot.pullRequests = [];
+        await until(() => only(f).some((i) => i.scenario === "afterMerge" && i.state === "needsYou"));
+        const dry = only(f).find((i) => i.scenario === "afterMerge");
+        assert.strictEqual(dry.headline, "Jira dry run ready — apply it in a session");
+        assert.strictEqual(actionLabel(dry), "Update Jira…");
+        const settingsFile = f.children[0].args[f.children[0].args.indexOf("--settings") + 1];
+        assert.match(nfsA.readFileSync(settingsFile, "utf8"), /hook\.js[\s\S]*afterMerge/, "the dry run runs under the read-only guard");
+        assert.match(f.children[0].args[f.children[0].args.indexOf("--append-system-prompt") + 1], /change nothing in Jira/);
+        assert.ok(notices.includes("needsYou") && notices.includes("finished"));
+        const board = view.stageColumns([], [], f.agent.getState(), { today: view.todayKey(new Date()) });
+        assert.ok(board.mine.done.some((c) => c.stage.item?.runId === dry.runId && c.stage.action?.kind === "updateJira"), "it shows under Merged today though its PR is gone");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent merge: a push since the offer, or a PR no longer ready, merges nothing", async () => {
+      const ghCalls = [];
+      const mine = { ...reviewPr({ role: "author" }), mergeMethods: { suggested: "squash", allowed: ["squash"] } };
+      let fresh = { ...mine, headOid: "ccc333" };
+      const f = agentFixture({
+        pr: mine,
+        script: succeed("x"),
+        fetchPr: async () => ({ pr: fresh, state: "OPEN", viewer: "me" }),
+        gh: async (args) => (ghCalls.push(args), { code: 0, stdout: "", stderr: "" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const offer = only(f)[0];
+        assert.match((await f.agent.act({ type: "merge", runId: offer.runId })).error, /new commits/);
+        fresh = { ...mine, ciState: "failure" };
+        assert.match((await f.agent.act({ type: "merge", runId: offer.runId })).error, /CI is red/);
+        assert.strictEqual(ghCalls.length, 0);
+        assert.strictEqual(only(f)[0].state, "needsYou");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("ipc: Publish names a run; Merge may name a method the app knows", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "publish", runId: RID }), { type: "publish", runId: RID });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "merge", runId: RID }), { type: "merge", runId: RID });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "merge", runId: RID, method: "rebase", extra: 1 }), { type: "merge", runId: RID, method: "rebase" });
+    });
+
+    test("agent view: the first button of a prepared review is Publish, of an offer Merge", () => {
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, sessionId: "s" })), "Send review");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", plan: { event: "COMMENT" }, published: true, sessionId: "s" })), null, "sent: nothing left to do");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "merge" })), "Merge");
+    });
+
+    // --- stage 5: re-review (threads, escalations) and drive (commits, the app's push) ---
+    const driveMod = require(path.join(__dirname, "../dist/main/main/agent/drive.js"));
+    const captureMod = require(captureJs);
+
+    test("publish plan: an escalation holds back the reply to its thread and is listed for you; re-review switches drop resolves and approves", () => {
+      assert.deepStrictEqual(pub.parsePublishCall(["escalate", "a/b", "7", "55", "/x/why.txt"]).value, { sub: "escalate", repo: "a/b", number: 7, replyTo: 55, file: "/x/why.txt" });
+      const steps = [
+        { kind: "review", event: "APPROVE", body: "b", comments: [] },
+        { kind: "reply", replyTo: 55, body: "still applies" },
+        { kind: "reply", replyTo: 56, body: "still applies too" },
+        { kind: "escalate", replyTo: 55, body: "design call" },
+        { kind: "resolve", threadId: "PRRT_a" },
+      ];
+      const ctx = { repo: "a/b", number: 7, signature: "s", holdApprove: false };
+      assert.deepStrictEqual(pub.planRequests(steps, ctx).map((r) => r.endpoint), ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/56/replies", "graphql"], "no reply where the thread was handed back");
+      const off = pub.planRequests(steps, { ...ctx, allowResolve: false, allowApprove: false });
+      assert.deepStrictEqual(off.map((r) => r.endpoint), ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/56/replies"]);
+      assert.strictEqual(off[0].body.event, "COMMENT", "approve is off for re-reviews");
+      const sum = pub.summarizePlan(steps);
+      assert.deepStrictEqual(sum.replies.map((r) => r.replyTo), [56]);
+      assert.deepStrictEqual(sum.escalations, [{ replyTo: 55, body: "design call" }]);
+      assert.strictEqual(pub.describePlan(sum), "approve, 1 reply, 1 resolve, 1 dispute for you");
+      assert.deepStrictEqual(pub.readPlanLines(steps.map((x) => JSON.stringify(x)).join("\n")), steps);
+    });
+
+    test("capture: a run's own list of subcommands — a drive only replies", () => {
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-cap-"));
+      const outDir = path.join(runDir, "out");
+      nfsA.mkdirSync(outDir);
+      const run = { repo: "a/b", number: 7, outDir, wrapperPath: "x", subs: ["reply"] };
+      const file = path.join(outDir, "r.txt");
+      nfsA.writeFileSync(file, "fixed in abc123");
+      assert.deepStrictEqual(captureMod.captureCall(run, ["reply", "a/b", "7", "9", file]), { step: { kind: "reply", replyTo: 9, body: "fixed in abc123" } });
+      assert.match(captureMod.captureCall(run, ["resolve", "PRRT_x"]).error, /may not resolve/);
+      assert.match(captureMod.captureCall(run, ["escalate", "a/b", "7", "9", file]).error, /may not escalate/);
+      assert.deepStrictEqual(captureMod.captureCall({ ...run, subs: undefined }, ["escalate", "a/b", "7", "9", file]), { step: { kind: "escalate", replyTo: 9, body: "fixed in abc123" } });
+    });
+
+    await atest("publish: a review answers and resolves only in your threads; your own PR's drive answers reviewers and resolves nothing", async () => {
+      const gh = async (args) => {
+        if (args[1] === "graphql") {
+          return { code: 0, stdout: JSON.stringify({ data: { node: { isResolved: false, pullRequest: { number: 7, repository: { nameWithOwner: "a/b" } }, comments: { nodes: [{ author: { login: "colleague" } }] } } } }), stderr: "" };
+        }
+        return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "colleague" } }), stderr: "" };
+      };
+      const url = "https://github.com/a/b/pull/7";
+      assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /not yours/);
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /colleague's thread/);
+      assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), null, "a drive answers a reviewer in theirs");
+      const myReplyInTheirs = async () => ({ code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "me" }, in_reply_to_id: 1 }), stderr: "" });
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 4, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, myReplyInTheirs), /not the start of a thread/, "your reply in a colleague's thread is still theirs");
+      assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), /doesn't resolve/);
+      assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: null, mine: true }, gh), /login on the host is unknown/);
+    });
+
+    test("mapPr: the author's latest thread answer, a reviewer's latest open-thread comment, and whether the branch is in a fork", () => {
+      const thread = (login, at, isResolved = false) => ({ isResolved, comments: { totalCount: 2, nodes: [{ author: { login }, createdAt: at }] } });
+      const pr = github.mapPr(
+        rawPr({
+          isCrossRepository: true,
+          reviewThreads: {
+            totalCount: 4,
+            nodes: [thread("auth", "2026-07-08T00:00:00Z"), thread("auth", "2026-07-09T00:00:00Z"), thread("rev", "2026-07-10T00:00:00Z"), thread("rev", "2026-07-11T00:00:00Z", true)],
+          },
+        }),
+        "GH",
+        ["reviewed"],
+        "me",
+      );
+      assert.strictEqual(pr.authorRepliedAt, "2026-07-09T00:00:00Z");
+      assert.strictEqual(pr.reviewerRepliedAt, "2026-07-10T00:00:00Z", "a resolved thread asks nothing of the author");
+      assert.strictEqual(pr.isCrossRepository, true);
+      assert.strictEqual(github.mapPr(rawPr(), "GH", ["author"], "me").isCrossRepository, false);
+    });
+
+    test("agent policy: a re-review once the author answers after your review — a push, a thread reply — or asks you again", () => {
+      const at = (h) => `2026-07-0${h}T00:00:00Z`;
+      const rv = (o = {}) => ({ ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), viewerReviewedAt: at(5), viewerReviewedHead: false, lastCommitPushedAt: at(4), authorRepliedAt: null, ...o });
+      assert.strictEqual(policy.authorActivitySince(rv()), null);
+      assert.strictEqual(policy.authorActivitySince(rv({ lastCommitPushedAt: at(6) })), at(6));
+      assert.strictEqual(policy.authorActivitySince(rv({ lastCommitPushedAt: at(6), viewerReviewedHead: true })), null, "your review is on the head: no push since");
+      assert.strictEqual(policy.authorActivitySince(rv({ authorRepliedAt: at(7), lastCommitPushedAt: at(6) })), at(7));
+      assert.strictEqual(policy.authorActivitySince(rv({ viewerReviewedAt: null, authorRepliedAt: at(7) })), null, "after a plain Comment there is nothing to compare with");
+      assert.match(policy.planJobs([rv()], agentOn(), noSessions).idle.get("PR_R"), /nothing new from the author/);
+      const replied = policy.planJobs([rv({ authorRepliedAt: at(7) })], agentOn(), noSessions).jobs;
+      assert.deepStrictEqual(replied.map((j) => [j.scenario, j.kind, j.mode, j.key]), [["rereview", "rereview", "shadow", `PR_R|rereview|aaa111|reply@${at(7)}`]]);
+      const later = policy.planJobs([rv({ authorRepliedAt: at(8) })], agentOn(), noSessions).jobs[0].key;
+      assert.notStrictEqual(later, replied[0].key, "a later reply without a push is new work");
+      const asked = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true })], agentOn(), noSessions).jobs[0];
+      assert.match(asked.key, /\|asked@-$/);
+      // Asked again on the very head your approval stands on, with no answer from the author: a re-review could only approve again.
+      const approved = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true, viewerReviewedHead: true, viewerApproved: true })], agentOn(), noSessions);
+      assert.deepStrictEqual(approved.jobs, []);
+      assert.strictEqual(approved.idle.get("PR_R"), "Asked again — your approval stands on this head and the author hasn't answered since");
+      // …after a change request on that head, the request itself is the author's "look again": the re-review runs, once per head and request.
+      const same = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true, viewerReviewedHead: true, viewerApproved: false })], agentOn(), noSessions);
+      assert.deepStrictEqual(same.jobs.map((j) => [j.scenario, j.mode, j.key]), [["rereview", "shadow", "PR_R|rereview|aaa111|asked@-"]]);
+      assert.strictEqual(same.idle.get("PR_R"), undefined);
+      assert.deepStrictEqual(policy.planJobs([rv({ roles: ["reviewed"], requestedOfMe: false, viewerReviewedHead: true })], agentOn(), noSessions).jobs, [], "not asked again: nothing new, nothing runs");
+      const answered = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true, viewerReviewedHead: true, authorRepliedAt: at(7) })], agentOn(), noSessions).jobs[0];
+      assert.strictEqual(answered.key, `PR_R|rereview|aaa111|asked@${at(7)}`, "an answer in a thread since your review is new work on the same head");
+      assert.match(policy.planJobs([rv({ authorRepliedAt: at(7) })], agentOn({ scenarios: { rereview: { mode: "off" } } }), noSessions).idle.get("PR_R"), /re-reviews are off/);
+    });
+
+    test("agent policy: a PR with no clone of its repository gets no run — it waits and says why; offers need none", () => {
+      const none = { ...noSessions, noCheckout: (pr) => `No checkout of ${pr.repo} — set its folder in Settings › Claude` };
+      const r = policy.planJobs([reviewPr()], agentOn(), none);
+      assert.deepStrictEqual(r.jobs, []);
+      assert.match(r.idle.get("PR_R"), /^No checkout of .+ — set its folder in Settings › Claude$/);
+      const mergeOnly = policy.planJobs([reviewPr({ role: "author" })], agentOn(), none);
+      assert.deepStrictEqual([mergeOnly.jobs.length, mergeOnly.merges.map((m) => m.scenario)], [0, ["merge"]], "a merge offer doesn't depend on a clone");
+      const why = policy.planJobs([reviewPr()], agentOn(), { ...noSessions, noCheckout: () => null });
+      assert.strictEqual(why.jobs.length, 1, "with a clone the review is planned as before");
+      assert.match(policy.planJobs([reviewPr({ isIgnored: true })], agentOn(), none).idle.get("PR_R"), /Ignored/, "the reason a PR is skipped anyway comes first");
+    });
+
+    test("agent policy: your PR is driven for red CI, conflicts or review comments — not a draft, not a fork, not past its attempts", () => {
+      const mine = (o = {}) => ({ ...reviewPr({ role: "author" }), ciState: "failure", ...o });
+      assert.deepStrictEqual(policy.driveReasons(mine({ hasConflicts: true, hasUnaddressedComments: true }), agentOn()), ["ci", "conflicts", "comments"]);
+      assert.deepStrictEqual(policy.driveReasons(mine(), agentOn({ scenarios: { driveCi: { mode: "off" } } })), []);
+      const job = policy.planJobs([mine()], agentOn(), noSessions).jobs[0];
+      assert.deepStrictEqual([job.scenario, job.kind, job.mode, job.reasons, job.key], ["drive", "drive", "shadow", ["ci"], "PR_R|drive|aaa111|ci"]);
+      const both = policy.planJobs([mine({ hasUnaddressedComments: true, reviewerRepliedAt: "2026-07-09T00:00:00Z" })], agentOn({ scenarios: { driveCi: { mode: "on" } } }), noSessions).jobs[0];
+      assert.strictEqual(both.mode, "shadow", "one Shadow reason keeps the run in Shadow");
+      assert.strictEqual(both.key, "PR_R|drive|aaa111|ci+comments@2026-07-09T00:00:00Z");
+      assert.strictEqual(policy.planJobs([mine()], agentOn({ scenarios: { driveCi: { mode: "on" } } }), noSessions).jobs[0].mode, "on");
+      assert.match(policy.planJobs([mine({ isDraft: true })], agentOn(), noSessions).idle.get("PR_R"), /draft/);
+      assert.match(policy.planJobs([mine({ isCrossRepository: true })], agentOn(), noSessions).idle.get("PR_R"), /fork/);
+      assert.match(policy.planJobs([mine()], agentOn(), { ...noSessions, driveExhausted: () => "Yours — the agent tried 2 times; over to you" }).idle.get("PR_R"), /tried 2 times/);
+      assert.strictEqual(policy.planJobs([mine()], agentOn(), noSessions).merges.length, 0, "a red PR is not offered for merge");
+    });
+
+    // --- three processes: your PR an orchestrator run drives (A), your PR without one (B), a PR you review (C) ---
+    test("agent policy B: your PR, not ready and nothing broken, gets a self-review per head — not one already self-reviewed, nor the agent's own push", () => {
+      const mine = (o = {}) => ({ ...reviewPr({ role: "author" }), awaitingReview: true, ...o });
+      const s = agentOn();
+      assert.ok(policy.mergeBlocker(mine(), s), "the fixture PR isn't ready to merge");
+      const job = policy.planJobs([mine()], s, noSessions).jobs[0];
+      assert.deepStrictEqual([job.scenario, job.kind, job.mode, job.reasons, job.key], ["drive", "drive", "shadow", ["self"], "PR_R|drive|aaa111|self"]);
+      const done = policy.planJobs([mine()], s, { ...noSessions, selfReviewed: () => true });
+      assert.deepStrictEqual(done.jobs, []);
+      assert.match(done.idle.get("PR_R"), /^Yours — self-reviewed; /, "waiting for reviewers, and says what it waits for");
+      assert.match(policy.planJobs([mine({ isDraft: true })], s, noSessions).idle.get("PR_R"), /^Yours — /, "a draft gets none");
+      assert.deepStrictEqual(policy.planJobs([mine()], agentOn({ scenarios: { selfReview: { mode: "off" } } }), noSessions).jobs, []);
+      assert.strictEqual(policy.planJobs([mine({ ciState: "failure" })], s, noSessions).jobs[0].reasons[0], "ci", "broken comes first: a drive, not a self-review");
+    });
+
+    test("agent policy A: your PR an SDLC orchestrator run drives is left alone — no self-review, no drive; once ready, only a Merge button", () => {
+      const mine = (o = {}) => ({ ...reviewPr({ role: "author" }), ...o });
+      const ctx = { ...noSessions, orchestrated: () => "the SDLC orchestrator runs ENG-1 (stage review) — the agent leaves it to it" };
+      for (const pr of [mine({ awaitingReview: true }), mine({ ciState: "failure" }), mine({ hasUnaddressedComments: true, awaitingReview: true })]) {
+        const r = policy.planJobs([pr], agentOn(), ctx);
+        assert.deepStrictEqual([r.jobs, r.merges], [[], []]);
+        assert.strictEqual(r.idle.get("PR_R"), "Yours — the SDLC orchestrator runs ENG-1 (stage review) — the agent leaves it to it");
+      }
+      // The run waits for someone to merge: a ready PR gets the offer — no session, the merge on your click.
+      const ready = policy.planJobs([mine()], agentOn(), ctx);
+      assert.deepStrictEqual([ready.jobs.length, ready.merges.map((m) => m.scenario)], [0, ["merge"]]);
+      assert.deepStrictEqual(policy.planJobs([mine()], agentOn({ scenarios: { merge: { mode: "off" } } }), ctx).merges, [], "offers off: none");
+      // C: someone else's PR is reviewed whoever drives it.
+      assert.strictEqual(policy.planJobs([reviewPr()], agentOn(), ctx).jobs[0].scenario, "review");
+    });
+
+    test("agent prompts: each run on your PR starts from its own prompt; a review from yours", () => {
+      const claude = cfg.validateSettings({ hosts: [] }).claude;
+      assert.match(agentCore.promptFor({ scenario: "drive", reasons: ["self"] }, claude), /creatio-code-review .*dryRun: true[\s\S]*validate-and-fix-review-comments/);
+      assert.match(agentCore.promptFor({ scenario: "drive", reasons: ["comments"] }, claude), /^\/validate-and-fix-review-comments /);
+      assert.strictEqual(agentCore.promptFor({ scenario: "drive", reasons: ["ci", "comments"] }, claude), claude.prompts.drive, "broken: your «PR is blocked» prompt");
+      assert.strictEqual(agentCore.promptFor({ scenario: "review" }, claude), claude.prompts.review);
+      const mineSet = { ...claude, agentPrompts: { ...claude.agentPrompts, selfReview: "/my-self-review {url}" } };
+      assert.strictEqual(agentCore.promptFor({ scenario: "drive", reasons: ["self"] }, mineSet), "/my-self-review {url}");
+      const rules = agentCore.agentRules("drive", "shadow", null, { repo: "a/b", number: 7, reasons: ["self"] });
+      assert.match(rules, /self-review of the user's own PR[\s\S]*dryRun: true — it must post nothing/);
+      assert.match(agentCore.agentRules("drive", "shadow", null, { repo: "a/b", number: 7, reasons: ["comments"] }), /business, product or design decision/);
+      assert.strictEqual(view.itemVerb({ scenario: "drive", reasons: ["self"] }), "Self-reviewing");
+    });
+
+    test("agent sdlc: a live orchestrator run is found by the PR it published, in the checkout or a worktree; an ended one and a lookalike URL aren't", () => {
+      const sdlc = require(path.join(__dirname, "../dist/main/main/agent/sdlc.js"));
+      const co = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-sdlc-"));
+      const url = "https://creatio.ghe.com/eng/core/pull/37";
+      const write = (dir, name, o) => {
+        nfsA.mkdirSync(dir, { recursive: true });
+        nfsA.writeFileSync(path.join(dir, name), JSON.stringify(o, null, 2));
+      };
+      assert.strictEqual(sdlc.orchestratorRunFor(co, url), null, "no .sdlc at all");
+      write(path.join(co, ".sdlc", "state"), "ENG-9.json", { lifecycle_status: "in_progress", current_stage: "review", outputs: { published_pr_reference: { url: url + "1" } } });
+      assert.strictEqual(sdlc.orchestratorRunFor(co, url), null, "…/pull/371 is another PR");
+      write(path.join(co, ".sdlc", "state"), "ENG-8.change_set.json", { url });
+      assert.strictEqual(sdlc.orchestratorRunFor(co, url), null, "a side file isn't a run");
+      write(path.join(co, ".sdlc", "state"), "ENG-7.json", { lifecycle_status: "completed", current_stage: "done", outputs: { published_pr_reference: { url } } });
+      assert.strictEqual(sdlc.orchestratorRunFor(co, url), null, "an ended run lets the PR go");
+      write(path.join(co, ".claude", "worktrees", "w1", ".sdlc", "state"), "ENG-6.json", { lifecycle_status: "blocked", current_stage: "fix_findings", outputs: { published_pr_reference: { url } } });
+      assert.deepStrictEqual(sdlc.orchestratorRunFor(co, url), { key: "ENG-6", stage: "fix_findings", status: "blocked" }, "found in a worktree; blocked still holds it");
+      assert.strictEqual(sdlc.describeOrchestratorRun({ key: "ENG-6", stage: "fix_findings", status: "blocked" }), "the SDLC orchestrator runs ENG-6 (stage fix findings) — the agent leaves it to it");
+      // A metarepo's run keeps its state at home and publishes to a member repository.
+      const projects = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-projects-"));
+      const meta = path.join(projects, "meta");
+      const member = path.join(projects, "member");
+      nfsA.mkdirSync(member, { recursive: true });
+      const memberPr = "https://creatio.ghe.com/eng/member/pull/22";
+      write(path.join(meta, ".sdlc", "state"), "ENG-4.json", { lifecycle_status: "blocked", current_stage: "publish_pr", outputs: { published_pr_reference: { url: memberPr } } });
+      assert.strictEqual(sdlc.orchestratorRunFor(member, memberPr), null, "not in the PR's own checkout");
+      const roots = sdlc.orchestratorRoots(member, { projectsRoot: projects, repoPaths: {} });
+      assert.ok(roots.includes(meta) && roots.includes(member));
+      assert.strictEqual(sdlc.orchestratorRunFor(roots, memberPr).key, "ENG-4", "found at the metarepo's home");
+    });
+
+    await atest("agent: your PR an orchestrator run published gets no run, says why on the Board, wears its badge, and refuses a hand-over", async () => {
+      const mine = { ...reviewPr({ role: "author" }), awaitingReview: true };
+      const f = agentFixture({ pr: mine, script: succeed("done") });
+      try {
+        // The fixture's checkout carries the orchestrator's state for this very PR.
+        const state = path.join(f.dir, "checkout", ".sdlc", "state");
+        nfsA.mkdirSync(state, { recursive: true });
+        nfsA.writeFileSync(path.join(state, "ENG-5.json"), JSON.stringify({ lifecycle_status: "in_progress", current_stage: "review", outputs: { published_pr_reference: { url: mine.url } } }));
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.strictEqual(f.children.length, 0);
+        assert.match(f.agent.getState().idle[mine.id], /SDLC orchestrator runs ENG-5/);
+        assert.deepStrictEqual(f.agent.getState().orchestrated, { [mine.id]: { key: "ENG-5", stage: "review" } }, "the badge, as data");
+        assert.match((await f.agent.act({ type: "enqueue", prId: mine.id })).error, /SDLC orchestrator runs ENG-5/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: your PR without an orchestrator run gets its self-review, from the self-review prompt", async () => {
+      const mine = { ...reviewPr({ role: "author" }), awaitingReview: true };
+      // A drive reads its git place before the session; this stands in for git.
+      const common = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(common, "config"), "[core]\n");
+      const gitImpl = async (all) => {
+        let i = 0;
+        for (;;) {
+          if (all[i] === "-c") i += 2;
+          else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+          else break;
+        }
+        const args = all.slice(i);
+        if (args[0] === "config") return `file:${common}/config\0core.bare\0`;
+        if (args[0] === "rev-parse") return `${common}\n`;
+        if (args[0] === "remote") return "https://github.com/a/b.git\n";
+        return "";
+      };
+      const f = agentFixture({ pr: mine, script: succeed("Nothing to fix."), git: gitImpl });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1);
+        assert.match(f.children[0].written, /creatio-code-review/);
+        assert.match(f.children[0].written, /dryRun: true/);
+        const item = only(f)[0];
+        assert.deepStrictEqual([item.scenario, item.reasons], ["drive", ["self"]]);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("agent tools: a self-review reads Jira, so drive lists twg; a list saved before gets it", () => {
+      assert.ok(ad.DEFAULT_AGENT_TOOLS.drive.includes("Bash(twg *)"));
+      const migrated = cfg.validateAgent({ permissions: { tools: { drive: ["Read"] }, toolsVersion: 2 } });
+      assert.deepStrictEqual(migrated.permissions.tools.drive, ["Read", "Bash(twg *)"], "only what came after the version it was saved at");
+      assert.strictEqual(cfg.validateAgent(undefined).scenarios.selfReview.mode, "shadow");
+    });
+
+    await atest("drive: commits on top of the head are read oldest first; a rewritten history is not a fast-forward", async () => {
+      const repo = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-drive-"));
+      const g = (...args) => spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+      g("init", "-q");
+      nfsA.writeFileSync(path.join(repo, "a.txt"), "1\n");
+      g("add", "a.txt");
+      g("commit", "-q", "-m", "base");
+      const base = g("rev-parse", "HEAD").stdout.trim();
+      for (const [n, msg] of [["2", "fix: one"], ["3", "fix: two"]]) {
+        nfsA.writeFileSync(path.join(repo, "a.txt"), `${n}\n`);
+        g("commit", "-q", "-am", msg);
+      }
+      const read = await driveMod.withNoHooks((h) => driveMod.collectDrive(wt.runGit, repo, base, ["ci"], h));
+      assert.deepStrictEqual(read.drive.commits.map((c) => c.subject), ["fix: one", "fix: two"]);
+      assert.strictEqual(read.fastForward, true);
+      assert.strictEqual(read.merges, 0);
+      assert.strictEqual(read.drive.head, g("rev-parse", "HEAD").stdout.trim(), "the commit a Push would send");
+      assert.match(read.drive.stat, /a\.txt/);
+      assert.match(read.drive.patch, /^\+3$/m);
+      // A merge among the run's commits is counted — a stack's layer must not get one.
+      const fixes = g("rev-parse", "HEAD").stdout.trim();
+      g("checkout", "-q", "-b", "side", base);
+      nfsA.writeFileSync(path.join(repo, "b.txt"), "side\n");
+      g("add", "b.txt");
+      g("commit", "-q", "-m", "side");
+      g("checkout", "-q", "-");
+      g("checkout", "-q", fixes);
+      g("merge", "-q", "--no-edit", "side");
+      const merged = await driveMod.withNoHooks((h) => driveMod.collectDrive(wt.runGit, repo, base, ["ci"], h));
+      assert.deepStrictEqual([merged.merges, merged.fastForward], [1, true], "a merge is still a fast-forward — but it is one");
+      g("reset", "-q", "--hard", base);
+      nfsA.writeFileSync(path.join(repo, "a.txt"), "amended\n");
+      g("commit", "-q", "--amend", "-am", "base, amended");
+      assert.strictEqual((await driveMod.withNoHooks((h) => driveMod.collectDrive(wt.runGit, repo, base, [], h))).fastForward, false, "an amended base is not a fast-forward");
+      g("reset", "-q", "--hard", base);
+      assert.deepStrictEqual((await driveMod.withNoHooks((h) => driveMod.collectDrive(wt.runGit, repo, base, [], h))).drive.commits, []);
+      await assert.rejects(driveMod.withNoHooks((h) => driveMod.collectDrive(wt.runGit, repo, "HEAD~1", [], h)), /no head commit/);
+    });
+
+    test("drive: the app pushes the exact commit you saw, to the URL read before the run — no --force, no hooks", () => {
+      const oid = "c".repeat(40);
+      const args = driveMod.pushArgs("https://github.com/a/b.git", oid, "feature/x-1", "/nohooks");
+      assert.deepStrictEqual(args.slice(-4), ["push", "--no-verify", "https://github.com/a/b.git", `${oid}:refs/heads/feature/x-1`]);
+      assert.ok(args.includes("core.hooksPath=/nohooks") && args.includes("core.fsmonitor=false"));
+      assert.ok(!args.includes("--force") && !args.some((a) => a.startsWith("+")), "never a forced update");
+      for (const [url, o, branch] of [
+        ["https://h/a.git", oid, "--force"],
+        ["https://h/a.git", oid, "a..b"],
+        ["https://h/a.git", oid, "x.lock"],
+        ["https://h/a.git", "HEAD", "main"],
+        ["-u", oid, "main"],
+        ["/local/path", oid, "main"],
+        ["https://h/a.git", oid, "a b"],
+      ]) {
+        assert.throws(() => driveMod.pushArgs(url, o, branch, "/nohooks"), /isn't a/, `${url} ${o} ${branch}`);
+      }
+      // The session's git: no hooks, no network, no credentials.
+      const configOf = (env) => Array.from({ length: Number(env.GIT_CONFIG_COUNT) }, (_, i) => [env[`GIT_CONFIG_KEY_${i}`], env[`GIT_CONFIG_VALUE_${i}`]]);
+      const NO = runner.sessionGitEnv("/run/no-hooks", true);
+      const keys = configOf(NO);
+      for (const prefix of ["https://", "http://", "git@", "ssh://", "git://"]) {
+        assert.ok(keys.some(([k, v]) => k === "url.pr-agent-no-push://.insteadOf" && v === prefix), prefix);
+      }
+      assert.ok(keys.some(([k, v]) => k === "credential.helper" && v === ""), "the credential helpers are reset");
+      assert.ok(keys.some(([k, v]) => k === "core.hooksPath" && v === "/run/no-hooks"), "a commit runs no hook of the repository");
+      assert.ok(keys.some(([k, v]) => k === "core.fsmonitor" && v === "false"));
+      assert.strictEqual(NO.GIT_SSH_COMMAND, "pr-agent-no-ssh");
+      assert.strictEqual(NO.GIT_TERMINAL_PROMPT, "0");
+      // A review's session runs no git of its own, but Claude Code's own `git status` may write the index (post-index-change).
+      const review = runner.sessionGitEnv("/run/no-hooks", false);
+      assert.deepStrictEqual(configOf(review), [["core.hooksPath", "/run/no-hooks"], ["core.fsmonitor", "false"]]);
+      assert.strictEqual(review.GIT_SSH_COMMAND, undefined, "a review keeps its network");
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-run-"));
+      nfsA.mkdirSync(path.join(runDir, "no-hooks"));
+      nfsA.writeFileSync(path.join(runDir, "no-hooks", "pre-commit"), "#!/bin/sh\n");
+      const fresh = runner.freshHooksDir(runDir);
+      assert.deepStrictEqual(nfsA.readdirSync(fresh), [], "made afresh: nothing put there before survives");
+    });
+
+    await atest("drive: a fingerprint of everything git reads for a push — config files and includes, hooks, the worktree's links", async () => {
+      const base = nfsA.realpathSync.native(nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-fp-")));
+      const repo = path.join(base, "repo");
+      nfsA.mkdirSync(repo);
+      const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+      const g = (cwd, ...args) => spawnSync("git", args, { cwd, encoding: "utf8", env });
+      g(repo, "init", "-q");
+      nfsA.writeFileSync(path.join(repo, "a.txt"), "1\n");
+      g(repo, "add", "a.txt");
+      g(repo, "commit", "-q", "-m", "base");
+      const wtDir = path.join(base, "wt");
+      g(repo, "worktree", "add", "-q", "--detach", wtDir);
+      const gitDir = path.resolve(wtDir, g(wtDir, "rev-parse", "--git-dir").stdout.trim());
+      const commonDir = path.resolve(wtDir, g(wtDir, "rev-parse", "--git-common-dir").stdout.trim());
+      const place = { workTree: wtDir, gitDir };
+      const url = "https://github.com/a/b.git";
+      const fp = () => driveMod.gitFingerprint(wt.runGit, place, commonDir, url);
+      const a = await fp();
+      assert.strictEqual(await fp(), a, "stable");
+      // An include: the file it names is read too, so a change in it shows.
+      const extra = path.join(base, "extra.cfg");
+      nfsA.writeFileSync(extra, "[user]\n\tname = x\n");
+      nfsA.appendFileSync(path.join(commonDir, "config"), `[include]\n\tpath = ${extra.replace(/\\/g, "/")}\n`);
+      const b = await fp();
+      assert.notStrictEqual(b, a, "a config change shows");
+      nfsA.writeFileSync(extra, "[core]\n\tfsmonitor = evil\n");
+      const c = await fp();
+      assert.notStrictEqual(c, b, "a change in an included file shows");
+      nfsA.writeFileSync(path.join(commonDir, "hooks", "reference-transaction"), "#!/bin/sh\n");
+      const d = await fp();
+      assert.notStrictEqual(d, c, "a new hook shows");
+      nfsA.appendFileSync(path.join(wtDir, ".git"), "\n");
+      assert.notStrictEqual(await fp(), d, "a rewritten .git link shows");
+    });
+
+    test("drive: config origins are read NUL-separated, unquoted; an SSH push reads only a snapshot of your SSH settings", () => {
+      const cwd = path.resolve("/w");
+      const out = ["file:C:/Program Files/Git/etc/gitconfig", "core.symlinks", "file:.git/config", "core.bare", "command line:", "core.pager", "file:/odd \"name\"\tx", "user.name", ""].join("\0");
+      assert.deepStrictEqual(driveMod.parseConfigOrigins(out, cwd), [path.resolve(cwd, ".git/config"), path.resolve(cwd, "/odd \"name\"\tx"), path.resolve(cwd, "C:/Program Files/Git/etc/gitconfig")].sort());
+      // An SSH push reads only the app's snapshot of your SSH settings, resolved by ssh before the session.
+      assert.deepStrictEqual(driveMod.sshTarget("git@github.com:a/b.git"), { user: "git", host: "github.com" });
+      assert.deepStrictEqual(driveMod.sshTarget("ssh://git@h.example:2222/a/b.git"), { host: "h.example", user: "git", port: "2222" });
+      assert.strictEqual(driveMod.sshTarget("https://github.com/a/b.git"), null);
+      const snapDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-sshsnap-"));
+      const asked = [];
+      const snapshot = driveMod.snapshotSsh("git@github-work:a/b.git", (args) => (asked.push(args), "host github-work\nhostname github.com\nuser git\n"));
+      assert.deepStrictEqual(asked, [["-G", "-l", "git", "github-work"]]);
+      assert.match(snapshot, /^hostname github\.com$/m, "kept in memory, as text");
+      assert.strictEqual(driveMod.snapshotSsh("https://github.com/a/b.git", () => ""), null, "nothing to snapshot for HTTPS");
+      assert.throws(() => driveMod.snapshotSsh("git@h:a/b", () => "garbage"), /couldn't resolve/);
+      assert.throws(() => driveMod.snapshotSsh("ssh://-oProxyCommand=x@h/a", () => "host h"), /isn't an SSH address|couldn't resolve/);
+      const withSsh = driveMod.pushArgs("git@github.com:a/b.git", "c".repeat(40), "main", "/h", undefined, "C:\\Users\\Me\\PR Dashboard\\agent\\runs\\r\\ssh_config");
+      assert.ok(withSsh.includes('core.sshCommand=ssh -F "C:/Users/Me/PR Dashboard/agent/runs/r/ssh_config"'), withSsh.join(" "));
+      assert.throws(() => driveMod.pushArgs("git@h:a", "c".repeat(40), "main", "/h", undefined, 'C:/x"y'), /can't be quoted/);
+      const sg = driveMod.safeGit("/h");
+      for (const c of ["log.showSignature=false", "core.pager=cat", "gpg.program=pr-agent-no-gpg", "core.fsmonitor=false"]) assert.ok(sg.includes(c), c);
+    });
+
+    await atest("drive: the SSH snapshot is a file only for the length of one push, and what a push is checked against never reaches disk", async () => {
+      let seen = null;
+      await driveMod.withSshSnapshot("host h\nhostname h\n", async (file) => {
+        seen = file;
+        assert.strictEqual(nfsA.readFileSync(file, "utf8"), "host h\nhostname h\n");
+      });
+      assert.ok(seen && !nfsA.existsSync(seen), "gone after the push");
+      await driveMod.withSshSnapshot(undefined, async (file) => assert.strictEqual(file, undefined, "HTTPS: no file"));
+      const dir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-store-"));
+      const st = agentStore.openStore(dir, "2026-11-05");
+      st.data.items.push({ runId: "r", key: "k", prId: "p", prNumber: 1, repo: "a/b", url: "u", title: "t", hostLabel: "GH", scenario: "drive", mode: "shadow", state: "needsYou", headline: "h", queuedAt: "", pushTo: { url: "https://h/a.git", commonDir: "c", worktreeGitDir: "g", fingerprint: "f", sshSnapshot: "host h" } });
+      await st.save();
+      assert.ok(!nfsA.readFileSync(path.join(dir, "state.json"), "utf8").includes("pushTo"), "a file a session could rewrite is never what a push trusts");
+      // Nor read back: a pushTo planted in the file is dropped on load.
+      const planted = JSON.parse(nfsA.readFileSync(path.join(dir, "state.json"), "utf8"));
+      planted.items[0].pushTo = { url: "https://evil/x.git", commonDir: "c", worktreeGitDir: "g", fingerprint: "f" };
+      nfsA.writeFileSync(path.join(dir, "state.json"), JSON.stringify(planted));
+      assert.strictEqual(agentStore.readStore(path.join(dir, "state.json"), "2026-11-05").items[0].pushTo, undefined);
+    });
+
+    await atest("drive: each app git operation gets a fresh, empty hooks folder, gone afterwards", async () => {
+      let seen = null;
+      await driveMod.withNoHooks(async (dir) => {
+        seen = dir;
+        assert.deepStrictEqual(nfsA.readdirSync(dir), []);
+        assert.deepStrictEqual(driveMod.safeGit(dir, { workTree: "/w", gitDir: "/g" }).slice(0, 2), ["--git-dir=/g", "--work-tree=/w"], "the git folder is named, not discovered");
+      });
+      assert.ok(seen && !nfsA.existsSync(seen));
+      let other = null;
+      await driveMod.withNoHooks(async (dir) => (other = dir));
+      assert.notStrictEqual(other, seen, "never the same folder twice");
+      assert.ok(driveMod.isSshUrl("git@github.com:a/b.git") && driveMod.isSshUrl("ssh://git@h/a/b") && !driveMod.isSshUrl("https://h/a/b"));
+    });
+
+    await atest("agent drive: your red PR is driven in a session that can't push; on your Push the app pushes a fast-forward and counts the attempt", async () => {
+      const mine = { ...reviewPr({ role: "author" }), ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      let freshHead = "aaa111";
+      let worktreeHead = "2222222222222222222222222222222222222222";
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const pushes = [];
+      const f = agentFixture({
+        pr: mine,
+        script: succeed("Fixed the failing test."),
+        fetchPr: async () => ({ pr: { ...mine, headOid: freshHead }, state: "OPEN", viewer: "me" }),
+        git: async (all) => {
+          let i = 0;
+          for (;;) {
+            if (all[i] === "-c") i += 2;
+            else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+            else break;
+          }
+          const args = all.slice(i);
+          if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+          // Newest first, as git log prints it.
+          if (args[0] === "log") return "2222222222222222222222222222222222222222\tfix: the failing test\n1111111111111111111111111111111111111111\ttest: cover it\n";
+          if (args[0] === "diff") return args.includes("--stat") ? " a.ts | 2 +-" : "+fixed";
+          if (args[0] === "rev-parse") return args.includes("HEAD") ? `${worktreeHead}\n` : `${commonDir}\n`;
+          if (args[0] === "remote") return "https://github.com/a/b.git\n";
+          if (args[0] === "push") pushes.push(all);
+          return "";
+        },
+      });
+      // The fixture's head is "aaa111" — too short for a real oid; give the item a real one.
+      f.snapshot.pullRequests[0] = { ...mine, headOid: "a".repeat(40) };
+      freshHead = "a".repeat(40);
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.deepStrictEqual([item.scenario, item.reasons, item.headline], ["drive", ["ci"], "Would push 2 commits: fix: the failing test"]);
+        assert.strictEqual(actionLabel(item), "Push 2 fixes");
+        assert.deepStrictEqual(item.drive.commits.map((c) => c.subject), ["fix: the failing test", "test: cover it"].reverse());
+        assert.strictEqual(pushes.length, 0, "Shadow pushes nothing by itself");
+        const c = f.children[0];
+        assert.strictEqual(c.env.GIT_SSH_COMMAND, "pr-agent-no-ssh", "the session's git has no network and no credentials");
+        const rules = c.args[c.args.indexOf("--append-system-prompt") + 1];
+        assert.match(rules, /Never push and never rewrite history/);
+        assert.match(rules, /fetched for you as origin\/main/);
+        assert.ok(f.gitCalls.some((a) => a[0] === "fetch" && a.includes("+refs/heads/main:refs/remotes/origin/main")), "the app fetches the base before the session");
+        assert.strictEqual(item.pushTo.url, "https://github.com/a/b.git");
+        assert.match(rules, /Co-Authored-By: Claude/);
+        const guardFile = JSON.parse(nfsA.readFileSync(path.join(path.dirname(c.args[c.args.indexOf("--settings") + 1]), "guard.json"), "utf8"));
+        assert.ok(guardFile.workDir, "the guard knows its worktree");
+        // The fake git made no checkout on disk; the push wants the run's.
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        freshHead = "b".repeat(40);
+        assert.match((await f.agent.act({ type: "push", runId: item.runId })).error, /someone pushed/);
+        assert.strictEqual(pushes.length, 0);
+        freshHead = "a".repeat(40);
+        // Commits you weren't shown: back to you, nothing pushed.
+        worktreeHead = "3333333333333333333333333333333333333333";
+        assert.match((await f.agent.act({ type: "push", runId: item.runId })).error, /commits you haven't seen/);
+        assert.strictEqual(pushes.length, 0);
+        worktreeHead = "2222222222222222222222222222222222222222";
+        only(f)[0].state = "needsYou";
+        only(f)[0].drive.head = worktreeHead;
+        // The repository's git config changed during the run: nothing pushed.
+        nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n\tfsmonitor = evil\n");
+        assert.match((await f.agent.act({ type: "push", runId: item.runId })).error, /git config, hooks or links changed/);
+        nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+        only(f)[0].state = "needsYou";
+        assert.deepStrictEqual(await f.agent.act({ type: "push", runId: item.runId }), { ok: true });
+        assert.strictEqual(pushes.length, 1);
+        assert.deepStrictEqual(pushes[0].slice(-4), ["push", "--no-verify", "https://github.com/a/b.git", "2222222222222222222222222222222222222222:refs/heads/feature/x"]);
+        assert.ok(pushes[0].some((a) => a.startsWith("core.hooksPath=")), "no hook runs in the app's push");
+        assert.ok(pushes[0].some((a) => a.startsWith("--git-dir=")), "the git folder is named, not discovered from the worktree");
+        assert.deepStrictEqual([only(f)[0].state, only(f)[0].pushed, only(f)[0].headline], ["done", true, "Pushed 2 commits"]);
+        const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+        assert.deepStrictEqual(state.drive["PR_R"], { attempts: 1, agentHead: "2222222222222222222222222222222222222222" });
+        assert.strictEqual((await f.agent.act({ type: "push", runId: item.runId })).ok, false, "never twice");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent re-review: a review you gave, answered by the author, is re-reviewed under the re-review guard with the thread rules", async () => {
+      const at = "2026-07-09T00:00:00Z";
+      const rv = { ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), viewerReviewedAt: "2026-07-08T00:00:00Z", viewerReviewedHead: true, authorRepliedAt: at };
+      const f = agentFixture({ pr: rv, script: reviewWithPlan("COMMENT"), captureScript: captureJs });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.scenario, "rereview");
+        assert.match(item.key, /\|reply@2026-07-09T00:00:00Z$/);
+        const args = f.children[0].args;
+        assert.match(nfsA.readFileSync(args[args.indexOf("--settings") + 1], "utf8"), /hook\.js[\s\S]*rereview/);
+        const rules = args[args.indexOf("--append-system-prompt") + 1];
+        assert.match(rules, /review-not-posted/);
+        assert.match(rules, /escalate a\/b 7 <replyTo> <file>/);
+        assert.match(rules, /don't argue with your colleague/);
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(only(f).length, 1, "the same answer is re-reviewed once");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent drive: a session that changed the repository's git config gets nothing read, let alone pushed", async () => {
+      const mine = { ...reviewPr({ role: "author" }), ciState: "failure", headRefName: "feature/x", baseRefName: "main", headOid: "a".repeat(40) };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const reads = [];
+      const f = agentFixture({
+        pr: mine,
+        // The session rewrites the config, then finishes.
+        script: (c) => {
+          nfsA.writeFileSync(path.join(commonDir, "config"), "[log]\n\tshowSignature = true\n[gpg]\n\tprogram = evil\n");
+          succeed("done")(c);
+        },
+        git: async (all) => {
+          let i = 0;
+          for (;;) {
+            if (all[i] === "-c") i += 2;
+            else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+            else break;
+          }
+          const args = all.slice(i);
+          if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+          if (args[0] === "rev-parse") return `${commonDir}\n`;
+          if (args[0] === "remote") return "https://github.com/a/b.git\n";
+          if (args[0] === "log" || args[0] === "diff") reads.push(args[0]);
+          return "";
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "error"));
+        assert.match(only(f)[0].error, /changed during the run — the app read nothing/);
+        assert.deepStrictEqual(reads, [], "not even git log ran");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    // A drive session that finds nothing to fix in the code and answers the reviewers instead — through the run's wrapper.
+    const answerThreads = (ids) => (c) => {
+      const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+      const runDir = path.dirname(outDir);
+      const run = JSON.parse(nfsA.readFileSync(path.join(runDir, "run.json"), "utf8"));
+      for (const id of ids) {
+        const file = path.join(outDir, `reply-${id}.md`);
+        nfsA.writeFileSync(file, `Answer to ${id}.`);
+        const r = spawnSync(process.execPath, [captureJs, runDir, "reply", run.repo, String(run.number), String(id), file], { encoding: "utf8" });
+        if (r.status !== 0) throw new Error(r.stderr);
+      }
+      emit(c, { type: "system", subtype: "init", session_id: "s" });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: "Answered the threads; nothing to change in the code." });
+      setImmediate(() => c.emit("exit", 0));
+    };
+    const noCommitsGit = (commonDir, head) => async (all) => {
+      let i = 0;
+      for (;;) {
+        if (all[i] === "-c") i += 2;
+        else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+        else break;
+      }
+      const args = all.slice(i);
+      if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+      if (args[0] === "rev-parse") return args.includes("HEAD") ? `${head}\n` : `${commonDir}\n`;
+      if (args[0] === "remote") return "https://github.com/a/b.git\n";
+      // `git log base..HEAD`: nothing on top of the head.
+      return "";
+    };
+
+    await atest("agent drive: answers to reviewers with nothing to commit wait for your Send, then go out in their threads — signed, once, at the head it saw", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      let freshHead = A;
+      const posted = [];
+      const checked = [];
+      const f = agentFixture({
+        pr: mine,
+        script: answerThreads([101, 102]),
+        captureScript: captureJs,
+        git: noCommitsGit(commonDir, A),
+        fetchPr: async () => ({ pr: { ...mine, headOid: freshHead }, state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => {
+          if (!opts) {
+            // Whose comment it is: a colleague's thread on this PR — a drive answers reviewers in theirs.
+            checked.push(args[1]);
+            return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "colleague" }, in_reply_to_id: null }), stderr: "" };
+          }
+          posted.push({ args, body: JSON.parse(opts.input) });
+          return { code: 0, stdout: "{}", stderr: "" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.deepStrictEqual([item.scenario, item.drive.commits.length, item.headline], ["drive", 0, "Would post: 2 replies"]);
+        assert.deepStrictEqual(item.plan.replies.map((r) => r.replyTo), [101, 102]);
+        assert.strictEqual(actionLabel(item), "Send 2 replies", "not \"see what it found\": there is something to send");
+        assert.strictEqual(posted.length, 0, "Shadow posts nothing by itself");
+        const rules = f.children[0].args[f.children[0].args.indexOf("--append-system-prompt") + 1];
+        assert.match(rules, /posts it after the push — or, when you commit nothing, on its own once the user sends it/);
+        freshHead = "b".repeat(40);
+        assert.match((await f.agent.act({ type: "publish", runId: item.runId })).error, /new commits since this run/);
+        assert.strictEqual(posted.length, 0);
+        freshHead = A;
+        only(f)[0].state = "needsYou";
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(checked, ["repos/a/b/pulls/comments/101", "repos/a/b/pulls/comments/102"], "each comment is checked to be this PR's first");
+        assert.deepStrictEqual(
+          posted.map((p) => p.args[1]),
+          ["repos/a/b/pulls/7/comments/101/replies", "repos/a/b/pulls/7/comments/102/replies"],
+        );
+        assert.ok(posted.every((p) => p.body.body.startsWith("Answer to ") && p.body.body.endsWith(ad.DEFAULT_AGENT_SIGNATURE)), "signed by the app");
+        assert.deepStrictEqual([only(f)[0].state, only(f)[0].published, only(f)[0].headline], ["done", true, "Published: 2 replies"]);
+        assert.strictEqual((await f.agent.act({ type: "publish", runId: item.runId })).ok, false, "never twice");
+        assert.strictEqual(posted.length, 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent drive: in On, answers with nothing to commit go out right after the run — but not while it asks you something", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const run = async (resultExtra, settled) => {
+        const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+        nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+        const posted = [];
+        const f = agentFixture({
+          pr: mine,
+          agent: { scenarios: { driveCi: { mode: "on" } } },
+          script: (c) => {
+            const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+            const runDir = path.dirname(outDir);
+            const file = path.join(outDir, "reply.md");
+            nfsA.writeFileSync(file, "Not a defect: by design.");
+            const r = spawnSync(process.execPath, [captureJs, runDir, "reply", "a/b", "7", "101", file], { encoding: "utf8" });
+            if (r.status !== 0) throw new Error(r.stderr);
+            emit(c, { type: "system", subtype: "init", session_id: "s" });
+            emit(c, { type: "result", subtype: "success", is_error: false, result: resultExtra });
+            setImmediate(() => c.emit("exit", 0));
+          },
+          captureScript: captureJs,
+          git: noCommitsGit(commonDir, A),
+          fetchPr: async () => ({ pr: mine, state: "OPEN", viewer: "me" }),
+          gh: async (args, opts) => {
+            if (!opts) return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "colleague" } }), stderr: "" };
+            posted.push(args[1]);
+            return { code: 0, stdout: "{}", stderr: "" };
+          },
+        });
+        try {
+          f.agent.onSnapshot(f.snapshot);
+          await until(() => only(f).some((i) => i.state === settled));
+          return { item: only(f)[0], posted };
+        } finally {
+          f.agent.stop();
+        }
+      };
+      const sent = await run("Answered.", "done");
+      assert.deepStrictEqual([sent.item.mode, sent.posted, sent.item.state, sent.item.published], ["on", ["repos/a/b/pulls/7/comments/101/replies"], "done", true]);
+      const asking = await run('Done.\n\n```prd-result\n{"summary":"s","asks":[{"question":"Retarget the PR?","options":["Yes","No"]}],"findings":[]}\n```', "needsYou");
+      assert.deepStrictEqual([asking.posted, asking.item.state, actionLabel(asking.item)], [[], "needsYou", "Your call"], "the answers may hang on the question: they wait");
+    });
+
+    test("ipc and view: Push names a run; a drive's one button pushes its fixes", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "push", runId: RID }), { type: "push", runId: RID });
+      const drive = { base: "a".repeat(40), reasons: ["ci"], commits: [{ oid: "b".repeat(40), subject: "fix" }], stat: "", patch: "" };
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", drive, sessionId: "s" })), "Push 1 fix");
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "drive", drive: { ...drive, commits: [] }, sessionId: "s" })), "Open in Claude", "nothing to push: it couldn't");
+    });
+
+    test("main.js wiring: the agent's state is pulled and acted on over IPC, and pushed only to a visible window", () => {
+      const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /ipcMain\.handle\("agent:get", \(\) => agent\?\.getState\(\) \?\? null\)/);
+      assert.match(src, /ipcMain\.handle\("agent:action"[\s\S]{0,300}validateAgentAction\)\(raw\)[\s\S]{0,200}return agent\.act\(action\)/);
+      assert.match(src, /mainWindow\.isVisible\(\)\) \{\s*sendToRenderer\("agent-state", agent\.getState\(\)\)/);
+      assert.match(src, /onChange: scheduleAgentPush/);
+      const preload = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
+      assert.match(preload, /"agent:get"/);
+      assert.match(preload, /"agent:action"/);
+      assert.match(preload, /"agent-state"/);
+      // The log's path is main's own: the renderer asks to see it and sends nothing.
+      assert.match(src, /ipcMain\.handle\("agent:revealLog", async \(\) =>[\s\S]{0,200}"log\.jsonl"/);
+      assert.match(preload, /revealAgentLog: \(\) => electron_1\.ipcRenderer\.invoke\("agent:revealLog"\)/);
+      // Diagrams are parsed in the renderer: sources go over, one yes/no each comes back, validated.
+      assert.match(src, /ipcMain\.handle\("agent:diagramsChecked"[\s\S]{0,200}validateDiagramsChecked\)\(rawId, rawResults\)/);
+      assert.match(src, /webContents\.send\("agent-check-diagrams", \{ requestId, sources \}\)/);
+      assert.match(src, /onChange: scheduleAgentPush,\s*checkMermaid,/);
+      assert.match(preload, /"agent-check-diagrams"/);
+      assert.match(preload, /invoke\("agent:diagramsChecked", requestId, results\)/);
+      const iv = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+      const id = "00000000-0000-4000-8000-000000000001";
+      assert.deepStrictEqual(iv.validateDiagramsChecked(id, [true, false]), { requestId: id, results: [true, false] });
+      assert.throws(() => iv.validateDiagramsChecked(id, ["flowchart LR"]), /yes\/no/, "never text");
+      assert.throws(() => iv.validateDiagramsChecked("x", [true]), /request's id/);
+      assert.deepStrictEqual(iv.validateAgentAction({ type: "reapprove", runId: id }), { type: "reapprove", runId: id });
+    });
+
+    test("main.js wiring: the agent hears every snapshot, keeps hidden polling alive and stops on quit", () => {
+      const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /agent\?\.onSnapshot\(snapshot\);\s*handleNotifications\(snapshot\.pullRequests\)/, "the agent takes its triggers before the toasts are decided");
+      assert.match(src, /agentActive: \(\) => agent\?\.isActive\(\)/);
+      assert.match(src, /if \(!\(0, mock_1\.isMockMode\)\(\)\) \{\s*agent = \(0, agent_1\.createAgent\)/);
+      assert.match(src, /hookScript: unpackedScript\("hook\.js"\)/);
+      assert.match(src, /captureScript: unpackedScript\("capture\.js"\)/);
+      assert.ok(src.includes('.replace(/app\\.asar([\\\\/])/, "app.asar.unpacked$1")'), "the scripts are read from outside app.asar");
+      assert.match(src, /fetchPr: async \(pr\) =>/);
+      assert.match(src, /notify: handleAgentNotice/);
+      const pkg = JSON.parse(nfsA.readFileSync(path.join(__dirname, "../package.json"), "utf8"));
+      assert.deepStrictEqual(pkg.build.asarUnpack, ["dist/main/main/agent/**", "dist/main/shared/**"], "Claude Code runs the hook and capture scripts as Node — they and what they require must be on disk");
+      assert.match(src, /agent\?\.ownSessionIds\(\)/);
+      assert.match(src, /markQuitting\(\);\s*agent\?\.stop\(\)/);
+      // Windows shutdown, restart or sign-out never emits before-quit: the
+      // window's session-end is the only word the agent gets of it.
+      assert.match(src, /mainWindow\.on\("session-end", \(\) => \{\s*trayController\.markQuitting\(\);\s*agent\?\.stop\(\);/);
+    });
+
+    // --- stage 6: quiet hours, the tray line, toasts, the whole-agent pause, Interrupted + Resume ---
+    test("agent quiet hours: a span may wrap past midnight; its end is when runs start again", () => {
+      const at = (h, m) => new Date(2026, 10, 5, h, m);
+      const night = { enabled: true, from: "20:00", to: "08:00" };
+      assert.strictEqual(view.quietUntil(at(23, 30), night), "08:00");
+      assert.strictEqual(view.quietUntil(at(7, 59), night), "08:00");
+      assert.strictEqual(view.quietUntil(at(20, 0), night), "08:00", "from is inside");
+      assert.strictEqual(view.quietUntil(at(8, 0), night), null, "to is outside");
+      assert.strictEqual(view.quietUntil(at(12, 0), night), null);
+      const lunch = { enabled: true, from: "12:00", to: "13:30" };
+      assert.strictEqual(view.quietUntil(at(12, 45), lunch), "13:30");
+      assert.strictEqual(view.quietUntil(at(13, 30), lunch), null);
+      assert.strictEqual(view.quietUntil(at(23, 30), { ...night, enabled: false }), null);
+      assert.strictEqual(view.quietUntil(at(23, 30), { enabled: true, from: "09:00", to: "09:00" }), null, "an empty span holds nothing");
+      assert.strictEqual(view.quietUntil(at(23, 30), { enabled: true, from: "25:00", to: "08:00" }), null);
+    });
+
+    test("agent tray line: what runs with its plan's progress, else why nothing does, plus what waits for you", () => {
+      const base = { enabled: true, items: [], running: [], idle: {}, runsToday: 0, perDay: 30, parallel: 2, heldUntil: null, headerChip: true, trayState: true, paused: false, quietUntil: null, acceptedUnchanged: 0, suggestOn: false };
+      const progress = (steps) => ({ steps: steps.map((status, i) => ({ id: String(i), subject: "s", status })) });
+      const a = vItem({ prId: "A", state: "working", prNumber: 911 });
+      a.prNumber = 911;
+      const b = vItem({ prId: "B", state: "working", scenario: "drive" });
+      const run = (item, steps) => ({ runId: item.runId, progress: progress(steps), recent: [], paused: false });
+      assert.strictEqual(view.agentTrayLine(base), "Idle");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: [a], running: [run(a, ["completed", "completed", "in_progress", "pending"])] }), "Drafting review #911 · 3/4", "the step it is on — as the popover shows it");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: [a], running: [{ ...run(a, ["in_progress"]), paused: true }] }), "Drafting review #911 (paused)");
+      assert.strictEqual(view.agentTrayLine({ ...base, runsToday: 30, items: [vItem({ prId: "Q", state: "queued" })] }), "Daily limit reached (30) · 1 in line");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: [a, b], running: [run(a, []), run(b, [])] }), "Drafting review #911 +1");
+      const toSend = { event: "COMMENT", body: "b", comments: [], replies: [], resolves: 0, escalations: [] };
+      const waiting = [vItem({ prId: "C", state: "needsYou", plan: toSend }), vItem({ prId: "D", state: "error" }), vItem({ prId: "E", state: "needsYou" })];
+      assert.strictEqual(view.agentTrayLine({ ...base, items: waiting }), "Idle · 2 ready for you", "a result that asks nothing isn't counted");
+      assert.strictEqual(view.agentTrayLine({ ...base, paused: true, items: [a], running: [run(a, [])] }), "Paused");
+      const queued = [vItem({ prId: "F", state: "queued" })];
+      assert.strictEqual(view.agentTrayLine({ ...base, quietUntil: "08:00", items: queued }), "Quiet hours until 08:00 · 1 in line");
+      assert.strictEqual(view.agentTrayLine({ ...base, items: queued }), "1 in line");
+      assert.match(view.agentTrayLine({ ...base, heldUntil: new Date(2026, 10, 5, 14, 5).toISOString() }), /^Usage limit — waits until 14:05$/);
+    });
+
+    test("agent toasts: a trigger the agent took in On is left to the agent; Shadow, other PRs and other triggers still toast", () => {
+      const on = (o) => vItem({ mode: "on", state: "queued", ...o });
+      const items = [on({ prId: "R", scenario: "review" }), on({ prId: "D", scenario: "drive", reasons: ["ci"] }), vItem({ prId: "S", scenario: "review", mode: "shadow", state: "working" })];
+      assert.strictEqual(view.agentTakesToast(items, { prId: "R", kind: "review_requested" }), true);
+      assert.strictEqual(view.agentTakesToast(items, { prId: "R", kind: "approved" }), false, "no run stands in for that");
+      assert.strictEqual(view.agentTakesToast(items, { prId: "D", kind: "ci_failed" }), true);
+      assert.strictEqual(view.agentTakesToast(items, { prId: "D", kind: "unanswered_comment" }), false, "a drive for CI doesn't answer comments");
+      assert.strictEqual(view.agentTakesToast(items, { prId: "S", kind: "review_requested" }), false, "Shadow leaves the trigger to you");
+      assert.strictEqual(view.agentTakesToast(items, { prId: "X", kind: "review_requested" }), false);
+      assert.strictEqual(view.agentTakesToast([on({ prId: "R", scenario: "review", state: "done" })], { prId: "R", kind: "review_requested" }), false, "only a run that is on it now");
+      assert.strictEqual(view.agentTakesToast([on({ prId: "B", scenario: "brief" })], { prId: "B", kind: "review_requested" }), true, "a brief stands in too");
+      assert.strictEqual(view.agentTakesToast([on({ prId: "Q", scenario: "rereview" })], { prId: "Q", kind: "returned_to_me" }), true);
+    });
+
+    test("ipc: the whole agent is paused and resumed with nothing riding along", () => {
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "pauseAgent", runId: "../x", path: "/etc" }), { type: "pauseAgent" });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "resumeAgent" }), { type: "resumeAgent" });
+    });
+
+    await atest("agent pause: the whole agent holds its queue, pauses the run in flight, and resumes only what it paused", async () => {
+      const f = agentFixture({ script: keepWorking });
+      try {
+        assert.deepStrictEqual(await f.agent.act({ type: "pauseAgent" }), { ok: true });
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.strictEqual(only(f)[0].state, "queued");
+        assert.strictEqual(f.children.length, 0, "nothing starts while paused");
+        assert.strictEqual(f.agent.getState().paused, true);
+        assert.strictEqual(JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).paused, true, "it stays paused across a restart");
+        assert.deepStrictEqual(await f.agent.act({ type: "resumeAgent" }), { ok: true });
+        await until(() => f.agent.getState().running.length === 1);
+        const c = f.children[0];
+        const runId = only(f)[0].runId;
+        await f.agent.act({ type: "pauseAgent" });
+        await tickOnce();
+        assert.match(c.written, /"subtype":"interrupt"/, "the run pauses at its next safe point");
+        assert.strictEqual(f.agent.getState().running[0].paused, true);
+        await f.agent.act({ type: "resumeAgent" });
+        await tickOnce();
+        assert.match(c.written, /Continue where you stopped/);
+        assert.strictEqual(f.agent.getState().running[0].paused, false);
+        assert.strictEqual(only(f)[0].headline, "Reviewing");
+        // One you paused yourself stays paused when the agent resumes.
+        await f.agent.act({ type: "pause", runId });
+        await f.agent.act({ type: "pauseAgent" });
+        await f.agent.act({ type: "resumeAgent" });
+        assert.strictEqual(f.agent.getState().running[0].paused, true);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent pause: an On review that finishes while the agent is paused waits for your Publish", async () => {
+      const posted = [];
+      const f = agentFixture({
+        agent: { scenarios: { review: { mode: "on" } } },
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          c.finish = () => reviewWithPlan("REQUEST_CHANGES")(c);
+        },
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+        gh: async (_args, opts) => (posted.push(JSON.parse(opts.input)), { code: 0, stdout: "{}", stderr: "" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+        await until(() => typeof f.children[0]?.finish === "function");
+        await f.agent.act({ type: "pauseAgent" });
+        f.children[0].finish();
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        assert.strictEqual(posted.length, 0, "paused, nothing goes out on its own");
+        assert.match(only(f)[0].headline, /^Would post: .* — held: the agent is paused$/);
+        assert.strictEqual(actionLabel(only(f)[0]), "Send review");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent quiet hours: what the agent found itself waits; what you ask for runs", async () => {
+      const hm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      const night = { enabled: true, from: hm(new Date(Date.now() - 3600e3)), to: hm(new Date(Date.now() + 3600e3)) };
+      const f = agentFixture({ script: keepWorking, agent: { limits: { quietHours: night } } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.strictEqual(only(f)[0].state, "queued");
+        assert.strictEqual(f.children.length, 0);
+        assert.strictEqual(f.agent.getState().quietUntil, night.to);
+        // Yours: asked by you, it runs — the automatic one leaves the queue for it.
+        await f.agent.act({ type: "skip", runId: only(f)[0].runId });
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => f.children.length === 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a run the app's closing cut short goes on by itself at the next start — the same session, in its worktree", async () => {
+      const f = agentFixture({ script: keepWorking });
+      f.agent.onSnapshot(f.snapshot);
+      await until(() => f.agent.getState().running.length === 1);
+      const { runId, sessionId, worktree, key } = only(f)[0];
+      f.agent.stop();
+      const saved = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+      const was = saved.items.find((i) => i.runId === runId);
+      assert.deepStrictEqual([was.state, was.interrupted, was.headline], ["needsYou", true, "Interrupted — the app closed while it ran"], "written down before the app goes");
+      assert.strictEqual(saved.ledger[key].state, "failed");
+
+      // The app starts again.
+      nfsA.mkdirSync(worktree, { recursive: true });
+      const g = agentFixture({ home: f.dir, script: keepWorking });
+      try {
+        assert.ok(only(g).find((i) => i.runId === runId).interrupted, "held until the PRs are known");
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length === 1);
+        const c = g.children[0];
+        assert.strictEqual(c.args[c.args.indexOf("--resume") + 1], sessionId, "the very session it ran");
+        assert.ok(!c.args.includes("--session-id"));
+        assert.strictEqual(c.cwd, worktree, "in the worktree it worked in");
+        assert.ok(!g.gitCalls.some((a) => a[0] === "worktree" && a[1] === "add"), "no new worktree");
+        await tickOnce();
+        assert.match(c.written, /closed while you worked/);
+        assert.strictEqual(only(g).find((i) => i.runId === runId).state, "working");
+        assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"resumed"/);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    // The drawing run as Claude Code answers in print mode: one JSON result on stdout.
+    const DRAWN_FLOW = 'flowchart LR\n  a["Poller"] --> b["Agent"]\n  class b newComp';
+    const drawing = (c) => {
+      c.stdout.write(
+        JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "### Architecture\n```mermaid\n" + DRAWN_FLOW + "\n```", total_cost_usd: 0.02 }),
+      );
+      setImmediate(() => c.emit("close", 0));
+    };
+    const reviewOrDrawing = (c) => (c.args.includes("--no-session-persistence") ? drawing(c) : reviewWithPlan()(c));
+    const diagramGh = (state) => async (args, opts) => {
+      if (args.includes("--paginate")) return { code: 0, stdout: state.existing ? `${state.existing}\n` : "", stderr: "" };
+      if (args.includes("Accept: application/vnd.github.v3.diff")) return { code: 0, stdout: "diff --git a/src/poller.ts b/src/poller.ts\n+agent.onSnapshot()\n", stderr: "" };
+      state.posted.push({ endpoint: args[1], body: JSON.parse(opts.input) });
+      return { code: 0, stdout: "{}", stderr: "" };
+    };
+    const DIAGRAMS_ON = { diagrams: { enabled: true, minLines: 100, post: true, model: "sonnet" } };
+
+    await atest("agent diagrams: a big review is drawn before it reaches you, and its diagrams go out with it as one comment", async () => {
+      const dg = require(path.join(__dirname, "../dist/main/shared/agent-diagrams.js"));
+      const state = { existing: null, posted: [] };
+      const checked = [];
+      const f = agentFixture({
+        pr: reviewPr({ additions: 300 }),
+        agent: DIAGRAMS_ON,
+        script: reviewOrDrawing,
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr({ additions: 300 }), state: "OPEN", viewer: "me" }),
+        gh: diagramGh(state),
+        checkMermaid: async (sources) => (checked.push(sources), sources.map(() => true)),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.headline, "Would post: request changes, 1 inline comment, 1 diagram");
+        assert.deepStrictEqual(item.diagrams, { list: [{ title: "Architecture", source: DRAWN_FLOW }], checked: true });
+        assert.strictEqual(f.children.length, 2, "the review, then the drawing run");
+        const draw = f.children[1];
+        assert.strictEqual(draw.cwd, path.join(f.dir, "agent", "runs", item.runId, "diagrams"), "a folder of the app's own, not the PR's checkout");
+        assert.match(draw.written, /^Pull request: .+\nWhat it does: Prepared the review\./);
+        assert.match(draw.written, /src\/poller\.ts/);
+        assert.deepStrictEqual(checked, [[DRAWN_FLOW]], "parsed in the renderer before it may go out");
+        await until(() => readLog(f).some((l) => l.event === "diagrams"));
+        const line = readLog(f).find((l) => l.event === "diagrams");
+        assert.deepStrictEqual([line.data.count, line.data.checked, line.data.costUsd], [1, true, 0.02]);
+
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(state.posted.map((p) => p.endpoint), ["repos/a/b/pulls/7/reviews", "repos/a/b/issues/7/comments"], "the review first, its diagrams last");
+        const note = state.posted[1].body.body;
+        assert.ok(note.startsWith(dg.DIAGRAM_HEADER) && note.includes(DRAWN_FLOW), note);
+        assert.ok(note.endsWith(ad.DEFAULT_AGENT_SIGNATURE), "signed like everything the agent posts");
+        assert.strictEqual(only(f)[0].headline, "Published: request changes, 1 inline comment, 1 diagram");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent diagrams: none for a small PR or one that has a Mermaid diagram already — and none goes out unchecked", async () => {
+      // Under the threshold: no drawing run at all.
+      const small = agentFixture({ agent: DIAGRAMS_ON, script: reviewOrDrawing, captureScript: captureJs, gh: diagramGh({ existing: null, posted: [] }) });
+      try {
+        small.agent.onSnapshot(small.snapshot);
+        await until(() => only(small).some((i) => i.state === "needsYou"));
+        assert.deepStrictEqual([small.children.length, only(small)[0].diagrams], [1, undefined]);
+      } finally {
+        small.agent.stop();
+      }
+
+      // The PR carries one already — whoever drew it: its link instead of a second.
+      const existing = "https://github.com/a/b/pull/7#issuecomment-1";
+      const has = agentFixture({ pr: reviewPr({ additions: 300 }), agent: DIAGRAMS_ON, script: reviewOrDrawing, captureScript: captureJs, gh: diagramGh({ existing, posted: [] }) });
+      try {
+        has.agent.onSnapshot(has.snapshot);
+        await until(() => only(has).some((i) => i.state === "needsYou"));
+        assert.strictEqual(has.children.length, 1, "no drawing run");
+        assert.deepStrictEqual(only(has)[0].diagrams, { list: [], checked: false, existingUrl: existing, note: "The PR has a Mermaid diagram already" });
+        assert.strictEqual(only(has)[0].headline, "Would post: request changes, 1 inline comment");
+      } finally {
+        has.agent.stop();
+      }
+
+      // Drawn with no window to parse them: shown, but held back from the post.
+      const state = { existing: null, posted: [] };
+      const blind = agentFixture({
+        pr: reviewPr({ additions: 300 }),
+        agent: DIAGRAMS_ON,
+        script: reviewOrDrawing,
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr({ additions: 300 }), state: "OPEN", viewer: "me" }),
+        gh: diagramGh(state),
+      });
+      try {
+        blind.agent.onSnapshot(blind.snapshot);
+        await until(() => only(blind).some((i) => i.state === "needsYou"));
+        const item = only(blind)[0];
+        assert.deepStrictEqual([item.diagrams.list.length, item.diagrams.checked], [1, false]);
+        assert.deepStrictEqual(await blind.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(state.posted.map((p) => p.endpoint), ["repos/a/b/pulls/7/reviews"], "the review alone");
+        assert.strictEqual(only(blind)[0].headline, "Published: request changes, 1 inline comment");
+        await until(() => readLog(blind).some((l) => l.event === "diagrams-held"));
+        assert.match(readLog(blind).find((l) => l.event === "diagrams-held").detail, /not checked/);
+      } finally {
+        blind.agent.stop();
+      }
+    });
+
+    // GitHub as the re-approve check and its writes see it.
+    const reapproveGh = (st) => async (args, opts) => {
+      if (args[1] === "graphql") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ data: { viewer: { login: "me" }, node: { state: "OPEN", headRefOid: "aaa111", baseRefName: "master", author: { login: st.author ?? "author1" }, timelineItems: { nodes: st.timeline } } } }),
+          stderr: "",
+        };
+      }
+      st.posted.push({ endpoint: args[1], body: JSON.parse(opts.input) });
+      return { code: 0, stdout: "{}", stderr: "" };
+    };
+    const myDismissal = [review("me", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("me", "APPROVED", "2026-11-01T10:00:00Z", "old111")];
+
+    await atest("agent re-approve: a base-only push that dismissed your approval is offered back, and given on your click — signed, on the new head", async () => {
+      const st = { timeline: myDismissal, posted: [] };
+      const notices = [];
+      const f = agentFixture({
+        pr: reviewPr({ role: "reviewed" }),
+        agent: { scenarios: { reapprove: { mode: "shadow", askReviewers: true } } },
+        script: keepWorking,
+        gh: reapproveGh(st), git: cleanMergeGit(st.git),
+        fetchPr: async () => ({ pr: reviewPr({ role: "reviewed" }), state: "OPEN", viewer: "me" }),
+        notify: (n) => notices.push([n.kind, n.item.scenario]),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.scenario === "reapprove"));
+        const item = only(f).find((i) => i.scenario === "reapprove");
+        assert.deepStrictEqual([item.state, item.headline, item.reapproval], ["needsYou", "Only the base changed — approve again", { logins: ["me"], oldHead: "old111" }]);
+        assert.strictEqual(actionLabel(item), "Re-approve");
+        assert.strictEqual(f.children.length, 0, "no session: a review of this head would only repeat the approval");
+        assert.deepStrictEqual(st.posted, [], "Shadow gives nothing by itself");
+        assert.deepStrictEqual(notices, [["needsYou", "reapprove"]]);
+        await until(() => readLog(f).some((l) => l.event === "reapprove-check"));
+        assert.strictEqual(readLog(f).find((l) => l.event === "reapprove-check").data.verdict, "same");
+
+        assert.deepStrictEqual(await f.agent.act({ type: "reapprove", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(st.posted.map((p) => [p.endpoint, p.body.event, p.body.commit_id]), [["repos/a/b/pulls/7/reviews", "APPROVE", "aaa111"]]);
+        assert.ok(st.posted[0].body.body.startsWith(ra.reapprovalBody("old111")) && st.posted[0].body.body.endsWith(ad.DEFAULT_AGENT_SIGNATURE));
+        assert.deepStrictEqual([only(f)[0].state, only(f)[0].published], ["done", true]);
+        assert.strictEqual((await f.agent.act({ type: "reapprove", runId: item.runId })).ok, false, "never twice");
+        await until(() => readLog(f).some((l) => l.event === "reapproved"));
+        // The head is read once: planning again starts no second check.
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.strictEqual(readLog(f).filter((l) => l.event === "reapprove-check").length, 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent re-approve: On gives it at once; changed lines leave the head to the other rules; on your PR the reviewers are asked again", async () => {
+      // On: no click.
+      const on = { timeline: myDismissal, posted: [] };
+      const f = agentFixture({
+        pr: reviewPr({ role: "reviewed" }),
+        agent: { scenarios: { reapprove: { mode: "on", askReviewers: true } } },
+        script: keepWorking,
+        gh: reapproveGh(on), git: cleanMergeGit(on.git),
+        fetchPr: async () => ({ pr: reviewPr({ role: "reviewed" }), state: "OPEN", viewer: "me" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => on.posted.length === 1 && only(f)[0]?.state === "done");
+        assert.strictEqual(on.posted[0].body.event, "APPROVE");
+        assert.match(only(f)[0].headline, /^Approved again — only the base changed since old111/);
+        assert.strictEqual(view.agentNoticeTitle("finished", only(f)[0]), "Approved again: #7", "not «Review sent»");
+        assert.strictEqual(view.agentNoticeTitle("needsYou", { ...only(f)[0], state: "needsYou", published: undefined }), "Only the base changed — approve again: #7");
+      } finally {
+        f.agent.stop();
+      }
+
+      // The author pushed a commit of their own: nothing is offered.
+      const changed = { timeline: myDismissal, posted: [], git: { own: "c1 old111\n", chain: "c1\n" } };
+      const g = agentFixture({ pr: reviewPr({ role: "reviewed" }), agent: { scenarios: { reapprove: { mode: "on", askReviewers: true } } }, script: keepWorking, gh: reapproveGh(changed), git: cleanMergeGit(changed.git) });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => readLog(g).some((l) => l.event === "reapprove-check"));
+        await tickOnce();
+        assert.deepStrictEqual([only(g).length, changed.posted.length], [0, 0]);
+        assert.notStrictEqual(g.agent.getState().idle.PR_R, "Checking whether only the base changed since your approval", "the other rules decide again");
+      } finally {
+        g.agent.stop();
+      }
+
+      // Your PR: the reviewer whose approval went is asked again.
+      const mine = { author: "me", timeline: [review("anna", "DISMISSED", "2026-11-01T10:00:00Z", "old111"), dismissal("anna", "APPROVED", "2026-11-01T10:00:00Z", "old111")], posted: [] };
+      const off = { mode: "off" };
+      const unapproved = () => ({ ...reviewPr({ role: "author" }), hasHumanApproval: false, reviewers: [] });
+      const h = agentFixture({
+        pr: unapproved(),
+        agent: { scenarios: { reapprove: { mode: "shadow", askReviewers: true }, selfReview: off, driveCi: { mode: "off", maxAttempts: 2 }, driveComments: off, merge: { mode: "off" } } },
+        script: keepWorking,
+        gh: reapproveGh(mine), git: cleanMergeGit(mine.git),
+        fetchPr: async () => ({ pr: unapproved(), state: "OPEN", viewer: "me" }),
+      });
+      try {
+        h.agent.onSnapshot(h.snapshot);
+        await until(() => only(h).some((i) => i.scenario === "reask"));
+        const item = only(h).find((i) => i.scenario === "reask");
+        assert.deepStrictEqual([item.headline, actionLabel(item), view.laneOfScenario(item.scenario)], ["Only the base changed — ask anna again", "Ask again", "mine"]);
+        assert.deepStrictEqual(await h.agent.act({ type: "reapprove", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(mine.posted, [{ endpoint: "repos/a/b/pulls/7/requested_reviewers", body: { reviewers: ["anna"] } }]);
+        assert.strictEqual(only(h).find((i) => i.scenario === "reask").headline, "Asked anna again — only the base changed");
+      } finally {
+        h.agent.stop();
+      }
+    });
+
+    await atest("agent re-approve: a failed read is tried again ten minutes later, not by the very plan it ends in", async () => {
+      let reads = 0;
+      const f = agentFixture({
+        pr: reviewPr({ role: "reviewed" }),
+        agent: { scenarios: { reapprove: { mode: "shadow", askReviewers: true } } },
+        script: keepWorking,
+        gh: async (args) => {
+          if (args[1] === "graphql") reads++;
+          return { code: 1, stdout: "", stderr: "HTTP 502" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => readLog(f).some((l) => l.event === "reapprove-check"));
+        await tickOnce();
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.strictEqual(reads, 1, "one read until the ten minutes are up");
+        assert.strictEqual(f.agent.getState().idle.PR_R, "Checking whether only the base changed since your approval");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    // --- GitHub's native stacks ---
+    const stk = require(path.join(__dirname, "../dist/main/shared/agent-stack.js"));
+    // Stack #9 of a/b: layer n is PR #(10 + n), all open unless `states` says otherwise.
+    const inStack = (position, size = 3, states = []) => ({
+      number: 9,
+      position,
+      size,
+      baseRefName: "master",
+      entries: Array.from({ length: size }, (_, i) => ({ position: i + 1, number: 11 + i, title: `layer ${i + 1}`, url: `https://github.com/a/b/pull/${11 + i}`, state: states[i] ?? "OPEN" })),
+      bottom: position > 1 ? { number: 11, url: "https://github.com/a/b/pull/11" } : null,
+    });
+    const layerPr = (position, o = {}) => ({
+      ...reviewPr({ id: `PR_L${position}`, number: 10 + position, role: o.role ?? "author" }),
+      stack: inStack(position, o.size, o.states),
+      baseRefName: position === 1 ? "master" : `layer-${position - 1}`,
+      blockedByStack: position > 1,
+      ...o.pr,
+    });
+
+    test("agent stack: a layer knows the PR below it and the open ones above; the lowest broken layer comes first", () => {
+      assert.strictEqual(stk.stackLayer({ stack: null }), null);
+      assert.deepStrictEqual(stk.stackLayer(layerPr(2, { size: 4, states: ["OPEN", "OPEN", "MERGED", "OPEN"] })), { number: 9, position: 2, size: 4, trunk: "master", below: 11, above: [14] }, "a merged layer above has nothing to rebase");
+      assert.strictEqual(stk.stackLayer(layerPr(1)).below, null);
+      const prs = [layerPr(1), layerPr(2), layerPr(3), { ...layerPr(1), id: "PR_X", repo: "x/y" }];
+      const red = new Set(["PR_L1", "PR_L2", "PR_X"]);
+      assert.strictEqual(stk.brokenLayerBelow(prs[2], prs, (p) => red.has(p.id)).id, "PR_L1", "the lowest of them");
+      assert.strictEqual(stk.brokenLayerBelow(prs[0], prs, (p) => red.has(p.id)), null, "nothing below the bottom — stack #9 of another repository is another stack");
+      assert.strictEqual(stk.brokenLayerBelow(prs[2], prs, () => false), null);
+      assert.strictEqual(stk.brokenLayerBelow(reviewPr(), prs, () => true), null, "outside a stack");
+    });
+
+    test("agent stack: a session on a layer keeps to it — a review to its own diff, a drive away from merging the base in", () => {
+      const review = stk.stackRules(layerPr(2), "review");
+      assert.match(review, /layer 2 of 3 in GitHub stack #9 \(bottom first, onto master\)/);
+      assert.match(review, /targets layer-1, the branch of #11 below it/);
+      assert.match(review, /a problem in code a lower layer added belongs to that PR/);
+      assert.match(stk.stackRules(layerPr(1), "rereview"), /it is the bottom layer, onto master/);
+      assert.match(stk.stackRules(layerPr(2), "drive"), /never merge the base branch into this one, and never rebase it/);
+      assert.strictEqual(stk.stackRules(layerPr(2), "afterMerge"), null);
+      assert.strictEqual(stk.stackRules(reviewPr(), "review"), null, "outside a stack");
+      const drive = agentCore.agentRules("drive", "shadow", null, { repo: "a/b", number: 12, baseRef: "origin/layer-1", reasons: ["ci"], stack: stk.stackRules(layerPr(2), "drive") });
+      assert.match(drive, /linear history/);
+      assert.doesNotMatch(drive, /Resolve a conflict by merging the base branch in/, "a layer is never told to merge its base");
+      assert.match(agentCore.agentRules("drive", "shadow", null, { repo: "a/b", number: 7, baseRef: "origin/master", reasons: ["ci"] }), /Resolve a conflict by merging the base branch in/, "outside a stack it still is");
+      assert.match(agentCore.agentRules("review", "shadow", null, { repo: "a/b", number: 12, stack: review }), /Review this layer only/);
+    });
+
+    test("agent stack: a conflicting layer is yours to rebase, and a broken layer waits for a broken one below it", () => {
+      const s = agentOn();
+      const conflicted = policy.planJobs([layerPr(2, { pr: { hasConflicts: true, ciState: "failure" } })], s, noSessions);
+      assert.deepStrictEqual([conflicted.jobs, conflicted.merges], [[], []], "no drive merging the base in, no self-review, no merge offer");
+      assert.match(conflicted.idle.get("PR_L2"), /^Yours — in a stack with conflicts; rebase the stack: Rebase stack on GitHub, or gh stack rebase and gh stack push$/);
+      assert.deepStrictEqual(policy.planJobs([{ ...reviewPr({ role: "author" }), hasConflicts: true }], s, noSessions).jobs[0].reasons, ["conflicts"], "outside a stack a conflict is still a drive");
+
+      const red = { ciState: "failure" };
+      const drives = (prs) => policy.planJobs(prs, s, noSessions).jobs.filter((j) => j.scenario === "drive").map((j) => j.prNumber);
+      const r = policy.planJobs([layerPr(3, { pr: red }), layerPr(2, { pr: red }), layerPr(1, { pr: red })], s, noSessions);
+      assert.deepStrictEqual(r.jobs.map((j) => j.prNumber), [11], "only the lowest broken layer is driven");
+      assert.strictEqual(r.idle.get("PR_L2"), "Yours — #11 below it in the stack comes first");
+      assert.strictEqual(r.idle.get("PR_L3"), "Yours — #11 below it in the stack comes first");
+      assert.deepStrictEqual(drives([layerPr(2, { pr: red }), layerPr(1)]), [12], "a green layer below holds nothing");
+      assert.deepStrictEqual(drives([layerPr(2, { pr: red }), layerPr(1, { role: "reviewer", pr: red })]), [12], "nor someone else's");
+      assert.deepStrictEqual(drives([layerPr(2, { pr: red }), layerPr(1, { pr: { ...red, isDraft: true } })]), [12], "nor a draft");
+      assert.strictEqual(policy.planJobs([layerPr(2, { pr: red }), layerPr(1, { pr: { hasConflicts: true } })], s, noSessions).idle.get("PR_L2"), "Yours — #11 below it in the stack comes first", "a layer below that needs its rebase holds the ones above");
+      // The Board's card says what mends it.
+      const conflictPr = layerPr(2, { pr: { hasConflicts: true } });
+      assert.strictEqual(view.stageLine(stage(conflictPr), conflictPr), "Conflicts in the stack — it needs Rebase stack");
+      const plainPr = { ...reviewPr({ role: "author" }), hasConflicts: true };
+      assert.strictEqual(view.stageLine(stage(plainPr), plainPr), "Conflicts with the base branch");
+    });
+
+    test("agent stack: a push alone after your review is checked for the same change on a new base before any re-review", () => {
+      const at = (h) => `2026-07-0${h}T00:00:00Z`;
+      const rv = (o = {}) => ({ ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), viewerReviewedAt: at(5), viewerReviewedHead: false, viewerReviewedOid: "old111", lastCommitPushedAt: at(6), authorRepliedAt: null, ...o });
+      const plan = (state, o) => policy.planJobs([rv(o)], agentOn(), { ...noSessions, baseOnlyState: () => state });
+      let r = plan("unchecked");
+      assert.deepStrictEqual([r.jobs, r.baseChecks.map((j) => j.key)], [[], ["PR_R|rereview|aaa111|base"]]);
+      assert.strictEqual(r.idle.get("PR_R"), "Reviewed — checking whether only the base changed under your review");
+      r = plan("checking");
+      assert.deepStrictEqual([r.jobs.length, r.baseChecks.length], [0, 1]);
+      r = plan("same");
+      assert.deepStrictEqual([r.jobs, r.baseChecks, r.idle.get("PR_R")], [[], [], "Reviewed — only the base changed under your review since"]);
+      assert.deepStrictEqual(plan("changed").jobs.map((j) => j.key), [`PR_R|rereview|aaa111|reply@${at(6)}`], "the re-review runs as it always did");
+      assert.strictEqual(plan("same", { authorRepliedAt: at(7) }).jobs.length, 1, "the author answered too: no check");
+      assert.strictEqual(plan("same", { roles: ["reviewer"], requestedOfMe: true }).jobs.length, 1, "asked again: no check");
+      assert.strictEqual(plan("same", { viewerReviewedOid: null }).jobs.length, 1, "no review commit to compare with");
+      assert.strictEqual(policy.planJobs([rv()], agentOn(), noSessions).jobs.length, 1, "no hook: changed");
+    });
+
+    await atest("agent stack: in a real clone a layer rebased after the one below merged is the same change; an own commit, a change folded in or a conflict resolved by hand isn't", async () => {
+      const md = require(path.join(__dirname, "../dist/main/main/agent/reapprove.js"));
+      const wtM = require(path.join(__dirname, "../dist/main/main/agent/worktrees.js"));
+      const { execFileSync } = require("node:child_process");
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-stack-"));
+      const remote = path.join(root, "remote.git");
+      const co = path.join(root, "co");
+      const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+      const g = (...args) => execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", "-c", "core.editor=true", ...args], { cwd: co, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+      const write = (file, text) => nfsA.writeFileSync(path.join(co, file), text);
+      const lines = (over = {}) => Array.from({ length: 12 }, (_, i) => over[i + 1] ?? `line ${i + 1}`).join("\n") + "\n";
+      execFileSync("git", ["init", "--bare", "-b", "master", remote], { env, stdio: "ignore" });
+      // As GitHub does: a commit is fetched by its id, whichever ref holds it.
+      execFileSync("git", ["-C", remote, "config", "uploadpack.allowAnySHA1InWant", "true"], { env, stdio: "ignore" });
+      execFileSync("git", ["clone", remote, co], { env, stdio: "ignore" });
+      g("checkout", "-b", "master");
+      write("a.txt", lines());
+      write("b.txt", lines());
+      g("add", ".");
+      g("commit", "-m", "base");
+      g("push", "origin", "master");
+      // Layer 1 changes a.txt; layer 2 — the PR you reviewed — changes b.txt on top of it.
+      g("checkout", "-b", "layer-1");
+      write("a.txt", lines({ 2: "layer 1" }));
+      g("commit", "-am", "layer 1");
+      g("push", "origin", "layer-1");
+      const layer1 = g("rev-parse", "HEAD");
+      g("checkout", "-b", "layer-2");
+      write("b.txt", lines({ 5: "layer 2" }));
+      g("commit", "-am", "layer 2");
+      const reviewed = g("rev-parse", "HEAD");
+      const pushPr = () => {
+        g("push", "-f", "origin", "HEAD:refs/pull/2/head");
+        return g("rev-parse", "HEAD");
+      };
+      pushPr();
+      const local = { git: wtM.runGit, checkout: co, remote: "origin" };
+      const check = (head, reviewedOn = null) => md.sameChangeOnNewBase(local, { number: 2, baseRefName: "master" }, reviewed, head, reviewedOn);
+      g("checkout", "master");
+      write("c.txt", "elsewhere\n");
+      g("add", ".");
+      g("commit", "-m", "master moves");
+      g("push", "origin", "master");
+      // Layer 2 moved onto master with layer 1 NOT merged: layer 1's code is in its diff now.
+      g("checkout", "-B", "leak", reviewed);
+      g("rebase", "master");
+      const leaked = pushPr();
+      assert.strictEqual(await check(leaked), null, "against master alone it reads the same — the reviewed head holds layer 1 too");
+      assert.strictEqual(await check(leaked, layer1), "the PR's own change differs from the one you reviewed", "against the base you reviewed it on, it doesn't");
+      // Layer 1 lands squashed, and GitHub rebases layer 2 onto master.
+      g("checkout", "master");
+      g("merge", "--squash", "layer-1");
+      g("commit", "-m", "layer 1 (#1)");
+      g("push", "origin", "master");
+      g("checkout", "-B", "rebased", reviewed);
+      g("rebase", "--onto", "master", "layer-1");
+      const rebased = pushPr();
+      assert.strictEqual(await check(rebased), null, "the same layer on the new base");
+      assert.strictEqual(await check(rebased, layer1), null, "taken against the base you reviewed it on, too");
+
+      // The check as main runs it: what GitHub records about the base since your review decides what it is taken against.
+      const reviewedAt = "2026-11-01T00:00:00Z";
+      const retarget = { __typename: "BaseRefChangedEvent", createdAt: "2026-11-02T00:00:00Z", previousRefName: "layer-1" };
+      const lowerMerged = { headRefOid: layer1, mergedAt: "2026-11-02T00:00:00Z", isCrossRepository: false, headRepository: { nameWithOwner: "a/b" } };
+      const ghWith = ({ events = [], hasNextPage = false, merged = [lowerMerged] } = {}) => async (args, opts) => {
+        const { query, variables } = JSON.parse(opts.input);
+        if (query.includes("BaseRefChangedEvent")) {
+          assert.deepStrictEqual(variables, { id: "PR_2", since: reviewedAt }, "only what happened since your review");
+          return { code: 0, stderr: "", stdout: JSON.stringify({ data: { node: { state: "OPEN", headRefOid: g("rev-parse", "HEAD"), baseRefName: "master", timelineItems: { pageInfo: { hasNextPage }, nodes: events } } } }) };
+        }
+        assert.deepStrictEqual(variables, { owner: "a", name: "b", ref: "layer-1", base: "master" }, "PRs merged from the branch it had into the one it has");
+        return { code: 0, stderr: "", stdout: JSON.stringify({ data: { repository: { pullRequests: { nodes: merged } } } }) };
+      };
+      const target = (head) => ({ id: "PR_2", url: "https://github.com/a/b/pull/2", repo: "a/b", number: 2, headOid: head, baseRefName: "master", viewerReviewedAt: reviewedAt, viewerReviewedOid: reviewed });
+      const verdict = async (gh, head = rebased) => (await md.checkBaseOnly(gh, target(head), local)).verdict;
+      assert.deepStrictEqual(await md.checkBaseOnly(ghWith({ events: [retarget] }), target(rebased), local), { verdict: "same", note: `only the base changed since ${reviewed.slice(0, 7)}`, baseRefName: "master" });
+      // A force-push of the base: taken against the tip GitHub records from before it.
+      assert.strictEqual(await verdict(ghWith({ events: [{ __typename: "BaseRefForcePushedEvent", createdAt: "2026-11-02T00:00:00Z", beforeCommit: { oid: layer1 } }] })), "same");
+      // Whatever can't be told for sure is "changed".
+      for (const [why, gh] of [
+        ["a force-push GitHub names no commit for", ghWith({ events: [{ __typename: "BaseRefForcePushedEvent", createdAt: "2026-11-02T00:00:00Z", beforeCommit: null }] })],
+        ["two changes of the base", ghWith({ events: [retarget, { ...retarget, createdAt: "2026-11-03T00:00:00Z" }] })],
+        ["more than one page of them", ghWith({ events: [retarget], hasNextPage: true })],
+        ["a fork's PR from a branch of that name", ghWith({ events: [retarget], merged: [{ ...lowerMerged, isCrossRepository: true, headRepository: { nameWithOwner: "evil/b" } }] })],
+        ["two PRs it could be", ghWith({ events: [retarget], merged: [lowerMerged, { ...lowerMerged, headRefOid: reviewed }] })],
+        ["one merged before your review", ghWith({ events: [retarget], merged: [{ ...lowerMerged, mergedAt: "2026-10-01T00:00:00Z" }] })],
+        ["none merged", ghWith({ events: [retarget], merged: [] })],
+      ]) {
+        assert.strictEqual(await verdict(gh), "changed", why);
+      }
+      g("checkout", "-B", "leak", leaked);
+      pushPr();
+      assert.strictEqual(await verdict(ghWith({ events: [retarget] }), leaked), "changed", "retargeted onto master without layer 1: a re-review");
+      g("checkout", "-B", "rebased", rebased);
+      pushPr();
+      await assert.rejects(md.checkBaseOnly(ghWith(), { ...target(rebased), baseRefName: "layer-1" }, local), /moved on/, "the dashboard is behind GitHub");
+      assert.deepStrictEqual(await md.checkBaseOnly(ghWith(), { ...target(rebased), viewerReviewedOid: null }, local), { verdict: "changed", note: "no review commit to compare with", baseRefName: "master" });
+      assert.strictEqual((await md.checkBaseOnly(ghWith(), target(rebased), null)).note, "no clone of the repository to check the push in");
+
+      write("d.txt", "more\n");
+      g("add", ".");
+      g("commit", "-m", "more");
+      assert.strictEqual(await check(pushPr()), "the PR's own change differs from the one you reviewed", "a commit of the author's on top");
+
+      g("reset", "--hard", rebased);
+      write("b.txt", lines({ 5: "layer 2", 9: "slipped in" }));
+      g("commit", "--amend", "-a", "--no-edit");
+      assert.strictEqual(await check(pushPr()), "the PR's own change differs from the one you reviewed", "a change folded into the rebase");
+
+      // Outside a stack: the base merged in is the same change too.
+      g("checkout", "-B", "merged", reviewed);
+      g("merge", "--no-edit", "master");
+      assert.strictEqual(await check(pushPr()), null, "the base merged in, cleanly");
+
+      // The base changes the reviewed line; the rebase's conflict is resolved by hand.
+      g("checkout", "master");
+      write("b.txt", lines({ 5: "master's own line 5" }));
+      g("commit", "-am", "master touches line 5");
+      g("push", "origin", "master");
+      g("checkout", "-B", "conflict", rebased);
+      try {
+        g("rebase", "master");
+      } catch {
+        // The conflict, as expected.
+      }
+      write("b.txt", lines({ 5: "layer 2" }));
+      g("add", ".");
+      g("rebase", "--continue");
+      const conflicted = pushPr();
+      assert.strictEqual(await check(conflicted), "the reviewed change doesn't go onto the new base cleanly");
+
+      await assert.rejects(check(rebased), /newer head/, "the PR moved on since the dashboard saw it");
+      assert.strictEqual(await md.sameChangeOnNewBase(local, { number: 2, baseRefName: "master" }, "nope", conflicted), "no commit id to compare");
+      assert.ok(!nfsA.existsSync(path.join(co, ".git", "FETCH_HEAD")), "no FETCH_HEAD is written");
+
+      // A clone that never saw the reviewed head: it is fetched by its id from the remote, where no ref holds it now.
+      const co2 = path.join(root, "co2");
+      // --no-local: a plain local clone copies every object, unreachable ones too.
+      execFileSync("git", ["clone", "--no-local", remote, co2], { env, stdio: "ignore" });
+      g("push", "-f", "origin", `${rebased}:refs/pull/2/head`);
+      assert.throws(() => execFileSync("git", ["cat-file", "-e", `${reviewed}^{commit}`], { cwd: co2, stdio: "ignore" }), "not in the new clone yet");
+      assert.strictEqual(await md.sameChangeOnNewBase({ git: wtM.runGit, checkout: co2, remote: "origin" }, { number: 2, baseRefName: "master" }, reviewed, rebased), null);
+    });
+
+    await atest("agent stack: a reviewed PR whose new head is the same change on a new base gets no re-review — checked once per head", async () => {
+      const oldHead = "1".repeat(40);
+      const head = "2".repeat(40);
+      const reviewed = (base = "layer-1") => ({
+        ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false, headOid: head }),
+        ...{ viewerReviewedAt: "2026-07-05T00:00:00Z", viewerReviewedHead: false, viewerReviewedOid: oldHead, lastCommitPushedAt: "2026-07-06T00:00:00Z", authorRepliedAt: null },
+        baseRefName: base,
+        stack: inStack(2),
+      });
+      // GitHub as the check reads it: the PR at the dashboard's head and base, not retargeted since your review.
+      let ghBase = "layer-1";
+      let baseReads = 0;
+      const baseGh = async (args, opts) => {
+        baseReads++;
+        assert.match(JSON.parse(opts.input).query, /BaseRefChangedEvent/);
+        return { code: 0, stderr: "", stdout: JSON.stringify({ data: { node: { state: "OPEN", headRefOid: head, baseRefName: ghBase, timelineItems: { pageInfo: { hasNextPage: false }, nodes: [] } } } }) };
+      };
+      const fakeGit = (tree) => async (args) => {
+        const a = gitCmd(args);
+        // ls-remote <remote> <base ref> <pull ref>: both there, the PR at the dashboard's head.
+        if (a[0] === "ls-remote") return `${"b".repeat(40)}\t${a[2]}\n${head}\t${a[3]}\n`;
+        if (a[0] === "merge-base") return `${"c".repeat(40)}\n`;
+        if (a[0] === "merge-tree") return "tree1\n";
+        if (a[0] === "rev-parse") return `${tree}\n`;
+        return "";
+      };
+      const f = agentFixture({ pr: reviewed(), script: keepWorking, git: fakeGit("tree1"), gh: baseGh });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => readLog(f).some((l) => l.event === "base-check"));
+        await tickOnce();
+        const line = readLog(f).find((l) => l.event === "base-check");
+        assert.deepStrictEqual([line.data.verdict, line.data.oldHead, line.data.stack, line.data.layer, line.detail], ["same", oldHead, 9, 2, "only the base changed since 1111111"]);
+        assert.deepStrictEqual([only(f).length, f.children.length], [0, 0], "no re-review");
+        assert.strictEqual(f.agent.getState().idle.PR_R, "Reviewed — only the base changed under your review since");
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.deepStrictEqual([readLog(f).filter((l) => l.event === "base-check").length, baseReads], [1, 1], "once per head");
+        // Retargeted since, on the same head: the verdict was for the other base — looked at again.
+        ghBase = "master";
+        f.snapshot.pullRequests[0] = reviewed("master");
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => readLog(f).filter((l) => l.event === "base-check").length === 2);
+        assert.strictEqual(baseReads, 2);
+      } finally {
+        f.agent.stop();
+        ghBase = "layer-1";
+      }
+
+      // The layer's own change differs: the re-review runs — told it is a layer.
+      const g = agentFixture({ pr: reviewed(), script: keepWorking, git: fakeGit("tree2"), gh: baseGh });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length === 1);
+        assert.strictEqual(readLog(g).find((l) => l.event === "base-check").data.verdict, "changed");
+        const c = g.children[0];
+        assert.match(c.args[c.args.indexOf("--append-system-prompt") + 1], /layer 2 of 3 in GitHub stack #9/);
+      } finally {
+        g.agent.stop();
+      }
+
+      // A failed check waits its ten minutes; meanwhile no re-review starts.
+      let lsRemotes = 0;
+      const k = agentFixture({
+        pr: reviewed(),
+        script: keepWorking,
+        gh: baseGh,
+        git: async (args) => {
+          if (gitCmd(args)[0] === "ls-remote") {
+            lsRemotes++;
+            throw new Error("network down");
+          }
+          return "";
+        },
+      });
+      try {
+        k.agent.onSnapshot(k.snapshot);
+        await until(() => readLog(k).some((l) => l.event === "base-check"));
+        await tickOnce();
+        k.agent.onSnapshot(k.snapshot);
+        await tickOnce();
+        assert.deepStrictEqual([lsRemotes, readLog(k).find((l) => l.event === "base-check").data.verdict, only(k).length], [1, "error", 0]);
+        assert.strictEqual(k.agent.getState().idle.PR_R, "Reviewed — checking whether only the base changed under your review");
+      } finally {
+        k.agent.stop();
+      }
+    });
+
+    await atest("agent stack: a drive on a layer never pushes a merge commit, and says which layers above need Rebase stack", async () => {
+      const mine = { ...layerPr(2), ciState: "failure", headRefName: "layer-2", headOid: "a".repeat(40) };
+      let merges = "0";
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const pushes = [];
+      const f = agentFixture({
+        pr: mine,
+        script: succeed("Fixed the failing test."),
+        fetchPr: async () => ({ pr: mine, state: "OPEN", viewer: "me" }),
+        git: async (all) => {
+          let i = 0;
+          for (;;) {
+            if (all[i] === "-c") i += 2;
+            else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+            else break;
+          }
+          const args = all.slice(i);
+          if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+          if (args[0] === "log") return "2222222222222222222222222222222222222222\tfix: the failing test\n";
+          if (args[0] === "rev-list") return `${merges}\n`;
+          if (args[0] === "diff") return args.includes("--stat") ? " a.ts | 2 +-" : "+fixed";
+          if (args[0] === "rev-parse") return args.includes("HEAD") ? "2222222222222222222222222222222222222222\n" : `${commonDir}\n`;
+          if (args[0] === "remote") return "https://github.com/a/b.git\n";
+          if (args[0] === "push") pushes.push(all);
+          return "";
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        const rules = f.children[0].args[f.children[0].args.indexOf("--append-system-prompt") + 1];
+        assert.match(rules, /layer 2 of 3 in GitHub stack #9/);
+        assert.doesNotMatch(rules, /Resolve a conflict by merging the base branch in/);
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        // A merge commit turned up in the worktree since (the session went on): nothing pushed.
+        merges = "1";
+        assert.match((await f.agent.act({ type: "push", runId: item.runId })).error, /merge commit in a stacked PR/);
+        assert.strictEqual(pushes.length, 0);
+        merges = "0";
+        only(f)[0].state = "needsYou";
+        assert.deepStrictEqual(await f.agent.act({ type: "push", runId: item.runId }), { ok: true });
+        assert.strictEqual(pushes.length, 1);
+        assert.strictEqual(only(f)[0].headline, "Pushed 1 commit — the layer above (#13) needs Rebase stack");
+      } finally {
+        f.agent.stop();
+      }
+
+      // A run that made a merge commit itself: failed, nothing to push.
+      merges = "1";
+      const g = agentFixture({
+        pr: mine,
+        script: succeed("Merged the base in."),
+        git: async (all) => {
+          let i = 0;
+          for (;;) {
+            if (all[i] === "-c") i += 2;
+            else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+            else break;
+          }
+          const args = all.slice(i);
+          if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+          if (args[0] === "log") return "2222222222222222222222222222222222222222\tMerge branch 'layer-1'\n";
+          if (args[0] === "rev-list") return "1\n";
+          if (args[0] === "rev-parse") return args.includes("HEAD") ? "2222222222222222222222222222222222222222\n" : `${commonDir}\n`;
+          if (args[0] === "remote") return "https://github.com/a/b.git\n";
+          return "";
+        },
+      });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => only(g).some((i) => i.state === "error"));
+        assert.strictEqual(only(g)[0].headline, "The run made a merge commit in a stacked PR — nothing to push");
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    // --- asked again with your approval standing on the head (#4079) ---
+    const approvedHere = (o = {}) => ({
+      ...reviewPr({ viewerHasReviewed: true, role: "reviewer", requestedOfMe: true, headOid: "e".repeat(40) }),
+      roles: ["reviewer", "reviewed"],
+      viewerApproved: true,
+      viewerReviewedHead: true,
+      viewerReviewedOid: "e".repeat(40),
+      viewerReviewedAt: new Date(Date.now() - 3 * 3600e3).toISOString(),
+      authorRepliedAt: null,
+      ...o,
+    });
+
+    test("agent board: asked again with your approval standing on this head is Done, not Your move — a reply or a new head is yours again", () => {
+      const s = stage(approvedHere());
+      assert.deepStrictEqual([s.lane, s.column, s.action, s.askedAgain, s.earlier], ["review", "done", null, true, false]);
+      assert.strictEqual(view.stageLine(s, approvedHere()), "Asked again — your approval stands on this head");
+      assert.strictEqual(view.approvalStands(approvedHere()), true);
+      // The author answered in a thread after your approval: a look is due.
+      const replied = approvedHere({ authorRepliedAt: new Date().toISOString() });
+      assert.strictEqual(view.approvalStands(replied), false);
+      assert.deepStrictEqual(where(stage(replied)), ["review", "you", "rereview", "Open on GitHub", false]);
+      // Your approval is on an older head: the new head is unreviewed.
+      assert.deepStrictEqual(where(stage(approvedHere({ viewerReviewedHead: false }))), ["review", "you", "rereview", "Open on GitHub", false]);
+      // Not asked: the plain approval, as before.
+      const quiet = stage(approvedHere({ requestedOfMe: false, roles: ["reviewed"] }));
+      assert.deepStrictEqual([quiet.column, quiet.askedAgain], ["done", false]);
+      assert.strictEqual(view.stageLine(quiet, approvedHere({ requestedOfMe: false, roles: ["reviewed"] })), "You approved");
+    });
+
+    await atest("agent: Approve again answers the request on your click — read again first, signed, on the same head; nothing else", async () => {
+      const head = "e".repeat(40);
+      let freshPr = approvedHere();
+      const posted = [];
+      const f = agentFixture({
+        pr: approvedHere(),
+        script: keepWorking,
+        fetchPr: async () => ({ pr: freshPr, state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => {
+          posted.push({ endpoint: args[1], body: JSON.parse(opts.input) });
+          return { code: 0, stdout: "{}", stderr: "" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        assert.deepStrictEqual([only(f).length, f.children.length], [0, 0], "asked again with nothing new: no re-review");
+        // GitHub says otherwise by now: nothing goes out.
+        freshPr = approvedHere({ headOid: "f".repeat(40) });
+        assert.match((await f.agent.act({ type: "approveAgain", prId: "PR_R" })).error, /new commits since/);
+        freshPr = approvedHere({ authorRepliedAt: new Date().toISOString() });
+        assert.match((await f.agent.act({ type: "approveAgain", prId: "PR_R" })).error, /no longer stands|answered since/);
+        assert.deepStrictEqual(posted, []);
+        freshPr = approvedHere();
+        assert.deepStrictEqual(await f.agent.act({ type: "approveAgain", prId: "PR_R" }), { ok: true });
+        assert.deepStrictEqual(posted.map((p) => [p.endpoint, p.body.event, p.body.commit_id]), [["repos/a/b/pulls/7/reviews", "APPROVE", head]]);
+        assert.ok(posted[0].body.body.startsWith("Approved again: nothing changed since my approval of `eeeeeee`.") && posted[0].body.body.endsWith(ad.DEFAULT_AGENT_SIGNATURE), "one line and the signature");
+        assert.deepStrictEqual(only(f), [], "no item, no session");
+        const logged = readLog(f).find((l) => l.event === "approved-again");
+        assert.deepStrictEqual([logged.kind, logged.prNumber, logged.headOid], ["run", 7, head]);
+        assert.ok(readLog(f).some((l) => l.kind === "action" && l.event === "approveAgain" && l.data.ok === true), "the click is in the log");
+        assert.strictEqual((await f.agent.act({ type: "approveAgain", prId: "PR_GONE" })).ok, false);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a review you asked for that finds your approval already on the head says so", async () => {
+      const f = agentFixture({ pr: approvedHere({ requestedOfMe: false, roles: ["reviewed"] }), script: succeed("Already approved this head; nothing new."), captureScript: captureJs });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => only(f).length === 1 && only(f)[0].state === "done");
+        assert.strictEqual(only(f)[0].headline, "Already approved on this head — nothing to post");
+      } finally {
+        f.agent.stop();
+      }
+      // Elsewhere it stays as it was.
+      const g = agentFixture({ pr: { ...approvedHere({ requestedOfMe: false, roles: ["reviewed"] }), viewerApproved: false }, script: succeed("Nothing to add."), captureScript: captureJs });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        assert.deepStrictEqual(await g.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => only(g).length === 1 && only(g)[0].state === "done");
+        assert.strictEqual(only(g)[0].headline, "Reviewed — nothing to post");
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: a run whose process is ended mid-workflow is interrupted, not a clean review — it goes on in the same session", async () => {
+      const notes = [];
+      let spawned = 0;
+      const cutMidWorkflow = (c) => {
+        emit(c, { type: "system", subtype: "init", session_id: "s" });
+        emit(c, { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "w" }] });
+        emit(c, { type: "result", subtype: "success", is_error: false, result: "The review workflow is running in the background. I'll report once it completes." });
+        setImmediate(() => c.emit("exit", runner.STATUS_CONTROL_C_EXIT, null));
+      };
+      const f = agentFixture({ script: (c) => (++spawned === 1 ? cutMidWorkflow(c) : keepWorking(c)), notify: (n) => notes.push(n.kind) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f)[0]?.interrupted === true);
+        const item = only(f)[0];
+        assert.deepStrictEqual(
+          [item.state, item.headline],
+          ["needsYou", "Interrupted — its process was ended (Ctrl+C, or Windows shutting down or signing out)"],
+          "not «Reviewed — nothing to post»",
+        );
+        assert.ok(!f.gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"), "its folder stays for the session to go on in");
+        await until(() => readLog(f).some((l) => l.event === "interrupted"));
+        const line = readLog(f).find((l) => l.event === "interrupted");
+        assert.deepStrictEqual([line.kind, line.data.exitCode, line.data.backgroundTasks], ["run", 3221225786, 1]);
+        assert.ok(!readLog(f).some((l) => l.kind === "run" && ["done", "needsYou", "failed"].includes(l.event)), "no false end");
+        assert.deepStrictEqual(notes, [], "nothing to tell you: it goes on by itself");
+
+        // The next snapshot takes it up again, in the session it ran.
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+        const c = f.children[1];
+        assert.strictEqual(c.args[c.args.indexOf("--resume") + 1], item.sessionId, "the very session it ran");
+        assert.strictEqual(c.cwd, item.worktree);
+        assert.strictEqual(only(f)[0].state, "working");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a run cut short three times in a row stops going on by itself", async () => {
+      const cut = (c) => {
+        emit(c, { type: "system", subtype: "init", session_id: "s" });
+        setImmediate(() => c.emit("exit", runner.STATUS_CONTROL_C_EXIT, null));
+      };
+      const f = agentFixture({ script: cut });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        for (let k = 1; k <= 2; k++) {
+          await until(() => f.children.length === k && only(f)[0].interrupted === true);
+          nfsA.mkdirSync(only(f)[0].worktree, { recursive: true });
+          f.agent.onSnapshot(f.snapshot);
+        }
+        await until(() => only(f)[0].state === "error");
+        assert.strictEqual(f.children.length, 3);
+        assert.strictEqual(only(f)[0].headline, "Cut short 3 times in a row");
+        assert.match(only(f)[0].error, /process was ended/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: an interrupted drive, or a run whose folder is gone, starts over as a new run", async () => {
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", state: "working", headline: "h", queuedAt: "2026-11-05T00:00:00Z" };
+      for (const [scenario, folder] of [["drive", "here"], ["review", "gone"]]) {
+        const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+        const runId = "00000000-0000-4000-8000-0000000000d1";
+        const st = agentStore.emptyStore("2026-11-05");
+        st.items = [{ ...base, runId, key: `PR_R|${scenario}|aaa111`, scenario, sessionId: "11111111-1111-4111-8111-111111111111", worktree: folder === "here" ? home : path.join(home, "gone") }];
+        agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
+        const g = agentFixture({ home, script: keepWorking });
+        try {
+          assert.ok(only(g).every((i) => i.state === "needsYou" && i.interrupted), scenario);
+          g.agent.onSnapshot(g.snapshot);
+          await until(() => only(g).some((i) => i.key === `PR_R|${scenario}|aaa111|asked`));
+          assert.strictEqual(only(g).find((i) => i.runId === runId).headline, view.AGENT_CLOSED.rerun, scenario);
+          await until(() => g.children.length > 0);
+          assert.ok(g.children.every((c) => c.args.includes("--session-id") && !c.args.includes("--resume")), `${scenario}: a new session`);
+        } finally {
+          g.agent.stop();
+        }
+      }
+    });
+
+    await atest("agent: a run cut short on a head that has moved isn't resumed — what you asked for starts over on the new head, with no automatic one beside it", async () => {
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", state: "working", headline: "h", queuedAt: "2026-11-05T00:00:00Z", scenario: "review" };
+      for (const asked of [false, true]) {
+        const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+        const runId = "00000000-0000-4000-8000-0000000000e1";
+        const st = agentStore.emptyStore("2026-11-05");
+        // Its session and folder are still there: before, it would have resumed on the old head.
+        // Beside it, what the agent queued on its own for the new head before the app closed.
+        const auto = "00000000-0000-4000-8000-0000000000e2";
+        st.items = [
+          { ...base, runId, key: `PR_R|review|old000${asked ? "|asked" : ""}`, sessionId: "11111111-1111-4111-8111-111111111111", worktree: home },
+          { ...base, runId: auto, key: "PR_R|review|aaa111", state: "queued", queuedAt: "2026-11-05T00:01:00Z" },
+        ];
+        agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
+        const g = agentFixture({ home, script: keepWorking });
+        try {
+          g.agent.onSnapshot(g.snapshot);
+          const want = `PR_R|review|aaa111${asked ? "|asked" : ""}`;
+          await until(() => g.children.length === 1);
+          const old = only(g).find((i) => i.runId === runId);
+          assert.strictEqual(old.headline, asked ? view.AGENT_CLOSED.rerun : view.AGENT_CLOSED.superseded, `asked=${asked}`);
+          // Asked: yours goes first, the automatic one leaves. Found by the agent: the queued one simply runs.
+          assert.strictEqual(only(g).find((i) => i.runId === auto).state, asked ? "done" : "working", `asked=${asked}`);
+          assert.ok(g.children[0].args.includes("--session-id") && !g.children[0].args.includes("--resume"), "a new session on the new head");
+          assert.deepStrictEqual(only(g).filter((i) => i.state === "queued" || i.state === "working").map((i) => i.key), [want], `asked=${asked}: one run, on the new head`);
+          g.agent.onSnapshot(g.snapshot);
+          assert.strictEqual(only(g).filter((i) => i.state === "queued" || i.state === "working").length, 1, "the next plan adds no automatic review of the head you asked about");
+          const line = readLog(g).find((l) => l.event === "not-resumed");
+          assert.deepStrictEqual([line.runId, line.headOid, line.data.was], [runId, "aaa111", "old000"]);
+        } finally {
+          g.agent.stop();
+        }
+      }
+    });
+
+    await atest("agent: switched on in Settings, it plans at once — the poller reports a snapshot only when PRs change", async () => {
+      let pushes = 0;
+      const f = agentFixture({ enabled: false, script: keepWorking, onChange: () => pushes++ });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.agent.getState().idle.PR_R, "The agent is off");
+        f.setAgent({ enabled: true });
+        f.agent.refresh();
+        assert.ok(pushes > 0, "the new state is pushed");
+        assert.strictEqual(f.agent.getState().enabled, true);
+        assert.notStrictEqual(f.agent.getState().idle.PR_R, "The agent is off");
+        await until(() => f.children.length === 1);
+        const before = pushes;
+        f.agent.refresh();
+        assert.strictEqual(f.children.length, 1, "unchanged settings plan nothing new");
+        assert.ok(pushes > before, "a refresh still pushes: the chip and tray line are settings too");
+        f.setAgent({ enabled: false });
+        f.agent.refresh();
+        assert.deepStrictEqual([f.agent.getState().enabled, f.agent.getState().idle.PR_R], [false, "The agent is off"], "switched off: it says so at once");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a settings change is noticed on the agent's own tick too", async () => {
+      const f = agentFixture({ enabled: false, script: keepWorking, tickMs: 20 });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await new Promise((r) => setTimeout(r, 60));
+        assert.strictEqual(f.children.length, 0);
+        f.setAgent({ enabled: true });
+        await until(() => f.children.length === 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("agent queue: your order first, then the oldest; a place in front of any run, or the end", () => {
+      const q = (id, at, rank) => vItem({ prId: id, runId: `00000000-0000-4000-8000-00000000000${id}`, state: "queued", queuedAt: at, ...(rank !== undefined ? { rank } : {}) });
+      const a = q("1", "2026-11-05T09:00:00.000Z");
+      const b = q("2", "2026-11-05T10:00:00.000Z");
+      const c = q("3", "2026-11-05T11:00:00.000Z");
+      assert.deepStrictEqual(view.queueOrder([c, a, b]).map((i) => i.prId), ["1", "2", "3"]);
+      const front = view.rankBefore([a, b], a.runId);
+      assert.deepStrictEqual(view.queueOrder([a, b, { ...c, rank: front }]).map((i) => i.prId), ["3", "1", "2"], "Run next");
+      const middle = view.rankBefore([a, b], b.runId);
+      assert.deepStrictEqual(view.queueOrder([a, b, { ...c, rank: middle }]).map((i) => i.prId), ["1", "3", "2"]);
+      const end = view.rankBefore([b, c], null);
+      assert.deepStrictEqual(view.queueOrder([b, c, { ...a, rank: end }]).map((i) => i.prId), ["2", "3", "1"]);
+      assert.strictEqual(view.rankBefore([b, c], "00000000-0000-4000-8000-000000000999"), end, "a run no longer queued means the end");
+      assert.strictEqual(view.rankBefore([], null), undefined, "an empty queue: its own time will do");
+    });
+
+    await atest("agent worktrees: Run again gets a folder of its own, and the old one stays while your session works in it", async () => {
+      const sessions = [];
+      const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, sessions });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const first = only(f)[0];
+        // You continue its session in your terminal.
+        sessions.push({ id: first.sessionId, name: "x", status: "idle", where: "terminal", prKeys: [], repoKeys: [], branch: null });
+        assert.deepStrictEqual(await f.agent.act({ type: "retry", runId: first.runId }), { ok: true });
+        await until(() => only(f).some((i) => i.runId !== first.runId && i.worktree));
+        const second = only(f).find((i) => i.runId !== first.runId);
+        assert.notStrictEqual(second.worktree, first.worktree, "a folder of its own");
+        const removed = () => f.gitCalls.filter((a) => a[0] === "worktree" && a[1] === "remove").map((a) => a[3]);
+        assert.ok(!removed().includes(first.worktree), "your session's folder is left alone");
+        assert.strictEqual(only(f).find((i) => i.runId === first.runId).worktree, first.worktree, "and remembered, to go later");
+        // You closed the session: the next sweep takes the folder.
+        sessions.length = 0;
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => removed().includes(first.worktree));
+        await until(() => only(f).find((i) => i.runId === first.runId).worktree === undefined);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    const agentResult = require(path.join(__dirname, "../dist/main/shared/agent-result.js"));
+    test("agent result: the card reads the session's prd-result block, held to its shapes; the rest is the report", () => {
+      const block = (o) => "## Summary\n\nLong prose.\n\n```prd-result\n" + JSON.stringify(o) + "\n```\n";
+      const r = agentResult.parseRunResult(
+        block({
+          summary: "Nothing to post: your approve stands.",
+          asks: [{ question: "Keep the finding?", options: ["Keep", "Drop", "", 3, "a", "b", "c"] }, { question: "" }, "junk"],
+          findings: [
+            { severity: "minor", text: "small", where: "a.ts:1" },
+            { severity: "BLOCKER", text: "big", where: "b.ts:2" },
+            { severity: "weird", text: "odd" },
+            { severity: "major", text: "" },
+          ],
+        }),
+      );
+      assert.strictEqual(r.card.structured, true);
+      assert.strictEqual(r.card.summary, "Nothing to post: your approve stands.");
+      assert.deepStrictEqual(r.card.asks, [{ question: "Keep the finding?", options: ["Keep", "Drop", "a", "b"] }], "only real questions, at most 4 string options");
+      assert.deepStrictEqual(r.card.findings.map((x) => [x.severity, x.text]), [["blocker", "big"], ["minor", "small"], ["note", "odd"]], "most severe first; unknown severity is a note; empty text dropped");
+      assert.strictEqual(r.body, "## Summary\n\nLong prose.", "the block is not part of the report");
+      // No block, or a broken one: the first real paragraph, without markdown.
+      const fallback = agentResult.parseRunResult("## Summary\n\n**Nothing was prepared** — see `x` and [the PR](https://x).\n\nMore.");
+      assert.deepStrictEqual([fallback.card.structured, fallback.card.summary, fallback.card.asks], [false, "Nothing was prepared — see x and the PR.", []]);
+      assert.strictEqual(agentResult.parseRunResult("```prd-result\n{not json\n```\nText after.").card.summary, "Text after.");
+      assert.strictEqual(agentResult.summarizeOutput("```\ncode\n```\n# H\n\n- first point\n- second"), "first point second");
+      assert.strictEqual(agentResult.summarizeOutput("x".repeat(400)).length, 240);
+      // The last block wins (a skill's own example earlier in the message doesn't).
+      const two = agentResult.parseRunResult(block({ summary: "first" }) + "\n" + block({ summary: "last" }));
+      assert.strictEqual(two.card.summary, "last");
+      assert.strictEqual(agentResult.resultCard({ output: "Plain words." }).summary, "Plain words.", "a result from before the block still has a summary");
+      assert.strictEqual(agentResult.resultCard({}), null);
+      for (const [scenario, mode] of [["review", "shadow"], ["brief", "on"], ["drive", "shadow"], ["afterMerge", "on"], ["rereview", "on"]]) {
+        assert.ok(agentCore.agentRules(scenario, mode).endsWith(agentResult.resultRuleFor(scenario)), `${scenario} sessions are told how to end`);
+      }
+    });
+
+    await atest("agent answer: a run on your PR that asks you waits with its question; your answer goes on in the same session; Discard closes it", async () => {
+      const text = "Prose.\n\n```prd-result\n" + JSON.stringify({ summary: "One finding is a product decision.", asks: [{ question: "Make the threshold configurable?", options: ["Yes", "No"] }], findings: [] }) + "\n```";
+      const mine = { ...reviewPr({ role: "author", headOid: "abcdef1234567" }), awaitingReview: true };
+      const common = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(common, "config"), "[core]\n");
+      const gitImpl = async (all) => {
+        let i = 0;
+        for (;;) {
+          if (all[i] === "-c") i += 2;
+          else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+          else break;
+        }
+        const args = all.slice(i);
+        if (args[0] === "config") return `file:${common}/config\0core.bare\0`;
+        if (args[0] === "rev-parse") return `${common}\n`;
+        if (args[0] === "remote") return "https://github.com/a/b.git\n";
+        return "";
+      };
+      const f = agentFixture({ pr: mine, script: succeed(text), git: gitImpl });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.deepStrictEqual([item.result.summary, item.result.asks[0].question, item.output], ["One finding is a product decision.", "Make the threshold configurable?", "Prose."]);
+        assert.strictEqual(actionLabel(item), "Your call");
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        assert.deepStrictEqual(await f.agent.act({ type: "answer", runId: item.runId, text: "Q: Make the threshold configurable?\nA: No" }), { ok: true });
+        await until(() => f.children.length === 2);
+        const c = f.children[1];
+        assert.strictEqual(c.args[c.args.indexOf("--resume") + 1], item.sessionId, "the same session");
+        assert.strictEqual(c.cwd, item.worktree);
+        await until(() => only(f)[0].state === "needsYou");
+        assert.match(c.written, /The user answered from the app: Q: Make the threshold configurable\?\\nA: No/);
+        assert.match(nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8"), /"event":"answered"/);
+        assert.strictEqual(only(f)[0].answer, undefined, "the answer is used once");
+        // Discard: it closes.
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: item.runId }), { ok: true });
+        assert.strictEqual(only(f)[0].state, "done");
+        assert.strictEqual((await f.agent.act({ type: "answer", runId: item.runId, text: "late" })).ok, false, "a closed result can't be answered");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("agent result: on a PR you review nothing is asked of you — questions are the author's; a brief's go into the review it drafts", () => {
+      const block = (o) => "Text.\n\n```prd-result\n" + JSON.stringify(o) + "\n```";
+      const r = agentResult.parseRunResult(block({ summary: "s", asks: [{ question: "Is the retry unbounded on purpose?", options: ["Yes"] }], findings: [], authorQuestions: ["Why a new endpoint?"] }), "review");
+      assert.deepStrictEqual([r.card.asks, r.card.authorQuestions], [[], ["Why a new endpoint?", "Is the retry unbounded on purpose?"]]);
+      const own = agentResult.parseRunResult(block({ summary: "s", asks: [{ question: "Configurable?", options: [] }], findings: [] }), "drive");
+      assert.strictEqual(own.card.asks.length, 1, "your own PR may ask you");
+      assert.match(agentResult.resultRuleFor("review"), /never ask them anything/);
+      assert.match(agentResult.resultRuleFor("brief"), /authorQuestions/);
+      assert.strictEqual(agentResult.resultRuleFor("drive"), agentResult.RESULT_RULE);
+      // A result stored before the rule reads the same way.
+      const old = agentResult.resultCard({ scenario: "rereview", result: { summary: "s", asks: [{ question: "Keep it?", options: [] }], findings: [], structured: true } });
+      assert.deepStrictEqual([old.asks, old.authorQuestions], [[], ["Keep it?"]]);
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "brief", output: "b", result: { summary: "s", asks: [], findings: [], authorQuestions: ["q"], structured: true } })), "Draft a review");
+    });
+
+    await atest("agent brief: Review anyway carries the brief's questions for the author into the review it drafts", async () => {
+      const big = reviewPr({ additions: 5000 });
+      const text = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: ["Why drop the cache?"], asks: [] }) + "\n```";
+      const f = agentFixture({ pr: big, script: succeed(text), agent: { scenarios: { review: { mode: "off" } } } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.scenario === "brief" && i.state === "needsYou"));
+        const brief = only(f).find((i) => i.scenario === "brief");
+        assert.deepStrictEqual(brief.result.authorQuestions, ["Why drop the cache?"]);
+        assert.deepStrictEqual(await f.agent.act({ type: "reviewAnyway", runId: brief.runId }), { ok: true });
+        await until(() => f.children.length === 2);
+        assert.match(f.children[1].written, /questions for its author[\s\S]*Why drop the cache\?/);
+        assert.match(only(f)[1].brief, /^Brief\./, "the brief's text stays on the review's card");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent brief: a big PR's review follows its brief on its own — the brief's questions in its prompt, its text on its card, no toast for the brief", async () => {
+      const big = reviewPr({ additions: 5000 });
+      const text = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: ["Why drop the cache?"], asks: [] }) + "\n```";
+      const notices = [];
+      const f = agentFixture({ pr: big, script: succeed(text), notify: (n) => notices.push([n.kind, n.item.scenario]) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+        const [brief, review] = only(f);
+        assert.deepStrictEqual([brief.scenario, brief.state, brief.headline], ["brief", "done", view.AGENT_CLOSED.reviewed], "the brief leaves Your move for the review");
+        assert.deepStrictEqual([review.scenario, review.key], ["review", `${big.id}|review|aaa111`], "planned by the agent, not asked by you");
+        assert.deepStrictEqual(review.carry, ["Why drop the cache?"]);
+        assert.match(review.brief, /^Brief\./);
+        assert.match(f.children[1].written, /questions for its author[\s\S]*Why drop the cache\?/);
+        await until(() => only(f)[1].state !== "queued" && only(f)[1].state !== "working");
+        assert.ok(!notices.some(([kind, scenario]) => kind === "needsYou" && scenario === "brief"), "the brief alone asks nothing of you: no toast for it");
+        // The head's brief and review are both in the ledger: another plan of the same head runs neither again.
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent brief: a brief you asked for on a big PR is followed by the review too", async () => {
+      const big = reviewPr({ additions: 5000 });
+      const f = agentFixture({ pr: big, script: succeed("Brief.") });
+      try {
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: big.id }), { ok: true });
+        await until(() => f.children.length === 2);
+        const [brief, review] = only(f);
+        assert.match(brief.key, /\|brief\|aaa111\|asked$/);
+        assert.deepStrictEqual([brief.headline, review.scenario], [view.AGENT_CLOSED.reviewed, "review"]);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("ipc: an answer is text held to a bound", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "answer", runId: RID, text: "  Keep  " }), { type: "answer", runId: RID, text: "Keep" });
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "answer", runId: RID, text: "" }));
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "answer", runId: RID, text: "x".repeat(ipcAgent.AGENT_HINT_MAX + 1) }));
+    });
+
+    // --- blockers from the deep test: what you saw is what goes out; off is off; drive can do its job ---
+    test("agent publish: a plan recorded again counts once — one review, the last; a step written twice, once", () => {
+      const review = (body) => JSON.stringify({ kind: "review", event: "COMMENT", body, comments: [] });
+      const reply = JSON.stringify({ kind: "reply", replyTo: 5, body: "Fixed in the last commit." });
+      const steps = pub.readPlanLines([review("first"), reply, reply, review("second")].join("\n"));
+      assert.deepStrictEqual(steps.map((x) => x.kind), ["reply", "review"]);
+      assert.strictEqual(steps[1].body, "second", "the summary you see and what is posted are the same review");
+    });
+
+    test("agent publish: a dispute you drop is a reply and a resolve; one you keep, or didn't choose, changes nothing", () => {
+      const esc = [{ replyTo: 501, body: "caller checks" }, { replyTo: 502, body: "naming" }, { replyTo: 503, body: "scope" }];
+      const steps = pub.disputeSteps(esc, { 501: "drop", 502: "keep" }, new Map([[501, "PRRT_a"], [502, "PRRT_b"]]));
+      assert.deepStrictEqual(steps, [
+        { kind: "reply", replyTo: 501, body: pub.DROP_REPLY },
+        { kind: "resolve", threadId: "PRRT_a" },
+      ]);
+    });
+
+    await atest("agent re-review: Keep or Drop the author's pushback — a dropped thread is answered and resolved when the review is sent", async () => {
+      const writes = [];
+      const reviewWithDispute = (c) => {
+        const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+        const runDir = path.dirname(outDir);
+        const run = JSON.parse(nfsA.readFileSync(path.join(runDir, "run.json"), "utf8"));
+        const rf = path.join(outDir, "review.json");
+        nfsA.writeFileSync(rf, JSON.stringify({ event: "COMMENT", body: "Re-review: 2 of 3 fixed.", comments: [] }));
+        const ef = path.join(outDir, "dispute.txt");
+        nfsA.writeFileSync(ef, "The author says the caller checks for null.");
+        for (const a of [["review", run.repo, String(run.number), rf], ["escalate", run.repo, String(run.number), "501", ef]]) {
+          const r = spawnSync(process.execPath, [captureJs, runDir, ...a], { encoding: "utf8" });
+          if (r.status !== 0) throw new Error(r.stderr);
+        }
+        emit(c, { type: "system", subtype: "init", session_id: "s" });
+        emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the re-review." });
+        setImmediate(() => c.emit("exit", 0));
+      };
+      const gh = async (args, opts) => {
+        const body = opts?.input ? JSON.parse(opts.input) : null;
+        if (args[1] === "graphql") {
+          if (/mutation/.test(body.query)) return writes.push(["resolve", body.variables.id]), { code: 0, stdout: "{}", stderr: "" };
+          if (/reviewThreads/.test(body.query)) {
+            return { code: 0, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [{ id: "PRRT_x1", comments: { nodes: [{ databaseId: 501 }] } }] } } } } }), stderr: "" };
+          }
+          return { code: 0, stdout: JSON.stringify({ data: { node: { isResolved: false, pullRequest: { number: 7, repository: { nameWithOwner: "a/b" } }, comments: { nodes: [{ author: { login: "me" } }] } } } }), stderr: "" };
+        }
+        if (!body && /pulls\/comments\/\d+$/.test(args[1])) {
+          return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "me" }, in_reply_to_id: null }), stderr: "" };
+        }
+        writes.push([args[1], body?.body ?? body?.event]);
+        return { code: 0, stdout: "{}", stderr: "" };
+      };
+      const f = agentFixture({ script: reviewWithDispute, captureScript: captureJs, gh, fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.deepStrictEqual(item.plan.escalations.map((e) => e.replyTo), [501]);
+        assert.match((await f.agent.act({ type: "dispute", runId: item.runId, replyTo: 999, choice: "drop" })).error, /didn't push back/);
+        assert.deepStrictEqual(await f.agent.act({ type: "dispute", runId: item.runId, replyTo: 501, choice: "drop" }), { ok: true });
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(
+          writes.map((w) => w[0]),
+          ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/501/replies", "resolve"],
+          "the review, then your drop: a reply in the thread and its resolve",
+        );
+        assert.ok(writes[1][1].startsWith(pub.DROP_REPLY) && writes[1][1].endsWith(ad.DEFAULT_AGENT_SIGNATURE), "signed like every write");
+        assert.strictEqual(writes[2][1], "PRRT_x1");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("ipc: a dispute choice names a comment and keep or drop, nothing else", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "dispute", runId: RID, replyTo: 501, choice: "drop", body: "x" }), { type: "dispute", runId: RID, replyTo: 501, choice: "drop" });
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "dispute", runId: RID, replyTo: "501", choice: "drop" }));
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "dispute", runId: RID, replyTo: 501, choice: "argue" }));
+    });
+
+    await atest("agent publish: a plan changed in the session since you saw it posts nothing; the card shows the new one and Publish then posts it", async () => {
+      const posted = [];
+      const f = agentFixture({
+        script: reviewWithPlan("REQUEST_CHANGES"),
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => (posted.push({ args, body: JSON.parse(opts.input) }), { code: 0, stdout: "{}", stderr: "" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.plan.event, "REQUEST_CHANGES");
+        // "Edit first": in the session you turn it into an approve, and it records the review again.
+        nfsA.appendFileSync(path.join(item.runFolder, "plan.jsonl"), JSON.stringify({ kind: "review", event: "APPROVE", body: "Edited: looks good", comments: [] }) + "\n");
+        const first = await f.agent.act({ type: "publish", runId: item.runId });
+        assert.strictEqual(first.ok, false);
+        assert.match(first.error, /changed in the session/);
+        assert.strictEqual(posted.length, 0, "nothing you hadn't seen went out");
+        assert.strictEqual(only(f)[0].plan.event, "APPROVE", "the card now shows what would go out");
+        assert.match(only(f)[0].headline, /changed in the session/);
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        const reviews = posted.filter((p) => /\/reviews$/.test(p.args[1]));
+        assert.strictEqual(reviews.length, 1, "one review, never two");
+        assert.strictEqual(reviews[0].body.event, "APPROVE");
+        assert.strictEqual(f.agent.getState().acceptedUnchanged, 0, "an edited plan isn't 'published exactly as prepared'");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent off: switching it off stops the runs in flight and says why; your clicks still work, nothing new starts", async () => {
+      const f = agentFixture({ script: keepWorking, agent: { scenarios: { review: { mode: "on" } } } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+        const runId = only(f)[0].runId;
+        f.setAgent({ enabled: false, scenarios: { review: { mode: "on" } } });
+        f.agent.refresh();
+        await until(() => only(f)[0].state === "done");
+        assert.strictEqual(only(f)[0].headline, "Stopped — the agent was switched off");
+        assert.strictEqual(f.agent.getState().running.length, 0);
+        // Your own clicks, with the agent off.
+        assert.match((await f.agent.act({ type: "retry", runId })).error, /The agent is off/, "a new run waits until it is on");
+        assert.match((await f.agent.act({ type: "enqueue", prId: "PR_R" })).error, /The agent is off/);
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId }), { ok: true });
+        assert.strictEqual(f.children.length, 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("agent tools: drive can merge the base in and read its threads; a list saved before that gets the new rules once", () => {
+      for (const rule of ["Bash(git merge *)", "Bash(gh api *)", "Bash(gh pr diff *)"]) assert.ok(ad.DEFAULT_AGENT_TOOLS.drive.includes(rule), rule);
+      assert.ok(!ad.DEFAULT_AGENT_TOOLS.drive.some((r) => /npm|test/.test(r)), "still no test commands by default");
+      // A list saved before versions: it gets the rules added since.
+      const old = ["Read", "Edit", "Bash(git commit *)"];
+      const migrated = cfg.validateAgent({ permissions: { tools: { drive: old } } });
+      assert.deepStrictEqual(migrated.permissions.tools.drive.slice(0, 3), old, "your own rules stay as they were");
+      assert.ok(migrated.permissions.tools.drive.includes("Bash(git merge *)"));
+      assert.strictEqual(migrated.permissions.toolsVersion, ad.AGENT_TOOLS_VERSION);
+      // Saved at this version, a rule you removed stays removed.
+      const mine = cfg.validateAgent({ permissions: { tools: { drive: old }, toolsVersion: ad.AGENT_TOOLS_VERSION } });
+      assert.deepStrictEqual(mine.permissions.tools.drive, old);
+      // The guard lets drive do exactly that.
+      const pr = guard.guardPrFromUrl("https://creatio.ghe.com/eng/core/pull/7");
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "git merge origin/main" }, pr).allow, true);
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "gh api repos/eng/core/pulls/7/comments --hostname creatio.ghe.com" }, pr).allow, true);
+      assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "gh api repos/eng/core/pulls/7/comments --hostname github.com" }, pr).allow, false);
+    });
+
+    await atest("agent gh: every session's gh points at its PR's own host and repository", async () => {
+      const f = agentFixture({ script: succeed("ok") });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1);
+        assert.strictEqual(f.children[0].env.GH_HOST, "github.com");
+        assert.strictEqual(f.children[0].env.GH_REPO, "github.com/a/b");
+      } finally {
+        f.agent.stop();
+      }
+      assert.deepStrictEqual(agentCore.ghTarget("https://creatio.ghe.com/eng/core/pull/7", "eng/core"), { GH_HOST: "creatio.ghe.com", GH_REPO: "creatio.ghe.com/eng/core" });
+      assert.deepStrictEqual(agentCore.ghTarget("not a url", "eng/core"), {});
+      assert.deepStrictEqual(agentCore.ghTarget("https://h/x/y/pull/1", "x/y; rm -rf"), {}, "only a plain owner/name");
+    });
+
+    // --- steps 4–6 of the test plan: an item's life, one summary, one way to a card ---
+    const reconcile = require(path.join(__dirname, "../dist/main/shared/agent-reconcile.js"));
+    test("agent reconcile: a PR missing from two snapshots in a row (its host answering) closes its items; a fetch error isn't a merge", () => {
+      const items = [
+        vItem({ prId: "GONE", state: "needsYou" }),
+        vItem({ prId: "GONE", state: "queued" }),
+        vItem({ prId: "GONE", state: "working" }),
+        vItem({ prId: "GONE", state: "needsYou", scenario: "afterMerge" }),
+        vItem({ prId: "GONE", state: "needsYou", scenario: "merge" }),
+        vItem({ prId: "HERE", state: "needsYou" }),
+        vItem({ prId: "DOWN", state: "error", hostLabel: "GHE" }),
+      ];
+      const misses = new Map();
+      const present = new Set(["HERE"]);
+      assert.deepStrictEqual(reconcile.goneItems(items, present, new Set(["GHE"]), misses), [], "one snapshot is not enough");
+      const gone = reconcile.goneItems(items, present, new Set(["GHE"]), misses);
+      assert.deepStrictEqual(gone.map((i) => [i.prId, i.state, i.scenario]), [["GONE", "needsYou", "review"], ["GONE", "queued", "review"]], "not a running one, not the merge offer, not the Jira run after a merge");
+      assert.strictEqual(misses.has("DOWN"), false, "its host failed: not counted");
+      assert.deepStrictEqual(reconcile.goneItems(items, new Set(["HERE", "GONE"]), new Set(), misses), [], "back on the dashboard: the count starts over");
+      assert.strictEqual(misses.has("GONE"), false);
+    });
+
+    test("agent reconcile: a newer run replaces what waits on the same PR in its lane; nothing for you goes to Done", () => {
+      const fresh = vItem({ prId: "P", state: "queued", scenario: "review" });
+      const items = [
+        fresh,
+        vItem({ prId: "P", state: "needsYou", scenario: "review" }),
+        vItem({ prId: "P", state: "error", scenario: "brief" }),
+        vItem({ prId: "P", state: "needsYou", scenario: "drive" }),
+        vItem({ prId: "P", state: "done", scenario: "review" }),
+        vItem({ prId: "Q", state: "needsYou", scenario: "review" }),
+      ];
+      assert.deepStrictEqual(reconcile.supersededBy(items, fresh).map((i) => [i.prId, i.scenario]), [["P", "review"], ["P", "brief"]], "your PR's drive is another lane");
+      const card = (o) => ({ summary: "s", asks: [], findings: [], structured: true, ...o });
+      const r = (o) => vItem({ prId: "P", state: "needsYou", runFolder: "/x", result: card({}), ...o });
+      assert.strictEqual(reconcile.nothingForYou(r({})), true);
+      assert.strictEqual(reconcile.nothingForYou(r({ scenario: "rereview" })), true);
+      assert.strictEqual(reconcile.nothingForYou(r({ plan: { event: "COMMENT" } })), false, "something to publish");
+      assert.strictEqual(reconcile.nothingForYou(r({ result: card({ asks: [{ question: "q", options: [] }] }) })), false, "it asks you");
+      assert.strictEqual(reconcile.nothingForYou(r({ result: card({ findings: [{ severity: "major", text: "t", where: "" }] }) })), false, "a major finding");
+      assert.strictEqual(reconcile.nothingForYou(r({ result: card({ findings: [{ severity: "minor", text: "t", where: "" }] }) })), true);
+      assert.strictEqual(reconcile.nothingForYou(r({ scenario: "drive" })), false, "a drive with no commits: CI is still red");
+      assert.strictEqual(reconcile.nothingForYou(r({ runFolder: undefined })), false, "a plain dry run's text is yours to post");
+      assert.strictEqual(reconcile.nothingForYou(r({ result: undefined })), false);
+    });
+
+    await atest("agent reconcile: a new head supersedes the waiting result; a PR that left the dashboard closes its items", async () => {
+      const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const old = only(f)[0];
+        // The author pushes: a new head, a new review — the old result goes quietly.
+        f.snapshot.pullRequests = [reviewPr({ headOid: "bbb222" })];
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).find((i) => i.runId === old.runId).state === "done");
+        assert.strictEqual(only(f).find((i) => i.runId === old.runId).headline, view.AGENT_CLOSED.superseded);
+        await until(() => only(f).some((i) => i.runId !== old.runId && i.state === "needsYou"));
+        // The PR is merged elsewhere: two snapshots without it, and its result closes.
+        f.snapshot.pullRequests = [];
+        f.agent.onSnapshot(f.snapshot);
+        assert.ok(only(f).some((i) => i.state === "needsYou"), "one snapshot without it is not enough");
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => !only(f).some((i) => i.state === "needsYou"));
+        assert.ok(only(f).some((i) => i.headline === view.AGENT_CLOSED.offDashboard));
+        const board = view.stageColumns([], [], f.agent.getState(), { today: view.todayKey(new Date()) });
+        assert.deepStrictEqual([board.review.you.length, board.review.done.length], [0, 0], "both close quietly: no decision, no Done today card");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent reconcile: a review with nothing to post is a note, not a decision", async () => {
+      const text = "Checked.\n\n```prd-result\n" + JSON.stringify({ summary: "Nothing to post: your approve stands.", asks: [], findings: [{ severity: "note", text: "fine", where: "" }] }) + "\n```";
+      const notices = [];
+      const f = agentFixture({ script: succeed(text), captureScript: captureJs, notify: (n) => notices.push(n.kind) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "done"));
+        const item = only(f)[0];
+        assert.strictEqual(item.headline, "Reviewed — nothing to post");
+        assert.deepStrictEqual(notices, ["finished"], "not a decision for you");
+        const board = view.stageColumns([], [], f.agent.getState(), { today: view.todayKey(new Date()) });
+        assert.ok(board.review.done.some((c) => c.stage.item?.runId === item.runId), "its PR gone, the note is today's");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("agent summary: one set of numbers and words for the chip, the tray, the Board and the cards", () => {
+      const base = { enabled: true, items: [], running: [], idle: {}, runsToday: 3, perDay: 30, parallel: 2, heldUntil: null, headerChip: true, trayState: true, paused: false, quietUntil: null, acceptedUnchanged: 0, suggestOn: false };
+      const items = [vItem({ prId: "A", state: "queued" }), vItem({ prId: "B", state: "needsYou" }), vItem({ prId: "C", state: "error" }), vItem({ prId: "D", state: "working" })];
+      const running = [{ runId: items[3].runId, progress: { steps: [] }, recent: [], paused: true }];
+      const sum = view.agentSummary({ ...base, items, running });
+      assert.deepStrictEqual(
+        { running: sum.running, pausedRuns: sum.pausedRuns, queued: sum.queued, readyForYou: sum.readyForYou, block: sum.block },
+        { running: 1, pausedRuns: 1, queued: 1, readyForYou: 1, block: null },
+        "B asks nothing (no plan); C failed: that is ready for you",
+      );
+      assert.strictEqual(view.readyItems([...items, vItem({ prId: "C", state: "queued" })]).length, 0, "not while the agent is on the PR again");
+      assert.deepStrictEqual([view.agentSummary({ ...base, paused: true }).block, view.agentSummary({ ...base, quietUntil: "08:00" }).blockText], ["paused", "Quiet hours until 08:00"]);
+      assert.strictEqual(view.agentSummary({ ...base, runsToday: 30 }).blockText, "Daily limit reached (30)");
+      assert.deepStrictEqual([view.stepLabel([]), view.stepLabel([{ status: "completed" }, { status: "pending" }]), view.stepLabel([{ status: "completed" }])], ["", "2/2", "1/1"]);
+      assert.strictEqual(actionLabel(vItem({ prId: "P", state: "error", scenario: "afterMerge" })), null, "the Jira run after a merge can't run again: a note");
+    });
+
+    test("main.js wiring: a clicked agent notification names its item; the focus flash is a finite animation", () => {
+      const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /sendToRenderer\("agent-show-board", item\.runId\)/);
+      const preload = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
+      assert.match(preload, /"agent-show-board", handler/);
+      assert.match(preload, /listener\(typeof runId === "string" \? runId : undefined\)/);
+      const css = nfsA.readFileSync(path.join(__dirname, "../src/renderer/src/styles.css"), "utf8");
+      assert.match(css, /\.focus-flash \{\s*animation: focus-flash 0\.9s ease-out 3;/);
+    });
+
+    test("ipc: an idle PR can be queued in front of a run, and a queued run moved; nothing else rides along", () => {
+      const RID = "00000000-0000-4000-8000-000000000001";
+      const RID2 = "00000000-0000-4000-8000-000000000002";
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "enqueue", prId: "PR_kw1", before: RID }), { type: "enqueue", prId: "PR_kw1", before: RID });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "enqueue", prId: "PR_kw1", before: null }), { type: "enqueue", prId: "PR_kw1" });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "moveQueued", runId: RID, before: RID2, rank: -1 }), { type: "moveQueued", runId: RID, before: RID2 });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "moveQueued", runId: RID }), { type: "moveQueued", runId: RID, before: null });
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "moveQueued", runId: RID, before: "../x" }));
+      assert.throws(() => ipcAgent.validateAgentAction({ type: "enqueue", prId: "PR_kw1", before: 5 }));
+    });
+
+    await atest("agent queue: Run next and a drop in front of a run decide what starts next; Skip keeps a queued PR out", async () => {
+      const f = agentFixture({ script: keepWorking, agent: { limits: { parallel: 1 } } });
+      try {
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_B", number: 8 }), reviewPr({ id: "PR_C", number: 9 }));
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+        const byPr = (id) => only(f).find((i) => i.prId === id && (i.state === "queued" || i.state === "working"));
+        assert.strictEqual(byPr("PR_R").state, "working");
+        assert.deepStrictEqual(view.queueOrder(only(f).filter((i) => i.state === "queued")).map((i) => i.prId), ["PR_B", "PR_C"]);
+        // Run next: C goes in front of B.
+        assert.deepStrictEqual(await f.agent.act({ type: "moveQueued", runId: byPr("PR_C").runId, before: byPr("PR_B").runId }), { ok: true });
+        assert.deepStrictEqual(view.queueOrder(only(f).filter((i) => i.state === "queued")).map((i) => i.prId), ["PR_C", "PR_B"]);
+        assert.strictEqual(JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).items.find((i) => i.prId === "PR_C").rank !== undefined, true, "your order survives a restart");
+        // Skip B: it stays out, and Idle says why.
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: byPr("PR_B").runId }), { ok: true });
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(byPr("PR_B"), undefined, "a PR you took out of the queue isn't queued again for this head");
+        assert.match(f.agent.getState().idle.PR_B, /took it out of the queue/);
+        // An idle PR dropped in front of C runs before it.
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_D", number: 10, requestedOfMe: false }));
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_D", before: byPr("PR_C").runId }), { ok: true });
+        assert.deepStrictEqual(view.queueOrder(only(f).filter((i) => i.state === "queued")).map((i) => i.prId), ["PR_D", "PR_C"]);
+        // The run ends: the first in your order starts.
+        await f.agent.act({ type: "stop", runId: byPr("PR_R").runId });
+        await until(() => byPr("PR_D")?.state === "working");
+        assert.strictEqual(byPr("PR_C").state, "queued");
+        assert.strictEqual((await f.agent.act({ type: "moveQueued", runId: byPr("PR_D").runId, before: null })).ok, false, "a started run has left the queue");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("main.js wiring: the tray shows the agent hidden or not; Show agent opens its popover; toasts the agent took are left out", () => {
+      const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /showAgent: \(\) => showAgent\(\)/);
+      assert.match(src, /toggleAgentPause: \(\) =>[\s\S]{0,200}"resumeAgent" : "pauseAgent"/);
+      assert.match(src, /agentPushTimer = null;\s*(?:\/\/[^\n]*\n\s*)?updateTrayAgent\(\);\s*if \(agent && mainWindow/, "before the visibility gate");
+      assert.match(src, /trayController\.setAgent\(s && s\.enabled && s\.trayState \? \{ line: \(0, agent_view_1\.agentTrayLine\)\(s\), paused: s\.paused \} : null\)/);
+      assert.match(src, /sendToRenderer\("agent-open-companion", null\)/);
+      assert.match(src, /void poller\?\.refresh\(\);\s*(?:\/\/[^\n]*\n\s*)*agent\?\.refresh\(\);/, "saving settings wakes the agent, without waiting for the poll");
+      assert.match(src, /all\.filter\(\(e\) => !\(0, agent_view_1\.agentTakesToast\)\(agentItems, e\)\)/);
+      const preload = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
+      assert.match(preload, /"agent-open-companion"/);
+    });
+  }
+
+  // --- Stale PRs: closing one with its Jira task -------------------------------
+  {
+    const sfs = require("node:fs");
+    const stale = require(path.join(__dirname, "../dist/main/shared/stale.js"));
+    const staleClose = require(path.join(__dirname, "../dist/main/main/stale-close.js"));
+    const ipcv = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+    const DAY = 864e5;
+    const NOW = Date.parse("2026-11-05T12:00:00Z");
+    const ago = (d) => new Date(NOW - d * DAY).toISOString();
+
+    test("stale: validateStaleAfterDays defaults, clamps and allows 0 (off)", () => {
+      assert.strictEqual(stale.validateStaleAfterDays(undefined), 30);
+      assert.strictEqual(stale.validateStaleAfterDays("garbage"), 30);
+      assert.strictEqual(stale.validateStaleAfterDays(0), 0);
+      assert.strictEqual(stale.validateStaleAfterDays(-5), 0);
+      assert.strictEqual(stale.validateStaleAfterDays(9999), 365);
+      assert.strictEqual(stale.validateStaleAfterDays("45"), 45);
+      assert.strictEqual(stale.validateStaleAfterDays(14.6), 15);
+    });
+
+    test("stale: settings keep staleAfterDays, and an old file without it gets the default", () => {
+      assert.strictEqual(cfg.validateSettings({}).staleAfterDays, 30);
+      assert.strictEqual(cfg.validateSettings({ staleAfterDays: 60 }).staleAfterDays, 60);
+      assert.strictEqual(cfg.defaultSettings().staleAfterDays, 30);
+    });
+
+    test("stale: isStalePr counts whole days from createdAt; 0 is off", () => {
+      assert.strictEqual(stale.isStalePr({ createdAt: ago(30) }, 30, NOW), true);
+      assert.strictEqual(stale.isStalePr({ createdAt: ago(29.9) }, 30, NOW), false);
+      assert.strictEqual(stale.isStalePr({ createdAt: ago(400) }, 0, NOW), false);
+      assert.strictEqual(stale.isStalePr({ createdAt: "nonsense" }, 30, NOW), false);
+    });
+
+    test("stale: the close action is offered on your own stale PRs only", () => {
+      assert.strictEqual(stale.canCloseStale({ isStale: true, roles: ["author"] }), true);
+      assert.strictEqual(stale.canCloseStale({ isStale: true, roles: ["reviewer"] }), false);
+      assert.strictEqual(stale.canCloseStale({ isStale: false, roles: ["author"] }), false);
+    });
+
+    const tr = (id, name, toStatus, toCategory, resolutions = [], resolutionRequired = false) => ({
+      id, name, toStatus, toCategory, resolutions, resolutionRequired,
+    });
+
+    test("stale: suggestTransition picks To Do by category, preferring a To Do name", () => {
+      const list = [
+        tr("1", "Backlog it", "Backlog", "new"),
+        tr("2", "Start", "In Progress", "indeterminate"),
+        tr("3", "Reset", "To Do", "new"),
+      ];
+      assert.strictEqual(stale.suggestTransition(list, "todo").id, "3");
+      assert.strictEqual(stale.suggestTransition([tr("9", "Reset", "Selected", "new")], "todo").id, "9");
+      assert.strictEqual(stale.suggestTransition([tr("2", "Start", "In Progress", "indeterminate")], "todo"), null);
+    });
+
+    test("stale: suggestTransition finds Won't Do by name, status, then a Done with that resolution", () => {
+      assert.strictEqual(
+        stale.suggestTransition([tr("1", "Done", "Done", "done"), tr("2", "Won't Do", "Won't Do", "done")], "wontDo").id,
+        "2",
+      );
+      assert.strictEqual(stale.suggestTransition([tr("4", "Finish", "Declined", "done")], "wontDo").id, "4");
+      assert.strictEqual(stale.suggestTransition([tr("5", "Abort", "Cancelled", "done")], "wontDo").id, "5");
+      const viaResolution = tr("6", "Close", "Closed", "done", [{ id: "10", name: "Done" }, { id: "11", name: "Won't Do" }], true);
+      assert.strictEqual(stale.suggestTransition([tr("1", "Done", "Done", "done"), viaResolution], "wontDo").id, "6");
+      assert.strictEqual(stale.suggestResolution(viaResolution.resolutions).id, "11");
+      assert.strictEqual(stale.suggestTransition([tr("1", "Done", "Done", "done")], "wontDo"), null);
+      assert.strictEqual(stale.suggestTransition([tr("1", "Done", "Done", "done")], "keep"), null);
+    });
+
+    test("stale: validateCloseStaleOptions accepts the four actions and rejects bad ids", () => {
+      assert.deepStrictEqual(ipcv.validateCloseStaleOptions({ comment: "bye" }), { comment: "bye", jira: { action: "keep" } });
+      assert.deepStrictEqual(
+        ipcv.validateCloseStaleOptions({ comment: "", jira: { action: "wontDo", transitionId: "41", resolutionId: "10001" } }),
+        { comment: "", jira: { action: "wontDo", transitionId: "41", resolutionId: "10001" } },
+      );
+      assert.deepStrictEqual(
+        ipcv.validateCloseStaleOptions({ jira: { action: "todo", transitionId: "11" } }).jira,
+        { action: "todo", transitionId: "11", resolutionId: null },
+      );
+      assert.deepStrictEqual(
+        ipcv.validateCloseStaleOptions({ jira: { action: "delete", deleteSubtasks: "yes" } }).jira,
+        { action: "delete", deleteSubtasks: false },
+      );
+      assert.throws(() => ipcv.validateCloseStaleOptions({ jira: { action: "todo", transitionId: "../x" } }), /invalid transition/);
+      assert.throws(() => ipcv.validateCloseStaleOptions({ jira: { action: "nuke" } }), /unknown Jira action/);
+      assert.throws(() => ipcv.validateCloseStaleOptions(null), /expected options/);
+    });
+
+    const HOST = { label: "GitHub", graphqlUrl: "https://api.github.com/graphql", repos: [] };
+    const stalePr = (o = {}) => ({ id: "PR_1", hostLabel: "GitHub", issueKey: "ENG-1", isStale: true, roles: ["author"], ...o });
+    function deps(o = {}) {
+      const calls = [];
+      return {
+        calls,
+        d: {
+          loadSettings: () => ({ hosts: [HOST], jira: { baseUrl: "https://x.atlassian.net", email: "me@x" } }),
+          resolveGhToken: () => "ghtok",
+          getJiraToken: () => "jtok",
+          closePullRequest: async (host, id, comment) => calls.push(["close", host.token, id, comment]),
+          fetchTaskInfo: async () => ({ key: "ENG-1" }),
+          transitionTask: async (_c, _t, key, tid, rid) => calls.push(["transition", key, tid, rid]),
+          deleteTask: async (_c, _t, key, sub) => calls.push(["delete", key, sub]),
+          ...o,
+        },
+      };
+    }
+
+    await atest("staleClose: closes the PR, then transitions the task", async () => {
+      const { calls, d } = deps();
+      const r = await staleClose.closeStale(
+        stalePr(),
+        { comment: "bye", jira: { action: "wontDo", transitionId: "41", resolutionId: "10001" } },
+        d,
+      );
+      assert.deepStrictEqual(calls, [["close", "ghtok", "PR_1", "bye"], ["transition", "ENG-1", "41", "10001"]]);
+      assert.strictEqual(r.ok, true);
+      assert.match(r.jira.message, /Won't Do/);
+    });
+
+    await atest("staleClose: delete passes deleteSubtasks; keep touches no task", async () => {
+      let { calls, d } = deps();
+      await staleClose.closeStale(stalePr(), { comment: "", jira: { action: "delete", deleteSubtasks: true } }, d);
+      assert.deepStrictEqual(calls[1], ["delete", "ENG-1", true]);
+      ({ calls, d } = deps({ getJiraToken: () => null }));
+      const r = await staleClose.closeStale(stalePr({ issueKey: null }), { comment: "", jira: { action: "keep" } }, d);
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.jira, null);
+      assert.strictEqual(calls.length, 1);
+    });
+
+    await atest("staleClose: refuses someone else's or a fresh PR, before any call", async () => {
+      for (const pr of [stalePr({ roles: ["reviewer"] }), stalePr({ isStale: false }), undefined]) {
+        const { calls, d } = deps();
+        const r = await staleClose.closeStale(pr, { comment: "", jira: { action: "keep" } }, d);
+        assert.strictEqual(r.ok, false);
+        assert.strictEqual(r.prClosed, false);
+        assert.strictEqual(calls.length, 0);
+      }
+    });
+
+    await atest("staleClose: a missing Jira token stops before the PR is closed", async () => {
+      const { calls, d } = deps({ getJiraToken: () => null });
+      const r = await staleClose.closeStale(stalePr(), { comment: "", jira: { action: "todo", transitionId: "11", resolutionId: null } }, d);
+      assert.strictEqual(r.prClosed, false);
+      assert.match(r.error, /Jira API token/);
+      assert.strictEqual(calls.length, 0);
+    });
+
+    await atest("staleClose: a failed close leaves the task alone; a failed task reports the closed PR", async () => {
+      let { calls, d } = deps({ closePullRequest: async () => { throw new Error("Resource not accessible"); } });
+      let r = await staleClose.closeStale(stalePr(), { comment: "", jira: { action: "delete", deleteSubtasks: false } }, d);
+      assert.strictEqual(r.prClosed, false);
+      assert.match(r.error, /Couldn't close the PR: Resource not accessible/);
+      assert.strictEqual(calls.length, 0);
+      ({ calls, d } = deps({ deleteTask: async () => { throw new Error("HTTP 403"); } }));
+      r = await staleClose.closeStale(stalePr(), { comment: "", jira: { action: "delete", deleteSubtasks: false } }, d);
+      assert.strictEqual(r.ok, false);
+      assert.strictEqual(r.prClosed, true);
+      assert.match(r.error, /PR was closed, but ENG-1 was not changed: HTTP 403/);
+    });
+
+    await atest("closePullRequest: posts the comment first, then closes; no comment, no addComment", async () => {
+      const real = global.fetch;
+      const bodies = [];
+      global.fetch = async (_url, init) => {
+        bodies.push(JSON.parse(init.body));
+        return { ok: true, status: 200, json: async () => ({ data: {} }), text: async () => "" };
+      };
+      try {
+        await github.closePullRequest({ label: "GH", graphqlUrl: "https://api.github.com/graphql", token: "t" }, "PR_1", " bye ");
+        assert.match(bodies[0].query, /addComment/);
+        assert.strictEqual(bodies[0].variables.body, "bye");
+        assert.match(bodies[1].query, /closePullRequest/);
+        bodies.length = 0;
+        await github.closePullRequest({ label: "GH", graphqlUrl: "https://api.github.com/graphql", token: "t" }, "PR_1", "  ");
+        assert.strictEqual(bodies.length, 1);
+        assert.match(bodies[0].query, /closePullRequest/);
+      } finally {
+        global.fetch = real;
+      }
+    });
+
+    await atest("jira task actions: transitions read with fields, writes fall back past a 401, refusals name the scope", async () => {
+      const real = global.fetch;
+      const CFG = { baseUrl: "https://acme.atlassian.net", email: "me@acme" };
+      const CID = "158d8f10-2fb5-4b9b-9d0f-6a1c3f4b5e6d";
+      const GW = `https://api.atlassian.com/ex/jira/${CID}/rest/api/3`;
+      const SITE = `${CFG.baseUrl}/rest/api/3`;
+      const ok = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => "" });
+      const err = (status) => ({ ok: false, status, json: async () => ({}), text: async () => "nope" });
+      const seen = [];
+      try {
+        jira.clearJiraCaches();
+        global.fetch = async (url, init) => {
+          seen.push(`${init.method ?? "GET"} ${url}`);
+          if (url.endsWith("/_edge/tenant_info")) return ok({ cloudId: CID });
+          if (url.startsWith(GW)) return err(401); // a classic token
+          if (url === `${SITE}/issue/ENG-1?fields=summary,status,subtasks`)
+            return ok({ fields: { summary: "S", status: { name: "In Progress", statusCategory: { key: "indeterminate" } }, subtasks: [{}, {}] } });
+          if (url === `${SITE}/issue/ENG-1/transitions?expand=transitions.fields`)
+            return ok({ transitions: [{ id: "41", name: "Close", to: { name: "Closed", statusCategory: { key: "done" } },
+              fields: { resolution: { required: true, allowedValues: [{ id: "10001", name: "Won't Do" }] } } }] });
+          if (url === `${SITE}/issue/ENG-1/transitions` && init.method === "POST") return { ok: true, status: 204, text: async () => "" };
+          if (url.startsWith(`${SITE}/issue/ENG-1?deleteSubtasks=`)) return err(403);
+          throw new Error("unexpected " + url);
+        };
+        const info = await jira.fetchTaskInfo(CFG, "t", "ENG-1");
+        assert.strictEqual(info.subtaskCount, 2);
+        assert.deepStrictEqual(info.transitions[0], {
+          id: "41", name: "Close", toStatus: "Closed", toCategory: "done",
+          resolutions: [{ id: "10001", name: "Won't Do" }], resolutionRequired: true,
+        });
+        await jira.transitionTask(CFG, "t", "ENG-1", "41", "10001");
+        assert.ok(seen.includes(`POST ${GW}/issue/ENG-1/transitions`), "gateway tried first");
+        assert.ok(seen.includes(`POST ${SITE}/issue/ENG-1/transitions`), "then the site");
+        await assert.rejects(jira.deleteTask(CFG, "t", "ENG-1", true), /read-only[\s\S]*write:jira-work/);
+        assert.ok(seen.some((u) => u.includes("deleteSubtasks=true")));
+        await assert.rejects(jira.transitionTask(CFG, "t", "ENG-1/../x", "1", null), /not an issue key/);
+      } finally {
+        global.fetch = real;
+        jira.clearJiraCaches();
+      }
+    });
+
+    test("stale: the poller hashes isStale, so crossing the threshold re-emits", () => {
+      const base = { pullRequests: [], errors: [], rateLimits: [], fetchedAt: "", version: "x" };
+      const p = { id: "a", updatedAt: "", roles: [], failingChecks: [], pendingChecks: [], checks: [], reviewers: [] };
+      const h1 = poller.hashSnapshot({ ...base, pullRequests: [{ ...p, isStale: false }] });
+      const h2 = poller.hashSnapshot({ ...base, pullRequests: [{ ...p, isStale: true }] });
+      assert.notStrictEqual(h1, h2);
+    });
+
+    test("stale: the Stale chip is a source chip over isStale", () => {
+      const chip = prFilter.SOURCE_CHIPS.find((c) => c.key === "stale");
+      assert.strictEqual(chip.flag, "staleOnly");
+      assert.strictEqual(chip.matches({ isStale: true }), true);
+      assert.strictEqual(chip.matches({ isStale: false }), false);
+    });
+
+    test("main.js wiring: stale close takes only the PR id and validated options", () => {
+      const src = sfs.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /"stale:close"[\s\S]{0,200}validatePrId\)\(raw\)[\s\S]{0,120}validateCloseStaleOptions\)\(rawOptions\)/);
+      assert.match(src, /"stale:jiraTask"[\s\S]{0,300}validatePrId\)\(raw\)/);
+      assert.match(src, /closeStale\)\(snapshotPr\(id\)/);
     });
   }
 

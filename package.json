@@ -30,8 +30,10 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "dompurify": "3.4.17",
     "electron": "^35.0.0",
     "electron-builder": "^26.0.0",
+    "mermaid": "11.17.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwindcss": "^4.1.5",
@@ -47,6 +49,10 @@
       "dist/renderer/**/*",
       "build/icon.png",
       "package.json"
+    ],
+    "asarUnpack": [
+      "dist/main/main/agent/**",
+      "dist/main/shared/**"
     ],
     "directories": {
       "buildResources": "build"

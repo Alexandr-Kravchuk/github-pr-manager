@@ -66,6 +66,7 @@ export interface FilterState {
   newOnly: boolean;
   mergeableOnly: boolean;
   noReviewsOnly: boolean;
+  staleOnly: boolean;
   hideApproved: boolean;
   showDrafts: boolean;
   showIgnored: boolean;
@@ -106,6 +107,7 @@ export type FilterablePr = SignalPr & Pick<
   | "hasNewActivity"
   | "canBeMerged"
   | "hasNoReviews"
+  | "isStale"
   | "viewerApproved"
   | "title"
   | "repo"
@@ -113,23 +115,25 @@ export type FilterablePr = SignalPr & Pick<
   | "number"
 >;
 
-export type SourceKey = "attention" | "failing" | "fresh" | "mergeable" | "noReviews";
+export type SourceKey = "attention" | "failing" | "fresh" | "mergeable" | "noReviews" | "stale";
 export type RevealKey = "drafts" | "ignored";
 
 interface SourceChip {
   readonly key: SourceKey;
   /** The `FilterState` flag this chip toggles. */
-  readonly flag: "attentionOnly" | "failingOnly" | "newOnly" | "mergeableOnly" | "noReviewsOnly";
+  readonly flag: "attentionOnly" | "failingOnly" | "newOnly" | "mergeableOnly" | "noReviewsOnly" | "staleOnly";
   readonly matches: (pr: FilterablePr) => boolean;
 }
 
-/** The five source chips, in the order they render. Their sets are OR-ed. */
+/** The six source chips, in the order they render. Their sets are OR-ed. */
 export const SOURCE_CHIPS: readonly SourceChip[] = [
   { key: "attention", flag: "attentionOnly", matches: (pr) => pr.needsAttention },
   { key: "failing", flag: "failingOnly", matches: (pr) => pr.failingChecks.length > 0 },
   { key: "fresh", flag: "newOnly", matches: (pr) => pr.hasNewActivity },
   { key: "mergeable", flag: "mergeableOnly", matches: (pr) => pr.canBeMerged },
   { key: "noReviews", flag: "noReviewsOnly", matches: (pr) => pr.hasNoReviews },
+  // Open past the `staleAfterDays` setting (the poller sets the flag).
+  { key: "stale", flag: "staleOnly", matches: (pr) => pr.isStale },
 ];
 
 /**

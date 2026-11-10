@@ -27,7 +27,14 @@ Three layers:
   quit / hide, with a leave-fullscreen-first hide for macOS); the three-way
   close decision is unit-tested in `tests/run-tests.cjs` against a mocked
   Electron, and the wiring registrations are asserted on the compiled `main.js`.
-  Close-to-tray makes hidden-but-alive the app's *normal* idle state, so the
+  While the PR agent is on (and Settings › Agent › Companion keeps its tray
+  state), the tooltip and the menu also carry the agent: its one line
+  (`agentTrayLine`), "Show agent" (the window with the companion popover, or
+  the Board when the header chip is off) and "Pause agent" / "Resume agent".
+  `setAgent` rebuilds the menu only when that line changed — a run reports a
+  step per tool call — and `main.ts` feeds it from the throttled agent push
+  *before* that push's visibility gate, since a hidden window is exactly when
+  the tray is the only place to look. Close-to-tray makes hidden-but-alive the app's *normal* idle state, so the
   "no always-running animation in the renderer" rule below applies with extra
   force — a hidden renderer with an `infinite` animation burns CPU invisibly,
   and snapshot pushes are already gated on window visibility for the same
@@ -41,9 +48,9 @@ Three layers:
   module that uses them) so the renderer can value-import them: `notify.ts`
   (`DEFAULT_NOTIFICATION_SETTINGS`, the single source of truth for notification
   defaults), `pr-filter.ts` (the whole view-filter layer: the reveal gate, the
-  filter pipeline and the chips' facet counts — the five `SOURCE_CHIPS`
+  filter pipeline and the chips' facet counts — the six `SOURCE_CHIPS`
   (`Needs attention`, `Failing CI`, `New comments`, `Ready to merge`,
-  `No reviews yet`) are OR-ed **sources**, and role / host / author / search /
+  `No reviews yet`, `Stale`) are OR-ed **sources**, and role / host / author / search /
   `Hide my approvals` / the reveal gate narrow whatever union they produced
   (author is an exact login set by clicking an author in any view, through
   `AuthorFilterContext` and `AuthorButton`, transient like search and shown as
@@ -95,11 +102,13 @@ Three layers:
   card's review pill amber; a host
   whose schema has no `stack` field is read again without it and remembered for
   the app run. The stack badge's menu is portalled to <body> because table
-  cells clip with `overflow-hidden`), `view-mode.ts` (the three
+  cells clip with `overflow-hidden`), `view-mode.ts` (the four
   display variants behind the header's Finder-style switch — `roomy` cards,
-  `cozy` table, `compact` tiles — with the guard that validates the persisted
+  `cozy` table, `compact` tiles, `board` (the PR agent's work by state) — with
+  the guard that validates the persisted
   choice and the two predicates App.tsx gates grouping and the sort dropdown on),
-  `pr-table.ts` (the Cozy table's eleven columns and its ordering: a comparator
+  `pr-table.ts` (the Cozy table's twelve columns — the Agent one only while the
+  PR agent is on (`visibleColumns`) — and its ordering: a comparator
   per column, always ascending in terms of what the cell SHOWS, plus what a
   header click does) and `claude-launch.ts` (the opt-in "start Claude on this
   PR" button: which prompt a PR's state picks — blocked → drive, review due →
@@ -161,29 +170,210 @@ Three layers:
   `settings-search.ts` (the Settings screen's tabs, which section sits on which,
   and the keywords its search box matches — every word of the query must hit a
   section's title or keywords; a setting whose label is missing there cannot be
-  found, so extend its keywords when adding one) and `host-status.ts` (the
+  found, so extend its keywords when adding one), `host-status.ts` (the
   colour of a header host pill's dot — red on a failed fetch, amber on a spent
   or low GraphQL budget, green otherwise; the pills replaced the raw budget
   number and, with two or more hosts, the "All hosts" dropdown, since clicking a
-  pill toggles that host's filter) and `jira-status.ts` (how the renderer
+  pill toggles that host's filter), `jira-status.ts` (how the renderer
   loads the Jira status: the cached answer first, a fresh `twg whoami` only
   while twg is still `checking` or on Check again, and every answer to a load
-  that a later one replaced is dropped). Keep any such
+  that a later one replaced is dropped), `stale.ts` (long-open PRs: the
+  `staleAfterDays` threshold — counted from `createdAt`, 0 is off — behind the
+  poller's `isStale`, the `Stale` chip and badge, and the close dialog's rules:
+  only your own stale PR offers "Close…", which closes it on GitHub and can move
+  its Jira task back to To Do, close it as Won't Do or delete it. Workflows
+  differ per project, so the dialog lists the transitions Jira offers and
+  `suggestTransition` only preselects one. The close runs in
+  `main/stale-close.ts` with every outside call injected: the renderer sends
+  only the PR id and its choices, the PR is closed first and the task second,
+  and a missing Jira token stops it before anything changes. Jira writes need a
+  token with write scope — the read-only one the Jira section recommends gets a
+  refusal that says so) and the PR agent's nine: `agent-explain.ts` (the
+  Board in plain words — each card's owner (you, the agent, others, nobody),
+  what is happening, what is needed from you, what to read, every button with
+  what it does, and what comes next; `explainBoard` orders them) and
+  `agent-defaults.ts`
+  (the Agent tab's defaults and bounds), `agent-stream.ts` (a run's
+  stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
+  skill Workflow's phases — and current activity), `agent-view.ts` (where a
+  PR stands — `boardStage`: the column is whose move it is, the agent's
+  (queued, working), yours (a move it prepared: Send review, Push N fixes,
+  Your call, Merge, Draft a review, a run that failed — or GitHub's say-so with
+  the agent not on it), the people you wait on, or done today; a run that asks
+  nothing, stopped or taken over, is a note on its card. A PR whose review is
+  asked of you again while your approval stands on its head and the author
+  hasn't answered since (`approvalStands`) is not your move: it sits in Done
+  with that line (`askedAgain`) and "Approve again" under its More — an
+  `approveAgain` action on the PR, not an item: main reads the PR again and,
+  only if that still holds at the same head, posts an APPROVE of that head
+  with one line and the signature, logged as `run/approved-again`; a review
+  you ask for that finds the same says "Already approved on this head".
+  Asked again after a change request of yours on that same head, the
+  re-review runs by itself (`planJobs`, once per head and request): the
+  request is the author's "look again". A review asked of you starts without
+  a click on a big PR too: its brief comes first, and once that brief of the
+  head is written (`briefDone`) the plan queues the review, which takes the
+  brief over (`takeBrief`: the brief closes, its questions for the author go
+  into the review's prompt and its text onto the review's card, and the brief
+  alone sends no toast). "Draft a review" is left for a brief no review
+  followed — reviews off, or the request gone. A run the agent planned
+  itself that fails (`fail`: a checkout the network refused, a crashed
+  session) is tried once more by itself `RETRY_AFTER_MS` later (`retryAt`
+  on the failed item, `dueRetry` in the plan; the new run carries
+  `retryOf` and is not tried a third time) while the plan still wants that
+  head — not a run you asked for, not one cut short again and again; the
+  card, the toast and the PR's reason say when. A PR's reason when it is
+  idle comes from what the head's run really did (`ledgerIdle`): "Running"
+  only while it is live, else how it ended, and every run's end plans
+  again at once — except one taken over, cut short or ended by the
+  switch-off — so no reason waits for the next poll. A drive's result
+  from before the app last started is marked `needsRerun` at start: its
+  push and its answer are checked against what the app took in memory
+  (`pushTo`), so its card offers Run again (and Open in Claude) instead of
+  a question's buttons or a Push that would only be refused, and shows the
+  question as what the new run will ask. A refused action's message shows
+  on the open card it came from, not only at the top of the Board. A
+  move ready for you names itself wherever the PR shows — the Roomy line's
+  button ("Send review →", "Push 2 fixes →") and the Cozy cell open its card
+  on the Board, the one place it is sent from, since a bare "Open" left an
+  approval waiting two days unfound — and the words every
+  surface says it in: a card's line, the Cozy cell and tile, "ready for you"
+  (`readyItems`) on the chip and the tray, a notification's title; the *local*
+  day "Done today" and the daily run limit count on, quiet hours
+  (`quietUntil`, a span that may wrap past midnight), and which regular toasts
+  the agent stands in for — `agentTakesToast`: a trigger it took in On;
+  `main.ts` hands it the snapshot before deciding the toasts) and
+  `agent-result.ts` (what a run's final message means for its Your-move card:
+  every session is told to end with a fenced `prd-result` JSON block — one
+  summary sentence, the questions only you can answer, findings by severity —
+  read here and held to its shapes; a message without it gets its first real
+  paragraph as the summary; answering a question from the card resumes the same
+  session with your answer) and
+  `agent-publish.ts` (what a review prepared to post: a review session never
+  posts — its skill's `publishCommand` is a wrapper of the app's that only
+  records each write, checked like the skill's own `pr-review-publish.sh`, and
+  the app posts the plan with `gh api` afterwards, signature added, one write
+  at a time with progress on disk so a retry never posts twice) and
+  `agent-diagrams.ts` (Mermaid diagrams of a PR's change — Settings › Agent ›
+  Diagrams: after a review or a brief of a PR at least `minLines` big,
+  `main/agent/diagrams.ts` runs one short `claude -p` of its own — no tools,
+  `--restricted --strict-mcp-config --no-session-persistence`, in a folder of
+  the app's, the PR's title, summary and diff on stdin — while the item is still
+  `working`, so its slot stays taken and nothing goes out without them. The
+  answer is untrusted model output posted under your name: only a plain
+  flowchart or sequence diagram passes `isSafeMermaid` (no fence, no tag but
+  `<br>`, no click/link/`url()`/init/`@{…}`), titles are stripped to words, one
+  that looks like it carries a secret is dropped whole. A flowchart can't be
+  parsed without a DOM, so main asks the renderer (`agent-check-diagrams` →
+  `agent:diagramsChecked`, one boolean per source back, never text) and posts
+  none unchecked. A review's diagrams are its plan's last write, a `note` step
+  (an issue comment, signed) that only the app adds — the capture script has no
+  such write — and none is drawn or posted while the PR's conversation already
+  has a Mermaid comment, whoever drew it (the creatio-pr-watch reviewer draws
+  the same kind, with the same three colours). The card renders them with the
+  renderer's own mermaid, loaded on first use, labels as SVG text and the SVG
+  sanitized again to SVG only — HTML in a `<foreignObject>` came out empty) and
+  `agent-reapprove.ts` (approvals a base-only push dismissed — a branch rule
+  that dismisses approvals on every push takes them away when the base is
+  merged in, though nothing of the PR changed. Two offers with a button, like
+  a merge offer, never a session: `reapprove` gives your approval again on
+  someone's PR, `reask` asks your PR's reviewers again. The policy points at a
+  PR from its state alone — someone's PR you reviewed with no approval or
+  change request of yours standing, or your PR with no approval left — and
+  holds someone's PR (no review of its head starts) until main has read it:
+  once per head (`ReapproveMark`s in `state.json`, by ledger key),
+  `main/agent/reapprove.ts` reads the PR's timeline — a reviewer's latest
+  review DISMISSED and the `ReviewDismissedEvent` of that very review, matched
+  by review id (author and commit can match an earlier dismissed approval),
+  saying it was APPROVED, so a dismissed change request never becomes an
+  approval and any later word of theirs wins — and then checks the push in
+  your clone (`baseOnlyPush`; no clone, no offer): everything between the
+  approved head and the new one must be merges of the base on the branch's
+  first-parent walk (`baseMerges` over `rev-list --parents old..new --not
+  <base>`), and each merge's tree exactly what `git merge-tree --write-tree`
+  makes of its two parents — so an own commit, a rewrite, a conflict resolved
+  by hand or a merge carrying changes of its own all pass. Diffs were compared
+  first and dropped: a change moved to a spot with the same context, or a
+  `--- `/`+++ ` content line read as a header, slipped through. The git calls
+  run under `withNoHooks` + `safeGit` and leave the clone as it was — the
+  fetch takes `--no-write-fetch-head --refmap=`, so not even a remote-tracking
+  branch moves (a test pins both on a real repository).
+  Shadow offers it, On gives it at once; the PR is read again before anything
+  goes out, the approval carries one line and the signature, and turning an
+  offer down hands the head back to the other rules — a read that failed is
+  tried again ten minutes later, never by the plan it ends in, which would
+  start it over at once) and
+  `agent-stack.ts` (the agent and GitHub's native stacks: each layer's diff is
+  its own, the stack merges only with a linear history, and GitHub rebases
+  the layers above after a lower one merges — so a session on a layer is
+  told its place (`stackRules`: a review keeps to its layer, a finding in a
+  lower layer's code is a note, not a comment here; a drive never merges the
+  base in), a layer of yours that conflicts gets no drive but a "Rebase
+  stack" card (the agent never rebases or force-pushes — the button on
+  GitHub, or `gh stack rebase` + `gh stack push`), only the lowest broken
+  layer of your stack is driven (`brokenLayerBelow`; the ones above wait),
+  a drive's commits with a merge in them are neither kept at the run's end
+  nor pushed (`collectDrive` counts merges), and a push to a layer with open
+  layers above says they need Rebase stack. Not stack-only: a PR you
+  reviewed that got a push and nothing else since — no reply, not asked
+  again — is held while main checks in your clone that the new head is the
+  change you reviewed on a new base (`checkBaseOnly` / `sameChangeOnNewBase`
+  in `main/agent/reapprove.ts`: "the change you reviewed" is the reviewed
+  head against the base it had then, put onto the base commit the new head
+  sits on with `git merge-tree --merge-base`, and the result must be the new
+  head's tree exactly — a stack GitHub rebased, a Rebase stack, the base
+  merged in). The base it had then matters — a layer retargeted onto the
+  trunk without the layer below merged carries that layer's code in its
+  diff now — and it is taken from GitHub's own records only, never from a
+  branch tip, which whoever pushes to it chooses: one read of the PR's
+  timeline since your review; nothing there means the same branch, moved
+  forward; one `BaseRefForcePushedEvent` (a lower layer GitHub rebased)
+  means the tip it records from before; one `BaseRefChangedEvent` (moved
+  onto the trunk when the layer below merged) means that lower PR's head as
+  GitHub kept it at the merge — the only PR of this very repository, never a
+  fork's, merged from the old branch into the new base after your review.
+  Anything else — two changes, a second page, no such single PR — is
+  "changed": the check fails closed. Then no re-review runs; once per head
+  and base (`baseOnly` marks in `state.json`, keyed
+  `…|rereview|<head>|base`, holding the base they were for), with commits the
+  clone lacks fetched by id; no clone or another review of yours since makes
+  it "changed" or looks again, and a failed check waits ten minutes like
+  re-approve's. The merge itself is not adapted yet: GitHub's
+  synchronous merge API, which `gh pr merge` uses, does not support stacked
+  PRs — the asynchronous `merge-async` endpoint does).
+  Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
-  `settings-search.js`, `host-status.js` and `jira-status.js`
-  stay free of `node:` builtin references, so the
+  `settings-search.js`, `host-status.js`, `jira-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
+  `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`,
+  `agent-reapprove.js`, `agent-stack.js` and `agent-explain.js` stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
   It talks to main **exclusively** through `window.api` (the preload bridge):
   no direct network, no Node access (`contextIsolation` on, `nodeIntegration`
-  off). The list renders in one of three display variants, chosen by the
+  off). The list renders in one of four display variants, chosen by the
   Finder-style `ViewSwitch` in the header row next to Refresh and persisted with
   the other view preferences in `localStorage`: `roomy` (`PrCard`, the original
-  full cards and the default), `cozy` (`PrTable`) and `compact` (`PrTile`).
+  full cards and the default), `cozy` (`PrTable`), `compact` (`PrTile`) and
+  `board` (`PrBoard`: what needs you first, then what doesn't — a sentence of
+  how much is yours; Your turn, every decision as an open card, readiest
+  first (a merge or an approval in one click, then a question or a brief, a
+  failure, then a review nobody started), each saying what happened, what to
+  read (the summary, findings, what goes out on GitHub, the commits, the
+  pushed-back comments), your move with what its button does, and what comes
+  next; then rows that ask nothing of you — the agent is on it, waiting on
+  others, done today — each with what comes next and what you could do one
+  click away. Where a PR stands is still `boardStage` in
+  `shared/agent-view.ts`, one pure function the chip and the tray read too,
+  so a PR shows once; the words are `shared/agent-explain.ts`. A card nobody
+  started (asked of you, red CI) offers "Let the agent …" first and GitHub
+  second, never only a link. The two lanes are a tag on each card, not rows
+  of columns: a move was missed for days among eight equal columns. The
+  three variants it was picked from are on the `prototype/board-redesign`
+  branch. Like Cozy it turns off Group-by and Sort).
   Roomy and Compact are the same grid at two densities — one `PrList` renders
   both, so their column counts are the only difference and can't drift. Cozy is
   the odd one out and deliberately so: it is one FLAT table sorted by any
@@ -342,6 +532,77 @@ Three layers:
   `staleLoginItemsFor` deletes it on every apply, whatever the preference is.
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes
   `electron .` self-quit after the renderer loads (a non-interactive boot check).
+- **The PR agent's log** is `userData/agent/log.jsonl` — one JSON line per
+  event, kept for Settings › Agent › Policy's retention (its "Show the log"
+  opens the folder). Read it first when the agent did something odd. Every line
+  has `at`, `kind`, `event`; most have `prId`/`prNumber`/`repo`/`runId`, a
+  change has `from`/`to` and `ms` (how long the `from` side lasted), the rest is
+  in `data`. Kinds: `run` (a run's own steps — `queued` with mode, reasons and
+  PR size; `started` with its folder, model and queue wait; its end,
+  `needsYou`/`done`/`failed`, with time, turns, cost, tokens, tool calls,
+  refused tools and stderr's tail; `interrupted` when its process was ended
+  under it; `diagrams`; `published`/`pushed`/`merged`/`reapproved`/`reasked`
+  and their `not-*` refusals; `approved-again` (no run: your Approve again);
+  `offered` for an offer; `notice`), `item` (every
+  state change of an item), `board`
+  (a card's column or button changed: `seen` on the first look, `move`,
+  `action`, `left`), `plan` (why the agent leaves a PR alone — `idle` — what
+  holds the queue — `held`/`released` — what a head's re-approve check
+  found, `reapprove-check`, and whether a reviewed PR's new head was the same
+  change on a new base, `base-check`), `action` (each `act`, i.e. each
+  click, with its result) and `agent` (start, stop, `on`/`off`, `settings`
+  path by path). State changes are found by diffing in `main/agent/journal.ts`,
+  run before every save (`openStore`'s `beforeSave`) and after every plan, so a
+  new code path can't leave a hole in them; run events are written where they
+  happen. Board lines use the same `boardStage` as the Board, over all PRs
+  rather than the filtered ones, and only while the agent is on — pruning runs
+  only then; their marks persist in `state.json` (`board`), so a restart logs
+  what moved while the app was closed rather than every card again.
+- **No hook of a PR's repository runs for the agent.** A relative
+  `core.hooksPath` (husky v9's `.husky/_`) resolves inside the worktree, so a
+  hook there is the PR's own script. Every git command the app runs in a clone
+  or worktree goes through `safeGit` with a fresh empty hooks folder
+  (`withNoHooks`, `main/agent/drive.ts`) — the worktree's `fetch`, `worktree
+  add` (post-checkout, reference-transaction) and `remove` included — and
+  every session's environment carries `sessionGitEnv` (`main/agent/runner.ts`:
+  `core.hooksPath` at the run's own empty `no-hooks` folder, no fsmonitor, as
+  `GIT_CONFIG_*` entries that win over every config file), so neither a drive's
+  `git commit` nor Claude Code's own `git status` runs one. The guard hook
+  (`main/agent/hook.ts`) reads back every field of the guard file — a `subs`,
+  `workDir`, `readDirs`, `sessionId` or `sessionRoots` that is there but
+  malformed gives no file access at all, since a missing `subs` means every
+  wrapper subcommand, and a folder list keeps absolute paths only — and
+  follows a drive's write through links (`checkRealWrite`): `checkDriveWrite`
+  alone is lexical, and a link committed in the branch would lead it out of
+  the worktree. A merge
+  keeps the branch while open PRs build on it (`builtOn` in
+  `main/agent/merge.ts`): gh's own delete can win the race with GitHub's
+  retargeting and close them.
+- **An agent session reads its own folders only, and uses only the tools the
+  guard names.** A PR's diff, description or comments can tell a review to
+  read `~/.config/gh/hosts.yml`, `~/.ssh/*` or `userData` and quote it in a
+  comment, which On posts unseen. So `checkToolUse` (`shared/agent-guard.ts`)
+  holds `Read`, `Grep`, `Glob`, `LS` and `NotebookRead` to the guard file's
+  `readDirs` — the run's working folder (`workDir`, now written for every
+  kind of run: relative paths and a Grep/Glob with no path mean it), its
+  payload folder and the plugin folders it mounted (`prd-user-skills`
+  included; a skill reads its own files and Workflow script there) — plus
+  Claude Code's own folder for the session, `<root>/<project>/<sessionId>/`
+  under `sessionRoots` (`claudeSessionRoots` in `main/agent/runner.ts`:
+  `projects` in its config folder, `claude` in its temp folder), where it
+  spills a tool result too long to show and a background Workflow's output
+  and tells the session to read them; another session's folder there is
+  refused. `~`, `..`, a colon past the drive letter and an absolute Glob
+  pattern or brace alternative outside those folders are refused. The hook
+  passes `realRead` (links and junctions followed, Git Bash `/c/…` read as
+  `C:\…`, 8.3 short names resolved), so a link the PR's branch carries is
+  judged by where it leads — `--restricted` already keeps Read to the working
+  folders, but that is Claude Code's rule and it judges a link by its name.
+  Any tool the guard doesn't name is refused (`SESSION_TOOLS` lists the
+  harmless ones: `Skill`, `Agent`, `ToolSearch`, `TaskCreate`, `TaskUpdate`,
+  and `StructuredOutput`, which a Workflow's agents answer through); a test
+  pins that every tool the default `--allowedTools` lists grant is one the
+  guard knows, so extend the guard before adding a tool to the defaults.
 - **No always-running animation in the renderer.** An `infinite` CSS animation —
   including Tailwind's `animate-pulse` / `-spin` / `-bounce` / `-ping` — keeps the
   compositor producing frames for as long as the app is open, and Electron
@@ -363,7 +624,10 @@ Three layers:
   the *oldest* host's stamp and stalls. A guard test in `tests/run-tests.cjs`
   scans `.ts`/`.tsx`/`.css`/`.html` under `src/renderer` for
   `animate-{pulse,spin,bounce,ping}` (bare or arbitrary-value) and for literal
-  `infinite` iteration counts, so this can't regress unnoticed.
+  `infinite` iteration counts, so this can't regress unnoticed. The scan does
+  not see a dependency's stylesheet: mermaid's ships an endless dash animation
+  for edges marked `@{ animate: true }`, so the diagram guard refuses `@{` and
+  `.agent-diagram svg *` sets `animation: none`.
   Related: `backdrop-blur` on the sticky header is free at rest but multiplies
   the cost of anything animating beneath it (~3x in one dev-instance A/B) — keep
   animations under it short and finite.

@@ -2,6 +2,7 @@
  * Domain types for the pull-request dashboard.
  * Raw GraphQL responses are mapped into these types in `github.ts`.
  */
+import type { CloseStaleOptions, CloseStaleResult, JiraTaskInfo } from "./stale";
 
 /** Normalized check (CI) state on top of GitHub's various terms. */
 export type CheckState =
@@ -151,6 +152,12 @@ export interface ClaudeSettings {
    */
   prompts: Record<"drive" | "review" | "close" | "explain" | "open" | "explainGroup" | "reviewGroup", string>;
   /**
+   * Prompts only the PR agent runs (see `AgentSettings`). Kept apart from
+   * `prompts` on purpose: those keys are the Claude button's launch kinds, and a
+   * key there would show up in the button's menu and its IPC allow-list.
+   */
+  agentPrompts: Record<AgentPromptKey, string>;
+  /**
    * Where the session opens. `auto` takes iTerm2 when it is installed, else
    * Terminal (macOS; a `cmd` window on Windows). The system's "default
    * terminal" is not consulted: macOS has no such setting a launcher can ask.
@@ -220,6 +227,126 @@ export interface Settings {
   jira?: JiraSettings;
   /** Claude session launcher (off by default). */
   claude: ClaudeSettings;
+  /**
+   * Days a PR stays open before it is marked stale and, when it is yours, can
+   * be closed together with its Jira task. 0 switches it off. See `shared/stale.ts`.
+   */
+  staleAfterDays: number;
+  /** The PR agent (off by default). */
+  agent: AgentSettings;
+}
+
+/** The prompts only the PR agent uses, next to the Claude button's ones. */
+export type AgentPromptKey = "triage" | "rereview" | "afterMerge" | "selfReview" | "validateComments";
+
+/** Off never runs; shadow does the work and waits for you before posting; on posts and tells you after. */
+export type AgentMode = "off" | "shadow" | "on";
+
+/** The kinds of session the agent starts — each has its own tool set. */
+export type AgentRunKind = "review" | "brief" | "rereview" | "drive" | "afterMerge";
+
+/** A merge method, in `gh pr merge` terms. */
+export type MergeMethod = "merge" | "squash" | "rebase";
+
+/**
+ * The PR agent: it works on your PRs in the background with Claude Code.
+ * Everything that can be tuned is here (see the Agent tab of Settings); the
+ * hard safety rails — merging only on your click, never pushing to anyone
+ * else's branch, never skipping permission checks — are deliberately not.
+ */
+export interface AgentSettings {
+  enabled: boolean;
+  /** Model for agent runs; "" = Claude Code's default. */
+  model: string;
+  /** Effort for agent runs; "" = Claude Code's default. */
+  effort: "" | "low" | "medium" | "high";
+  /** Where each run's git worktree goes; "" = `<checkout>/.claude/worktrees`. */
+  worktreeDir: string;
+  /** Remove a run's worktree once its PR is merged or closed. */
+  removeWorktree: boolean;
+  /** "owner/name" the agent may work in; empty = every repository with a checkout. */
+  repos: string[];
+  scenarios: {
+    /** A review requested of you personally, on a PR within the size limit. */
+    review: {
+      mode: AgentMode;
+      maxLines: number;
+      maxFiles: number;
+      /** Also take requests made of a team you are in (off: they would eat the daily limit). */
+      teamRequests: boolean;
+      /** Also review drafts (off: a draft is picked up once it is marked ready). */
+      drafts: boolean;
+      /** Hold the approve while another reviewer's change request is open. */
+      holdApproveOnChangeRequest: boolean;
+    };
+    /** A review requested of you on a PR over the limit: a brief, never posted. */
+    brief: { mode: "off" | "on" };
+    /** The author replied in your threads. */
+    rereview: { mode: AgentMode; resolve: boolean; approve: boolean };
+    /** Your PR is ready to merge: offer the Merge button (the agent never merges itself). */
+    merge: {
+      mode: "off" | "offer";
+      requireAllReviewers: boolean;
+      requireThreadsResolved: boolean;
+      requireChecksGreen: boolean;
+      /** "github" takes the repository's own suggestion. */
+      method: "github" | MergeMethod;
+      deleteBranch: boolean;
+    };
+    /**
+     * Your PR, before reviewers see it: a self-review of each head you push
+     * (the review in dry run, its findings validated, the confirmed ones fixed).
+     */
+    selfReview: { mode: AgentMode };
+    /** Your PR fails CI or has a conflict. */
+    driveCi: { mode: AgentMode; maxAttempts: number };
+    /** Reviewers commented on your PR. */
+    driveComments: { mode: AgentMode };
+    /**
+     * An approval dismissed by a push that only brought in the base branch
+     * (`shared/agent-reapprove.ts`): yours on someone's PR is given again; on
+     * your PR, the reviewers whose approvals went are asked again.
+     */
+    reapprove: { mode: AgentMode; askReviewers: boolean };
+  };
+  limits: {
+    parallel: number;
+    perDay: number;
+    /** A run is stopped (and handed to you) after this many minutes. */
+    maxMinutes: number;
+    /** No new run starts between `from` and `to` ("HH:MM", may wrap past midnight). */
+    quietHours: { enabled: boolean; from: string; to: string };
+    /** Suggest switching a scenario from shadow to on after this many results accepted unchanged. */
+    promoteAfter: number;
+  };
+  permissions: {
+    /** `--allowedTools` rules per kind of run. */
+    tools: Record<AgentRunKind, string[]>;
+    /** The defaults' version these lists were saved under (`AGENT_TOOLS_VERSION`): newer default rules are added on load. */
+    toolsVersion: number;
+    /** Allow pushing to the head branch of your own PR (drive). */
+    pushOwnBranch: boolean;
+  };
+  /**
+   * Mermaid diagrams of the change (`shared/agent-diagrams.ts`), drawn by a
+   * short model run of their own after a review or a brief, shown on its card.
+   */
+  diagrams: {
+    enabled: boolean;
+    /** Only for a PR with at least this many changed lines (additions + deletions). */
+    minLines: number;
+    /** Post them with the review, as one comment — unless the PR has a Mermaid diagram already. */
+    post: boolean;
+    /** Model for the drawing run; "" = Claude Code's default. */
+    model: string;
+  };
+  companion: { headerChip: boolean; trayState: boolean };
+  notifications: { needsYou: boolean; failed: boolean; finished: boolean };
+  policy: {
+    /** Appended to everything the agent posts; it cannot be removed, only reworded. */
+    signature: string;
+    logRetentionDays: number;
+  };
 }
 
 /** Where Jira data comes from: the `twg` CLI's own sign-in, or the stored API token. */
@@ -405,6 +532,34 @@ export interface PullRequest {
   /** Name of the head branch, e.g. "feature/ENG-93374-foo" — used as a fallback issue-key source. */
   headRefName: string;
   /**
+   * Oid of the head commit, or null when GitHub listed none. The PR agent keys
+   * its ledger on it and merges with `--match-head-commit` against it, so a push
+   * between the offer and the click is refused by GitHub itself.
+   */
+  headOid: string | null;
+  /** Lines added and removed and files touched — the agent's "big PR" limit reads these. */
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  /**
+   * The repository's merge methods: the one GitHub suggests to this viewer and
+   * the ones the repository allows (rulesets are not reflected here — a merge
+   * they refuse is reported as GitHub's answer).
+   */
+  mergeMethods: { suggested: MergeMethod | null; allowed: MergeMethod[] };
+  /** The head branch lives in a fork: the PR agent never pushes to it. */
+  isCrossRepository: boolean;
+  /** The latest thread comment by the PR's author, when a thread ends with one (any thread). */
+  authorRepliedAt: string | null;
+  /** The latest comment by someone else that ends an unresolved thread. */
+  reviewerRepliedAt: string | null;
+  /**
+   * A review is asked of you by name (`review-requested:@me`), as opposed to of
+   * a team you are in — both give the `reviewer` role. The agent takes team
+   * requests only when told to, so a busy team can't use up its daily limit.
+   */
+  requestedOfMe: boolean;
+  /**
    * Issue-tracker key parsed from the title (falling back to the head branch),
    * e.g. "ENG-93374", or null when none is found. Used to group related PRs.
    */
@@ -478,6 +633,13 @@ export interface PullRequest {
    */
   viewerReviewedHead: boolean;
   /**
+   * The commit your latest opinionated review was submitted on, or null. The PR
+   * agent checks a new head against it: the same change on a new base (a stack
+   * GitHub rebased after a lower layer merged, the base merged in) needs no
+   * re-review.
+   */
+  viewerReviewedOid: string | null;
+  /**
    * true when YOUR change request still stands and the author has since acted
    * (pushed a new commit, or replied and left nothing unresolved) — the merge is
    * blocked on your re-review and GitHub will not ask you for it, because
@@ -501,6 +663,12 @@ export interface PullRequest {
    * a plain "Comment" review does not clear it.
    */
   hasNoReviews: boolean;
+  /**
+   * true when the PR has been open at least `staleAfterDays` (the setting) —
+   * the "Stale" chip and, on your own PR, the close action. Set by the poller,
+   * not by `github.ts`, because the threshold is a setting.
+   */
+  isStale: boolean;
 
   /** Number of unresolved review threads — "comments to fix". */
   unresolvedThreads: number;
@@ -710,6 +878,215 @@ export interface ClaudeSessionInfo {
 /** Result of `focusClaudeSession`. */
 export type FocusClaudeSessionResult = { ok: true } | { ok: false; error: string };
 
+// --- The PR agent, as main shows it to the renderer -------------------------
+
+/**
+ * What the agent does with a PR: review it, brief it, offer to merge it (no
+ * run — a button), or the Jira dry run after you merged one. Re-review and
+ * drive land in a later stage.
+ */
+export type AgentScenario = "review" | "brief" | "rereview" | "drive" | "merge" | "afterMerge" | "reapprove" | "reask";
+
+export type AgentItemState = "queued" | "working" | "needsYou" | "done" | "error";
+
+/** What a run's drawing step left: the diagrams, or the comment that already had one, or why none. */
+export interface AgentItemDiagrams {
+  /** Passed the guard (`cleanDiagrams`) and, once `checked`, rendered in the app's own mermaid. */
+  list: import("./agent-diagrams").AgentDiagram[];
+  /** Checked in the renderer (a flowchart can't be parsed without a DOM). None is posted unchecked. */
+  checked: boolean;
+  /** The PR has a comment with a Mermaid diagram already — nothing drawn, its link instead. */
+  existingUrl?: string;
+  /** Why none was drawn or some were dropped, in a line. */
+  note?: string;
+}
+
+/** One thing the agent did or is doing on a PR — persisted in userData/agent/state.json. */
+export interface AgentItem {
+  runId: string;
+  key: string;
+  prId: string;
+  prNumber: number;
+  repo: string;
+  url: string;
+  title: string;
+  hostLabel: string;
+  scenario: AgentScenario;
+  mode: "shadow" | "on";
+  state: AgentItemState;
+  /** One line: what it is doing, or why it stopped. */
+  headline: string;
+  queuedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  sessionId?: string;
+  worktree?: string;
+  checkout?: string;
+  /** The review it would post (shadow) or the brief — the session's final message, without its result block. */
+  output?: string;
+  /** What the final message means for you: one sentence, its questions to you, its findings (`shared/agent-result.ts`). */
+  result?: import("./agent-result").RunResultCard;
+  /** Your answer to its question, queued: the next run continues the session with it. */
+  answer?: string;
+  /** A brief's questions for the author, carried into the review that follows it (on its own, or on "Draft a review"). */
+  carry?: string[];
+  /** The brief a big PR's review follows, kept on the review's card — the brief itself closes once the review is queued. */
+  brief?: string;
+  /**
+   * A failed run the agent planned itself: when it tries it once more on its
+   * own, while the PR still wants it. Cleared once that try is queued or the
+   * PR no longer wants it.
+   */
+  retryAt?: string;
+  /** The failed run this one tries again, by its runId — a run that is a try again is not tried a third time. */
+  retryOf?: string;
+  /**
+   * A drive's result from before the app last started: what it would push
+   * and its session going on with your answer are checked against what the
+   * app took in memory before the session, which a restart drops — so it can
+   * only be run again (or continued in your terminal).
+   */
+  needsRerun?: boolean;
+  /** Your choice on each thread the author pushed back on (by its first comment's id): keep your comment, or drop it. */
+  disputes?: Record<string, "keep" | "drop">;
+  error?: string;
+  /**
+   * The app closed while it ran. It goes on by itself at the next start: the
+   * same session where its folder is still there, else (and always for a
+   * drive) a new run.
+   */
+  interrupted?: boolean;
+  /**
+   * How many runs of it in a row ended with their process cut short (Ctrl+C,
+   * a shutdown, a workflow still running). Each goes on by itself like an
+   * interrupted run, up to a cap; a run that ends any other way clears it.
+   */
+  cuts?: number;
+  /** Diagrams of the change, drawn after the run (Settings › Agent › Diagrams). */
+  diagrams?: AgentItemDiagrams;
+  /**
+   * Re-approve / re-ask: the approvals a base-only push dismissed — whose, and
+   * the head they were given on. The PR's own changes are the same at both.
+   */
+  reapproval?: { logins: string[]; oldHead: string };
+  /** The next run continues `sessionId` instead of starting a session: after a restart, or with your answer. */
+  resumeSession?: boolean;
+  /**
+   * Your place for it in the queue (dragged, or "Run next"): lower runs first.
+   * Unset, it queues by the time it was queued.
+   */
+  rank?: number;
+  /**
+   * What a review prepared to post — captured by the app's publish wrapper,
+   * posted by the app (`main/agent/publish.ts`). Absent when it prepared
+   * nothing, or ran as a plain dry run.
+   */
+  plan?: import("./agent-publish").PublishSummary;
+  /** The review run's own folder (wrapper, payloads, plan, publish progress). */
+  runFolder?: string;
+  /** The fingerprint of the plan file `plan` was read from: Publish posts only while the file still matches it. */
+  planHash?: string;
+  /** The plan changed in the session after you first saw it ("Edit first"): its Publish isn't "accepted unchanged". */
+  planEdited?: boolean;
+  /** The plan is on GitHub. */
+  published?: boolean;
+  /** A merge offer: the methods the repository allows and the one the button uses. */
+  mergeMethods?: { suggested: MergeMethod | null; allowed: MergeMethod[] };
+  mergeMethod?: MergeMethod;
+  /**
+   * A drive run's commits on top of the head it started from (`base`), as the
+   * app read them from its worktree — what the Push button would send.
+   */
+  drive?: AgentDriveResult;
+  /** The drive's commits are on the PR's branch. */
+  pushed?: boolean;
+  /** A drive: what it was queued for — "ci", "conflicts", "comments". */
+  reasons?: string[];
+  /**
+   * A drive: where its push goes and what git looked like before the session
+   * — the remote URL then (not a remote name the session could repoint), and
+   * a fingerprint of the repository's git config and hooks and your global
+   * git config. A push goes out only while the fingerprint still matches.
+   */
+  pushTo?: { url: string; commonDir: string; worktreeGitDir: string | null; fingerprint: string; sshSnapshot?: string };
+}
+
+export interface AgentDriveResult {
+  /** The PR's head the run started from: a push goes out only while it is still the head. */
+  base: string;
+  /** The commit the drive ended at — what you were shown, and the one commit a Push sends. */
+  head: string;
+  /** What it was driven for: "ci", "conflicts", "comments". */
+  reasons: string[];
+  /** Oldest first. */
+  commits: Array<{ oid: string; subject: string }>;
+  /** `git diff --stat`, and the patch itself (cut at 100 kB). */
+  stat: string;
+  patch: string;
+}
+
+/** A run in flight: its plan and live line (see agent-stream.ts), the last few things it did. */
+export interface AgentRunState {
+  runId: string;
+  progress: import("./agent-stream").RunProgress;
+  recent: Array<{ at: string; text: string }>;
+  paused: boolean;
+}
+
+export interface AgentState {
+  enabled: boolean;
+  items: AgentItem[];
+  running: AgentRunState[];
+  /** Why each PR on the dashboard is idle, by PR id. */
+  idle: Record<string, string>;
+  runsToday: number;
+  perDay: number;
+  parallel: number;
+  /** Set while Claude's usage limit holds new runs back. */
+  heldUntil: string | null;
+  /** The companion settings, so the header shows the chip only when wanted. */
+  headerChip: boolean;
+  /** …and the tray its status line and Pause item. */
+  trayState: boolean;
+  /**
+   * Paused as a whole (Board, companion, tray): nothing new starts, runs in
+   * flight are paused, and nothing is posted or pushed on its own.
+   */
+  paused: boolean;
+  /** Inside quiet hours: the local clock they end at ("08:00"). Only runs you ask for start meanwhile. */
+  quietUntil: string | null;
+  /** Shadow reviews you published exactly as prepared — the count behind the Shadow → On hint. */
+  acceptedUnchanged: number;
+  /** Reviews are in Shadow and you've published enough of them unchanged to consider On. */
+  suggestOn: boolean;
+  /**
+   * Your PRs an SDLC orchestrator run drives, by PR id: its Jira key and the
+   * stage it is at — the badge their cards wear instead of the agent's work.
+   */
+  orchestrated?: Record<string, { key: string; stage: string | null }>;
+}
+
+/** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
+export type AgentAction =
+  | { type: "skip" | "retry" | "continue" | "reviewAnyway" | "pause" | "resume" | "stop" | "takeOver" | "publish" | "push" | "reapprove"; runId: string }
+
+  // The whole agent — two members, so a check for both narrows the rest.
+  | { type: "pauseAgent" }
+  | { type: "resumeAgent" }
+  | { type: "hint"; runId: string; text: string }
+  /** Your answer to a finished run's question: the same session goes on with it. */
+  | { type: "answer"; runId: string; text: string }
+  /** Keep your comment, or drop it, in a thread where the author pushed back — applied when the review is sent. */
+  | { type: "dispute"; runId: string; replyTo: number; choice: "keep" | "drop" }
+  | { type: "merge"; runId: string; method?: MergeMethod }
+  /** `before`: the queued run it goes in front of; null or absent, the end of the queue. */
+  | { type: "enqueue"; prId: string; before?: string | null }
+  /** Your approval again, on a PR it already stands on, to answer a review request made after it. */
+  | { type: "approveAgain"; prId: string }
+  | { type: "moveQueued"; runId: string; before: string | null };
+
+export type AgentActionResult = { ok: true } | { ok: false; error: string };
+
 /** `gh` CLI availability + per-host authentication, for the settings UI. */
 export interface GhStatus {
   /** Whether the `gh` CLI is installed and on PATH. */
@@ -791,8 +1168,36 @@ export interface PrManagerApi {
   focusClaudeSession(sessionId: string): Promise<FocusClaudeSessionResult>;
   /** Subscribe to changes in the running sessions. Returns an unsubscribe function. */
   onClaudeSessions(listener: (sessions: ClaudeSessionInfo[]) => void): () => void;
+  /** The PR agent's state, or null when there is no agent (fixture mode). */
+  getAgentState(): Promise<AgentState | null>;
+  /** Act on an agent run or hand a PR to the agent. */
+  agentAction(action: AgentAction): Promise<AgentActionResult>;
+  /** Shows the agent's log (userData/agent/log.jsonl) in the file manager. */
+  revealAgentLog(): Promise<void>;
+  /**
+   * Main asks whether the agent's diagrams parse — a flowchart needs a DOM,
+   * and the renderer is the only browser at hand. Returns an unsubscribe function.
+   */
+  onCheckDiagrams(listener: (request: { requestId: string; sources: string[] }) => void): () => void;
+  /** The answer: one yes/no per source, in order. Nothing else crosses back. */
+  diagramsChecked(requestId: string, results: boolean[]): Promise<void>;
+  /** Subscribe to agent state pushes (sent only while the window is visible). */
+  onAgentState(listener: (state: AgentState) => void): () => void;
+  /** An agent notification was clicked: show the Board, where its decision waits. */
+  /** A clicked agent notification: the Board, at the item it was about. */
+  onAgentShowBoard(listener: (runId?: string) => void): () => void;
+  /** The tray's "Show agent": open the agent's popover (the Board when the header chip is off). */
+  onAgentOpenCompanion(listener: () => void): () => void;
   /** Copy text (e.g. a PR URL) to the system clipboard. */
   copyText(text: string): Promise<void>;
+  /**
+   * The Jira task of a stale PR of yours and the transitions Jira offers on it,
+   * for the close dialog. Only the PR id crosses over; the issue key is read
+   * from main's own snapshot.
+   */
+  getStaleJiraTask(prId: string): Promise<{ ok: true; task: JiraTaskInfo } | { ok: false; error: string }>;
+  /** Close a stale PR of yours and apply the chosen action to its Jira task. */
+  closeStalePr(prId: string, options: CloseStaleOptions): Promise<CloseStaleResult>;
   /** Returns release info if a new version was installed since last ack, or null. */
   getWhatsNew(): Promise<{ version: string; url: string } | null>;
   /** Acknowledges the current version (hides "What's new"). */

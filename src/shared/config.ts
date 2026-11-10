@@ -1,8 +1,24 @@
 import { execFileSync } from "node:child_process";
 
+import {
+  AGENT_BOUNDS,
+  DEFAULT_AGENT_PROMPTS,
+  DEFAULT_AGENT_SETTINGS,
+  DEFAULT_AGENT_SIGNATURE,
+  AGENT_TOOLS_VERSION,
+  DEFAULT_AGENT_TOOLS,
+  isClockTime,
+  migrateTools,
+  type AgentBoundKey,
+} from "./agent-defaults";
 import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS, PREVIOUS_DEFAULT_PROMPTS } from "./claude-launch";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "./notify";
+import { DEFAULT_STALE_AFTER_DAYS, validateStaleAfterDays } from "./stale";
 import type {
+  AgentMode,
+  AgentPromptKey,
+  AgentRunKind,
+  AgentSettings,
   ClaudeSettings,
   GhStatus,
   HostConfig,
@@ -200,6 +216,8 @@ export function validateSettings(raw: unknown): Settings {
     hosts,
     jira: validateJira(obj.jira),
     claude: validateClaude(obj.claude),
+    agent: validateAgent(obj.agent),
+    staleAfterDays: validateStaleAfterDays(obj.staleAfterDays),
   };
 }
 
@@ -245,6 +263,10 @@ export function validateClaude(raw: unknown): ClaudeSettings {
     const saved = str(rawPrompts[k]);
     return !saved || PREVIOUS_DEFAULT_PROMPTS[k]?.includes(saved) ? DEFAULT_CLAUDE_PROMPTS[k] : saved;
   };
+  const rawAgentPrompts = (
+    typeof obj.agentPrompts === "object" && obj.agentPrompts !== null ? obj.agentPrompts : {}
+  ) as Record<string, unknown>;
+  const agentPrompt = (k: AgentPromptKey): string => str(rawAgentPrompts[k]) || DEFAULT_AGENT_PROMPTS[k];
   return {
     enabled: typeof obj.enabled === "boolean" ? obj.enabled : d.enabled,
     projectsRoot: str(obj.projectsRoot),
@@ -258,10 +280,152 @@ export function validateClaude(raw: unknown): ClaudeSettings {
       explainGroup: prompt("explainGroup"),
       reviewGroup: prompt("reviewGroup"),
     },
+    agentPrompts: {
+      triage: agentPrompt("triage"),
+      rereview: agentPrompt("rereview"),
+      afterMerge: agentPrompt("afterMerge"),
+      selfReview: agentPrompt("selfReview"),
+      validateComments: agentPrompt("validateComments"),
+    },
     terminal:
       obj.terminal === "iterm" || obj.terminal === "terminal" || obj.terminal === "desktop"
         ? obj.terminal
         : d.terminal,
+  };
+}
+
+const AGENT_RUN_KINDS: readonly AgentRunKind[] = ["review", "brief", "rereview", "drive", "afterMerge"];
+
+/**
+ * Coerces the PR agent block, filling anything missing from the defaults and
+ * clamping every number into `AGENT_BOUNDS`. Never throws — like the Claude
+ * block, a bad shape falls back (to OFF) rather than blocking a save or making
+ * the app look unconfigured, and a settings file from before the agent existed
+ * simply reads as the defaults.
+ */
+export function validateAgent(raw: unknown): AgentSettings {
+  const d = DEFAULT_AGENT_SETTINGS;
+  const o = (v: unknown): Record<string, unknown> =>
+    (typeof v === "object" && v !== null && !Array.isArray(v) ? v : {}) as Record<string, unknown>;
+  const bool = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : fallback);
+  const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const num = (v: unknown, key: AgentBoundKey, fallback: number): number => {
+    const n = typeof v === "number" ? v : typeof v === "string" && v.trim() ? Number(v) : NaN;
+    if (!Number.isFinite(n)) return fallback;
+    const { min, max } = AGENT_BOUNDS[key];
+    return Math.min(max, Math.max(min, Math.round(n)));
+  };
+  const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
+    allowed.includes(v as T) ? (v as T) : fallback;
+  const MODES: readonly AgentMode[] = ["off", "shadow", "on"];
+  const clock = (v: unknown, fallback: string): string => (typeof v === "string" && isClockTime(v) ? v : fallback);
+  const list = (v: unknown): string[] | null =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim()) : null;
+
+  const obj = o(raw);
+  const sc = o(obj.scenarios);
+  const review = o(sc.review);
+  const brief = o(sc.brief);
+  const rereview = o(sc.rereview);
+  const merge = o(sc.merge);
+  const selfReview = o(sc.selfReview);
+  const driveCi = o(sc.driveCi);
+  const driveComments = o(sc.driveComments);
+  const reapprove = o(sc.reapprove);
+  const limits = o(obj.limits);
+  const quiet = o(limits.quietHours);
+  const permissions = o(obj.permissions);
+  const rawTools = o(permissions.tools);
+  const companion = o(obj.companion);
+  const notifications = o(obj.notifications);
+  const policy = o(obj.policy);
+  const diagrams = o(obj.diagrams);
+
+  // A list saved before a newer default rule existed gets that rule; one saved without a version is from before versions (1).
+  const savedVersion = typeof permissions.toolsVersion === "number" && Number.isInteger(permissions.toolsVersion) ? permissions.toolsVersion : 1;
+  const tools = {} as Record<AgentRunKind, string[]>;
+  for (const kind of AGENT_RUN_KINDS) {
+    const saved = list(rawTools[kind]);
+    tools[kind] = saved ? migrateTools(kind, saved, savedVersion) : [...DEFAULT_AGENT_TOOLS[kind]];
+  }
+
+  return {
+    enabled: bool(obj.enabled, d.enabled),
+    model: str(obj.model),
+    effort: oneOf(obj.effort, ["", "low", "medium", "high"] as const, d.effort),
+    worktreeDir: str(obj.worktreeDir),
+    removeWorktree: bool(obj.removeWorktree, d.removeWorktree),
+    repos: (list(obj.repos) ?? []).filter((r) => /^[^/\s]+\/[^/\s]+$/.test(r)),
+    scenarios: {
+      review: {
+        mode: oneOf(review.mode, MODES, d.scenarios.review.mode),
+        maxLines: num(review.maxLines, "maxLines", d.scenarios.review.maxLines),
+        maxFiles: num(review.maxFiles, "maxFiles", d.scenarios.review.maxFiles),
+        teamRequests: bool(review.teamRequests, d.scenarios.review.teamRequests),
+        drafts: bool(review.drafts, d.scenarios.review.drafts),
+        holdApproveOnChangeRequest: bool(review.holdApproveOnChangeRequest, d.scenarios.review.holdApproveOnChangeRequest),
+      },
+      brief: { mode: oneOf(brief.mode, ["off", "on"] as const, d.scenarios.brief.mode) },
+      rereview: {
+        mode: oneOf(rereview.mode, MODES, d.scenarios.rereview.mode),
+        resolve: bool(rereview.resolve, d.scenarios.rereview.resolve),
+        approve: bool(rereview.approve, d.scenarios.rereview.approve),
+      },
+      merge: {
+        mode: oneOf(merge.mode, ["off", "offer"] as const, d.scenarios.merge.mode),
+        requireAllReviewers: bool(merge.requireAllReviewers, d.scenarios.merge.requireAllReviewers),
+        requireThreadsResolved: bool(merge.requireThreadsResolved, d.scenarios.merge.requireThreadsResolved),
+        requireChecksGreen: bool(merge.requireChecksGreen, d.scenarios.merge.requireChecksGreen),
+        method: oneOf(merge.method, ["github", "merge", "squash", "rebase"] as const, d.scenarios.merge.method),
+        deleteBranch: bool(merge.deleteBranch, d.scenarios.merge.deleteBranch),
+      },
+      selfReview: { mode: oneOf(selfReview.mode, MODES, d.scenarios.selfReview.mode) },
+      driveCi: {
+        mode: oneOf(driveCi.mode, MODES, d.scenarios.driveCi.mode),
+        maxAttempts: num(driveCi.maxAttempts, "maxAttempts", d.scenarios.driveCi.maxAttempts),
+      },
+      driveComments: { mode: oneOf(driveComments.mode, MODES, d.scenarios.driveComments.mode) },
+      reapprove: {
+        mode: oneOf(reapprove.mode, MODES, d.scenarios.reapprove.mode),
+        askReviewers: bool(reapprove.askReviewers, d.scenarios.reapprove.askReviewers),
+      },
+    },
+    limits: {
+      parallel: num(limits.parallel, "parallel", d.limits.parallel),
+      perDay: num(limits.perDay, "perDay", d.limits.perDay),
+      maxMinutes: num(limits.maxMinutes, "maxMinutes", d.limits.maxMinutes),
+      quietHours: {
+        enabled: bool(quiet.enabled, d.limits.quietHours.enabled),
+        from: clock(quiet.from, d.limits.quietHours.from),
+        to: clock(quiet.to, d.limits.quietHours.to),
+      },
+      promoteAfter: num(limits.promoteAfter, "promoteAfter", d.limits.promoteAfter),
+    },
+    permissions: { tools, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: bool(permissions.pushOwnBranch, d.permissions.pushOwnBranch) },
+    diagrams: {
+      enabled: bool(diagrams.enabled, d.diagrams.enabled),
+      minLines: num(diagrams.minLines, "diagramMinLines", d.diagrams.minLines),
+      post: bool(diagrams.post, d.diagrams.post),
+      // Absent: the default model; saved empty: Claude Code's default. A name only — it goes on a command line.
+      model:
+        typeof diagrams.model === "string" && (diagrams.model.trim() === "" || /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,79}$/.test(diagrams.model.trim()))
+          ? diagrams.model.trim()
+          : d.diagrams.model,
+    },
+    companion: {
+      headerChip: bool(companion.headerChip, d.companion.headerChip),
+      trayState: bool(companion.trayState, d.companion.trayState),
+    },
+    notifications: {
+      needsYou: bool(notifications.needsYou, d.notifications.needsYou),
+      failed: bool(notifications.failed, d.notifications.failed),
+      finished: bool(notifications.finished, d.notifications.finished),
+    },
+    policy: {
+      // Rewording is allowed; an empty signature is not — it falls back.
+      signature: str(policy.signature) || DEFAULT_AGENT_SIGNATURE,
+      logRetentionDays: num(policy.logRetentionDays, "logRetentionDays", d.policy.logRetentionDays),
+    },
   };
 }
 
@@ -321,6 +485,8 @@ export function defaultSettings(): Settings {
     notifications: defaultNotificationSettings(),
     hosts: [],
     claude: validateClaude(undefined),
+    agent: validateAgent(undefined),
+    staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
   };
 }
 

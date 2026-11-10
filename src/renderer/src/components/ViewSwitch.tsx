@@ -58,7 +58,20 @@ function ViewModeIcon({ mode }: { mode: ViewMode }) {
       return <CozyIcon />;
     case "compact":
       return <CompactIcon />;
+    case "board":
+      return <BoardIcon />;
   }
+}
+
+/** Three columns of falling height — a kanban board. */
+function BoardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden>
+      <rect x="3" y="3" width="5" height="18" rx="1.5" />
+      <rect x="9.5" y="3" width="5" height="13" rx="1.5" />
+      <rect x="16" y="3" width="5" height="8" rx="1.5" />
+    </svg>
+  );
 }
 
 /** Four big tiles — Finder's icon view, and the full cards here. */

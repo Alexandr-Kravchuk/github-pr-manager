@@ -121,6 +121,25 @@ async function openTerminal(
 }
 
 /**
+ * Opens a terminal in `dir` continuing an existing Claude Code session —
+ * `claude --resume <id>` — for the PR agent's "Continue in session" and "Take
+ * over". Always a terminal: Claude Desktop's link starts new sessions only.
+ * `sessionId` is a UUID the agent minted, so it needs no quoting beyond the
+ * POSIX helper's.
+ */
+export async function resumeClaudeSession(dir: string, sessionId: string, terminal: ClaudeTerminal): Promise<void> {
+  if (!/^[0-9a-f-]{36}$/i.test(sessionId)) throw new Error("Not a session id.");
+  const term: Exclude<ClaudeTerminal, "desktop"> = terminal === "desktop" ? "auto" : terminal;
+  await openTerminalWith(
+    {
+      posix: posixLaunchCommand(dir, "").replace(/ ''$/, ` --resume ${sessionId}`),
+      windows: ["/D", `"${dir}"`, "cmd", "/k", "claude", "--resume", sessionId],
+    },
+    { terminal: term, unsupported: "Opening a Claude session is supported on macOS and Windows only." },
+  );
+}
+
+/**
  * Starts `claude <prompt>` in `dir` where Settings say: Claude Desktop through
  * `openUrl`, else a terminal. `inTerminal` overrides a Claude Desktop setting
  * with the default terminal (iTerm2 when installed, else Terminal; cmd on
