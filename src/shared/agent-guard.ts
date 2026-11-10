@@ -189,29 +189,98 @@ function readPath(p: string, workDir: string | undefined): { path: string } | { 
 /** A glob segment that matches more than itself. */
 const GLOB_SEGMENT = /[*?[\]{}]/;
 
+/** How many alternatives a Glob pattern's braces may stand for before the guard gives up judging it. */
+const MAX_GLOB_ALTERNATIVES = 256;
+
+/**
+ * The first brace group of `s` expanded one level — `a{b,c}d` → `abd`, `acd` —
+ * or null when `s` has none. Escaped braces and commas stay literal; an
+ * unclosed `{` is skipped. A group without a comma expands to its content: an
+ * engine that keeps `{x}` literal reads a name no more than that.
+ */
+function expandFirstBrace(s: string): string[] | null {
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (s[i] !== "{") continue;
+    let depth = 0;
+    const cuts: number[] = [];
+    for (let j = i; j < s.length; j++) {
+      const c = s[j];
+      if (c === "\\") {
+        j++;
+      } else if (c === "{") {
+        depth++;
+      } else if (c === "," && depth === 1) {
+        cuts.push(j);
+      } else if (c === "}" && --depth === 0) {
+        const parts: string[] = [];
+        let from = i + 1;
+        for (const k of cuts) {
+          parts.push(s.slice(from, k));
+          from = k + 1;
+        }
+        parts.push(s.slice(from, j));
+        return parts.map((x) => s.slice(0, i) + x + s.slice(j + 1));
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Every pattern a Glob pattern's braces stand for, nested ones included, as
+ * the engine expands them — or null past `MAX_GLOB_ALTERNATIVES`. Judging the
+ * text between brace characters alone missed what joins across them:
+ * `.{.,}/*` is `../*`.
+ */
+function expandBraces(pattern: string): string[] | null {
+  let out = [pattern];
+  for (;;) {
+    let changed = false;
+    const next: string[] = [];
+    for (const s of out) {
+      const e = expandFirstBrace(s);
+      if (e) changed = true;
+      next.push(...(e ?? [s]));
+      if (next.length > MAX_GLOB_ALTERNATIVES) return null;
+    }
+    if (!changed) return out;
+    out = next;
+  }
+}
+
 /**
  * Where a Glob pattern starts reading. A relative one stays under its folder —
- * once no segment steps out — but an absolute one names its own folder
+ * once no alternative steps out — but an absolute one names its own folder
  * (`C:/Users/me/.ssh/*`), and so may a brace alternative (`{/etc/*,x}`).
  */
 function globStart(pattern: string): { path: string | null } | { error: string } {
   const p = pattern.trim();
-  const pieces = p.split(/[{},]/).map((x) => x.trim());
-  if (pieces.some((x) => x.startsWith("~"))) return { error: "Agent runs don't glob under ~." };
-  if (/^[\\/]{2}/.test(p) || p.replace(/^[A-Za-z]:(?=[\\/])/, "").includes(":")) return { error: "A Glob pattern takes no network path, and a colon only after a drive letter." };
-  // Off Windows a backslash escapes the next character, so the glob engine
-  // reads `\.\./` and `.\./` as `../`: the escapes are dropped and the
-  // pattern judged again, as well as split at both separators as written.
-  const unescaped = (x: string) => x.replace(/\\(.)/g, "$1");
-  if (pieces.some((x) => x.split(/[\\/]/).includes("..") || unescaped(x).split("/").includes(".."))) {
+  const expanded = expandBraces(p);
+  if (!expanded) return { error: `A Glob pattern's braces can't stand for more than ${MAX_GLOB_ALTERNATIVES} patterns.` };
+  const alts = expanded.map((x) => x.trim());
+  // Off Windows a backslash escapes the next character, so the engine reads
+  // `\.\./` and `.\./` as `../`: each alternative is judged as written and
+  // with its escapes dropped.
+  const unescaped = alts.map((x) => x.replace(/\\(.)/g, "$1").trim());
+  if ([...alts, ...unescaped].some((x) => x.startsWith("~"))) return { error: "Agent runs don't glob under ~." };
+  if (alts.some((x) => /^[\\/]{2}/.test(x) || x.replace(/^[A-Za-z]:(?=[\\/])/, "").includes(":"))) {
+    return { error: "A Glob pattern takes no network path, and a colon only after a drive letter." };
+  }
+  if ([...alts, ...unescaped].some((x) => x.split(/[\\/]/).includes(".."))) {
     return { error: "A Glob pattern can't step out of its folder with '..'." };
   }
-  if (pieces.slice(1).some(isAbsolutePath)) return { error: "A Glob pattern's alternatives can't be absolute paths." };
-  if (!isAbsolutePath(p)) return { path: null };
+  if (!isAbsolutePath(p)) return alts.some(isAbsolutePath) ? { error: "A Glob pattern's alternatives can't be absolute paths." } : { path: null };
   const segs = p.split(/[\\/]/);
   const firstGlob = segs.findIndex((s) => GLOB_SEGMENT.test(s));
   const fixed = firstGlob < 0 ? segs : segs.slice(0, firstGlob);
-  return { path: fixed.join("/") || "/" };
+  const start = fixed.join("/");
+  // A bare drive (`C:/{Users}/…` stops at `C:`) is the drive's root: resolved
+  // as written, `C:` is that drive's current folder — the hook's, the worktree.
+  return { path: /^[A-Za-z]:$/.test(start) ? `${start}/` : start || "/" };
 }
 
 /** What a read tool's call reads: its file, or the folder it searches. */

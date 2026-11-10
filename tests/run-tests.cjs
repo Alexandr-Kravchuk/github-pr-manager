@@ -9215,6 +9215,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ["Glob", { pattern: "**/*.ts" }],
         ["Glob", { pattern: "{CLAUDE.md,AGENTS.md,.ai/**/*.md}" }],
         ["Glob", { pattern: "src\\**\\*.ts" }],
+        ["Glob", { pattern: "src/{a,{b,c}}/*.{ts,tsx}" }],
+        ["Glob", { pattern: "docs/\\{literal\\}/*.md" }],
+        ["Glob", { pattern: "C:\\wt\\src\\*.ts" }],
         ["Glob", { pattern: `${PLUGIN}/skills/creatio-code-review/*` }],
         ["Glob", { pattern: "*", path: "C:/T/prd-agent/r/out" }],
         ["LS", { path: "src" }],
@@ -9267,6 +9270,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ["Glob", { pattern: ".\\./*" }],
         ["Glob", { pattern: "src/\\.\\./\\.\\./*" }],
         ["Glob", { pattern: "{x,\\.\\./*}" }],
+        // Braces join across their edges: each of these expands to a `../`.
+        ["Glob", { pattern: "{.,x}./*" }],
+        ["Glob", { pattern: "src/{x,.}./secret" }],
+        ["Glob", { pattern: ".{.,}/*" }],
+        ["Glob", { pattern: "{.}{.}/*" }],
+        ["Glob", { pattern: "src/.{.,x}/.{.,y}/*" }],
+        ["Glob", { pattern: "{a,.{.,b}}/*" }],
+        ["Glob", { pattern: "{x,{~,y}}/.ssh/*" }],
+        ["Glob", { pattern: "{x,{y,/etc/*}}" }],
+        ["Glob", { pattern: `${"{a,b}".repeat(9)}/*` }],
         ["Glob", { pattern: "{/etc/*,x}" }],
         ["Glob", { pattern: "{x,C:/Users/me/.ssh/*}" }],
         ["Glob", { pattern: "~/.ssh/*" }],
@@ -10967,6 +10980,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         const bash = `/${base[0].toLowerCase()}/${base.slice(3).replace(/\\/g, "/")}`;
         assert.strictEqual(call("Read", { file_path: `${bash}/wt/src/x.ts` }).status, 0, "Git Bash spelling");
         assert.strictEqual(call("Read", { file_path: `${bash}/home/.ssh/id_rsa` }).status, 2);
+        // A glob right after the drive starts at the drive's root — `C:` as written is the hook's own folder, here the worktree.
+        const top = base.slice(3).split(path.sep)[0];
+        const fromWorktree = spawnSync(process.execPath, [hookJs, "review", "https://github.com/a/b/pull/7", guardFile], {
+          cwd: workDir,
+          input: JSON.stringify({ tool_name: "Glob", tool_input: { pattern: `${base[0]}:/{${top[0]}}${top.slice(1)}/**/id_rsa` } }),
+          encoding: "utf8",
+        });
+        assert.strictEqual(fromWorktree.status, 2, `a glob from the drive's root: ${fromWorktree.stderr}`);
       }
     });
 
