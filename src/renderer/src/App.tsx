@@ -1389,14 +1389,15 @@ export function App() {
               <section key={g.key} className={isCollapsed ? "mb-3" : "mb-8"}>
                 {/* "Explain all" sits right after the PR count but outside the
                     toggle: a button inside a button is invalid and its click
-                    would fold the group too. The empty rest of the row still
-                    folds it, as the whole row did before. */}
-                <div className="flex items-center gap-2 rounded-md hover:bg-elevated/40">
+                    would fold the group too. Only the heading button folds it:
+                    the empty rest of the row showed no pointer and no sign of
+                    being clickable, so a stray click there folded the group. */}
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => toggleGroup(g.key)}
                     aria-expanded={!isCollapsed}
-                    className="flex min-w-0 items-center gap-2 py-2 text-left"
+                    className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md py-2 pr-2 text-left hover:bg-elevated/40"
                   >
                     <ChevronIcon collapsed={isCollapsed} />
                     {g.hostLabel && (
@@ -1422,7 +1423,6 @@ export function App() {
                   {groupBy !== "repo" && (
                     <GroupClaudeButton groupKey={g.key} prs={g.prs} />
                   )}
-                  <div aria-hidden className="flex-1 self-stretch" onClick={() => toggleGroup(g.key)} />
                 </div>
                 {!isCollapsed && (
                   <PrList
