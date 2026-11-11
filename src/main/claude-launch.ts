@@ -72,23 +72,28 @@ export function parseRemoteUrls(text: string): string[] {
 /**
  * Where people keep their clones, searched when no projects folder is set: a
  * fresh install should find a checkout in `~/source/repos` (Visual Studio's
- * default) or `C:\Projects` as readily as in `~/Projects`, rather than report
- * "no checkout" for every PR until a folder is typed in.
+ * default) or `~/src` as readily as in `~/Projects`, rather than report "no
+ * checkout" for every PR until a folder is typed in.
+ *
+ * Under your home only, never a drive root's `C:\Projects`: any user of the
+ * machine may create a folder there, and a "checkout" planted in it with the
+ * PR's remote would become the folder the agent runs git in — its
+ * `.git/config` theirs — and the one a Claude session opens. A folder you set
+ * in Settings is your choice and is searched as it is.
  */
 const USUAL_HOME_ROOTS = ["Projects", "source/repos", "src", "code", "git", "repos", "dev", "Developer", "workspace", "GitHub", "Documents/GitHub"];
-const USUAL_WINDOWS_ROOTS = ["C:\\Projects", "C:\\src", "C:\\git", "C:\\repos", "C:\\dev", "D:\\Projects", "D:\\src", "D:\\git", "D:\\repos"];
 
 /**
  * The folders whose subfolders are matched to a PR: the projects folder when
- * one is set — your choice, searched alone — else the usual places, in order,
- * each once (Windows and macOS file names ignore case).
+ * one is set — your choice, searched alone — else the usual places under your
+ * home, in order, each once (Windows and macOS file names ignore case).
  */
 export function checkoutRoots(projectsRoot: string, platform: NodeJS.Platform = process.platform, home: string = os.homedir()): string[] {
   if (projectsRoot.trim()) return [expandHome(projectsRoot.trim())];
   // Never a relative folder: with no home known, `join` would make one, read against the app's cwd.
-  if (!home) return platform === "win32" ? [...USUAL_WINDOWS_ROOTS] : [];
+  if (!home) return [];
   const p = platform === "win32" ? path.win32 : path.posix;
-  const all = [...USUAL_HOME_ROOTS.map((r) => p.join(home, ...r.split("/"))), ...(platform === "win32" ? USUAL_WINDOWS_ROOTS : [])];
+  const all = USUAL_HOME_ROOTS.map((r) => p.join(home, ...r.split("/")));
   const seen = new Set<string>();
   return all.filter((r) => {
     const k = platform === "linux" ? r : r.toLowerCase();
@@ -100,7 +105,7 @@ export function checkoutRoots(projectsRoot: string, platform: NodeJS.Platform = 
 
 /** Where a missing checkout was looked for, in words for an error. */
 export function checkoutRootsText(projectsRoot: string): string {
-  return projectsRoot.trim() ? projectsRoot.trim() : "~/Projects or the usual folders (~/source/repos, ~/src, ~/code, ~/git, C:\\Projects…)";
+  return projectsRoot.trim() ? projectsRoot.trim() : "~/Projects or the usual folders in your home (~/source/repos, ~/src, ~/code, ~/git…)";
 }
 
 /**

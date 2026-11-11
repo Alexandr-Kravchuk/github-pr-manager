@@ -115,8 +115,10 @@ Three layers:
   review, own mergeable → close, else the bare link — plus the shell quoting;
   the renderer imports it for the tooltip, while finding the checkout by git
   remote — in the projects folder, or with none set in the usual places
-  (`checkoutRoots`: `~/Projects`, `~/source/repos`, `~/src`, `~/code`,
-  `C:\Projects`…, so a fresh install finds clones it was never told about) —
+  (`checkoutRoots`: `~/Projects`, `~/source/repos`, `~/src`, `~/code`…, so a
+  fresh install finds clones it was never told about — under your home only,
+  never a drive root's `C:\Projects`, which any user of the machine may
+  create and plant a "checkout" in for the agent to run git in) —
   live in `main/claude-launch.ts` and opening the terminal in
   `main/terminal.ts`, and the
   renderer sends only the PR id (plus a picked kind and an in-terminal

@@ -10427,18 +10427,19 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(await cl.ensureAgentClone(async () => assert.fail("no git for a clone that exists"), root, pr), da);
     });
 
-    test("checkout: with no projects folder set, the usual places are searched — yours alone when set", () => {
+    test("checkout: with no projects folder set, the usual places in your home are searched — never a drive root; yours alone when set", () => {
       const launcherM = require(path.join(__dirname, "../dist/main/main/claude-launch.js"));
       assert.deepStrictEqual(launcherM.checkoutRoots("D:\\work", "win32", "C:\\Users\\me"), ["D:\\work"], "your folder, searched alone");
       const win = launcherM.checkoutRoots("", "win32", "C:\\Users\\me");
       assert.strictEqual(win[0], "C:\\Users\\me\\Projects");
-      for (const r of ["C:\\Users\\me\\source\\repos", "C:\\Users\\me\\src", "C:\\Projects", "D:\\Projects"]) assert.ok(win.includes(r), r);
+      for (const r of ["C:\\Users\\me\\source\\repos", "C:\\Users\\me\\src"]) assert.ok(win.includes(r), r);
+      // Any user of the machine may create C:\Projects: a checkout planted there would be run in.
+      assert.ok(win.every((r) => r.startsWith("C:\\Users\\me\\")), `only under your home: ${win.join(", ")}`);
       assert.strictEqual(new Set(win.map((r) => r.toLowerCase())).size, win.length, "each once");
       const linux = launcherM.checkoutRoots("", "linux", "/home/me");
       assert.strictEqual(linux[0], "/home/me/Projects");
-      assert.ok(linux.includes("/home/me/source/repos") && !linux.some((r) => r.startsWith("C:")));
-      assert.deepStrictEqual(launcherM.checkoutRoots("", "linux", ""), [], "never a folder relative to the app's");
-      assert.ok(launcherM.checkoutRoots("", "win32", "").every((r) => /^[CD]:\\/.test(r)));
+      assert.ok(linux.includes("/home/me/source/repos") && linux.every((r) => r.startsWith("/home/me/")));
+      for (const platform of ["linux", "win32", "darwin"]) assert.deepStrictEqual(launcherM.checkoutRoots("", platform, ""), [], `never a folder relative to the app's (${platform})`);
     });
 
     test("checkout: a clone in ~/source/repos is found with no projects folder set", () => {

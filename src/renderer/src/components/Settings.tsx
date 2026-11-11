@@ -937,7 +937,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               <input
                 id="claude-root"
                 value={claude.projectsRoot}
-                placeholder="~/Projects, ~/source/repos, ~/src, C:\Projects…"
+                placeholder="~/Projects, ~/source/repos, ~/src…"
                 onChange={(e) => setClaude((prev) => ({ ...prev, projectsRoot: e.target.value }))}
                 className={inputCls}
               />
