@@ -107,7 +107,11 @@ log "Built: $DMG"
 
 # -- verify -------------------------------------------------------------------
 log "Verifying the signed app"
-APP_PATH="$(find dist -maxdepth 2 -name '*.app' -type d | head -1)"
+# The universal app only: dist/native holds the prd-locate.app helper, which is
+# notarized inside the main bundle and carries no stapled ticket of its own, and
+# a stale dist/mac-arm64 from an older build may sit next to it. In v3.1.0 a bare
+# `find dist` picked the helper, stapler failed and the upload never ran.
+APP_PATH="$(find dist/mac-universal -maxdepth 1 -name '*.app' -type d 2>/dev/null | head -1)"
 [[ -n "$APP_PATH" ]] || die "No .app found in dist/ to verify."
 codesign --verify --deep --strict --verbose=4 "$APP_PATH"
 xcrun stapler validate "$APP_PATH"
