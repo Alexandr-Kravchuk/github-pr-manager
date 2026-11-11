@@ -19,6 +19,15 @@ export const DEFAULT_AGENT_PROMPTS: Record<AgentPromptKey, string> = {
 };
 
 /**
+ * Every earlier text of a default agent prompt. A prompt is stored empty while
+ * it is the default (`toStoredSettings`), but a copy saved verbatim before that
+ * — or a default a later release replaced — reads back as the current default,
+ * so a changed default reaches everyone who never edited it. When you change a
+ * default above, add its old text here.
+ */
+export const PREVIOUS_DEFAULT_AGENT_PROMPTS: Partial<Record<AgentPromptKey, readonly string[]>> = {};
+
+/**
  * `--allowedTools` rules per kind of run — a starting point the Agent tab lets
  * you edit. These are only the first gate: every tool call also goes through
  * the agent's PreToolUse guard (`agent-guard.ts`), which the list here cannot
@@ -153,8 +162,11 @@ export const AGENT_BOUNDS = {
 export type AgentBoundKey = keyof typeof AGENT_BOUNDS;
 
 /**
- * Off until switched on; every scenario that posts starts in shadow, so the
- * first days show what the agent would do before it does any of it.
+ * Off until switched on — and then at work right away: every scenario is On,
+ * the settings the agent has been run with day to day, so a fresh install
+ * works the way it is meant to without a round of tuning first. Shadow stays a
+ * per-scenario choice (it prepares and waits for your Send). A merge is never
+ * automatic: it is only offered, and happens on your click.
  */
 export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   enabled: false,
@@ -162,11 +174,12 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   effort: "",
   worktreeDir: "",
   removeWorktree: true,
+  cloneMissing: true,
   repos: [],
   scenarios: {
-    review: { mode: "shadow", maxLines: 400, maxFiles: 15, teamRequests: false, drafts: false, holdApproveOnChangeRequest: false },
+    review: { mode: "on", maxLines: 400, maxFiles: 15, teamRequests: false, drafts: false, holdApproveOnChangeRequest: false },
     brief: { mode: "on" },
-    rereview: { mode: "shadow", resolve: true, approve: true },
+    rereview: { mode: "on", resolve: true, approve: true },
     merge: {
       mode: "offer",
       requireAllReviewers: true,
@@ -175,10 +188,10 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
       method: "github",
       deleteBranch: true,
     },
-    selfReview: { mode: "shadow" },
-    driveCi: { mode: "shadow", maxAttempts: 2 },
-    driveComments: { mode: "shadow" },
-    reapprove: { mode: "shadow", askReviewers: true },
+    selfReview: { mode: "on" },
+    driveCi: { mode: "on", maxAttempts: 2 },
+    driveComments: { mode: "on" },
+    reapprove: { mode: "on", askReviewers: true },
   },
   limits: {
     parallel: 2,
