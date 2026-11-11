@@ -134,9 +134,10 @@ Three layers:
   checkout (`in <folder>:`, started through `start_session`'s `cwd`), since a
   review in a foreign folder loads that folder's CLAUDE.md as its rules and
   searches the wrong code. The parent also adds to every nested prompt, word
-  for word, the user's permission to publish the review on the PR (never
-  `APPROVE`), since a request from another session is not the user's
-  consent; a default prompt is stored empty and an old default saved
+  for word, the user's permission to publish the review on the PR (an
+  `APPROVE` without text only when it finds no Blocker and no Major, and only
+  of the head it reviewed), since a request from another session is not the
+  user's consent; a default prompt is stored empty and an old default saved
   verbatim is read through `PREVIOUS_DEFAULT_PROMPTS`, so a changed default
   reaches every user who never edited it. Each
   prompt starts with `groupMarker(kind, key)`: the session scanner records it

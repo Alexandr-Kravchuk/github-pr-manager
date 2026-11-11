@@ -105,11 +105,12 @@ export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
     "Give each session its prompt word for word, and add to it these five lines, each word for word as a line of its own " +
     "and without its letter: " +
     "a) Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
-    "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
+    "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. " +
+    "Коли немає ні Blocker, ні Major, після підсумку постав `APPROVE` без тексту.». " +
     "Публікуй рев'ю на PR за цим дозволом. " +
     "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
     "or by a test; without that check, ask it as a question in the summary. " +
-    "c) APPROVE only on my separate word for that PR: this permission does not cover it. " +
+    "c) APPROVE only the head commit you reviewed: when the PR has a newer commit, approve nothing and say so in your report. " +
     "d) Skip the PR when I already reviewed it after its last commit. " +
     "e) Start your report with the link to the review you published on the PR (#pullrequestreview-…) and your decision, " +
     "or with why you published none. " +
@@ -118,7 +119,7 @@ export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
     "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently. " +
     "Read each report whole with list_events, paging back to the session's last message, since the note on a session's turn " +
     "keeps only its first 400 characters. " +
-    "A later decision on one PR — a review its session could not publish, an APPROVE — is mine to give in that PR's session: " +
+    "A later decision on one PR — a review its session could not publish, an APPROVE it held back — is mine to give in that PR's session: " +
     "link me to the session and leave my answer for me to type there, so each session hears it once and from me.",
 };
 
@@ -164,6 +165,29 @@ export const PREVIOUS_DEFAULT_PROMPTS: Partial<Record<ClaudePromptKey, readonly 
     "The prompts: {prompts}. " +
     "When every session has reported, give me one summary: for each PR the link to its review, its decision and its Blocker and Major findings, " +
     "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently.",
+    // Reads whole reports and leaves per-PR decisions, an APPROVE among them, to the PR's session.
+    "Review the {count} pull requests of {key} that wait for my review. Do not review them here: start one session per PR " +
+    "with the start_session tool (initiation user_asked, context fresh, use_worktree false), so each review runs in its own " +
+    "session nested under this one. A prompt that starts with a folder (in, the folder, a colon) is that PR's own repository: start its " +
+    "session there through start_session's cwd, so it reads that repository's rules and code; the others run in this folder. " +
+    "Give each session its prompt word for word, and add to it these five lines, each word for word as a line of its own " +
+    "and without its letter: " +
+    "a) Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
+    "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
+    "Публікуй рев'ю на PR за цим дозволом. " +
+    "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
+    "or by a test; without that check, ask it as a question in the summary. " +
+    "c) APPROVE only on my separate word for that PR: this permission does not cover it. " +
+    "d) Skip the PR when I already reviewed it after its last commit. " +
+    "e) Start your report with the link to the review you published on the PR (#pullrequestreview-…) and your decision, " +
+    "or with why you published none. " +
+    "The prompts: {prompts}. " +
+    "When every session has reported, give me one summary: for each PR the link to its review, its decision and its Blocker and Major findings, " +
+    "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently. " +
+    "Read each report whole with list_events, paging back to the session's last message, since the note on a session's turn " +
+    "keeps only its first 400 characters. " +
+    "A later decision on one PR — a review its session could not publish, an APPROVE — is mine to give in that PR's session: " +
+    "link me to the session and leave my answer for me to type there, so each session hears it once and from me.",
   ],
 };
 

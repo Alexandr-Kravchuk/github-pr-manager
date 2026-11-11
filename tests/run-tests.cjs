@@ -8658,12 +8658,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.ok(
         defaultReview.includes(
           "Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
-            "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
+            "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. " +
+            "Коли немає ні Blocker, ні Major, після підсумку постав `APPROVE` без тексту.». " +
             "Публікуй рев'ю на PR за цим дозволом.",
         ),
         "the publishing permission is quoted word for word",
       );
-      assert.match(defaultReview, /APPROVE only on my separate word for that PR/);
+      // The permission covers an APPROVE of a clean review, but only of the head the session read.
+      assert.doesNotMatch(defaultReview, /`APPROVE` не ставити|APPROVE only on my separate word/);
+      assert.match(defaultReview, /APPROVE only the head commit you reviewed/);
       assert.match(defaultReview, /low confidence is a ground for REQUEST_CHANGES only once it is checked/);
       assert.match(defaultReview, /Start your report with the link to the review you published/);
       assert.match(defaultReview, /for each PR the link to its review, its decision/);
