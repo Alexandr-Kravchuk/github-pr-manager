@@ -45,13 +45,7 @@ export interface SettingsSection {
 
 /** In display order — within a tab, and across tabs in the search results. */
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
-  { id: "appearance", tab: "general", title: "Appearance", keywords: ["theme", "dark", "light", "system", "mode"] },
-  {
-    id: "weather",
-    tab: "general",
-    title: "Header weather",
-    keywords: ["weather", "city", "location", "sky", "snow", "rain", "sun", "stars", "clouds", "fog", "open-meteo", "header"],
-  },
+  { id: "appearance", tab: "general", title: "Appearance", keywords: ["theme", "dark", "light", "system", "mode", "neumorphism", "neumorphic", "claymorphism", "clay", "neobrutalism", "brutalism", "bento", "grid", "glassmorphism", "glass", "frosted", "blur", "soft ui", "style", "look", "flat"] },
   {
     id: "refresh",
     tab: "general",
@@ -83,6 +77,12 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       "to do",
       "delete task",
     ],
+  },
+  {
+    id: "weather",
+    tab: "general",
+    title: "Header weather",
+    keywords: ["weather", "city", "location", "geolocation", "temperature", "icon", "snow", "rain", "sun", "clouds", "fog", "open-meteo", "header", "use my location", "forget my location"],
   },
   {
     id: "notifications",

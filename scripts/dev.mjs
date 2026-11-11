@@ -91,6 +91,10 @@ function shutdown(code = 0) {
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
+// The header weather's macOS location helper (a no-op elsewhere); main finds
+// it in dist/native when the app is not packaged.
+spawnSync(process.execPath, ["scripts/build-locate.mjs"], { stdio: "inherit" });
+
 const vite = run("npx", [
   "vite",
   "--config",

@@ -8,6 +8,7 @@
  * asked of you, or nothing to do (default: sleeping). `?jiraAuth=token|twg` shows the
  * rejected-credentials banner for that Jira source.
  */
+import { isUiStyle } from "../../shared/ui-style";
 import { rankBefore } from "../../shared/agent-view";
 import type {
   AgentAction,
@@ -412,9 +413,10 @@ FIXTURES.agent = [...FIXTURES.showcase, ...FIXTURES.review];
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
 // `?jiraAuth=token` / `?jiraAuth=twg` shows the rejected-credentials banner and
 // the matching Settings state, which a working mock never reaches.
-// `?weather=rain` (any WeatherKind) previews a header sky; none keeps the snowfall.
+// `?weather=rain` (any WeatherKind) previews the header's weather icon;
+// none shows no weather.
 const weatherParam = new URLSearchParams(window.location.search).get("weather");
-const WEATHER: WeatherStatus = weatherParam
+let WEATHER: WeatherStatus = weatherParam
   ? { state: "ok", kind: weatherParam as WeatherKind, place: "Kyiv, Ukraine", temperatureC: 4, fetchedAt: Date.now() }
   : { state: "off" };
 
@@ -435,12 +437,17 @@ const snapshot: DashboardResponse = {
   version: "dev",
 };
 
+// `?ui=<style>` (neumorphism, claymorphism, neobrutalism, bento, glassmorphism) previews a look (Settings › Appearance).
+const uiParam = new URLSearchParams(window.location.search).get("ui");
+const mockUiStyle = isUiStyle(uiParam) ? uiParam : "flat";
+
 const settings: Settings = {
   pollIntervalSeconds: 60,
   launchAtLogin: false,
   autoUpdate: false,
   closeToTray: true,
   theme: "system",
+  uiStyle: mockUiStyle,
   trackComments: true,
   notifications: {
     enabled: true,
@@ -959,6 +966,7 @@ const api: PrManagerApi = {
       trackComments: true,
       claudeEnabled: true,
       claudeDesktop: true,
+      uiStyle: settings.uiStyle,
     },
   }),
   markSeen: async () => {},
@@ -967,6 +975,9 @@ const api: PrManagerApi = {
   getSettings: async () => settings,
   saveSettings: async () => ({ ok: true }),
   setTheme: async () => {},
+  setUiStyle: async (style) => {
+    settings.uiStyle = style;
+  },
   getGhStatus: async () => ({ installed: true, hosts: [{ hostname: "github.com", label: "GitHub", authenticated: true }] }),
   // A site is set so the issue-key badge renders in mock mode; openExternal is a
   // no-op above, so clicking it stays inert.
@@ -1032,7 +1043,14 @@ const api: PrManagerApi = {
     jira: options.jira.action === "keep" ? null : { ok: true, message: `Task: ${options.jira.action} (mock).` },
   }),
   getWeather: async () => WEATHER,
-  getWhatsNew: async () => null,
+  locateForWeather: async () => {
+    WEATHER = { state: "ok", kind: "clouds", place: "Your location", temperatureC: 7, fetchedAt: Date.now(), fromLocation: true };
+    return { outcome: "granted", weather: WEATHER };
+  },
+  forgetWeatherLocation: async () => {
+    WEATHER = { state: "off" };
+    return WEATHER;
+  },  getWhatsNew: async () => null,
   dismissWhatsNew: async () => {},
   onSnapshot: (listener) => {
     snapshotListeners.add(listener);
@@ -1043,6 +1061,7 @@ const api: PrManagerApi = {
   onNotifySound: () => () => {},
   onOpenSettings: () => () => {},
   onRefreshRequest: () => () => {},
+  onFindRequest: () => () => {},
   getAgentState: async () => agentState,
   agentAction: async (action) => mockAgentAction(action),
   revealAgentLog: async () => {},

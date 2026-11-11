@@ -10,5 +10,9 @@
   <true/>
   <key>com.apple.security.inherit</key>
   <true/>
+  <!-- The header weather's location helper (prd-locate.app) asks Core
+       Location; the hardened runtime blocks that without this. -->
+  <key>com.apple.security.personal-information.location</key>
+  <true/>
 </dict>
 </plist>

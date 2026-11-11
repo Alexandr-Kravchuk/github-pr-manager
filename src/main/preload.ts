@@ -12,6 +12,7 @@ const api: PrManagerApi = {
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (settings) => ipcRenderer.invoke("settings:save", settings),
   setTheme: (theme) => ipcRenderer.invoke("theme:set", theme),
+  setUiStyle: (style) => ipcRenderer.invoke("style:set", style),
   getGhStatus: () => ipcRenderer.invoke("gh:status"),
   getJiraStatus: (mode) => ipcRenderer.invoke("jira:status", mode),
   setJiraToken: (token) => ipcRenderer.invoke("jira:setToken", token),
@@ -63,6 +64,8 @@ const api: PrManagerApi = {
   getStaleJiraTask: (prId) => ipcRenderer.invoke("stale:jiraTask", prId),
   closeStalePr: (prId, options) => ipcRenderer.invoke("stale:close", prId, options),
   getWeather: () => ipcRenderer.invoke("weather:get"),
+  locateForWeather: () => ipcRenderer.invoke("weather:locate"),
+  forgetWeatherLocation: () => ipcRenderer.invoke("weather:forgetLocation"),
   onSnapshot: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DashboardResponse) =>
       listener(payload);
@@ -104,6 +107,13 @@ const api: PrManagerApi = {
     ipcRenderer.on("menu:refresh", handler);
     return () => {
       ipcRenderer.removeListener("menu:refresh", handler);
+    };
+  },
+  onFindRequest: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on("menu:find", handler);
+    return () => {
+      ipcRenderer.removeListener("menu:find", handler);
     };
   },
   onNotifySound: (listener) => {

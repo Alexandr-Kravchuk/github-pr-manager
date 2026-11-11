@@ -33,6 +33,9 @@
   --color-fg-muted: var(--fg-muted);
   --color-fg-subtle: var(--fg-subtle);
   --color-fg-faint: var(--fg-faint);
+  /* `shadow-tile`: the PR cards and tiles. Per theme (below), since a light
+     theme's faint shadow vanishes on the near-black dark canvas. */
+  --shadow-tile: var(--tile-shadow);
 }
 
 /* Light theme (default) — window bg gray, cards pure white. The canvas sits a
@@ -50,13 +53,15 @@
   --fg-muted: #52525b;
   --fg-subtle: #6b6b73;
   --fg-faint: #9b9ba3;
+  --tile-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
 }
 
-/* Dark theme — the original zinc palette. */
+/* Dark theme — zinc, with the canvas a step above black: on #09090b no
+   shadow could show, so the cards did not lift off the background. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --canvas: #09090b; /* zinc-950 */
-    --surface: #18181b; /* zinc-900 */
+    --canvas: #141417;
+    --surface: #1e1e22;
     --elevated: #27272a; /* zinc-800 */
     --line: #27272a; /* zinc-800 */
     --line-strong: #3f3f46; /* zinc-700 */
@@ -65,7 +70,562 @@
     --fg-muted: #a1a1aa; /* zinc-400 */
     --fg-subtle: #71717a; /* zinc-500 */
     --fg-faint: #52525b; /* zinc-600 */
+    /* Black on a dark canvas shows less than on a light one, so it is deeper
+       than the light theme's, and a faint top highlight lifts the edge. */
+    --tile-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06), 0 1px 2px rgb(0 0 0 / 0.7), 0 6px 18px -4px rgb(0 0 0 / 0.9);
   }
+}
+
+/*
+ * Neumorphism (Settings › Appearance, off by default): `data-ui="neumorphism"`
+ * on <html> (ui-style.ts). Cards and the canvas share one colour and a card is
+ * raised out of it by two shadows — a light one up-left, a dark one down-right
+ * — instead of being drawn with a border; fields and the segmented controls'
+ * wells are pressed in (inset), and the chosen segment is raised. These rules
+ * sit outside Tailwind's layers on purpose, so they win over the utilities.
+ */
+:root[data-ui="neumorphism"] {
+  --canvas: #e3e7ee;
+  --surface: #e3e7ee;
+  --elevated: #d7dce5;
+  --line: #d3d9e2;
+  --line-strong: #c3cad6;
+  --neu-dark: rgb(163 177 198 / 0.75);
+  --neu-light: rgb(255 255 255 / 0.9);
+  --tile-shadow: 6px 6px 14px var(--neu-dark), -6px -6px 14px var(--neu-light);
+  --neu-raised: 3px 3px 7px var(--neu-dark), -3px -3px 7px var(--neu-light);
+  --neu-inset: inset 2px 2px 5px var(--neu-dark), inset -2px -2px 5px var(--neu-light);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-ui="neumorphism"] {
+    --canvas: #25262b;
+    --surface: #25262b;
+    --elevated: #2e2f35;
+    --line: #303137;
+    --line-strong: #3a3b42;
+    --neu-dark: rgb(0 0 0 / 0.6);
+    --neu-light: rgb(255 255 255 / 0.055);
+  }
+}
+
+/* PR cards and tiles: no outline, only the accent stripe on the left. */
+[data-ui="neumorphism"] .shadow-tile[class*="border-l-"] {
+  border-top-color: transparent;
+  border-right-color: transparent;
+  border-bottom-color: transparent;
+}
+[data-ui="neumorphism"] .shadow-tile {
+  border-radius: 0.875rem;
+}
+
+/* Panels — the Board's boxes, Settings' sections, the Cozy table — raised like a card. */
+[data-ui="neumorphism"] :is(.rounded-xl.border.border-line, section.rounded-lg.border.border-line) {
+  border-color: transparent;
+  box-shadow: var(--tile-shadow);
+}
+[data-ui="neumorphism"] .table-scroll {
+  border-radius: 0.875rem;
+  box-shadow: var(--tile-shadow);
+}
+
+/* Buttons and dropdowns with a frame: raised, frameless. */
+[data-ui="neumorphism"] :is(button, select, a).border {
+  border-color: transparent;
+  box-shadow: var(--neu-raised);
+}
+/* A framed toggle that is on (a host pill), and any framed button being
+   clicked, is pressed in. */
+[data-ui="neumorphism"] :is(button, a).border:is([aria-pressed="true"], :active) {
+  box-shadow: var(--neu-inset);
+}
+
+/* Text fields: pressed in. */
+[data-ui="neumorphism"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea).border {
+  border-color: transparent;
+  background-color: var(--canvas);
+  box-shadow: var(--neu-inset);
+}
+
+/* Segmented controls (view switch, theme): a well with the chosen segment raised. */
+[data-ui="neumorphism"] :is([role="radiogroup"], div:has(> button[aria-pressed])).border {
+  border-color: transparent;
+  background-color: var(--canvas);
+  box-shadow: var(--neu-inset);
+}
+[data-ui="neumorphism"] :is(button[aria-pressed="true"]:not(.border), [role="radio"][aria-checked="true"]) {
+  background-color: var(--canvas);
+  box-shadow: var(--neu-raised);
+}
+
+/* The sticky header blends into the canvas instead of floating as a band. */
+[data-ui="neumorphism"] header.sticky {
+  background-color: color-mix(in oklab, var(--canvas) 85%, transparent);
+}
+
+/*
+ * Claymorphism (Settings › Appearance): `data-ui="claymorphism"`. Pastel
+ * canvas, cards a shade lighter with big radii, each puffed up by a soft
+ * coloured drop shadow plus two inner shadows — light up-left, tinted
+ * down-right — so it reads like a lump of clay. Buttons are small clay pills,
+ * fields are pressed into the surface, the chosen segment is a pastel accent.
+ */
+:root[data-ui="claymorphism"] {
+  --canvas: #eceefa;
+  --surface: #fbfaff;
+  --elevated: #ebe8fb;
+  --line: #e2dff4;
+  --line-strong: #d2cdee;
+  --clay-accent: #ddd6ff;
+  --tile-shadow: 0 16px 30px -12px rgb(91 79 180 / 0.32), inset -6px -7px 14px rgb(120 108 200 / 0.14),
+    inset 6px 6px 12px rgb(255 255 255 / 0.95);
+  --clay-raised: 0 6px 12px -6px rgb(91 79 180 / 0.4), inset -2px -3px 5px rgb(120 108 200 / 0.18),
+    inset 2px 2px 4px rgb(255 255 255 / 0.95);
+  --clay-inset: inset 3px 3px 7px rgb(120 108 200 / 0.2), inset -3px -3px 6px rgb(255 255 255 / 0.85);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-ui="claymorphism"] {
+    --canvas: #1c1a28;
+    --surface: #2a2740;
+    --elevated: #34304e;
+    --line: #36324f;
+    --line-strong: #47416c;
+    --clay-accent: #4a4180;
+    --tile-shadow: 0 16px 30px -12px rgb(0 0 0 / 0.7), inset -6px -7px 14px rgb(0 0 0 / 0.35),
+      inset 6px 6px 12px rgb(255 255 255 / 0.07);
+    --clay-raised: 0 6px 12px -6px rgb(0 0 0 / 0.75), inset -2px -3px 5px rgb(0 0 0 / 0.35),
+      inset 2px 2px 4px rgb(255 255 255 / 0.09);
+    --clay-inset: inset 3px 3px 7px rgb(0 0 0 / 0.45), inset -3px -3px 6px rgb(255 255 255 / 0.05);
+  }
+}
+
+[data-ui="claymorphism"] .shadow-tile[class*="border-l-"] {
+  border-top-color: transparent;
+  border-right-color: transparent;
+  border-bottom-color: transparent;
+}
+[data-ui="claymorphism"] .shadow-tile {
+  border-radius: 1.5rem;
+}
+[data-ui="claymorphism"] :is(.rounded-xl.border.border-line, section.rounded-lg.border.border-line) {
+  border-color: transparent;
+  border-radius: 1.5rem;
+  box-shadow: var(--tile-shadow);
+}
+[data-ui="claymorphism"] .table-scroll {
+  border-radius: 1.5rem;
+  background-color: var(--surface);
+  box-shadow: var(--tile-shadow);
+}
+/* The table sits on a surface here, so its sticky head and sticky actions
+   column — painted with the canvas colour to hide what scrolls under them —
+   take the surface colour too. */
+[data-ui="claymorphism"] .table-scroll :is(thead, .bg-canvas) {
+  background-color: var(--surface);
+}
+[data-ui="claymorphism"] :is(button, select, a).border {
+  border-color: transparent;
+  border-radius: 0.875rem;
+  box-shadow: var(--clay-raised);
+}
+[data-ui="claymorphism"] :is(button, a).border:is([aria-pressed="true"], :active) {
+  background-color: var(--clay-accent);
+  box-shadow: var(--clay-inset);
+}
+[data-ui="claymorphism"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea).border {
+  border-color: transparent;
+  border-radius: 0.875rem;
+  background-color: var(--elevated);
+  box-shadow: var(--clay-inset);
+}
+[data-ui="claymorphism"] :is([role="radiogroup"], div:has(> button[aria-pressed])).border {
+  border-color: transparent;
+  border-radius: 0.875rem;
+  background-color: var(--elevated);
+  box-shadow: var(--clay-inset);
+}
+[data-ui="claymorphism"] :is(button[aria-pressed="true"]:not(.border), [role="radio"][aria-checked="true"]) {
+  border-radius: 0.625rem;
+  background-color: var(--clay-accent);
+  box-shadow: var(--clay-raised);
+}
+[data-ui="claymorphism"] header.sticky {
+  background-color: color-mix(in oklab, var(--canvas) 85%, transparent);
+}
+
+/*
+ * Neobrutalism (Settings › Appearance): `data-ui="neobrutalism"`. A loud
+ * canvas, plain cards with a thick ink outline and a hard offset shadow — no
+ * blur — small radii, buttons that sit on their shadow and drop onto it when
+ * pressed, and a bright accent for whatever is chosen. In the dark theme the
+ * ink is near-white, so the outlines and shadows still read.
+ */
+:root[data-ui="neobrutalism"] {
+  --canvas: #fff4d6;
+  --surface: #ffffff;
+  --elevated: #ffe9a8;
+  --line: #1a1a1a;
+  --line-strong: #1a1a1a;
+  --fg-faint: #6b6b73;
+  --ink: #1a1a1a;
+  --brut-accent: #ffd23f;
+  --brut-pressed: #a6e3ff;
+  --tile-shadow: 5px 5px 0 0 var(--ink);
+  --brut-raised: 3px 3px 0 0 var(--ink);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-ui="neobrutalism"] {
+    --canvas: #17171a;
+    --surface: #232327;
+    --elevated: #34343a;
+    --line: #e8e8ea;
+    --line-strong: #e8e8ea;
+    --fg-faint: #8b8b93;
+    --ink: #e8e8ea;
+    --brut-accent: #c9a400;
+    --brut-pressed: #1d6f99;
+  }
+}
+
+/* Cards and tiles: ink outline on three sides, the accent stripe kept on the left. */
+[data-ui="neobrutalism"] .shadow-tile {
+  border-radius: 0.5rem;
+  border-top: 2px solid var(--ink);
+  border-right: 2px solid var(--ink);
+  border-bottom: 2px solid var(--ink);
+}
+[data-ui="neobrutalism"] .shadow-tile:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 6px 6px 0 0 var(--ink);
+}
+[data-ui="neobrutalism"] :is(.rounded-xl.border.border-line, section.rounded-lg.border.border-line) {
+  border: 2px solid var(--ink);
+  border-radius: 0.5rem;
+  box-shadow: var(--tile-shadow);
+}
+[data-ui="neobrutalism"] .table-scroll {
+  border: 2px solid var(--ink);
+  border-radius: 0.5rem;
+  background-color: var(--surface);
+  box-shadow: var(--tile-shadow);
+}
+[data-ui="neobrutalism"] .table-scroll :is(thead, .bg-canvas) {
+  background-color: var(--surface);
+}
+/* Row separators in the table and the Board's lists stay thin and quiet. */
+[data-ui="neobrutalism"] :is(.table-scroll tbody tr, .divide-y > *) {
+  border-color: color-mix(in oklab, var(--ink) 18%, transparent);
+}
+
+/* Framed buttons sit on a hard shadow and drop onto it when pressed. */
+[data-ui="neobrutalism"] :is(button, select, a).border {
+  border: 2px solid var(--ink);
+  border-radius: 0.375rem;
+  box-shadow: var(--brut-raised);
+  font-weight: 600;
+}
+[data-ui="neobrutalism"] :is(button, a).border:is([aria-pressed="true"], :active) {
+  background-color: var(--brut-pressed);
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 0 var(--ink);
+}
+[data-ui="neobrutalism"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea).border {
+  border: 2px solid var(--ink);
+  border-radius: 0.375rem;
+  background-color: var(--surface);
+}
+[data-ui="neobrutalism"] :is(input, textarea).border:focus {
+  box-shadow: var(--brut-raised);
+  outline: none;
+}
+/* Segmented controls: an outlined strip; the chosen segment is the accent. */
+[data-ui="neobrutalism"] :is([role="radiogroup"], div:has(> button[aria-pressed])).border {
+  border: 2px solid var(--ink);
+  border-radius: 0.375rem;
+  background-color: var(--surface);
+  box-shadow: var(--brut-raised);
+}
+[data-ui="neobrutalism"] :is(button[aria-pressed="true"]:not(.border), [role="radio"][aria-checked="true"]) {
+  border-radius: 0.25rem;
+  background-color: var(--brut-accent);
+  box-shadow: inset 0 0 0 2px var(--ink);
+  color: #1a1a1a;
+}
+/* The segment's count and icon carry colour classes of their own; on the
+   accent they would vanish in the dark theme. */
+[data-ui="neobrutalism"] :is(button[aria-pressed="true"]:not(.border), [role="radio"][aria-checked="true"]) * {
+  color: inherit;
+}
+[data-ui="neobrutalism"] header.sticky {
+  background-color: var(--canvas);
+  border-bottom: 2px solid var(--ink);
+}
+
+/*
+ * Bento grid (Settings › Appearance): `data-ui="bento"`. The PR lists become a
+ * bento box — borderless cells with big radii on a quiet canvas, wider gaps,
+ * and every fifth card (every seventh tile) twice as wide, with dense packing
+ * so the wide cells leave no holes. The wide cells start only where the grid
+ * already has two columns, or a span would invent a second one. The status
+ * stripe stays: it is the card's only colour.
+ */
+:root[data-ui="bento"] {
+  --canvas: #f0f0f3;
+  --surface: #ffffff;
+  --elevated: #f4f4f6;
+  --line: #ececf0;
+  --line-strong: #dcdce2;
+  --tile-shadow: 0 1px 2px rgb(16 16 24 / 0.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-ui="bento"] {
+    --canvas: #0f0f12;
+    --surface: #1c1c21;
+    --elevated: #26262c;
+    --line: #26262c;
+    --line-strong: #34343c;
+    --tile-shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  }
+}
+[data-ui="bento"] [data-pr-grid] {
+  gap: 0.875rem;
+  grid-auto-flow: row dense;
+}
+[data-ui="bento"] [data-pr-grid="compact"] {
+  gap: 0.625rem;
+}
+[data-ui="bento"] [data-pr-grid="compact"] > :nth-child(7n + 1) {
+  grid-column: span 2;
+}
+@media (min-width: 48rem) {
+  [data-ui="bento"] [data-pr-grid="roomy"] > :nth-child(5n + 1) {
+    grid-column: span 2;
+  }
+}
+[data-ui="bento"] .shadow-tile[class*="border-l-"] {
+  border-top-color: transparent;
+  border-right-color: transparent;
+  border-bottom-color: transparent;
+}
+[data-ui="bento"] .shadow-tile {
+  border-radius: 1.5rem;
+}
+[data-ui="bento"] [data-pr-grid="compact"] .shadow-tile {
+  border-radius: 1rem;
+}
+[data-ui="bento"] :is(.rounded-xl.border.border-line, section.rounded-lg.border.border-line) {
+  border-color: transparent;
+  border-radius: 1.5rem;
+  background-color: var(--surface);
+}
+[data-ui="bento"] .table-scroll {
+  border-radius: 1.5rem;
+  background-color: var(--surface);
+}
+[data-ui="bento"] .table-scroll :is(thead, .bg-canvas) {
+  background-color: var(--surface);
+}
+[data-ui="bento"] :is(button, select, a).border {
+  border-color: transparent;
+  border-radius: 0.75rem;
+}
+[data-ui="bento"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea).border {
+  border-color: transparent;
+  border-radius: 0.75rem;
+  background-color: var(--surface);
+}
+[data-ui="bento"] :is([role="radiogroup"], div:has(> button[aria-pressed])).border {
+  border-color: transparent;
+  border-radius: 0.875rem;
+  background-color: var(--surface);
+}
+[data-ui="bento"] :is(button[aria-pressed="true"]:not(.border), [role="radio"][aria-checked="true"]) {
+  border-radius: 0.625rem;
+  background-color: var(--elevated);
+  box-shadow: none;
+}
+
+/*
+ * Glassmorphism (Settings › Appearance): `data-ui="glassmorphism"`. A
+ * colourful backdrop of soft blobs fixed behind the page, and cards, panels
+ * and the header as frosted glass over it: translucent fill, a backdrop blur,
+ * a bright hairline edge and a soft shadow. Static on purpose — a blur is free
+ * at rest, but anything animating under it costs (see AGENTS.md).
+ */
+:root[data-ui="glassmorphism"] {
+  --canvas: #e9ecfa;
+  --surface: rgb(255 255 255 / 0.5);
+  --elevated: rgb(255 255 255 / 0.65);
+  --line: rgb(255 255 255 / 0.6);
+  --line-strong: rgb(255 255 255 / 0.75);
+  --tile-shadow: 0 8px 32px rgb(31 38 135 / 0.14);
+  --glass-backdrop: radial-gradient(40rem 30rem at 8% 12%, rgb(167 139 250 / 0.55), transparent 70%),
+    radial-gradient(36rem 28rem at 92% 18%, rgb(56 189 248 / 0.5), transparent 70%),
+    radial-gradient(44rem 34rem at 70% 95%, rgb(244 114 182 / 0.45), transparent 70%),
+    radial-gradient(30rem 24rem at 20% 85%, rgb(52 211 153 / 0.35), transparent 70%);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-ui="glassmorphism"] {
+    --canvas: #0d0f1c;
+    --surface: rgb(255 255 255 / 0.07);
+    --elevated: rgb(255 255 255 / 0.12);
+    --line: rgb(255 255 255 / 0.12);
+    --line-strong: rgb(255 255 255 / 0.2);
+    --tile-shadow: 0 8px 32px rgb(0 0 0 / 0.45);
+    --glass-backdrop: radial-gradient(40rem 30rem at 8% 12%, rgb(124 58 237 / 0.45), transparent 70%),
+      radial-gradient(36rem 28rem at 92% 18%, rgb(14 165 233 / 0.35), transparent 70%),
+      radial-gradient(44rem 34rem at 70% 95%, rgb(219 39 119 / 0.32), transparent 70%),
+      radial-gradient(30rem 24rem at 20% 85%, rgb(16 185 129 / 0.25), transparent 70%);
+  }
+}
+:root[data-ui="glassmorphism"] body {
+  background: var(--glass-backdrop), var(--canvas);
+  background-attachment: fixed;
+}
+[data-ui="glassmorphism"] :is(.shadow-tile, .rounded-xl.border.border-line, section.rounded-lg.border.border-line, .table-scroll) {
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(18px) saturate(160%);
+  border-radius: 1rem;
+}
+[data-ui="glassmorphism"] .shadow-tile[class*="border-l-"] {
+  border-top-color: var(--line);
+  border-right-color: var(--line);
+  border-bottom-color: var(--line);
+}
+[data-ui="glassmorphism"] :is(.rounded-xl.border.border-line, section.rounded-lg.border.border-line) {
+  border-color: var(--line);
+  background-color: var(--surface);
+  box-shadow: var(--tile-shadow);
+}
+[data-ui="glassmorphism"] .table-scroll {
+  background-color: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--tile-shadow);
+}
+/* The sticky head hides what scrolls under it with a blur of its own. The
+   sticky actions column takes no fill at all: any fill or second blur there
+   reads as a lighter stripe down the table's right edge. */
+[data-ui="glassmorphism"] .table-scroll thead {
+  background-color: transparent;
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+[data-ui="glassmorphism"] .table-scroll .bg-canvas {
+  background-color: transparent;
+}
+[data-ui="glassmorphism"] :is(button, select, a).border {
+  border-color: var(--line);
+  border-radius: 0.75rem;
+}
+[data-ui="glassmorphism"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea).border {
+  border-color: var(--line);
+  border-radius: 0.75rem;
+  background-color: var(--surface);
+}
+[data-ui="glassmorphism"] select option {
+  background-color: var(--canvas);
+}
+[data-ui="glassmorphism"] :is(button, a).border[aria-pressed="true"] {
+  background-color: var(--elevated);
+  border-color: var(--line-strong);
+}
+[data-ui="glassmorphism"] :is([role="radiogroup"], div:has(> button[aria-pressed])).border {
+  border-color: var(--line);
+  border-radius: 0.875rem;
+  background-color: var(--surface);
+}
+[data-ui="glassmorphism"] :is(button[aria-pressed="true"]:not(.border), [role="radio"][aria-checked="true"]) {
+  border-radius: 0.625rem;
+  background-color: var(--elevated);
+  box-shadow: 0 1px 6px rgb(0 0 0 / 0.08);
+}
+/* Floating layers — the Claude and stack menus, the base-PR preview, the
+   agent popover and the close dialog — sit over cards, not over the calm
+   backdrop: at the cards' 7–50% fill the card under a menu read straight
+   through it. They get a nearly solid frosted fill instead. */
+[data-ui="glassmorphism"] :is([role="menu"], [role="tooltip"], [role="dialog"], [role="listbox"]) {
+  background-color: color-mix(in oklab, var(--canvas) 86%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  border-color: var(--line-strong);
+}
+[data-ui="glassmorphism"] header.sticky {
+  background-color: color-mix(in oklab, var(--canvas) 35%, transparent);
+  border-bottom: 1px solid var(--line);
+}
+
+/*
+ * Hover and focus for the styles above. Their rules sit outside Tailwind's
+ * layers, so they beat the components' own `hover:` utilities: every state a
+ * style overrides at rest (a button's fill, a card's frame, the table's
+ * sticky cell) needs its hover restated here, or the style shows no hover.
+ *
+ * A "plain" framed button is one with no fill of its own — no `bg-*` class
+ * other than the neutral surfaces. A coloured button (Save, Merge, an active
+ * chip) keeps its colour and its own hover; only plain ones take the style's
+ * fill. `[class*=" bg-"]` matches a `bg-` token, not `hover:bg-`.
+ */
+[data-ui="claymorphism"] :is(button, select, a).border:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])),
+[data-ui="bento"] :is(button, select, a).border:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])),
+[data-ui="glassmorphism"] :is(button, select, a).border:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])) {
+  background-color: var(--surface);
+}
+[data-ui]:is([data-ui="neumorphism"], [data-ui="claymorphism"], [data-ui="neobrutalism"], [data-ui="bento"], [data-ui="glassmorphism"])
+  :is(button, a).border:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])):not(:disabled):not([aria-pressed="true"]):hover {
+  background-color: var(--elevated);
+  color: var(--fg);
+}
+[data-ui="neumorphism"] :is(button, a).border:not(:disabled):not([aria-pressed="true"]):not(:active):hover {
+  box-shadow: 4px 4px 9px var(--neu-dark), -4px -4px 9px var(--neu-light);
+}
+[data-ui="neobrutalism"] :is(button, a).border:not(:disabled):not([aria-pressed="true"]):not(:active):hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 0 var(--ink);
+}
+[data-ui="neobrutalism"] :is(button, a).border:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])):not(:disabled):not([aria-pressed="true"]):hover {
+  background-color: var(--brut-accent);
+  color: #1a1a1a;
+}
+
+/* Cards and tiles: each style's own lift on hover (flat darkens the frame). */
+[data-ui="neumorphism"] .shadow-tile:hover {
+  box-shadow: 9px 9px 20px var(--neu-dark), -9px -9px 20px var(--neu-light);
+}
+[data-ui="claymorphism"] .shadow-tile:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 22px 36px -14px rgb(91 79 180 / 0.42), inset -6px -7px 14px rgb(120 108 200 / 0.16),
+    inset 6px 6px 12px rgb(255 255 255 / 0.95);
+}
+@media (prefers-color-scheme: dark) {
+  [data-ui="claymorphism"] .shadow-tile:hover {
+    box-shadow: 0 22px 36px -14px rgb(0 0 0 / 0.85), inset -6px -7px 14px rgb(0 0 0 / 0.35),
+      inset 6px 6px 12px rgb(255 255 255 / 0.09);
+  }
+}
+[data-ui="bento"] .shadow-tile:hover {
+  box-shadow: 0 0 0 1px var(--line-strong), 0 10px 24px -12px rgb(0 0 0 / 0.25);
+}
+[data-ui="glassmorphism"] .shadow-tile:hover {
+  background-color: var(--elevated);
+  border-top-color: var(--line-strong);
+  border-right-color: var(--line-strong);
+  border-bottom-color: var(--line-strong);
+}
+
+/* Cozy: the table sits on a surface in these styles, so a hovered row and its
+   sticky actions cell take a hover colour mixed over that surface, together. */
+[data-ui]:is([data-ui="claymorphism"], [data-ui="neobrutalism"], [data-ui="bento"]) .table-scroll tbody tr:hover,
+[data-ui]:is([data-ui="claymorphism"], [data-ui="neobrutalism"], [data-ui="bento"]) .table-scroll tbody tr:hover > .bg-canvas {
+  background-color: color-mix(in srgb, var(--elevated) 60%, var(--surface));
+}
+[data-ui="glassmorphism"] .table-scroll tbody tr:hover {
+  background-color: var(--elevated);
+}
+
+/* Text fields lost their sky focus border with the frame: a ring instead. */
+[data-ui]:is([data-ui="neumorphism"], [data-ui="claymorphism"], [data-ui="bento"], [data-ui="glassmorphism"])
+  :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select).border:focus {
+  outline: 2px solid rgb(14 165 233 / 0.55);
+  outline-offset: 1px;
 }
 
 /*
@@ -172,97 +732,6 @@
   }
 }
 
-/*
- * The header's sky (components/HeaderSky.tsx: snow, rain, thunder, clouds,
- * fog, sun, stars — picked from the weather). Every moving part carries
- * `.sky-anim`, which runs only while the pointer is over the header and is
- * paused otherwise, so at rest the sky produces no frames at all. The two
- * play-state rules are more specific than the one-class animation rules on
- * purpose: the `animation` shorthand resets the play state, and a tie would be
- * settled by stylesheet order. Counts are finite on purpose (hours of
- * hovering): the guard test bans `infinite`, and this keeps the rule whole
- * instead of carving an exception into it. Only `transform` and `opacity`
- * animate, on HTML elements, which the compositor moves without repainting.
- */
-.sky-host .sky-anim {
-  animation-play-state: paused;
-}
-.sky-host:hover .sky-anim {
-  animation-play-state: running;
-}
-/* Falling (snow, rain): one strip height per cycle, see FallingColumn. */
-.sky-fall {
-  animation: sky-fall var(--sky-dur, 9s) linear 4000;
-}
-@keyframes sky-fall {
-  0% {
-    transform: translate(0, 0);
-  }
-  50% {
-    transform: translate(var(--sky-sway, 0px), 50%);
-  }
-  100% {
-    transform: translate(0, 100%);
-  }
-}
-/* Drifting (clouds, fog): one strip width per cycle, the same trick sideways. */
-.sky-drift {
-  animation: sky-drift var(--sky-dur, 90s) linear 200;
-}
-@keyframes sky-drift {
-  from {
-    transform: translateX(0);
-  }
-  to {
-    transform: translateX(100%);
-  }
-}
-/* Stars and the sun's glints; a negative delay desyncs them, also at rest. */
-.sky-twinkle {
-  animation: sky-twinkle var(--sky-dur, 4s) ease-in-out var(--sky-delay, 0s) 4000;
-}
-@keyframes sky-twinkle {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.15;
-  }
-}
-.sky-spin {
-  animation: sky-spin 80s linear 200;
-}
-@keyframes sky-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-/* Lightning: dark at rest (offset 0), a double flash late in each cycle. */
-.sky-flash {
-  opacity: 0;
-  animation: sky-flash var(--sky-dur, 7s) linear 2000;
-}
-@keyframes sky-flash {
-  0%,
-  86%,
-  100% {
-    opacity: 0;
-  }
-  87% {
-    opacity: 1;
-  }
-  89% {
-    opacity: 0.2;
-  }
-  90% {
-    opacity: 0.8;
-  }
-  94% {
-    opacity: 0;
-  }
-}
-
 @keyframes refresh-spin {
   to {
     transform: rotate(360deg);
@@ -272,8 +741,7 @@
 @media (prefers-reduced-motion: reduce) {
   .refresh-spin,
   .live-beat,
-  .claude-glow,
-  .sky-anim {
+  .claude-glow {
     animation: none !important;
   }
 }

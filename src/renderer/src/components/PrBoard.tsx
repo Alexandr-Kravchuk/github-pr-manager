@@ -238,7 +238,7 @@ function Decision({ e, n, run, onOpen, notice }: { e: BoardEntry; n: number; run
   const rest = e.choices.filter((c) => c !== primary);
   const kind = e.stage.action?.kind ?? null;
   return (
-    <article data-run-id={item?.runId} data-pr-id={e.prId} className={cn("overflow-hidden rounded-xl border bg-surface shadow-sm", kind === "fix" ? "border-red-500/50" : "border-amber-500/50")}>
+    <article data-run-id={item?.runId} data-pr-id={e.prId} className={cn("overflow-hidden rounded-xl border bg-surface shadow-tile", kind === "fix" ? "border-red-500/50" : "border-amber-500/50")}>
       <div className={cn("flex items-center gap-2 border-b border-line px-4 py-1.5 text-xs text-fg-muted", kind === "fix" ? "bg-red-500/[0.06]" : "bg-amber-500/[0.06]")}>
         <span className={cn("flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white", kind === "fix" ? "bg-red-500" : "bg-amber-500")}>{n}</span>
         <span className="shrink-0 rounded border border-line-strong px-1.5 py-px">{e.laneLabel}</span>

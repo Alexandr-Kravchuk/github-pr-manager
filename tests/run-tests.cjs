@@ -113,6 +113,7 @@ for (const mod of [
   "stale.js",
   "jira-status.js",
   "weather.js",
+  "ui-style.js",
   "check-groups.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
@@ -199,26 +200,6 @@ for (const mod of [
     // No `\b` around the bracketed form: Tailwind joins its parts with `_`,
     // which is a word character, so `linear_infinite` has no boundary to find.
     /\banimate-(?:pulse|spin|bounce|ping)\b|\banimate-\[[^\]]*infinite[^\]]*\]|\banimation(?:-iteration-count)?\s*:[^;{}]*\binfinite\b/g;
-
-  test("header sky is paused unless the header is hovered", () => {
-    const css = fs.readFileSync(path.join(rendererRoot, "src/styles.css"), "utf8");
-    const rule = (sel) => {
-      const m = css.match(new RegExp(`(?:^|\\n)${sel.replace(/[.:]/g, "\\$&")}\\s*\\{([^}]*)\\}`));
-      return m ? m[1] : "";
-    };
-    assert.match(rule(".sky-host .sky-anim"), /animation-play-state:\s*paused/, "at rest the sky must not animate");
-    assert.match(rule(".sky-host:hover .sky-anim"), /animation-play-state:\s*running/);
-    // The play state must win over each one-class `animation` shorthand, which
-    // resets it: two classes beat one whatever the order in the file.
-    for (const cls of ["sky-fall", "sky-drift", "sky-twinkle", "sky-spin", "sky-flash"]) {
-      assert.match(rule(`.${cls}`), /animation:/, `${cls} is defined`);
-    }
-    // Every animated element of the sky carries the pausing class.
-    const sky = fs.readFileSync(path.join(rendererRoot, "src/components/HeaderSky.tsx"), "utf8");
-    const animated = sky.match(/className="[^"]*\bsky-(?:fall|drift|twinkle|spin|flash)\b[^"]*"/g) ?? [];
-    assert.ok(animated.length >= 5, "found the animated elements");
-    for (const c of animated) assert.match(c, /\bsky-anim\b/, c);
-  });
 
   test("infinite-animation detector matches what it claims", () => {
     const hit = (s) => new RegExp(FOREVER.source).test(s);
@@ -1089,12 +1070,13 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
   };
 
   const deps = () => {
-    const calls = { openSettings: 0, refresh: 0 };
+    const calls = { openSettings: 0, refresh: 0, find: 0 };
     return {
       calls,
       deps: {
         openSettings: () => calls.openSettings++,
         refresh: () => calls.refresh++,
+        find: () => calls.find++,
       },
     };
   };
@@ -1184,6 +1166,28 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     // to SEE fresh data, and a hidden refresh spends a GraphQL request for
     // nothing visible.
     assert.deepStrictEqual(order, ["focus", "menu:refresh"]);
+    order.length = 0;
+    actions.find();
+    assert.deepStrictEqual(order, ["focus", "menu:find"]);
+  });
+
+  test("app menu: Search sits in View on CmdOrCtrl+F on every platform", () => {
+    for (const platform of ["darwin", "win32"]) {
+      const { deps: d, calls } = deps();
+      const template = buildAppMenuTemplate(d, { platform });
+      const view = template.find((m) => m.label === "View");
+      const item = view.submenu.find((i) => i.accelerator === "CmdOrCtrl+F");
+      assert.ok(item, `${platform}: View has the Search item`);
+      item.click();
+      assert.strictEqual(calls.find, 1);
+    }
+  });
+
+  test("find: both search boxes are marked for CmdOrCtrl+F", () => {
+    const fs = require("node:fs");
+    for (const f of ["src/App.tsx", "src/components/Settings.tsx"]) {
+      assert.match(fs.readFileSync(path.join(__dirname, "../src/renderer", f), "utf8"), /data-find-field/, f);
+    }
   });
 
   test("app menu: the option defaults are the production call's shape", () => {
@@ -1203,6 +1207,7 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     const platformKey = process.platform === "darwin" ? "darwin" : "other";
     assert.strictEqual(byAccelerator(template, "CmdOrCtrl+,", platformKey).length, 1);
     assert.strictEqual(byAccelerator(template, "CmdOrCtrl+R", platformKey).length, 1);
+    assert.strictEqual(byAccelerator(template, "CmdOrCtrl+F", platformKey).length, 1);
     assert.strictEqual(byAccelerator(template, "F5", platformKey).length, 0, "F5 must stay unclaimed");
     assert.ok(
       !items.some((item) => item.role === "toggleDevTools" || item.role === "forceReload"),
@@ -1228,12 +1233,13 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
 // SEND on exactly the channels the compiled preload.js LISTENS on.
 test("hotkey wiring: main sends the menu channels preload subscribes to", () => {
   const fs = require("node:fs");
-  const mainJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+  const { readFileSync } = require("node:fs");
+  const mainJs = readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
   const menuJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/menu.js"), "utf8");
   const preloadJs = fs.readFileSync(path.join(__dirname, "../dist/main/main/preload.js"), "utf8");
   assert.match(mainJs, /installAppMenu/, "main installs the application menu");
   assert.match(mainJs, /createMenuActions/, "main builds the actions through the tested factory");
-  for (const channel of ["menu:open-settings", "menu:refresh"]) {
+  for (const channel of ["menu:open-settings", "menu:refresh", "menu:find"]) {
     assert.ok(menuJs.includes(channel), `menu.js sends on ${channel}`);
     assert.ok(preloadJs.includes(channel), `preload.js subscribes to ${channel}`);
   }
@@ -1437,6 +1443,48 @@ test("validateSettings: theme honored when light/dark", () => {
   assert.strictEqual(cfg.validateSettings({ theme: "light", hosts: [] }).theme, "light");
   assert.strictEqual(cfg.validateSettings({ theme: "dark", hosts: [] }).theme, "dark");
 });
+test("validateSettings: the look is flat unless a known style, and reaches the public config", () => {
+  assert.strictEqual(cfg.defaultSettings().uiStyle, "flat");
+  assert.strictEqual(cfg.validateSettings({ hosts: [] }).uiStyle, "flat");
+  assert.strictEqual(cfg.validateSettings({ uiStyle: "glass", hosts: [] }).uiStyle, "flat");
+  assert.strictEqual(cfg.validateSettings({ uiStyle: true, hosts: [] }).uiStyle, "flat");
+  for (const style of ["neumorphism", "claymorphism", "neobrutalism", "bento", "glassmorphism"]) {
+    const s = cfg.validateSettings({ uiStyle: style, hosts: [] });
+    assert.strictEqual(s.uiStyle, style);
+    assert.strictEqual(cfg.toPublicConfig(s).uiStyle, style);
+  }
+  assert.strictEqual(cfg.toPublicConfig(cfg.defaultSettings()).uiStyle, "flat");
+});
+test("ui style: the switch takes the listed styles only, persists over its own channel, and keys the CSS", () => {
+  const { readFileSync } = require("node:fs");
+  const v = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+  const list = require(path.join(__dirname, "../dist/main/shared/ui-style.js")).UI_STYLES.map((s) => s.value);
+  assert.deepStrictEqual(list, ["flat", "neumorphism", "claymorphism", "neobrutalism", "bento", "glassmorphism"]);
+  for (const style of list) assert.strictEqual(v.validateUiStyle(style), style);
+  assert.throws(() => v.validateUiStyle("glass"));
+  assert.throws(() => v.validateUiStyle(true));
+  const mainJs = readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+  assert.ok(mainJs.includes('"style:set"'), "main handles style:set");
+  const preload = readFileSync(path.join(__dirname, "../src/main/preload.ts"), "utf8");
+  assert.ok(preload.includes('setUiStyle: (style) => ipcRenderer.invoke("style:set", style)'));
+  const css = readFileSync(path.join(__dirname, "../src/renderer/src/styles.css"), "utf8");
+  const ui = readFileSync(path.join(__dirname, "../src/renderer/src/ui-style.ts"), "utf8");
+  for (const style of list.filter((s) => s !== "flat")) {
+    assert.ok(css.includes(`:root[data-ui="${style}"]`), `styles key on data-ui=${style}`);
+  }
+  assert.ok(ui.includes("root.dataset.ui = style"), "ui-style sets the attribute to the style's name");
+  assert.ok(ui.includes('if (style === "flat") delete root.dataset.ui'), "flat carries no attribute");
+});
+test("bento: both card grids are marked, and a wide cell starts only where the grid has two columns", () => {
+  const { readFileSync } = require("node:fs");
+  const app = readFileSync(path.join(__dirname, "../src/renderer/src/App.tsx"), "utf8");
+  assert.ok(app.includes('data-pr-grid="compact"') && app.includes('data-pr-grid="roomy"'));
+  const css = readFileSync(path.join(__dirname, "../src/renderer/src/styles.css"), "utf8");
+  // Roomy is one column below md (48rem): its wide cells must sit inside that media query.
+  const mq = css.indexOf("@media (min-width: 48rem)");
+  const roomySpan = css.indexOf('[data-ui="bento"] [data-pr-grid="roomy"] > :nth-child');
+  assert.ok(mq !== -1 && roomySpan > mq && roomySpan < css.indexOf("}", css.indexOf("{", mq) + 1) + 200);
+});
 test("validateSettings: notifications default off (opt-in), native on, sound off, all events on", () => {
   const n = cfg.validateSettings({ hosts: [] }).notifications;
   assert.strictEqual(n.enabled, false);
@@ -1522,6 +1570,7 @@ test("toPublicConfig: strips graphqlUrl, keeps label + repos", () => {
     trackComments: true,
     claudeEnabled: false,
     claudeDesktop: false,
+    uiStyle: "flat",
   });
 });
 test("toPublicConfig: trackComments is propagated, not assumed", () => {
@@ -14926,9 +14975,101 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(cfg.validateSettings({ weatherCity: 5 }).weatherCity, "");
     });
 
-    test("main.js wiring: the weather city comes from saved settings, not the renderer", () => {
+    test("main.js wiring: the weather place comes from saved settings and the saved location, not the renderer", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
-      assert.match(src, /"weather:get", async \(\) =>[\s\S]{0,200}loadSettings\)?\(\)\.weatherCity/);
+      assert.match(src, /const currentWeather = async \(\) =>[\s\S]{0,300}loadSettings\)?\(\)\.weatherCity/);
+      assert.match(src, /"weather:get", \(\) => currentWeather\(\)/);
+      // The location only on the user's click: the channel takes no argument and nothing else calls locate.
+      assert.match(src, /"weather:locate", \(\) =>/);
+      assert.strictEqual((src.match(/\(0, locate_1\.locate\)\(/g) ?? []).length, 1);
+    });
+
+    await atest("weather service: coordinates skip geocoding and say 'Your location'", async () => {
+      const calls = [];
+      const s = svc.createWeatherService({ fetchJson: async (u) => (calls.push(u), forecast(0)) });
+      const r = await s.get({ latitude: 50.45, longitude: 30.52 });
+      assert.strictEqual(r.state, "ok");
+      assert.strictEqual(r.place, "Your location");
+      assert.strictEqual(r.fromLocation, true);
+      assert.strictEqual(calls.length, 1);
+      assert.ok(!calls[0].includes("geocoding"));
+      assert.ok(calls[0].includes("latitude=50.4500"));
+    });
+
+    test("weather location: saved by the button, rounded, and forgotten", () => {
+      const nfs = require("node:fs");
+      const os = require("node:os");
+      const loc = require(path.join(__dirname, "../dist/main/main/weather-location.js"));
+      const dir = nfs.mkdtempSync(path.join(os.tmpdir(), "prd-geo-"));
+      const file = path.join(dir, "weather-location.json");
+      assert.strictEqual(loc.readSavedLocation(file), null, "none saved");
+      assert.deepStrictEqual(loc.saveLocation(file, { latitude: 52.356789, longitude: 21.021 }), { latitude: 52.36, longitude: 21.02 });
+      assert.deepStrictEqual(loc.readSavedLocation(file), { latitude: 52.36, longitude: 21.02 });
+      nfs.writeFileSync(file, JSON.stringify({ latitude: 500, longitude: 0 }));
+      assert.strictEqual(loc.readSavedLocation(file), null, "bad coordinates are not used");
+      nfs.writeFileSync(file, "{not json");
+      assert.strictEqual(loc.readSavedLocation(file), null);
+      loc.forgetLocation(file);
+      assert.ok(!nfs.existsSync(file));
+      loc.forgetLocation(file);
+      nfs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    const locate = require(path.join(__dirname, "../dist/main/main/locate.js"));
+
+    test("locate: the helper's JSON line becomes a result", () => {
+      assert.deepStrictEqual(locate.parseLocateOutput('noise\n{"status":"ok","latitude":52.35,"longitude":21.02}\n'), {
+        status: "ok",
+        latitude: 52.35,
+        longitude: 21.02,
+      });
+      assert.deepStrictEqual(locate.parseLocateOutput('{"status":"denied"}'), { status: "denied" });
+      assert.deepStrictEqual(locate.parseLocateOutput('{"status":"timeout"}'), { status: "timeout" });
+      assert.strictEqual(locate.parseLocateOutput('{"status":"disabled"}').status, "failed");
+      assert.strictEqual(locate.parseLocateOutput('{"status":"ok","latitude":95,"longitude":0}').status, "failed");
+      assert.strictEqual(locate.parseLocateOutput("").status, "failed");
+    });
+
+    await atest("locate: macOS runs the helper app through open and reads its stdout file", async () => {
+      const nfs = require("node:fs");
+      const os = require("node:os");
+      const dir = nfs.mkdtempSync(path.join(os.tmpdir(), "prd-loc-"));
+      const app = path.join(dir, "prd-locate.app");
+      assert.strictEqual((await locate.locateMac(app, async () => ({ stdout: "" }))).status, "unavailable", "no helper: nothing to run");
+      nfs.mkdirSync(path.join(app, "Contents", "MacOS"), { recursive: true });
+      nfs.writeFileSync(path.join(app, "Contents", "MacOS", "prd-locate"), "");
+      let seen;
+      const r = await locate.locateMac(app, async (file, args) => {
+        seen = { file, args };
+        nfs.writeFileSync(args[args.indexOf("--stdout") + 1], '{"status":"ok","latitude":1,"longitude":2}\n');
+        return { stdout: "" };
+      });
+      assert.deepStrictEqual(r, { status: "ok", latitude: 1, longitude: 2 });
+      assert.strictEqual(seen.file, "/usr/bin/open");
+      assert.ok(seen.args.includes("-W") && seen.args.includes("-n"), "waits for a fresh instance");
+      assert.strictEqual(seen.args[seen.args.length - 1], app);
+      nfs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    await atest("locate: Windows runs Windows PowerShell with the encoded script", async () => {
+      let seen;
+      const r = await locate.locateWindows(async (file, args) => ((seen = { file, args }), { stdout: '{"status":"denied"}\r\n' }));
+      assert.deepStrictEqual(r, { status: "denied" });
+      assert.match(seen.file, /WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/);
+      const script = Buffer.from(seen.args[seen.args.indexOf("-EncodedCommand") + 1], "base64").toString("utf16le");
+      assert.match(script, /GeoCoordinateWatcher/);
+      assert.strictEqual((await locate.locateWindows(async () => { throw new Error("no powershell"); })).status, "unavailable");
+      assert.strictEqual((await locate.locate({ platform: "linux", helperApp: "" })).status, "unavailable");
+    });
+
+    test("electron-builder ships the macOS location helper and the location entitlement", () => {
+      const pkg = require(path.join(__dirname, "../package.json"));
+      assert.deepStrictEqual(pkg.build.mac.extraResources, [{ from: "dist/native/prd-locate.app", to: "prd-locate.app" }]);
+      assert.match(pkg.scripts.build, /build:native/);
+      const nfs = require("node:fs");
+      for (const f of ["entitlements.mac.plist", "entitlements.mac.inherit.plist"]) {
+        assert.match(nfs.readFileSync(path.join(__dirname, "../build", f), "utf8"), /com\.apple\.security\.personal-information\.location/, f);
+      }
     });
   }
 

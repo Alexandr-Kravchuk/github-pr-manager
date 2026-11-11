@@ -32,6 +32,7 @@ import type {
   PullRequest,
   SaveSettingsResult,
   Settings,
+  WeatherLocateResult,
   WeatherStatus,
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
@@ -61,6 +62,7 @@ import {
   validateClaudeSessionId,
   validatePrId,
   validateSeenItems,
+  validateUiStyle,
   validateThemePreference,
 } from "./ipc-validation";
 import { loginItemSettingsFor, staleLoginItemsFor, wasLaunchedAtLogin } from "./login-launch";
@@ -82,6 +84,8 @@ import {
 import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./updater";
 import { whatsNewFor } from "../shared/whats-new";
 import { createWeatherService } from "./weather";
+import { locate } from "./locate";
+import { forgetLocation, readSavedLocation, saveLocation } from "./weather-location";
 
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
@@ -490,7 +494,7 @@ function applyLaunchAtLogin(enabled: boolean): void {
  *  renderer's `--canvas` so there's no flash before paint nor a mismatched
  *  edge on resize. */
 function themeBackground(): string {
-  return nativeTheme.shouldUseDarkColors ? "#09090b" : "#f7f7f8";
+  return nativeTheme.shouldUseDarkColors ? "#141417" : "#ebebee";
 }
 
 /** Drives the renderer's `prefers-color-scheme` (and native chrome) from the
@@ -960,6 +964,17 @@ function registerIpc(): void {
     }
   });
 
+  // The look (Flat / Neumorphism / Claymorphism): the renderer applies it
+  // itself; main only keeps it.
+  ipcMain.handle("style:set", async (_event, raw: unknown): Promise<void> => {
+    const uiStyle = validateUiStyle(raw);
+    try {
+      persistSettings({ ...loadSettings(), uiStyle });
+    } catch {
+      /* the look still switches for this session */
+    }
+  });
+
   ipcMain.handle("gh:status", async (): Promise<GhStatus> => {
     try {
       return getGhStatus(loadSettings());
@@ -1057,17 +1072,44 @@ function registerIpc(): void {
     return result;
   });
 
-  // No argument: the city comes from the saved settings, so the renderer
-  // cannot point the request anywhere else.
+  // No argument: the city comes from the saved settings and the coordinates
+  // from the location saved by "Use my location", so the renderer cannot
+  // point the request anywhere else. A typed city wins over the location.
   const weather = createWeatherService();
-  ipcMain.handle("weather:get", async (): Promise<WeatherStatus> => {
+  const locationFile = path.join(app.getPath("userData"), "weather-location.json");
+  const currentWeather = async (): Promise<WeatherStatus> => {
     let city = "";
     try {
       city = loadSettings().weatherCity ?? "";
     } catch {
-      /* unreadable settings: the header keeps its snowfall */
+      /* unreadable settings: fall back to the location, else no weather */
     }
-    return weather.get(city);
+    if (city.trim()) return weather.get(city);
+    const loc = readSavedLocation(locationFile);
+    return loc ? weather.get(loc) : { state: "off" };
+  };
+  ipcMain.handle("weather:get", () => currentWeather());
+  // The location comes from the OS through main (main/locate.ts), never from
+  // the renderer, and only on the user's click in Settings. One at a time.
+  const locateHelper = app.isPackaged
+    ? path.join(process.resourcesPath, "prd-locate.app")
+    : path.join(app.getAppPath(), "dist", "native", "prd-locate.app");
+  let locating: Promise<WeatherLocateResult> | null = null;
+  ipcMain.handle("weather:locate", (): Promise<WeatherLocateResult> => {
+    locating ??= (async (): Promise<WeatherLocateResult> => {
+      const r = await locate({ helperApp: locateHelper });
+      if (process.env.PRD_DEBUG) console.log(`[weather] locate: ${r.status}`);
+      if (r.status === "ok") saveLocation(locationFile, r);
+      const message = r.status === "failed" || r.status === "unavailable" ? r.reason : undefined;
+      return { outcome: r.status === "ok" ? "granted" : r.status, ...(message ? { message } : {}), weather: await currentWeather() };
+    })().finally(() => {
+      locating = null;
+    });
+    return locating;
+  });
+  ipcMain.handle("weather:forgetLocation", (): Promise<WeatherStatus> => {
+    forgetLocation(locationFile);
+    return currentWeather();
   });
 }
 

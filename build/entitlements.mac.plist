@@ -12,5 +12,9 @@
        hardened runtime blocks those without this entitlement. -->
   <key>com.apple.security.automation.apple-events</key>
   <true/>
+  <!-- The header weather's location helper (prd-locate.app) asks Core
+       Location; the hardened runtime blocks that without this. -->
+  <key>com.apple.security.personal-information.location</key>
+  <true/>
 </dict>
 </plist>

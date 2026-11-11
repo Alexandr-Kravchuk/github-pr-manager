@@ -119,7 +119,7 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
       className={cn(
         // Hover darkens every side but the left: that one is the accent stripe,
         // and a plain `hover:border-*` colour repaints it grey.
-        "group relative isolate overflow-hidden rounded-md border border-line border-l-[3px] bg-surface px-2 py-1.5 shadow-sm transition-colors hover:border-y-line-strong hover:border-r-line-strong",
+        "group relative isolate overflow-hidden rounded-md border border-line border-l-[3px] bg-surface px-2 py-1.5 shadow-tile transition-colors hover:border-y-line-strong hover:border-r-line-strong",
         ACCENT[prSignal(pr, { trackComments })],
         pr.isIgnored && "opacity-60 hover:opacity-100",
       )}

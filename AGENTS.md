@@ -341,20 +341,36 @@ Three layers:
   re-approve's. The merge itself is not adapted yet: GitHub's
   synchronous merge API, which `gh pr merge` uses, does not support stacked
   PRs — the asynchronous `merge-async` endpoint does).
-  The header sky has its own: `weather.ts` (WMO weather code → one of
-  seven skies, and parsing Open-Meteo's geocoding and forecast answers;
-  `main/weather.ts` fetches them for the city in Settings — the only thing
-  that leaves the machine, so an empty city sends nothing and the header
-  keeps its snow — and caches the answer 30 min, a failure 5, keeping the
-  last good sky through a failed refresh; the `weather:get` channel takes no
-  argument, so the renderer cannot point the request elsewhere). Keep any such
+  The header's weather icon has its own: `weather.ts` (WMO weather code →
+  one of seven kinds, and parsing Open-Meteo's geocoding and forecast answers;
+  `main/weather.ts` fetches them for the city in Settings or, with no city,
+  for the location saved by Settings' "Use my location" — the only things
+  that leave the machine, so with neither nothing is sent and the header
+  shows no weather at all (`WeatherBadge.tsx`: one static icon and the
+  temperature beside the PR count) — and caches the answer 30 min, a failure
+  5, keeping the last good answer through a failed refresh; the `weather:get`
+  channel takes no argument, so the renderer cannot point the request
+  elsewhere). Nothing asks for the location on its own: only that button
+  does, over `weather:locate` (no argument — the coordinates come from the
+  OS through main, never from the renderer), and they are kept rounded to
+  ~1 km in `userData/weather-location.json` (`main/weather-location.ts`). Not
+  `navigator.geolocation`: in Electron it calls Google's paid geolocation
+  service and, with no API key, times out without a prompt.
+  `main/locate.ts` asks the OS instead — on macOS the `prd-locate.app` helper
+  (`native/macos-locate`, Swift/Core Location, built universal by
+  `scripts/build-locate.mjs` into `dist/native` and shipped through
+  `extraResources`), run with `open -n -g -W --stdout`, because Location
+  Services prompts only for a bundle with a usage string and a bare child
+  binary stays "not determined"; the hardened runtime needs
+  `com.apple.security.personal-information.location`. On Windows it is
+  GeoCoordinateWatcher in Windows PowerShell. Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `jira-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
   `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`,
-  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js` and `weather.js` stay free of `node:` builtin references, so the
+  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js`, `weather.js` and `ui-style.js` stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
@@ -445,8 +461,10 @@ Three layers:
 - Keyboard shortcuts live in the application menu (`menu.ts`), not in renderer
   key handlers: a menu accelerator fires whatever has focus and it shows the
   user what the shortcut is. Both items forward to the renderer over IPC
-  (`menu:open-settings`, `menu:refresh`) because the renderer owns the view and
-  the loading state. Both actions surface the window first (`createMenuActions`,
+  (`menu:open-settings`, `menu:refresh`, `menu:find`) because the renderer owns
+  the view and the loading state. View › Search (CmdOrCtrl+F) focuses and selects
+  the search box of the screen on view — the PR list's or Settings', each marked
+  `data-find-field`. Both actions surface the window first (`createMenuActions`,
   unit-tested): close-to-tray makes hidden-but-alive the normal idle state, and
   on macOS the app can be frontmost with no window on screen, so a shortcut that
   only pushed an event would look dead while still spending a GraphQL request. `CmdOrCtrl` covers both platforms — Cmd+, / Cmd+R on macOS,
@@ -616,6 +634,36 @@ Three layers:
   and `StructuredOutput`, which a Workflow's agents answer through); a test
   pins that every tool the default `--allowedTools` lists grant is one the
   guard knows, so extend the guard before adding a tool to the defaults.
+- **The look** (Settings › Appearance › Style, `Settings.uiStyle`): `flat`
+  (the default), `neumorphism`, `claymorphism`, `neobrutalism`, `bento` or
+  `glassmorphism` — one list in `shared/ui-style.ts` (`UI_STYLES`, Node-free,
+  read by settings validation, the IPC check, the Settings menu and the
+  renderer) — a second axis next to
+  light/dark, so each works with both themes. The renderer sets
+  `data-ui="<style>"` on `<html>` (none for flat; `renderer/src/ui-style.ts`,
+  also cached in localStorage so a restart does not flash the flat look) and
+  `styles.css` keys every rule on it. Neumorphism: canvas and surface one
+  colour, cards, panels and framed buttons raised by a light and a dark
+  shadow, fields and segmented wells pressed in. Claymorphism: a pastel
+  canvas, lighter cards with big radii puffed up by a drop shadow and two
+  inner shadows, buttons as small clay pills, the chosen segment a pastel
+  accent. Neobrutalism: a loud canvas, thick ink outlines and hard offset
+  shadows with no blur, buttons that drop onto their shadow when pressed, the
+  chosen segment a bright yellow (its children inherit the dark text, or a
+  count with its own colour class vanishes on it in the dark theme), and a
+  near-white ink in the dark theme. Bento grid: borderless cells with big radii,
+  and in the card grids (`data-pr-grid` on `PrList`'s two grids) every fifth
+  card / seventh tile spans two columns with dense packing — Roomy's only
+  from `md`, where it has two columns, or the span would invent one.
+  Glassmorphism: a fixed backdrop of soft colour blobs on `body` and
+  translucent cards, panels and the table with a backdrop blur; static, and
+  the table's sticky actions column takes no fill (any fill or second blur
+  showed as a lighter stripe). The rules sit outside Tailwind's layers so they beat the
+  utilities; a new card or panel that should take part needs `shadow-tile`
+  or the `rounded-xl border border-line` panel shape. The switch applies at
+  once and persists over `style:set`, like the theme. In the plain-browser
+  mock, `?ui=<style>` previews them (with `&buddy=review` for nine PRs, enough to
+  see the bento grid).
 - **No always-running animation in the renderer.** An `infinite` CSS animation —
   including Tailwind's `animate-pulse` / `-spin` / `-bounce` / `-ping` — keeps the
   compositor producing frames for as long as the app is open, and Electron
@@ -629,14 +677,7 @@ Three layers:
   fires — see `.live-beat` in `styles.css` (one
   blink per snapshot) and `.claude-glow` (three breaths of a PR card's glow
   when a Claude session on it starts working or waiting; only its own layer's
-  `opacity` animates, so nothing repaints per frame). The header sky
-  (`HeaderSky.tsx`: snow, rain, thunder, clouds, fog, sun, stars — from the
-  weather) is the one animation that runs for as long as something holds it:
-  every moving part carries `.sky-anim`, which plays only while the pointer is
-  over the header and is `animation-play-state: paused` otherwise (a test pins
-  both rules and that each animated element carries the class), with a finite
-  iteration count. The play-state rules are two-class selectors on purpose:
-  the one-class `animation` shorthand resets the play state. Key it on something monotonic per event: `App.tsx` uses a
+  `opacity` animates, so nothing repaints per frame). Key it on something monotonic per event: `App.tsx` uses a
   snapshot counter, because `snapshot.fetchedAt` is
   the *oldest* host's stamp and stalls. A guard test in `tests/run-tests.cjs`
   scans `.ts`/`.tsx`/`.css`/`.html` under `src/renderer` for

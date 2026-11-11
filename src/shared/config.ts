@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 
+import { isUiStyle } from "./ui-style";
 import {
   AGENT_BOUNDS,
   DEFAULT_AGENT_PROMPTS,
@@ -170,6 +171,8 @@ export function validateSettings(raw: unknown): Settings {
 
   // Appearance defaults to following the OS; anything unrecognized falls back.
   const theme = obj.theme === "light" || obj.theme === "dark" ? obj.theme : "system";
+  // The look is opt-in: anything but a known style is the flat default.
+  const uiStyle = isUiStyle(obj.uiStyle) ? obj.uiStyle : "flat";
 
   // Comment tracking defaults ON — it is the app's original behavior, so an
   // existing settings file (which has no such key) must keep it.
@@ -211,6 +214,7 @@ export function validateSettings(raw: unknown): Settings {
     autoUpdate,
     closeToTray,
     theme,
+    uiStyle,
     trackComments,
     notifications,
     hosts,
@@ -484,6 +488,7 @@ export function defaultSettings(): Settings {
     autoUpdate: true,
     closeToTray: true,
     theme: "system",
+    uiStyle: "flat",
     trackComments: true,
     notifications: defaultNotificationSettings(),
     hosts: [],
@@ -518,6 +523,7 @@ export function toPublicConfig(settings: Settings): PublicConfig {
     trackComments: settings.trackComments,
     claudeEnabled: settings.claude.enabled,
     claudeDesktop: settings.claude.terminal === "desktop",
+    uiStyle: settings.uiStyle ?? "flat",
   };
 }
 

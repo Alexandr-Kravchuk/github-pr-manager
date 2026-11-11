@@ -6,8 +6,9 @@ import {
   type GroupLaunchKind,
   type ClaudeLaunchKind,
 } from "../shared/claude-launch";
+import { isUiStyle } from "../shared/ui-style";
 import type { CloseStaleOptions } from "../shared/stale";
-import type { AgentAction, JiraStatusMode, SeenInput, ThemePreference } from "../shared/types";
+import type { AgentAction, JiraStatusMode, SeenInput, ThemePreference, UiStyle } from "../shared/types";
 
 // Validators for values that cross the IPC boundary from the renderer. The
 // renderer is trusted, but a compromised/buggy caller must not be able to push
@@ -75,6 +76,12 @@ export function validateThemePreference(value: unknown): ThemePreference {
     return value;
   }
   throw new Error(`setTheme: invalid theme preference: ${String(value)}`);
+}
+
+/** The look picked in Settings › Appearance: one of `UI_STYLES`. */
+export function validateUiStyle(value: unknown): UiStyle {
+  if (isUiStyle(value)) return value;
+  throw new Error(`setUiStyle: invalid style: ${String(value)}`);
 }
 
 /** Ensures a Jira token is a string of sane length. Empty string clears it. */

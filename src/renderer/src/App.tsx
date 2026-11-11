@@ -41,7 +41,8 @@ import { StaleCloseDialog } from "./components/StaleCloseDialog";
 import { StaleCloseContext } from "./components/stale-close-context";
 import { BasePrContext } from "./components/base-pr-context";
 import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
-import { HeaderSky } from "./components/HeaderSky";
+import { WeatherBadge } from "./components/WeatherBadge";
+import { applyUiStyle } from "./ui-style";
 import {
   DEFAULT_TABLE_SORT,
   parseColumnWidths,
@@ -439,9 +440,9 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [whatsNew]);
 
-  // The header's sky. Asked again on every return from Settings (the city may
-  // have changed) and every 10 minutes after; main caches the answer for 30,
-  // so most of these cost no request.
+  // The header's weather icon. Asked again on every return from Settings (the
+  // city or location may have changed) and every 10 minutes after; main
+  // caches the answer for 30, so most of these cost no request.
   const [weather, setWeather] = useState<WeatherStatus | null>(null);
   useEffect(() => {
     if (view !== "dashboard") return;
@@ -678,6 +679,18 @@ export function App() {
     if (view === "settings") return;
     return window.api.onRefreshRequest(() => void refresh());
   }, [refresh, view]);
+  // CmdOrCtrl+F: the search box of whichever screen is on view — the PR list's
+  // or Settings' — each marked `data-find-field`. Its text is selected, so
+  // typing replaces the last query.
+  useEffect(
+    () =>
+      window.api.onFindRequest(() => {
+        const field = document.querySelector<HTMLInputElement>("input[data-find-field]");
+        field?.focus();
+        field?.select();
+      }),
+    [],
+  );
 
   // F5 is the second Refresh shortcut. It is handled here rather than in the
   // menu because one menu item carries exactly one accelerator, and a hidden
@@ -761,6 +774,13 @@ export function App() {
   // (silently clearing a stored filter) while the chip stayed on. Defaults to on
   // for the frame before `getConfig` answers, which is the original behavior.
   const trackComments = config?.trackComments ?? true;
+
+  // The look (Settings › Appearance) once the config is known; the Settings
+  // switch applies it at once itself.
+  const uiStyle = config ? (config.uiStyle ?? "flat") : null;
+  useEffect(() => {
+    if (uiStyle !== null) applyUiStyle(uiStyle);
+  }, [uiStyle]);
 
   // Every filter decision lives in `shared/pr-filter` so it can be unit-tested —
   // this is the whole view state that module needs.
@@ -1050,16 +1070,20 @@ export function App() {
           sticky header, so it already sits at top 0 and doesn't shift up by
           that gap on the first pixels of scrolling before it sticks. */}
       {/* No rule under the header: its lighter tone sets it off from the list
-          scrolling beneath it. The whole header hosts the weather sky. */}
-      <header className="sky-host sticky top-0 z-10 -mx-4 mb-2 bg-surface/70 px-4 pb-3 pt-2 backdrop-blur">
-        <HeaderSky weather={weather} />
+          scrolling beneath it. */}
+      <header className="sticky top-0 z-10 -mx-4 mb-2 bg-surface/70 px-4 pb-3 pt-2 backdrop-blur">
         <div className="relative flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <img src={logoUrl} alt="" aria-hidden width={44} height={44} draggable={false} className="h-11 w-11 shrink-0 select-none" />
-            {/* The count sits on the title's line, after it: one row, not two. */}
-            <div className="ml-1 flex items-baseline gap-3">
-              <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
-              <p className="text-xs text-fg-subtle">
+            {/* The count sits on the title's line, after it: one row, not two,
+                centred on the title's ink (capitals to baseline — the title has
+                no descender), measured in pixels of the real window: the
+                baseline plus a 0.203125rem lift. A box-centred line read as too
+                high, a baseline-aligned one as too low. Changing the title's
+                text can move its ink centre (a "q" or "p" drops it). */}
+            <div className="ml-1 flex items-baseline gap-5">
+              <h1 className="text-xl font-semibold text-fg">GitHub PR Dashboard</h1>
+              <p className="relative -top-[0.203125rem] text-xs text-fg-subtle">
                 {/* Only what the filter chips can't say. The attention / failing /
                     new-comments totals used to sit here too, counted over every PR
                     while the chips count within the current role — two numbers
@@ -1068,6 +1092,8 @@ export function App() {
                 {headerCountLabel(filtered, stats.total)}
                 {/* No chip covers "back to you", so it stays. */}
                 {stats.returned > 0 && ` · ${stats.returned} back to you`}
+                {/* Inside the count's line, so it centres on that text. */}
+                <WeatherBadge weather={weather} />
               </p>
             </div>
             {/* The PR agent as a companion: what it is doing, in one chip. */}
@@ -1157,6 +1183,7 @@ export function App() {
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search by title, repo, author…"
+                  data-find-field
                   className={cn(
                     "w-full rounded-md border py-1.5 pl-3 pr-8 text-sm text-fg placeholder:text-fg-faint focus:outline-none",
                     searchActive
@@ -1701,6 +1728,7 @@ function PrList({
   if (mode === "compact") {
     return (
       <div
+        data-pr-grid="compact"
         className={cn(
           "grid gap-1.5 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 3xl:grid-cols-8 4xl:grid-cols-10",
           className,
@@ -1721,6 +1749,7 @@ function PrList({
   }
   return (
     <div
+      data-pr-grid="roomy"
       className={cn(
         "grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3 3xl:grid-cols-4 4xl:grid-cols-5",
         className,

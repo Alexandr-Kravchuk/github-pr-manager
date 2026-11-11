@@ -10,6 +10,8 @@ import type {
   NotificationSettings,
   Settings,
   ThemePreference,
+  UiStyle,
+  WeatherLocateResult,
   WeatherStatus,
 } from "../../../shared/types";
 // notify.ts is deliberately Electron/Node-free (unlike the rest of shared/), so
@@ -32,6 +34,8 @@ import {
   type SettingsSectionId,
   type SettingsTabId,
 } from "../../../shared/settings-search";
+import { applyUiStyle } from "../ui-style";
+import { UI_STYLES } from "../../../shared/ui-style";
 import { cn } from "../format";
 import { agentSectionContent } from "./AgentSettings";
 
@@ -130,11 +134,37 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [trackComments, setTrackComments] = useState(true);
   const [staleAfterDays, setStaleAfterDays] = useState(DEFAULT_STALE_AFTER_DAYS);
   const [theme, setTheme] = useState<ThemePreference>("system");
+  const [uiStyle, setUiStyle] = useState<UiStyle>("flat");
   const [weatherCity, setWeatherCity] = useState("");
   // The weather main reports is for the SAVED city; it is shown only while the
   // field still holds that city, or it would describe a place not typed there.
   const [savedWeatherCity, setSavedWeatherCity] = useState("");
   const [weather, setWeather] = useState<WeatherStatus | null>(null);
+  const [locating, setLocating] = useState(false);
+  const [locationNote, setLocationNote] = useState<string | null>(null);
+  // Saved right away, like the theme: the location lives outside settings.json.
+  const LOCATE_NOTE: Record<WeatherLocateResult["outcome"], string | null> = {
+    granted: null,
+    denied: "Location access is denied — allow PR Dashboard in System Settings › Privacy & Security › Location Services.",
+    failed: "Your location could not be determined.",
+    unavailable: "Location is not available on this system.",
+    timeout: "No answer to the location prompt.",
+  };
+  const runLocation = (attempt: Promise<WeatherLocateResult | WeatherStatus>) => {
+    setLocating(true);
+    setLocationNote(null);
+    attempt
+      .then((r) => {
+        if ("outcome" in r) {
+          setWeather(r.weather);
+          setLocationNote(r.message ?? LOCATE_NOTE[r.outcome]);
+        } else {
+          setWeather(r);
+        }
+      })
+      .catch((e) => setLocationNote((e as Error).message))
+      .finally(() => setLocating(false));
+  };
   const [notifications, setNotifications] = useState<NotificationSettings>(DEFAULT_NOTIFICATIONS);
   const [hosts, setHosts] = useState<DraftHost[]>([]);
   const [claude, setClaude] = useState<ClaudeSettings>(DEFAULT_CLAUDE_SETTINGS);
@@ -173,6 +203,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setTrackComments(s.trackComments);
         setStaleAfterDays(s.staleAfterDays ?? DEFAULT_STALE_AFTER_DAYS);
         setTheme(s.theme);
+        setUiStyle(s.uiStyle ?? "flat");
         setWeatherCity(s.weatherCity ?? "");
         setSavedWeatherCity(s.weatherCity ?? "");
         setNotifications(s.notifications ?? DEFAULT_NOTIFICATIONS);
@@ -210,6 +241,11 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const changeTheme = (next: ThemePreference) => {
     setTheme(next);
     window.api.setTheme(next).catch(() => {});
+  };
+  const changeUiStyle = (next: UiStyle) => {
+    setUiStyle(next);
+    applyUiStyle(next);
+    window.api.setUiStyle(next).catch(() => {});
   };
 
   const [twgLoginNote, setTwgLoginNote] = useState<string | null>(null);
@@ -264,6 +300,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         autoUpdate,
         closeToTray,
         theme,
+        uiStyle,
         trackComments,
         notifications,
         weatherCity: weatherCity.trim(),
@@ -337,6 +374,30 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         <p className="mt-1 text-xs text-fg-subtle">
           Follow the system theme, or force light or dark. Applies right away, without Save.
         </p>
+        <div className="mt-3 flex items-center justify-between gap-4">
+          <label className="text-sm text-fg-secondary" htmlFor="ui-style">
+            Style
+          </label>
+          <select
+            id="ui-style"
+            value={uiStyle}
+            onChange={(e) => changeUiStyle(e.target.value as UiStyle)}
+            className={cn(fieldCls, "w-48")}
+          >
+            {UI_STYLES.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p className="mt-1 text-xs text-fg-subtle">
+          Flat is the default. Neumorphism raises cards and buttons out of the background with a light and a dark
+          shadow; Claymorphism makes them soft, rounded and pastel; Neobrutalism draws them with thick outlines, hard
+          shadows and loud colours; Bento grid lays the cards out as borderless cells, some twice as wide;
+          Glassmorphism turns them into frosted glass over a colourful backdrop. Each works with either theme and
+          applies right away.
+        </p>
       </section>
     ),
     weather: (
@@ -356,10 +417,9 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           />
         </div>
         <p className="mt-1 text-xs text-fg-subtle">
-          The header draws the current weather there — snow, rain, a thunderstorm, clouds, fog, the
-          sun or stars — and moves it while the pointer is over it. Add the country to pick among
-          same-named places (&quot;Paris, France&quot;). Only the city is sent, to Open-Meteo; empty
-          keeps the snowfall.
+          A small icon next to the PR count shows the current weather there. Add the country to pick
+          among same-named places (&quot;Paris, France&quot;). Only the city (or your location) is
+          sent, to Open-Meteo. Empty uses your location from the button below, else shows no weather.
         </p>
         {weather && weather.state !== "off" && weatherCity.trim() === savedWeatherCity && (
           <p className={cn("mt-1 text-xs", weather.state === "ok" ? "text-fg-muted" : "text-amber-700 dark:text-amber-300")}>
@@ -368,6 +428,29 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               : weather.message}
           </p>
         )}
+        {/* Location: only on this click — nothing asks for it on its own. */}
+        <div className="mt-2 flex items-center gap-2 text-xs">
+          {weather?.state === "ok" && weather.fromLocation && savedWeatherCity === "" ? (
+            <button
+              type="button"
+              disabled={locating}
+              onClick={() => runLocation(window.api.forgetWeatherLocation())}
+              className="rounded-md border border-line-strong px-2 py-0.5 text-fg-secondary hover:bg-elevated disabled:opacity-50"
+            >
+              Forget my location
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={locating}
+              onClick={() => runLocation(window.api.locateForWeather())}
+              className="rounded-md border border-line-strong px-2 py-0.5 text-fg-secondary hover:bg-elevated disabled:opacity-50"
+            >
+              {locating ? "Locating…" : "Use my location"}
+            </button>
+          )}
+          {locationNote && <span className="text-fg-subtle">{locationNote}</span>}
+        </div>
       </section>
     ),
     refresh: (
@@ -1136,6 +1219,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             if (e.key === "Escape") setQuery("");
           }}
           placeholder="Search settings"
+          data-find-field
           aria-label="Search settings"
           className={cn(fieldCls, "min-w-[12rem] flex-1")}
         />

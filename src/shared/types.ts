@@ -86,17 +86,32 @@ export interface SettingsHost {
  */
 export type ThemePreference = "system" | "light" | "dark";
 
-/** The header's sky picture, chosen from the current weather (shared/weather.ts). */
+/** The app's look, independent of light/dark (Settings › Appearance). */
+export type UiStyle = "flat" | "neumorphism" | "claymorphism" | "neobrutalism" | "bento" | "glassmorphism";
+
+/** The header's weather icon, chosen from the current weather (shared/weather.ts). */
 export type WeatherKind = "clear-day" | "clear-night" | "clouds" | "fog" | "rain" | "snow" | "thunder";
 
 /**
- * The header's weather. `off` while no city is set (the header keeps its
- * snowfall); `error` when the city is not found or Open-Meteo did not answer.
+ * The header's weather. `off` while neither a city nor a location is set (the
+ * header shows nothing). `fromLocation` marks an answer for the location
+ * chosen in Settings rather than the typed city. `error` when the place is not
+ * found or Open-Meteo did not answer.
  */
 export type WeatherStatus =
   | { state: "off" }
-  | { state: "ok"; kind: WeatherKind; place: string; temperatureC: number; fetchedAt: number }
+  | { state: "ok"; kind: WeatherKind; place: string; temperatureC: number; fetchedAt: number; fromLocation?: boolean }
   | { state: "error"; message: string };
+
+/**
+ * How a "Use my location" attempt ended (main/locate.ts) and the weather
+ * after it. Only `granted` saves anything.
+ */
+export interface WeatherLocateResult {
+  outcome: "granted" | "denied" | "failed" | "unavailable" | "timeout";
+  message?: string;
+  weather: WeatherStatus;
+}
 
 /**
  * Jira connection for parent-task grouping — credential-free, like the rest of
@@ -197,6 +212,16 @@ export interface Settings {
   /** Light/dark appearance, or follow the OS. */
   theme: ThemePreference;
   /**
+   * The app's look, on top of the light/dark theme: `flat` (the default — and
+   * what an absent value means), `neumorphism` (cards and controls raised out
+   * of a canvas of their own colour by a light and a dark shadow) or
+   * `claymorphism` (puffy pastel cards with big radii and inner shadows) or
+   * `neobrutalism` (thick ink outlines, hard offset shadows, loud colours),
+   * `bento` (a bento grid: borderless rounded cells, some twice as wide) or
+   * `glassmorphism` (frosted translucent cards over a colourful backdrop).
+   */
+  uiStyle?: UiStyle;
+  /**
    * Whether an unread-comment count is kept per PR. Off drops that one channel:
    * `hasNewActivity` never gets set, so the `New comments` chip, the card badge
    * with its `Mark as seen` button, the header stat and the `newOnly` filter all
@@ -241,9 +266,9 @@ export interface Settings {
   claude: ClaudeSettings;
   /**
    * The city whose current weather the header draws ("Kyiv" or "Kyiv,
-   * Ukraine"). Empty turns it off and the header keeps its snowfall — the
-   * city is the only thing that leaves the machine, so nothing is sent
-   * until one is typed.
+   * Ukraine"). Empty falls back to the location saved by "Use my location"
+   * (main/weather-location.ts), and with neither the header shows no weather
+   * and nothing is sent.
    */
   weatherCity?: string;
   /**
@@ -449,6 +474,8 @@ export interface PublicConfig {
   claudeEnabled: boolean;
   /** Whether Claude sessions open in Claude Desktop — the only place "Review all" can nest its sessions. */
   claudeDesktop: boolean;
+  /** Mirror of {@link Settings.uiStyle} — the renderer switches its look on it. */
+  uiStyle?: UiStyle;
 }
 
 /** State of an individual reviewer on a PR. */
@@ -1137,6 +1164,8 @@ export interface PrManagerApi {
   saveSettings(settings: Settings): Promise<SaveSettingsResult>;
   /** Apply an appearance preference immediately and persist it. */
   setTheme(theme: ThemePreference): Promise<void>;
+  /** Persist the look (one of {@link UI_STYLES}); no Save needed. */
+  setUiStyle(style: UiStyle): Promise<void>;
   /** `gh` CLI install + auth status for the configured hosts. */
   getGhStatus(): Promise<GhStatus>;
   /**
@@ -1215,6 +1244,14 @@ export interface PrManagerApi {
    */
   getWeather(): Promise<WeatherStatus>;
   /**
+   * Settings › Header weather › "Use my location": asks the OS for the
+   * location (main/locate.ts), saves it on success and answers with the
+   * weather for it. Only ever on the user's click — nothing asks on its own.
+   */
+  locateForWeather(): Promise<WeatherLocateResult>;
+  /** Drops the saved location. */
+  forgetWeatherLocation(): Promise<WeatherStatus>;
+  /**
    * The Jira task of a stale PR of yours and the transitions Jira offers on it,
    * for the close dialog. Only the PR id crosses over; the issue key is read
    * from main's own snapshot.
@@ -1251,6 +1288,11 @@ export interface PrManagerApi {
    * Returns an unsubscribe function.
    */
   onRefreshRequest(listener: () => void): () => void;
+  /**
+   * Subscribe to the menu's "Search" item (CmdOrCtrl+F): the renderer focuses
+   * the search box of the screen on view. Returns an unsubscribe function.
+   */
+  onFindRequest(listener: () => void): () => void;
 }
 
 /** Auto-update lifecycle, pushed from main as electron-updater progresses. */

@@ -9,7 +9,8 @@
   "scripts": {
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build --config vite.renderer.config.ts",
-    "build": "npm run build:main && npm run build:renderer",
+    "build:native": "node scripts/build-locate.mjs",
+    "build": "npm run build:main && npm run build:renderer && npm run build:native",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "test": "npm run build:main && node tests/run-tests.cjs",
     "test:double-launch": "node tests/double-launch.smoke.cjs",
@@ -93,8 +94,16 @@
         }
       ],
       "category": "public.app-category.developer-tools",
+      "extraResources": [
+        {
+          "from": "dist/native/prd-locate.app",
+          "to": "prd-locate.app"
+        }
+      ],
       "extendInfo": {
-        "NSAppleEventsUsageDescription": "PR Dashboard opens Terminal to start a Claude session in a pull request's folder."
+        "NSAppleEventsUsageDescription": "PR Dashboard opens Terminal to start a Claude session in a pull request's folder.",
+        "NSLocationUsageDescription": "PR Dashboard shows the current weather for your location in its header.",
+        "NSLocationWhenInUseUsageDescription": "PR Dashboard shows the current weather for your location in its header."
       }
     },
     "nsis": {
