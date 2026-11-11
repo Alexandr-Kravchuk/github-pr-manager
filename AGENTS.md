@@ -134,9 +134,13 @@ Three layers:
   checkout (`in <folder>:`, started through `start_session`'s `cwd`), since a
   review in a foreign folder loads that folder's CLAUDE.md as its rules and
   searches the wrong code. The parent also adds to every nested prompt, word
-  for word, the user's permission to publish the review on the PR (never
-  `APPROVE`), since a request from another session is not the user's
-  consent; a default prompt is stored empty and an old default saved
+  for word, the user's permission to publish the review on the PR, since a
+  request from another session is not the user's consent. The template's
+  `{permission}` takes one of `REVIEW_GROUP_PERMISSIONS`: never `APPROVE` by
+  default, or — only with Settings → Claude → "Review all may approve"
+  (`reviewGroupApprove`, an explicit opt-in, because the approval goes out
+  under the user's own account) — an `APPROVE` of a review with no Blocker
+  and no Major, posted with `commit_id` of the head it read; a default prompt is stored empty and an old default saved
   verbatim is read through `PREVIOUS_DEFAULT_PROMPTS`, so a changed default
   reaches every user who never edited it. Each
   prompt starts with `groupMarker(kind, key)`: the session scanner records it

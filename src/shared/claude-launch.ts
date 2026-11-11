@@ -79,11 +79,42 @@ export const GROUP_PROMPT_KEY: Record<GroupLaunchKind, "explainGroup" | "reviewG
 };
 
 /**
+ * The first three of the lines "Review all" adds to every nested review prompt:
+ * the user's publishing permission, quoted in their own words since a request
+ * from another session is not their consent, and the rules that bound it.
+ * `hold` keeps every APPROVE for the user's word in that PR's session;
+ * `approve` lets a review with no Blocker and no Major approve the head commit
+ * it read — only for a user who turned on Settings → Claude → "Review all may
+ * approve" (`ClaudeSettings.reviewGroupApprove`), since the approval is posted
+ * under their own GitHub account.
+ */
+export const REVIEW_GROUP_PERMISSIONS: Record<"hold" | "approve", string> = {
+  hold:
+    "a) Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
+    "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
+    "Публікуй рев'ю на PR за цим дозволом. " +
+    "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
+    "or by a test; without that check, ask it as a question in the summary. " +
+    "c) APPROVE only on my separate word for that PR: this permission does not cover it.",
+  approve:
+    "a) Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
+    "Подія цього рев'ю — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю; `COMMENT`, коли лишився " +
+    "лише Major з низькою впевненістю; `APPROVE`, коли немає ні Blocker, ні жодного Major.». " +
+    "Публікуй рев'ю на PR за цим дозволом. " +
+    "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
+    "or by a test; without that check, ask it as a question in the summary — and it still blocks the APPROVE. " +
+    "c) Post the review through the reviews API (gh api …/pulls/{number}/reviews) with commit_id set to the head commit you " +
+    "reviewed, and APPROVE only while that commit is still the PR's head: when the PR has a newer commit, post a COMMENT " +
+    "instead and say so in your report.",
+};
+
+/**
  * `{url}` is replaced with the PR's URL. The group templates take `{key}` (the
  * group's Jira key), `{count}` and `{urls}` (the links, space-separated);
  * `reviewGroup` also takes `{prompts}` — each PR's own "Your review is due"
  * prompt, numbered, for the sessions it starts, behind the folder of that PR's
- * own checkout when it differs from the parent's (`in <folder>:`).
+ * own checkout when it differs from the parent's (`in <folder>:`) — and
+ * `{permission}`, one of `REVIEW_GROUP_PERMISSIONS` by the user's setting.
  */
 export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
   drive: "/drive-pr-green {url}",
@@ -104,12 +135,7 @@ export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
     "session there through start_session's cwd, so it reads that repository's rules and code; the others run in this folder. " +
     "Give each session its prompt word for word, and add to it these five lines, each word for word as a line of its own " +
     "and without its letter: " +
-    "a) Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
-    "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
-    "Публікуй рев'ю на PR за цим дозволом. " +
-    "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
-    "or by a test; without that check, ask it as a question in the summary. " +
-    "c) APPROVE only on my separate word for that PR: this permission does not cover it. " +
+    "{permission} " +
     "d) Skip the PR when I already reviewed it after its last commit. " +
     "e) Start your report with the link to the review you published on the PR (#pullrequestreview-…) and your decision, " +
     "or with why you published none. " +
@@ -164,6 +190,30 @@ export const PREVIOUS_DEFAULT_PROMPTS: Partial<Record<ClaudePromptKey, readonly 
     "The prompts: {prompts}. " +
     "When every session has reported, give me one summary: for each PR the link to its review, its decision and its Blocker and Major findings, " +
     "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently.",
+    // Reads whole reports and leaves per-PR decisions to the PR's session; the
+    // permission lines were written out in full before `{permission}`.
+    "Review the {count} pull requests of {key} that wait for my review. Do not review them here: start one session per PR " +
+    "with the start_session tool (initiation user_asked, context fresh, use_worktree false), so each review runs in its own " +
+    "session nested under this one. A prompt that starts with a folder (in, the folder, a colon) is that PR's own repository: start its " +
+    "session there through start_session's cwd, so it reads that repository's rules and code; the others run in this folder. " +
+    "Give each session its prompt word for word, and add to it these five lines, each word for word as a line of its own " +
+    "and without its letter: " +
+    "a) Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
+    "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
+    "Публікуй рев'ю на PR за цим дозволом. " +
+    "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
+    "or by a test; without that check, ask it as a question in the summary. " +
+    "c) APPROVE only on my separate word for that PR: this permission does not cover it. " +
+    "d) Skip the PR when I already reviewed it after its last commit. " +
+    "e) Start your report with the link to the review you published on the PR (#pullrequestreview-…) and your decision, " +
+    "or with why you published none. " +
+    "The prompts: {prompts}. " +
+    "When every session has reported, give me one summary: for each PR the link to its review, its decision and its Blocker and Major findings, " +
+    "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently. " +
+    "Read each report whole with list_events, paging back to the session's last message, since the note on a session's turn " +
+    "keeps only its first 400 characters. " +
+    "A later decision on one PR — a review its session could not publish, an APPROVE — is mine to give in that PR's session: " +
+    "link me to the session and leave my answer for me to type there, so each session hears it once and from me.",
   ],
 };
 
@@ -204,7 +254,9 @@ export const MAX_GROUP_PRS = 30;
  * `folders[i]` is where the review of `prs[i]` should run — its repository's
  * checkout — or null to run it in the parent's folder: a review started in
  * another repository's folder loads that repository's CLAUDE.md as its own
- * rules and searches the wrong code for callers and patterns.
+ * rules and searches the wrong code for callers and patterns. `approve`
+ * picks the review permission (`REVIEW_GROUP_PERMISSIONS`) that fills
+ * `{permission}`.
  */
 export function renderGroupPrompt(
   prompts: Partial<Record<ClaudePromptKey, string>>,
@@ -212,11 +264,13 @@ export function renderGroupPrompt(
   key: string,
   prs: readonly Pick<PullRequest, "url">[],
   folders: readonly (string | null)[] = [],
+  approve = false,
 ): string {
   const templateKey = GROUP_PROMPT_KEY[kind];
   const template = prompts[templateKey]?.trim() || DEFAULT_CLAUDE_PROMPTS[templateKey];
   const fill = (text: string, token: string, value: string) => text.split(token).join(value);
-  let filled = fill(template, "{key}", key);
+  let filled = fill(template, "{permission}", REVIEW_GROUP_PERMISSIONS[approve ? "approve" : "hold"]);
+  filled = fill(filled, "{key}", key);
   filled = fill(filled, "{count}", String(prs.length));
   filled = fill(filled, "{urls}", prs.map((p) => p.url).join(" "));
   filled = fill(
@@ -260,6 +314,7 @@ export const DEFAULT_CLAUDE_SETTINGS: ClaudeSettings = {
   prompts: { ...DEFAULT_CLAUDE_PROMPTS },
   agentPrompts: { ...DEFAULT_AGENT_PROMPTS },
   terminal: "auto",
+  reviewGroupApprove: false,
 };
 
 export const CLAUDE_LAUNCH_LABEL: Record<ClaudeLaunchKind, string> = {

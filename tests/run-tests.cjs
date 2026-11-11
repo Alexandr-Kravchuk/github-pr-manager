@@ -8395,6 +8395,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(cfg.validateClaude({ terminal: "iterm" }).terminal, "iterm");
       assert.strictEqual(cfg.validateClaude({ terminal: "xterm" }).terminal, "auto");
       assert.strictEqual(cfg.validateClaude({ terminal: "desktop" }).terminal, "desktop");
+      // Review all may approve only on an explicit true.
+      assert.strictEqual(cfg.validateClaude({}).reviewGroupApprove, false);
+      assert.strictEqual(cfg.validateClaude({ reviewGroupApprove: "true" }).reviewGroupApprove, false);
+      assert.strictEqual(cfg.validateClaude({ reviewGroupApprove: true }).reviewGroupApprove, true);
       assert.strictEqual(
         cl.claudeDesktopUrl("/Users/me/my repo", "/drive-pr-green https://x/pull/1?a=b&c"),
         "claude://code/new?q=%2Fdrive-pr-green%20https%3A%2F%2Fx%2Fpull%2F1%3Fa%3Db%26c&folder=%2FUsers%2Fme%2Fmy%20repo",
@@ -8712,7 +8716,27 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ),
         "the publishing permission is quoted word for word",
       );
+      // Without the opt-in every APPROVE waits for the user's word.
       assert.match(defaultReview, /APPROVE only on my separate word for that PR/);
+      assert.doesNotMatch(defaultReview, /\{permission\}/);
+      // Opted in, a review with no Blocker and no Major approves, as one review pinned to the head it read.
+      const approving = cl.renderGroupPrompt({}, "review", "ENG-7", prs, [], true);
+      assert.ok(
+        approving.includes(
+          "Подія цього рев'ю — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю; `COMMENT`, коли лишився " +
+            "лише Major з низькою впевненістю; `APPROVE`, коли немає ні Blocker, ні жодного Major.». " +
+            "Публікуй рев'ю на PR за цим дозволом.",
+        ),
+        "the approving permission is quoted word for word",
+      );
+      assert.doesNotMatch(approving, /`APPROVE` не ставити|APPROVE only on my separate word/);
+      assert.match(approving, /it still blocks the APPROVE/, "a Major asked as a question blocks the approval");
+      assert.match(approving, /with commit_id set to the head commit you reviewed/, "the approval is pinned to the reviewed SHA");
+      // A custom template without the token is the user's own text: the setting does not touch it.
+      assert.strictEqual(
+        cl.renderGroupPrompt({ reviewGroup: "Review {key}: {prompts}" }, "review", "ENG-7", prs, [], true),
+        cl.renderGroupPrompt({ reviewGroup: "Review {key}: {prompts}" }, "review", "ENG-7", prs),
+      );
       assert.match(defaultReview, /low confidence is a ground for REQUEST_CHANGES only once it is checked/);
       assert.match(defaultReview, /Start your report with the link to the review you published/);
       assert.match(defaultReview, /for each PR the link to its review, its decision/);
@@ -8816,8 +8840,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           opened[1].includes(`1) in ${path.join(root, "core")}: /creatio-code-review https://github.com/acme/core/pull/1 2) /creatio-code-review https://github.com/acme/ui/pull/2`),
           "the core PR is reviewed in core's checkout, the ui ones in the parent's folder",
         );
+        assert.ok(opened[1].includes("APPROVE only on my separate word for that PR"), "no opt-in: every APPROVE waits for the user");
+        const approving = await launcher.launchGroup("review", "ENG-7", prs, { ...settings, reviewGroupApprove: true }, { openUrl });
+        assert.strictEqual(approving.ok, true);
+        assert.ok(opened.pop().includes("with commit_id set to the head commit you reviewed"), "the opt-in reaches the prompt");
 
-        const terminal = await launcher.launchGroup("review", "ENG-7", prs, { ...settings, terminal: "auto" }, { openUrl });
+        const terminal =await launcher.launchGroup("review", "ENG-7", prs, { ...settings, terminal: "auto" }, { openUrl });
         assert.match(terminal.ok ? "" : terminal.error, /only Claude Desktop/);
         const notDue = await launcher.launchGroup("review", "ENG-7", [at("acme/ui", 4, { roles: ["author"] })], settings, { openUrl });
         assert.match(notDue.ok ? "" : notDue.error, /waits for your review/);

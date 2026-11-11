@@ -298,6 +298,8 @@ export function validateClaude(raw: unknown): ClaudeSettings {
       obj.terminal === "iterm" || obj.terminal === "terminal" || obj.terminal === "desktop"
         ? obj.terminal
         : d.terminal,
+    // Only an explicit true opts in: the approval goes out under the user's account.
+    reviewGroupApprove: obj.reviewGroupApprove === true,
   };
 }
 

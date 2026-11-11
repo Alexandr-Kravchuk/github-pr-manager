@@ -194,6 +194,12 @@ export interface ClaudeSettings {
    * every launch. `iterm` / `terminal` fall back to `auto` off macOS.
    */
   terminal: ClaudeTerminal;
+  /**
+   * "Review all" lets a nested review with no Blocker and no Major APPROVE the
+   * head commit it read (`REVIEW_GROUP_PERMISSIONS.approve`). Off by default:
+   * the approval is posted under the user's own GitHub account.
+   */
+  reviewGroupApprove: boolean;
 }
 
 /** Persisted application settings (userData/settings.json) — no tokens. */

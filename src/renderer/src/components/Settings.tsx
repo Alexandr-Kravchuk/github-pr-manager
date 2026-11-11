@@ -1028,6 +1028,21 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                 Its subfolders are matched to a PR by their git remote. A folder set below wins.
               </p>
             </div>
+            <label className={cn("flex items-start gap-3", claude.enabled ? undefined : "hidden")}>
+              <input
+                type="checkbox"
+                checked={claude.reviewGroupApprove}
+                onChange={(e) => setClaude((prev) => ({ ...prev, reviewGroupApprove: e.target.checked }))}
+                className="mt-0.5 h-4 w-4 accent-sky-500"
+              />
+              <span>
+                <span className="block text-sm text-fg-secondary">Review all may approve</span>
+                <span className="block text-xs text-fg-faint">
+                  A review session that finds no Blocker and no Major approves the commit it reviewed, under
+                  your GitHub account. Off: it posts a comment and leaves the approval to you.
+                </span>
+              </span>
+            </label>
             {(
               [
                 ["drive", "Your PR is blocked (CI, conflict, threads, changes requested)"],
