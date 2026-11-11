@@ -284,7 +284,7 @@ export async function launchGroup(
           return own && own !== dir ? own : null;
         })
       : [];
-  const prompt = renderGroupPrompt(settings.prompts, kind, key, prs, folders);
+  const prompt = renderGroupPrompt(settings.prompts, kind, key, prs, folders, settings.reviewGroupApprove);
   const error = await startSession(dir, prompt, settings, opts.openUrl);
   return error ? { ok: false, error } : { ok: true, count: prs.length, dir };
 }
