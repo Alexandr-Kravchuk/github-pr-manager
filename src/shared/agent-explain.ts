@@ -285,6 +285,8 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
             : `The agent drafted a review that ${plan?.event === "REQUEST_CHANGES" ? "requests changes" : "comments"}: ${plural(n, "inline comment")}.`;
         }
         if (pushedBack > 0) now += ` The author pushed back on ${plural(pushedBack, "comment")} — your call below.`;
+        const held = plan?.held?.length ?? 0;
+        if (held > 0) now += ` It also wrote in ${held === 1 ? "a colleague's thread" : `${held} colleagues' threads`}; a review answers only in yours, so that stays out — it is shown below.`;
         ask = approve ? "Read the summary, then approve — or discard it." : pushedBack > 0 ? "Decide on the pushed-back comments, check the rest, then send." : "Check what goes out, then send — or edit or discard it.";
         choices = [
           {

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
-import { describePlan, disputeSteps, gitBashPath, readPlanLines, summarizePlan, type PublishStep } from "../../shared/agent-publish";
+import { describePlan, disputeSteps, gitBashPath, readPlanLines, summarizePlan, type PublishStep, type PublishSummary } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
@@ -31,6 +31,7 @@ import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type Installed
 import {
   ghApiArgs,
   ghError,
+  heldWrites,
   planHash,
   prepareRunFolder,
   publishedCount,
@@ -322,6 +323,8 @@ function scenarioRules(
       `That wrapper is the app's own — it records each write for the user and posts nothing; the app publishes what it recorded${later}. ` +
       `Write every file the wrapper takes (the review JSON, a comment JSON, a reply's text) under ${out}/ and pass that absolute path — nothing else is writable — and never call gh api for a write. ` +
       threads +
+      // The publish check holds such a write back anyway; said here so the session doesn't spend its words on one.
+      `Reply and resolve only in threads you opened (their first comment is yours — \`gh api user\` gives your login): never in a thread a colleague opened, even to follow up on it — put that point in the review body instead. The app holds back any reply or resolve in a colleague's thread and shows it to the user. ` +
       `${jira} End with a short summary of what you prepared${scenario === "rereview" ? ", resolved and escalated" : ""}. ${never}`
     );
   }
@@ -1567,10 +1570,11 @@ export function createAgent(deps: AgentDeps): Agent {
           }
         }
       } else if (steps.length > 0) {
-        item.plan = summarizePlan(steps);
+        item.plan = await summarizeReview(item, steps);
         item.planHash = planHash(planText);
         item.headline = `Would post: ${describePlan(item.plan)}`;
-        publishNow = item.mode === "on";
+        // A write held back is yours to answer: On waits for you rather than send the rest past it.
+        publishNow = item.mode === "on" && !item.plan.held?.length;
       } else {
         // Nothing captured to post: there's nothing to send — the report says what it found.
         item.state = "done";
@@ -1722,6 +1726,28 @@ export function createAgent(deps: AgentDeps): Agent {
   }
 
   /**
+   * A review's plan as the card shows it, with its replies and resolves in
+   * colleagues' threads set aside (`held`): a review answers only in threads
+   * you opened, and finding that out on Approve failed the whole publish —
+   * the approve with it — over a write you never needed to send. When the PR
+   * or your login can't be read now, nothing is set aside here and the check
+   * at publish refuses such a write with its reason, as before.
+   */
+  async function summarizeReview(item: AgentItemRecord, steps: readonly PublishStep[]): Promise<PublishSummary> {
+    const plan = summarizePlan(steps);
+    if (!steps.some((st) => st.kind === "reply" || st.kind === "resolve")) return plan;
+    const read = await fresh(item, snapshotPr(item.prId)?.roles ?? ["reviewer"]);
+    if (!read.ok || !read.fresh.viewer) return plan;
+    const held = await heldWrites(steps, item.url, item.repo, item.prNumber, read.fresh.viewer, gh).catch(() => []);
+    if (held.length === 0) return plan;
+    const heldReplies = new Set(held.flatMap((h) => (h.replyTo !== undefined ? [h.replyTo] : [])));
+    plan.replies = plan.replies.filter((r) => !heldReplies.has(r.replyTo));
+    plan.resolves -= held.filter((h) => h.kind === "resolve").length;
+    plan.held = held.map((h) => (h.body !== undefined && h.body.length > 4_000 ? { ...h, body: `${h.body.slice(0, 4_000)}…` } : h));
+    return plan;
+  }
+
+  /**
    * Posts what a review prepared — on your Publish (`byYou`) or, in On, right
    * after the run. The PR is read again first: a new push since the review
    * stops it (the review would talk about code that isn't the head), as does
@@ -1830,6 +1856,7 @@ export function createAgent(deps: AgentDeps): Agent {
         signature: all.agent.policy.signature,
         holdApprove,
         ...(rr ? { allowResolve: rr.resolve, allowApprove: rr.approve } : {}),
+        ...(item.plan.held?.length ? { held: item.plan.held } : {}),
       },
       // A review answers and resolves only in threads you opened; your own PR's
       // drive answers reviewers in theirs and resolves nothing, as after a push.
@@ -1842,7 +1869,7 @@ export function createAgent(deps: AgentDeps): Agent {
       // Edited in the session since you saw it: show the new plan, post nothing.
       if (publishedCount(item.runFolder) > 0) return refuse("part of it went out already and the rest changed in the session — run it again");
       const text = readPlanText(item.runFolder);
-      item.plan = summarizePlan(readPlanLines(text));
+      item.plan = drive ? summarizePlan(readPlanLines(text)) : await summarizeReview(item, readPlanLines(text));
       if (postsDiagrams(item, all.agent)) item.plan.diagrams = item.diagrams!.list.length;
       item.planHash = planHash(text);
       item.planEdited = true;
@@ -1854,7 +1881,7 @@ export function createAgent(deps: AgentDeps): Agent {
       return { ok: false, error: "It changed in the session since you saw it — check what it would post now, then Publish." };
     }
     if (!out.ok) {
-      return refuse(`stopped after ${out.posted} of ${out.total}: ${out.error}`);
+      return refuse(out.posted > 0 ? `posted ${out.posted} of ${out.total}, then stopped: ${out.error}` : `nothing was posted: ${out.error}`);
     }
     item.published = true;
     item.state = "done";

@@ -10822,6 +10822,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(send.does, /^Posts an approval on GitHub under your name, signed by the agent/);
       assert.match(e.next, /author can merge/);
       assert.ok(choice(e, "Discard"), "and a way out");
+      // A write held back in a colleague's thread is said in the words, not only shown.
+      const heldPlan = { ...plan("APPROVE"), held: [{ kind: "reply", replyTo: 3, author: "colleague", url: null, body: "b" }] };
+      const h = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: heldPlan })]);
+      assert.match(h.now, /suggests approving\. It also wrote in a colleague's thread; a review answers only in yours, so that stays out/);
       // Request changes, with the comments counted, and the re-review after.
       const rc = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: plan("REQUEST_CHANGES") })]);
       assert.strictEqual(rc.now, "The agent drafted a review that requests changes: 1 inline comment.");
@@ -11067,6 +11071,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const line = (pr, items) => view.stageLine(stage(pr, items), pr);
       const esc = { ...plan("REQUEST_CHANGES", 1), escalations: [{ replyTo: 9, body: "b" }] };
       assert.strictEqual(line(rPr(), [sIt({ state: "needsYou", plan: esc })]), "Request changes · 1 comment · 1 reply · 1 pushed back");
+      const held = { ...plan("APPROVE", 0), held: [{ kind: "reply", replyTo: 3, author: "colleague", url: null, body: "b" }] };
+      assert.strictEqual(line(rPr(), [sIt({ state: "needsYou", plan: held })]), "Approve · 1 comment · 1 held back");
       assert.strictEqual(line(sPr(), [sIt({ scenario: "drive", reasons: ["self"], state: "needsYou", drive: drive(2) })]), "Self-review: 2 fixes ready to push");
       assert.strictEqual(
         line(sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(1), plan: plan("COMMENT", 2) })]),
@@ -12134,6 +12140,52 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(plugins.mountUserSkills("/nope", owned, mount, skills), { prompt: "/nope", pluginDirs: [] });
     });
 
+    await atest("agent publish: a review's reply in a colleague's thread is held back when the run ends, and Approve posts the rest", async () => {
+      const posted = [];
+      const authors = { 3: "colleague", 4: "me" };
+      const f = agentFixture({
+        script: (c) => {
+          const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+          const runDir = path.dirname(outDir);
+          const record = (...a) => {
+            const r = spawnSync(process.execPath, [captureJs, runDir, ...a], { encoding: "utf8" });
+            if (r.status !== 0) throw new Error(r.stderr);
+          };
+          nfsA.writeFileSync(path.join(outDir, "review.json"), JSON.stringify({ event: "APPROVE", body: "Looks good", comments: [] }));
+          record("review", "a/b", "7", path.join(outDir, "review.json"));
+          nfsA.writeFileSync(path.join(outDir, "r3.txt"), "Follow-up on your question");
+          record("reply", "a/b", "7", "3", path.join(outDir, "r3.txt"));
+          nfsA.writeFileSync(path.join(outDir, "r4.txt"), "Fixed, thanks");
+          record("reply", "a/b", "7", "4", path.join(outDir, "r4.txt"));
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review." });
+          setImmediate(() => c.emit("exit", 0));
+        },
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => {
+          const m = /^repos\/a\/b\/pulls\/comments\/(\d+)$/.exec(args[1]);
+          if (m && !opts?.input) {
+            return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", html_url: `https://github.com/a/b/pull/7#discussion_r${m[1]}`, user: { login: authors[m[1]] } }), stderr: "" };
+          }
+          posted.push(args[1]);
+          return { code: 0, stdout: "{}", stderr: "" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.headline, "Would post: approve, 1 reply, 1 held back for you");
+        assert.deepStrictEqual(item.plan.replies.map((r) => r.replyTo), [4]);
+        assert.deepStrictEqual(item.plan.held.map((h) => [h.kind, h.replyTo, h.author, h.body]), [["reply", 3, "colleague", "Follow-up on your question"]]);
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/4/replies"], "the approve goes out; the colleague's thread gets nothing");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
     await atest("agent publish: a shadow review's writes are captured, then posted on your Publish — signed, once, at the head it saw", async () => {
       const posted = [];
       const notices = [];
@@ -12331,13 +12383,41 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "colleague" } }), stderr: "" };
       };
       const url = "https://github.com/a/b/pull/7";
-      assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /not yours/);
-      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /colleague's thread/);
+      assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /resolving colleague's thread/);
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /a reply in colleague's thread/);
       assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), null, "a drive answers a reviewer in theirs");
       const myReplyInTheirs = async () => ({ code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "me" }, in_reply_to_id: 1 }), stderr: "" });
-      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 4, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, myReplyInTheirs), /not the start of a thread/, "your reply in a colleague's thread is still theirs");
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 4, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, myReplyInTheirs), /doesn't open its thread/, "your reply in a colleague's thread is still theirs");
       assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), /doesn't resolve/);
       assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: null, mine: true }, gh), /login on the host is unknown/);
+    });
+
+    await atest("publish: a review's writes in colleagues' threads are held back, named all at once, and skipped by Publish", async () => {
+      const url = "https://github.com/a/b/pull/7";
+      const authors = { 3: "colleague", 4: "me", 5: "other" };
+      const gh = async (args) => {
+        const id = Number(/comments\/(\d+)$/.exec(args[1])[1]);
+        return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", html_url: `${url}#discussion_r${id}`, user: { login: authors[id] } }), stderr: "" };
+      };
+      const steps = [
+        { kind: "review", event: "APPROVE", body: "b", comments: [] },
+        { kind: "reply", replyTo: 3, body: "follow-up" },
+        { kind: "reply", replyTo: 4, body: "fixed" },
+        { kind: "reply", replyTo: 5, body: "also" },
+      ];
+      const held = await publishMod.heldWrites(steps, url, "a/b", 7, "me", gh);
+      assert.deepStrictEqual(held.map((h) => [h.replyTo, h.author, h.url]), [[3, "colleague", `${url}#discussion_r3`], [5, "other", `${url}#discussion_r5`]]);
+      assert.strictEqual(held[0].body, "follow-up", "the card shows what it would have said");
+      // Publish leaves them out and checks only what goes out.
+      const ctx = { repo: "a/b", number: 7, signature: "s", holdApprove: false, held };
+      assert.deepStrictEqual(pub.planRequests(steps, ctx).map((r) => r.endpoint), ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/4/replies"]);
+      assert.strictEqual(await publishMod.checkPlanTargets(pub.postedSteps(steps, ctx), url, "a/b", 7, { viewer: "me", mine: true }, gh), null);
+      // Unheld (a plan edited since), every one is named at once, with its link and what to do.
+      const all = await publishMod.checkPlanTargets(steps, url, "a/b", 7, { viewer: "me", mine: true }, gh);
+      assert.match(all, /a reply in colleague's thread \(https:\/\/github\.com\/a\/b\/pull\/7#discussion_r3\); a reply in other's thread/);
+      assert.match(all, /Edit in Claude to drop them/);
+      assert.deepStrictEqual(await publishMod.heldWrites(steps, url, "a/b", 7, "me", async () => ({ code: 1, stdout: "", stderr: "boom" })), [], "unreadable: left to the publish check");
+      assert.strictEqual(pub.describePlan({ ...pub.summarizePlan(steps.slice(0, 1)), held }), "approve, 2 held back for you");
     });
 
     test("mapPr: the author's latest thread answer, a reviewer's latest open-thread comment, and whether the branch is in a fork", () => {
@@ -12819,6 +12899,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(rules, /review-not-posted/);
         assert.match(rules, /escalate a\/b 7 <replyTo> <file>/);
         assert.match(rules, /don't argue with your colleague/);
+        assert.match(rules, /Reply and resolve only in threads you opened/);
         f.agent.onSnapshot(f.snapshot);
         assert.strictEqual(only(f).length, 1, "the same answer is re-reviewed once");
       } finally {

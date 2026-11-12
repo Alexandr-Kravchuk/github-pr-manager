@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { isUsableWrapperPath, planRequests, postedSteps, readPlanLines, type PublishContext, type PublishRequest, type PublishStep, type PublishSub } from "../../shared/agent-publish";
+import { isUsableWrapperPath, planRequests, postedSteps, readPlanLines, type HeldWrite, type PublishContext, type PublishRequest, type PublishStep, type PublishSub } from "../../shared/agent-publish";
 import { launcherEnv } from "../../shared/claude-launch";
 import { PLAN_FILE, type CaptureRun } from "./capture";
 
@@ -185,7 +185,7 @@ function readDone(runDir: string): number {
 export type PublishOutcome = { ok: true; posted: number; total: number } | { ok: false; error: string; posted: number; total: number; changed?: boolean };
 
 const THREAD_PR_QUERY =
-  "query($id:ID!){ node(id:$id){ ... on PullRequestReviewThread { isResolved pullRequest { number repository { nameWithOwner } } comments(first:1){ nodes{ author{ login } } } } } }";
+  "query($id:ID!){ node(id:$id){ ... on PullRequestReviewThread { isResolved pullRequest { number repository { nameWithOwner } } comments(first:1){ nodes{ url author{ login } } } } } }";
 
 /**
  * Whose threads a plan may touch. A review answers and resolves only threads
@@ -206,11 +206,90 @@ function json(text: string): unknown {
   }
 }
 
+type StepCheck = { ok: true } | { held: HeldWrite } | { error: string };
+
+/**
+ * One reply or resolve against GitHub: fine, held back (it lands in a thread
+ * a colleague opened, and this is a review), or refused outright (another PR,
+ * an unreadable target, a run that may not do it).
+ */
+async function checkStep(s: PublishStep, prUrl: string, repo: string, number: number, targets: PlanTargets, gh: GhRunner): Promise<StepCheck> {
+  const here = `${repo}#${number}`.toLowerCase();
+  const me = targets.viewer?.toLowerCase() ?? null;
+  if (s.kind === "resolve") {
+    if (!targets.mine) return { error: `this run doesn't resolve threads (${s.threadId})` };
+    if (!me) return { error: "couldn't tell whose threads these are — your login on the host is unknown" };
+    const r = await gh(["api", "graphql", "--input", "-", ...hostFlag(prUrl)], { input: JSON.stringify({ query: THREAD_PR_QUERY, variables: { id: s.threadId } }) });
+    if (r.code !== 0) return { error: `couldn't check thread ${s.threadId}: ${ghError(r)}` };
+    type ThreadNode = {
+      isResolved?: boolean;
+      pullRequest?: { number?: number; repository?: { nameWithOwner?: string } };
+      comments?: { nodes?: Array<{ url?: string; author?: { login?: string } | null }> };
+    };
+    const t = (json(r.stdout) as { data?: { node?: ThreadNode } } | null)?.data?.node;
+    const pr = t?.pullRequest;
+    if (!pr || `${pr.repository?.nameWithOwner ?? ""}#${pr.number}`.toLowerCase() !== here) return { error: `thread ${s.threadId} is not on ${repo}#${number}` };
+    const first = t?.comments?.nodes?.[0];
+    const author = first?.author?.login ?? null;
+    if ((author ?? "").toLowerCase() !== me) return { held: { kind: "resolve", threadId: s.threadId, author, url: first?.url ?? null } };
+    return { ok: true };
+  }
+  if (s.kind === "reply") {
+    const r = await gh(["api", `repos/${repo}/pulls/comments/${s.replyTo}`, ...hostFlag(prUrl)]);
+    if (r.code !== 0) return { error: `couldn't check comment ${s.replyTo}: ${ghError(r)}` };
+    const c = json(r.stdout) as { pull_request_url?: unknown; html_url?: unknown; user?: { login?: unknown }; in_reply_to_id?: unknown } | null;
+    const url = String(c?.pull_request_url ?? "").toLowerCase();
+    if (!url.endsWith(`/repos/${repo}/pulls/${number}`.toLowerCase())) return { error: `comment ${s.replyTo} is not on ${repo}#${number}` };
+    if (targets.mine) {
+      if (!me) return { error: "couldn't tell whose threads these are — your login on the host is unknown" };
+      const author = typeof c?.user?.login === "string" ? c.user.login : null;
+      const link = typeof c?.html_url === "string" ? c.html_url : null;
+      // The thread's first comment, and yours: a reply of yours in a colleague's thread is still their thread.
+      if (c?.in_reply_to_id != null || (author ?? "").toLowerCase() !== me) {
+        return { held: { kind: "reply", replyTo: s.replyTo, body: s.body, author: c?.in_reply_to_id != null ? null : author, url: link } };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+/** "a reply in a-kravchuk's thread (https://…)" — one held write, as a person reads it. */
+export function describeHeld(h: HeldWrite): string {
+  // No author on a reply: it answers a comment in the middle of a thread, whoever opened it.
+  const what =
+    h.kind === "reply" ? (h.author ? `a reply in ${h.author}'s thread` : "a reply to a comment that doesn't open its thread") : `resolving ${h.author ? `${h.author}'s thread` : "a thread you didn't open"}`;
+  return h.url ? `${what} (${h.url})` : what;
+}
+
+/**
+ * The replies and resolves of a review that land in threads a colleague
+ * opened. Read when the run ends, so the card shows them as held back and
+ * Approve posts the rest; a target the check can't read is left to
+ * `checkPlanTargets`, which refuses it at publish with the reason.
+ */
+export async function heldWrites(
+  steps: readonly PublishStep[],
+  prUrl: string,
+  repo: string,
+  number: number,
+  viewer: string | null,
+  gh: GhRunner = runGh,
+): Promise<HeldWrite[]> {
+  const out: HeldWrite[] = [];
+  for (const s of postedSteps(steps, {})) {
+    if (s.kind !== "reply" && s.kind !== "resolve") continue;
+    const c = await checkStep(s, prUrl, repo, number, { viewer, mine: true }, gh);
+    if ("held" in c) out.push(c.held);
+  }
+  return out;
+}
+
 /**
  * Whether every thread a plan resolves and every comment it replies to is on
  * this PR — or why not. A thread id or comment id is just a value the session
  * wrote; on its own it could name a thread on any PR your account can reach.
- * Checked against GitHub before anything is posted.
+ * Checked against GitHub before anything is posted. Every step is checked, so
+ * the answer names all that is wrong at once, not one per press of Publish.
  */
 export async function checkPlanTargets(
   steps: readonly PublishStep[],
@@ -220,38 +299,20 @@ export async function checkPlanTargets(
   targets: PlanTargets,
   gh: GhRunner = runGh,
 ): Promise<string | null> {
-  const here = `${repo}#${number}`.toLowerCase();
-  const me = targets.viewer?.toLowerCase() ?? null;
+  const errors: string[] = [];
+  const held: HeldWrite[] = [];
   for (const s of steps) {
-    if (s.kind === "resolve") {
-      if (!targets.mine) return `this run doesn't resolve threads (${s.threadId})`;
-      if (!me) return "couldn't tell whose threads these are — your login on the host is unknown";
-      const r = await gh(["api", "graphql", "--input", "-", ...hostFlag(prUrl)], { input: JSON.stringify({ query: THREAD_PR_QUERY, variables: { id: s.threadId } }) });
-      if (r.code !== 0) return `couldn't check thread ${s.threadId}: ${ghError(r)}`;
-      type ThreadNode = {
-        isResolved?: boolean;
-        pullRequest?: { number?: number; repository?: { nameWithOwner?: string } };
-        comments?: { nodes?: Array<{ author?: { login?: string } | null }> };
-      };
-      const t = (json(r.stdout) as { data?: { node?: ThreadNode } } | null)?.data?.node;
-      const pr = t?.pullRequest;
-      if (!pr || `${pr.repository?.nameWithOwner ?? ""}#${pr.number}`.toLowerCase() !== here) return `thread ${s.threadId} is not on ${repo}#${number}`;
-      if ((t?.comments?.nodes?.[0]?.author?.login ?? "").toLowerCase() !== me) return `thread ${s.threadId} is not yours — the agent never closes a colleague's thread`;
-    } else if (s.kind === "reply") {
-      const r = await gh(["api", `repos/${repo}/pulls/comments/${s.replyTo}`, ...hostFlag(prUrl)]);
-      if (r.code !== 0) return `couldn't check comment ${s.replyTo}: ${ghError(r)}`;
-      const c = json(r.stdout) as { pull_request_url?: unknown; user?: { login?: unknown }; in_reply_to_id?: unknown } | null;
-      const url = String(c?.pull_request_url ?? "").toLowerCase();
-      if (!url.endsWith(`/repos/${repo}/pulls/${number}`.toLowerCase())) return `comment ${s.replyTo} is not on ${repo}#${number}`;
-      if (targets.mine) {
-        if (!me) return "couldn't tell whose threads these are — your login on the host is unknown";
-        // The thread's first comment, and yours: a reply of yours in a colleague's thread is still their thread.
-        if (c?.in_reply_to_id != null) return `comment ${s.replyTo} is a reply, not the start of a thread — a review answers only in threads it opened`;
-        if (String(c?.user?.login ?? "").toLowerCase() !== me) return `comment ${s.replyTo} opens a colleague's thread — a review answers only in yours`;
-      }
-    }
+    const c = await checkStep(s, prUrl, repo, number, targets, gh);
+    if ("error" in c && !errors.includes(c.error)) errors.push(c.error);
+    else if ("held" in c) held.push(c.held);
   }
-  return null;
+  if (held.length > 0) {
+    errors.push(
+      `${held.map(describeHeld).join("; ")} — a review answers and resolves only in threads you opened. ` +
+        `Use Edit in Claude to drop ${held.length === 1 ? "it" : "them"}, or answer there yourself on GitHub`,
+    );
+  }
+  return errors.length > 0 ? errors.join("; ") : null;
 }
 
 const PR_THREADS_QUERY =

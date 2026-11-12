@@ -231,6 +231,28 @@ export interface PublishContext {
   allowResolve?: boolean;
   /** Re-review: approve once your threads are closed (Settings › Agent › re-review: approve). Absent = yes; off turns an approve into a comment. */
   allowApprove?: boolean;
+  /** Writes set aside when the run ended (`HeldWrite`): they are not posted, and the rest goes out without them. */
+  held?: ReadonlyArray<Pick<HeldWrite, "replyTo" | "threadId">>;
+}
+
+/**
+ * A reply or resolve the session recorded in a thread a colleague opened. A
+ * review answers and resolves only in threads you opened, so the app sets it
+ * aside when the run ends and shows it to you, instead of failing the whole
+ * publish on it once you press Approve.
+ */
+export interface HeldWrite {
+  kind: "reply" | "resolve";
+  /** The comment a reply answers. */
+  replyTo?: number;
+  /** The thread a resolve closes. */
+  threadId?: string;
+  /** What the reply would have said. */
+  body?: string;
+  /** Who opened the thread, when GitHub said. */
+  author: string | null;
+  /** The thread on GitHub, when GitHub said. */
+  url: string | null;
 }
 
 /** Comment ids the session handed back to you: replies to them are held back. */
@@ -243,10 +265,15 @@ function escalatedTargets(steps: readonly PublishStep[]): Set<number> {
  * writes), no reply to a thread that was escalated, no resolve when resolving
  * is off. `planRequests` and the publish progress both count over this list.
  */
-export function postedSteps(steps: readonly PublishStep[], ctx: Pick<PublishContext, "allowResolve">): PublishStep[] {
+export function postedSteps(steps: readonly PublishStep[], ctx: Pick<PublishContext, "allowResolve" | "held">): PublishStep[] {
   const escalated = escalatedTargets(steps);
+  const heldReplies = new Set((ctx.held ?? []).flatMap((h) => (h.replyTo !== undefined ? [h.replyTo] : [])));
+  const heldThreads = new Set((ctx.held ?? []).flatMap((h) => (h.threadId !== undefined ? [h.threadId] : [])));
   return steps.filter(
-    (s) => s.kind !== "escalate" && !(s.kind === "reply" && escalated.has(s.replyTo)) && !(s.kind === "resolve" && ctx.allowResolve === false),
+    (s) =>
+      s.kind !== "escalate" &&
+      !(s.kind === "reply" && (escalated.has(s.replyTo) || heldReplies.has(s.replyTo))) &&
+      !(s.kind === "resolve" && (ctx.allowResolve === false || heldThreads.has(s.threadId))),
   );
 }
 
@@ -335,6 +362,8 @@ export interface PublishSummary {
   commitId?: string;
   /** Diagrams that go out with it, as one comment (set by the app after drawing, not by the session). */
   diagrams?: number;
+  /** Replies and resolves in colleagues' threads: not posted, shown to you (set by the app when the run ends). */
+  held?: HeldWrite[];
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
@@ -376,6 +405,7 @@ export function describePlan(p: PublishSummary): string {
     n(p.replies.length, "reply", "replies"),
     n(p.resolves, "resolve", "resolves"),
     n(p.escalations?.length ?? 0, "dispute for you", "disputes for you"),
+    n(p.held?.length ?? 0, "held back for you", "held back for you"),
     n(p.diagrams ?? 0, "diagram", "diagrams"),
   ]) {
     if (part) parts.push(part);
