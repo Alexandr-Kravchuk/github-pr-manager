@@ -3,6 +3,19 @@ import type { PlanStep } from "./agent-stream";
 import { isReviewDue } from "./pr-filter";
 import type { AgentItem, AgentRunState, AgentSettings, AgentState, PullRequest } from "./types";
 
+/**
+ * Why the agent leaves a PR alone while a Claude session of yours holds it — the
+ * plan's reason, and the one the Board reads to offer no "Let the agent …" on
+ * that PR: a second session on one PR edits the same branch and answers the
+ * same threads twice.
+ */
+export const OWN_SESSION_WHY = "Your Claude session is on it";
+
+/** True when `why` says a Claude session of yours holds the PR. */
+export function isOwnSessionWhy(why: string | null | undefined): boolean {
+  return typeof why === "string" && why.toLowerCase().includes(OWN_SESSION_WHY.toLowerCase());
+}
+
 // How the agent's state reads on the dashboard: where each PR stands on the
 // Board and what its card, the chip, the tray and a notification say about
 // it. Node-free (the renderer value-imports it) and pure, so the rules are
@@ -391,6 +404,8 @@ export function resultAction(item: AgentItem, lane: BoardLane): StageAction | nu
       if (!item.plan || item.published) return null;
       return { kind: "send", label: item.plan.event === "APPROVE" ? "Approve" : item.scenario === "rereview" ? "Send re-review" : "Send review" };
     case "drive": {
+      // Commits in its worktree the app couldn't read: never "nothing to push", never a Send on its own.
+      if (item.localWork && !item.localWork.kept && item.localWork.ahead !== 0) return { kind: "push", label: "Unpushed work" };
       if ((item.result?.asks.length ?? 0) > 0) return { kind: "decide", label: "Your call" };
       const n = item.drive?.commits.length ?? 0;
       const replies = item.plan && !item.published ? item.plan.replies.length : 0;
@@ -677,6 +692,10 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
         .filter(Boolean)
         .join(" · ");
     }
+    if (kind === "push" && item.localWork && !item.localWork.kept) {
+      const a = item.localWork.ahead;
+      return `${a === null ? "Commits" : count(a, "commit")} in the run's worktree the app couldn't read — not on the PR`;
+    }
     if (kind === "push") {
       const n = item.drive?.commits.length ?? 0;
       const what = (item.reasons ?? []).map((x) => REASON_NAME[x] ?? x).join(" + ") || "The agent";
@@ -763,6 +782,7 @@ export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item:
       return `${action.label === "Approve" ? "Approval" : item.scenario === "rereview" ? "Re-review" : "Review"} ready to send: ${pr}`;
     case "push": {
       const n = item.drive?.commits.length ?? 0;
+      if (action.label === "Unpushed work") return `Unpushed work in the run's worktree: ${pr}`;
       return action.label === "Push & reply" ? `Fixes and replies ready to push: ${pr}` : `${n} fix${n === 1 ? "" : "es"} ready to push: ${pr}`;
     }
     case "merge":

@@ -110,6 +110,7 @@ for (const mod of [
   "agent-reapprove.js",
   "agent-stack.js",
   "agent-explain.js",
+  "agent-followup.js",
   "stale.js",
   "jira-status.js",
   "weather.js",
@@ -8339,6 +8340,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     };
     const pick = (patch) => cl.pickClaudeLaunch({ ...quiet, ...patch }, { trackComments: true });
 
+    test("cloneCommand: clones where findCheckout looks — the repo's own folder, else <projects root>/<name>", () => {
+      assert.strictEqual(cl.cloneCommand(quiet, null), "git clone https://github.com/acme/widgets.git ~/Projects/widgets");
+      assert.strictEqual(
+        cl.cloneCommand({ url: "https://creatio.ghe.com/eng/ui/pull/1", repo: "eng/ui" }, { projectsRoot: "~/Code/", repoPaths: {} }),
+        "git clone https://creatio.ghe.com/eng/ui.git ~/Code/ui",
+      );
+      assert.strictEqual(
+        cl.cloneCommand(quiet, { projectsRoot: "", repoPaths: { "acme/widgets": "/Users/me/My Repos/w" } }),
+        'git clone https://github.com/acme/widgets.git "/Users/me/My Repos/w"',
+        "a path with a space is quoted",
+      );
+      assert.strictEqual(cl.cloneCommand({ url: "not a url", repo: "acme/widgets" }, null), null);
+    });
+
     test("claude launch: own blocked PR → drive, review due → review, own mergeable → close, else open", () => {
       assert.strictEqual(pick({ failingChecks: [{ name: "ci" }] }), "drive");
       assert.strictEqual(pick({ hasConflicts: true }), "drive");
@@ -9769,6 +9784,55 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "gh api 'repos/acme/widgets/contents?ref=release'" }, gpr).allow, true, "quoted, it reads");
     });
 
+    test("agent guard: a full-context drive does anything but write to GitHub", () => {
+      const run = { mode: "full", workDir: "/wt", outDir: "/T/r/out", wrapperPath: "/T/r/bin/pr-review-publish.sh", subs: ["reply"] };
+      const ok = (tool, input) => guard.checkToolUse("drive", tool, input, gpr, run);
+      for (const cmd of [
+        "git status && git log -3 | head",
+        "git commit -F ~/notes.txt",
+        "stand list",
+        "npm test",
+        "gh pr view 12 --json state",
+        "gh pr checks 12",
+        "gh run view 5 --log-failed",
+        "gh api repos/acme/widgets/pulls/12/comments",
+        "gh api graphql -f query='query { viewer { login } }'",
+        "twg jira workitem get ENG-1",
+        "cat ~/.zshrc | grep x",
+        "/T/r/bin/pr-review-publish.sh reply acme/widgets 12 77 /T/r/out/reply.txt",
+      ]) assert.deepStrictEqual(ok("Bash", { command: cmd }), { allow: true }, cmd);
+      for (const cmd of [
+        "git push",
+        "git push origin HEAD",
+        "git -C /wt push",
+        "cd /wt && git push --force",
+        "FOO=1 git push",
+        "sudo /usr/bin/git push",
+        "bash -c 'git push origin x'",
+        "echo \"$(git push)\"",
+        "git -c alias.p=push p",
+        "gh pr comment 12 --body hi",
+        "gh pr review 12 --approve",
+        "gh pr merge 12",
+        "gh issue comment 3 -b x",
+        "gh release create v1",
+        "gh api -X POST repos/acme/widgets/issues/12/comments -f body=x",
+        "gh api --method=PATCH repos/acme/widgets/pulls/12",
+        "gh api repos/acme/widgets/issues/12/comments -f body=x",
+        "gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: \"x\"}) { thread { id } } }'",
+        "gh api repos/acme/widgets/pulls/12/reviews --input r.json",
+        "/T/r/bin/pr-review-publish.sh resolve PRRT_x",
+      ]) assert.strictEqual(ok("Bash", { command: cmd }).allow, false, cmd);
+      for (const tool of ["Read", "Edit", "Write", "WebFetch", "WebSearch", "mcp__clio__get-page", "mcp__ghe__pull_request_read", "mcp__ghe__get_file_contents", "mcp__ghe__list_commits", "mcp__plugin_github_github__search_code"]) {
+        assert.deepStrictEqual(ok(tool, { file_path: "/Users/me/.claude/CLAUDE.md" }), { allow: true }, tool);
+      }
+      for (const tool of ["mcp__ghe__add_issue_comment", "mcp__ghe__merge_pull_request", "mcp__ghe__push_files", "mcp__ghe__pull_request_review_write", "mcp__github__create_pull_request", "mcp__ghe__update_pull_request", "mcp__ghe__issue_write"]) {
+        assert.strictEqual(ok(tool, {}).allow, false, tool);
+      }
+      assert.strictEqual(guard.checkToolUse("review", "mcp__clio__get-page", {}, gpr, run).allow, false, "a review never runs full, whatever its guard file says");
+      assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: "/elsewhere/a.ts" }, gpr, { ...run, mode: undefined }).allow, false, "without the mode, the isolated rules");
+    });
+
     test("agent guard: drive may build, test and commit on its own PR", () => {
       for (const cmd of ["npm test", "npm run typecheck", "git status", "git add src/x.ts", "git commit -m fix", "git log -3"]) {
         assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: cmd }).allow, true, cmd);
@@ -10013,7 +10077,19 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       timeoutMs: 60_000,
       ...over,
     });
-    test("agent runner: the isolation flags are always there, and --allowedTools comes last", () => {
+    test("agent runner: full context drops the isolation flags and keeps the guard, the stream and the rules", () => {
+      const a = runner.buildClaudeArgs(spec({ kind: "drive", isolation: "full", pluginDirs: ["/p/mine"] }));
+      for (const flag of ["--restricted", "--strict-mcp-config", "--tools"]) assert.ok(!a.includes(flag), flag);
+      const at = (f) => a[a.indexOf(f) + 1];
+      assert.strictEqual(at("--permission-prompts"), "none");
+      assert.strictEqual(at("--settings"), "/s/settings.json");
+      assert.strictEqual(at("--input-format"), "stream-json");
+      assert.strictEqual(at("--plugin-dir"), "/p/mine");
+      assert.ok(a.includes("--append-system-prompt"));
+      assert.deepStrictEqual(a.slice(a.indexOf("--allowedTools")), ["--allowedTools", "Read", "Bash(gh pr view *)", "mcp__jira__get", "TaskCreate"], "the drive's rules add to yours");
+      assert.ok(runner.buildClaudeArgs(spec({ isolation: "restricted" })).includes("--restricted"));
+    });
+    test("agent runner: restricted runs carry the isolation flags, and --allowedTools comes last", () => {
       const a = runner.buildClaudeArgs(spec());
       for (const flag of ["-p", "--verbose", "--restricted", "--strict-mcp-config"]) assert.ok(a.includes(flag), flag);
       const at = (f) => a[a.indexOf(f) + 1];
@@ -10133,6 +10209,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    test("agent language: the rule names the chosen language and keeps GitHub posts out of it", () => {
+      assert.match(agentCore.agentRules("review", "shadow"), /meant for the user in English/, "English by default");
+      for (const [id, name] of [["uk", "Ukrainian"], ["pl", "Polish"]]) {
+        const r = agentCore.agentRules("drive", "on", null, null, id);
+        assert.match(r, new RegExp(`meant for the user in ${name}`));
+        assert.match(r, /prd-result block/);
+        assert.match(r, /review comments, thread replies, commit messages/);
+        assert.match(r, /author questions are not for the user/, "a brief's author questions go into a review on GitHub");
+      }
+      assert.strictEqual(cfg.validateAgent(undefined).language, "en");
+      assert.strictEqual(cfg.validateAgent({ language: "uk" }).language, "uk");
+      assert.strictEqual(cfg.validateAgent({ language: "pl" }).language, "pl");
+      assert.strictEqual(cfg.validateAgent({ language: "de" }).language, "en", "an unknown language falls back");
+    });
+
     test("agent: a host whose fetch failed or whose budget is nearly spent is held", () => {
       const snap = { pullRequests: [], errors: [{ hostLabel: "A", message: "x" }], rateLimits: [{ hostLabel: "B", remaining: 10, limit: 5000, cost: 1, resetAt: "" }, { hostLabel: "C", remaining: 4000, limit: 5000, cost: 1, resetAt: "" }] };
       assert.strictEqual(agentCore.hostHeld(snap, "A"), "Host unreachable");
@@ -10154,7 +10245,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid, now } = {}) => {
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid, now, claudeConfigDir } = {}) => {
       // `home`: the folder of an earlier fixture — the same app started again.
       const dir = home ?? nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
@@ -10200,6 +10291,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           return c;
         },
         tickMs,
+        // Where a session continued with "Open in Claude" writes its transcript; never your real ~/.claude.
+        claudeConfigDir: claudeConfigDir ?? path.join(dir, "claude-config"),
         // A test that waits out a delay sets the clock.
         ...(now ? { now } : {}),
       });
@@ -10345,9 +10438,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         f.agent.onSnapshot(f.snapshot);
         await new Promise((r) => setTimeout(r, 30));
         assert.deepStrictEqual(f.agent.getState().items, []);
-        assert.strictEqual(f.agent.getState().idle.PR_R, "No checkout of a/b — set its folder in Settings › Claude");
+        assert.strictEqual(f.agent.getState().idle.PR_R, "No checkout of a/b — clone it with `git clone https://github.com/a/b.git ~/Projects/b`, or set its folder in Settings › Claude");
         assert.deepStrictEqual([f.children.length, notices], [0, []], "nothing started, no toast");
-        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: false, error: "No checkout of a/b — set its folder in Settings › Claude." });
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: false, error: "No checkout of a/b — clone it with `git clone https://github.com/a/b.git ~/Projects/b`, or set its folder in Settings › Claude." });
         assert.deepStrictEqual(f.agent.getState().items, [], "a refused ask leaves no failed card behind");
         // The repository cloned (or its folder set): the next plan picks the PR up.
         cloned = true;
@@ -10693,6 +10786,57 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent act: nothing starts on a PR a Claude session of yours is on — asked, or waiting in the queue", async () => {
+      const csm = require(path.join(__dirname, "../dist/main/shared/claude-sessions.js"));
+      const sessions = [];
+      const f = agentFixture({ pr: reviewPr({ requestedOfMe: false }), script: keepWorking, sessions });
+      try {
+        const pr = f.snapshot.pullRequests[0];
+        const yours = { id: "yours", name: "PR 7 by hand", status: "idle", where: "terminal", prKeys: [csm.prUrlKey(pr.url)], repoKeys: [], branch: null };
+        sessions.push(yours);
+        const refused = await f.agent.act({ type: "enqueue", prId: pr.id });
+        assert.deepStrictEqual(refused, { ok: false, error: 'Your Claude session "PR 7 by hand" is on this PR — carry on there, or end it first.' });
+        assert.strictEqual(only(f).length, 0, "nothing queued beside it");
+        // Paused by Claude Desktop: still on it, and the refusal says how to let go of it.
+        yours.status = "paused";
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: pr.id }), { ok: false, error: 'Your Claude session "PR 7 by hand" is on this PR, paused in Claude Desktop — carry on there, or archive it first.' });
+        yours.status = "idle";
+        sessions.length = 0;
+        // Queued while the agent is paused, then the session opens before it starts: it waits.
+        await f.agent.act({ type: "pauseAgent" });
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: pr.id }), { ok: true });
+        sessions.push(yours);
+        await f.agent.act({ type: "resumeAgent" });
+        await until(() => /your Claude session "PR 7 by hand" is on it/.test(only(f)[0]?.headline ?? ""));
+        assert.strictEqual(only(f)[0].state, "queued");
+        assert.strictEqual(f.children.length, 0, "no session started");
+        // The session ends: the next tick starts the run.
+        sessions.length = 0;
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a session list that changed plans again — the PR whose session ended loses its 'Your Claude session is on it'", async () => {
+      const csm = require(path.join(__dirname, "../dist/main/shared/claude-sessions.js"));
+      const view = require(path.join(__dirname, "../dist/main/shared/agent-view.js"));
+      const sessions = [];
+      const f = agentFixture({ pr: reviewPr(), script: keepWorking, sessions });
+      try {
+        const pr = f.snapshot.pullRequests[0];
+        sessions.push({ id: "yours", name: "PR 7 by hand", status: "idle", where: "terminal", prKeys: [csm.prUrlKey(pr.url)], repoKeys: [], branch: null });
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.agent.getState().idle[pr.id], view.OWN_SESSION_WHY);
+        sessions.length = 0;
+        f.agent.sessionsChanged();
+        assert.notStrictEqual(f.agent.getState().idle[pr.id], view.OWN_SESSION_WHY, "planned again without waiting for the PRs to change");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
     const ipcAgent = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
     test("ipc: an agent action is a known type on a run id; a hint is trimmed and bounded", () => {
       const RID = "00000000-0000-4000-8000-000000000001";
@@ -10873,6 +11017,38 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // The same run before any restart: its own question and push, as ever.
       const live = xOne(mine, [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2) })]);
       assert.strictEqual(live.choices[0].label, "Push 2 fixes");
+    });
+
+    test("agent board words: commits your session left that the app couldn't read — named with their folder, never \"nothing to push\", no Send", () => {
+      const mine = xPr();
+      const lw = { worktree: "/wt/agent-ui-4161", ahead: 4, dirty: false, reason: "the app restarted since the run" };
+      // The case of creatio-ui#4161: 2 replies recorded, 0 commits read, 4 commits in the worktree.
+      const e = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(2), sessionId: "s", worktree: "/wt/agent-ui-4161", needsRerun: true, localWork: lw })]);
+      assert.deepStrictEqual([e.owner, e.stage.action.kind, e.stage.action.label], ["you", "push", "Unpushed work"]);
+      assert.doesNotMatch(e.now, /nothing to push/);
+      assert.match(e.now, /left 4 commits in \/wt\/agent-ui-4161 that the app couldn't read \(the app restarted since the run\)\. They are not on the PR, and its replies may cite them\./);
+      assert.deepStrictEqual(e.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
+        ["Open in Claude", "continue", true],
+        ["Run again", "retry", false],
+        ["Discard", "skip", false],
+      ]);
+      assert.match(e.choices[1].does, /without the 4 commits — the worktree stays with them/);
+      assert.ok(!e.choices.some((c) => c.act?.type === "publish"), "no Send while the replies may cite commits not on the PR");
+      assert.strictEqual(view.stageLine(e.stage, mine), "4 commits in the run's worktree the app couldn't read — not on the PR");
+      // Nothing in the worktree: the card is what it was.
+      const none = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), plan: answers(2), sessionId: "s", worktree: "/w", localWork: { ...lw, ahead: 0 } })]);
+      assert.strictEqual(none.stage.action.label, "Send 2 replies");
+    });
+
+    test("agent board words: no \"Let the agent …\" beside a Claude session of yours on the PR", () => {
+      const view2 = require(path.join(__dirname, "../dist/main/shared/agent-view.js"));
+      const idle = { P: view2.OWN_SESSION_WHY, R: "yours — " + view2.OWN_SESSION_WHY.toLowerCase() };
+      const board = (pr) => ex.explainBoard([pr], [pr], xState([]), { today: sToday, idle }).entries[0];
+      const review = board(xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true }));
+      assert.ok(!review.choices.some((c) => c.act), "nothing that starts the agent");
+      assert.strictEqual(review.ask, "Carry on in your Claude session — the agent stays off this PR while it is open.");
+      const red = board(xPr({ id: "R", ciState: "failure", failingChecks: [{ name: "build" }] }));
+      assert.ok(!red.choices.some((c) => c.act?.type === "enqueue"), "your PR with red CI: no Let the agent fix it");
     });
 
     test("agent board words: a review nobody started is the agent's to start — unless the agent is off", () => {
@@ -12999,6 +13175,44 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.ok(driveMod.isSshUrl("git@github.com:a/b.git") && driveMod.isSshUrl("ssh://git@h/a/b") && !driveMod.isSshUrl("https://h/a/b"));
     });
 
+    await atest("agent drive: with full context off, your PR's drive is isolated like a review", async () => {
+      const mine = { ...reviewPr({ role: "author" }), ciState: "failure", headRefName: "feature/x", baseRefName: "main", headOid: "a".repeat(40) };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const f = agentFixture({
+        pr: mine,
+        agent: { permissions: { fullContextDrive: false } },
+        script: succeed("Fixed."),
+        git: async (all) => {
+          let i = 0;
+          for (;;) {
+            if (all[i] === "-c") i += 2;
+            else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+            else break;
+          }
+          const args = all.slice(i);
+          if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+          if (args[0] === "rev-parse") return args.includes("HEAD") ? `${"a".repeat(40)}\n` : `${commonDir}\n`;
+          if (args[0] === "remote") return "https://github.com/a/b.git\n";
+          return "";
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length > 0);
+        const c = f.children[0];
+        for (const flag of ["--restricted", "--strict-mcp-config", "--tools"]) assert.ok(c.args.includes(flag), flag);
+        const rules = c.args[c.args.indexOf("--append-system-prompt") + 1];
+        assert.doesNotMatch(rules, /own Claude setup/);
+        const runDir = path.dirname(c.args[c.args.indexOf("--settings") + 1]);
+        const guardFile = JSON.parse(nfsA.readFileSync(path.join(runDir, "guard.json"), "utf8"));
+        assert.ok(!("mode" in guardFile));
+        assert.ok(Array.isArray(guardFile.readDirs));
+      } finally {
+        f.agent.stop();
+      }
+    });
+
     await atest("agent drive: your red PR is driven in a session that can't push; on your Push the app pushes a fast-forward and counts the attempt", async () => {
       const mine = { ...reviewPr({ role: "author" }), ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
       let freshHead = "aaa111";
@@ -13045,6 +13259,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(rules, /Never push and never rewrite history/);
         assert.match(rules, /fetched for you as origin\/main/);
         assert.ok(f.gitCalls.some((a) => a[0] === "fetch" && a.includes("+refs/heads/main:refs/remotes/origin/main")), "the app fetches the base before the session");
+        // Your own PR runs with full context by default: your Claude setup, the guard in its "full" mode.
+        for (const flag of ["--restricted", "--strict-mcp-config", "--tools"]) assert.ok(!c.args.includes(flag), flag);
+        assert.match(rules, /runs with the user's own Claude setup/);
+        const fullGuard = JSON.parse(nfsA.readFileSync(path.join(path.dirname(c.args[c.args.indexOf("--settings") + 1]), "guard.json"), "utf8"));
+        assert.strictEqual(fullGuard.mode, "full");
+        assert.ok(!("readDirs" in fullGuard), "no folder limit on reads");
         assert.strictEqual(item.pushTo.url, "https://github.com/a/b.git");
         assert.match(rules, /Co-Authored-By: Claude/);
         const guardFile = JSON.parse(nfsA.readFileSync(path.join(path.dirname(c.args[c.args.indexOf("--settings") + 1]), "guard.json"), "utf8"));
@@ -13143,13 +13363,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
 
     // A drive session that finds nothing to fix in the code and answers the reviewers instead — through the run's wrapper.
-    const answerThreads = (ids) => (c) => {
+    const answerThreads = (ids, body = (id) => `Answer to ${id}.`) => (c) => {
       const outDir = c.args[c.args.indexOf("--add-dir") + 1];
       const runDir = path.dirname(outDir);
       const run = JSON.parse(nfsA.readFileSync(path.join(runDir, "run.json"), "utf8"));
       for (const id of ids) {
         const file = path.join(outDir, `reply-${id}.md`);
-        nfsA.writeFileSync(file, `Answer to ${id}.`);
+        nfsA.writeFileSync(file, body(id));
         const r = spawnSync(process.execPath, [captureJs, runDir, "reply", run.repo, String(run.number), String(id), file], { encoding: "utf8" });
         if (r.status !== 0) throw new Error(r.stderr);
       }
@@ -13221,6 +13441,600 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual([only(f)[0].state, only(f)[0].published, only(f)[0].headline], ["done", true, "Published: 2 replies"]);
         assert.strictEqual((await f.agent.act({ type: "publish", runId: item.runId })).ok, false, "never twice");
         assert.strictEqual(posted.length, 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    // --- "Open in Claude": the card follows the session you continued -------------
+    const followup = require(path.join(__dirname, "../dist/main/shared/agent-followup.js"));
+    const realTranscript = nfsA.readFileSync(path.join(__dirname, "fixtures", "transcript-resumed-session.jsonl"), "utf8");
+    const tLine = (o) => JSON.stringify(o);
+    const userLine = (text, at = "2026-11-12T12:00:00.000Z") => tLine({ type: "user", uuid: `u-${text}`, timestamp: at, isSidechain: false, message: { role: "user", content: text } });
+    const asstLine = (id, blocks, stop, uuid, at = "2026-11-12T12:00:05.000Z") => tLine({ type: "assistant", uuid, timestamp: at, isSidechain: false, message: { id, role: "assistant", stop_reason: stop, content: blocks } });
+    const block = (o) => "Done.\n\n```prd-result\n" + JSON.stringify(o) + "\n```";
+
+    test("followup: a real resumed session's transcript (anonymized) ends its turn with the result the card should take", () => {
+      const end = followup.readTurnEnd(realTranscript);
+      assert.strictEqual(end.state, "ended");
+      const read = followup.resultOfTurn(end.text, "drive");
+      assert.ok(read, "the final message carries a prd-result block");
+      assert.deepStrictEqual(read.card.asks, [], "nothing is asked any more");
+      assert.deepStrictEqual(read.card.findings.map((x) => x.severity), ["major", "minor"]);
+      assert.match(read.card.findings[0].text, /^Jest, type check and lint not run/);
+      assert.match(read.card.findings[1].text, /PR description/);
+      assert.ok(!read.body.includes("prd-result"), "the block is not part of the report");
+    });
+
+    test("followup: the real transcript cut before its final message is a turn still going", () => {
+      const lines = realTranscript.trim().split("\n");
+      const finalAt = lines.findIndex((l) => /"stop_reason": "end_turn"/.test(l) && /prd-result/.test(l));
+      assert.ok(finalAt > 0);
+      // Up to the user's prompt: the model has not answered yet.
+      assert.strictEqual(followup.readTurnEnd(lines.slice(0, 1).join("\n")).state, "open");
+      // The final message's line cut off mid-write is skipped: no result is read from what is left.
+      const cut = followup.readTurnEnd(lines.slice(0, finalAt).join("\n") + "\n" + lines[finalAt].slice(0, 200));
+      assert.ok(cut.state !== "ended" || followup.resultOfTurn(cut.text, "drive") === null);
+    });
+
+    test("followup: the last block of the final message counts — not one in the middle, not one of an earlier turn", () => {
+      const first = block({ summary: "first", asks: [{ question: "Which?", options: ["a", "b"] }], findings: [] });
+      const middle = "```prd-result\n" + JSON.stringify({ summary: "draft", asks: [{ question: "Old?", options: [] }], findings: [] }) + "\n```\n\nThen I went on.";
+      const last = block({ summary: "settled", asks: [], findings: [{ severity: "minor", text: "Description", where: "" }] });
+      const text = [
+        userLine("go"),
+        asstLine("m1", [{ type: "text", text: first }], "end_turn", "a1"),
+        userLine("answer: a", "2026-11-12T12:01:00.000Z"),
+        // One message written as several lines, one per content block.
+        asstLine("m2", [{ type: "text", text: middle }], "end_turn", "a2", "2026-11-12T12:01:05.000Z"),
+        asstLine("m2", [{ type: "text", text: last }], "end_turn", "a3", "2026-11-12T12:01:06.000Z"),
+        tLine({ type: "system", subtype: "turn_duration", uuid: "s1" }),
+      ].join("\n");
+      const end = followup.readTurnEnd(text);
+      assert.deepStrictEqual([end.state, end.uuid, end.at], ["ended", "a3", "2026-11-12T12:01:06.000Z"]);
+      const read = followup.resultOfTurn(end.text, "drive");
+      assert.strictEqual(read.card.summary, "settled");
+      assert.deepStrictEqual(read.card.asks, []);
+      assert.strictEqual(read.card.findings.length, 1);
+    });
+
+    test("followup: a turn going on — a tool call, a tool's answer, your new prompt, a subagent's lines — is not read", () => {
+      const done = asstLine("m1", [{ type: "text", text: block({ summary: "x", asks: [], findings: [] }) }], "end_turn", "a1");
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), done].join("\n")).state, "ended");
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), done, userLine("more", "2026-11-12T12:02:00.000Z")].join("\n")).state, "open");
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), asstLine("m2", [{ type: "text", text: "Looking" }, { type: "tool_use", id: "t", name: "Bash", input: {} }], "tool_use", "a2")].join("\n")).state, "open");
+      const tool = tLine({ type: "user", uuid: "r", isSidechain: false, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "" }] } });
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), tool].join("\n")).state, "open");
+      // A subagent's own end does not end the session's turn.
+      const side = tLine({ type: "assistant", uuid: "sc", isSidechain: true, message: { id: "m9", stop_reason: "end_turn", content: [{ type: "text", text: "sub" }] } });
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), side].join("\n")).state, "open");
+      // No stop reason written: the turn's end logged after it counts; a message with no such line doesn't.
+      const noStop = asstLine("m3", [{ type: "text", text: "ok" }], null, "a3");
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), noStop].join("\n")).state, "open");
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), noStop, tLine({ type: "system", subtype: "turn_duration" })].join("\n")).state, "ended");
+      assert.strictEqual(followup.readTurnEnd("").state, "none");
+    });
+
+    test("followup: a final message without a prd-result block leaves the card alone", () => {
+      assert.strictEqual(followup.resultOfTurn("Sure, here is how it works.", "drive"), null);
+      assert.strictEqual(followup.resultOfTurn("```prd-result\nnot json\n```", "drive"), null, "a broken block is no result either");
+    });
+
+    test("followup: a turn is new only once — after you continued, and not the one taken last", () => {
+      const end = { state: "ended", uuid: "a1", at: "2026-11-12T12:00:05.000Z", text: "" };
+      assert.strictEqual(followup.isNewTurn(end, { since: "2026-11-12T12:00:00.000Z" }), true);
+      assert.strictEqual(followup.isNewTurn(end, { since: "2026-11-12T12:00:10.000Z" }), false, "the run's own final message, from before");
+      assert.strictEqual(followup.isNewTurn(end, { since: "2026-11-12T12:00:00.000Z", seen: "a1" }), false);
+      assert.strictEqual(followup.isNewTurn({ state: "open" }, { since: "2026-11-12T12:00:00.000Z" }), false);
+    });
+
+    test("followup: what the card becomes — your call while it asks, Publish or Push while something is left, else done", () => {
+      const card = (asks, findings = []) => ({ summary: "s", asks, findings, authorQuestions: [], structured: true });
+      const ask = { question: "Move it here or a follow-up?", options: ["here", "follow-up"] };
+      const plan = { event: null, body: "", comments: [], replies: [{ replyTo: 1, body: "x" }], resolves: 0, escalations: [] };
+      const commits = { base: "a", head: "c", reasons: [], commits: [{ oid: "b", subject: "fix: one" }, { oid: "c", subject: "fix: two" }], stat: "", patch: "" };
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive" }, card([ask])), { state: "needsYou", headline: "Your call: Move it here or a follow-up?" });
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive", drive: commits, plan }, card([])), { state: "needsYou", headline: "Would push 2 commits: fix: two" });
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive", drive: { ...commits, commits: [] }, plan }, card([])).headline, "Would post: 1 reply");
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive", drive: commits }, card([]), true), { state: "done", headline: "Settled in your session" }, "pushed from the session: nothing left to push");
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive", drive: commits, pushed: true }, card([])).state, "done");
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive", plan, published: true }, card([])).state, "done", "replies already out");
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive" }, card([], [{ severity: "major", text: "Jest not run", where: "" }])).state, "done", "a major finding asks nothing of you");
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive" }, card([], [{ severity: "blocker", text: "Broken", where: "" }])), { state: "needsYou", headline: "Blocker left: Broken" });
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "review", plan: { ...plan, event: "COMMENT", replies: [] } }, card([])).state, "needsYou", "a review left to send");
+    });
+
+    test("followup: commits a session left that couldn't be read keep the card, with where they are — never \"nothing to push\" or done", () => {
+      const card = { summary: "s", asks: [], findings: [], authorQuestions: [], structured: true };
+      const plan = { event: null, body: "", comments: [], replies: [{ replyTo: 1, body: "x" }, { replyTo: 2, body: "y" }], resolves: 0, escalations: [] };
+      const unread = { worktree: "/wt/a", ahead: 4, reason: "the app restarted since the run" };
+      const o = followup.followedOutcome({ scenario: "drive", plan }, card, false, unread);
+      assert.deepStrictEqual(o, { state: "needsYou", headline: "4 commits of your session couldn't be read — the app restarted since the run; they are not on the PR, see /wt/a" });
+      assert.doesNotMatch(o.headline, /nothing to push|Would post/);
+      assert.strictEqual(followup.followedOutcome({ scenario: "drive" }, card, false, { ...unread, ahead: null }).headline, "Your session's commits couldn't be read — the app restarted since the run; they are not on the PR, see /wt/a");
+      assert.strictEqual(followup.followedOutcome({ scenario: "drive" }, card, false, { ...unread, ahead: 1 }).headline.slice(0, 35), "1 commit of your session couldn't b");
+      assert.strictEqual(followup.followedOutcome({ scenario: "drive" }, card, false, { ...unread, ahead: 0 }).state, "needsYou", "even with none counted it isn't closed unread");
+    });
+
+    test("publish: a drive's replies that cite commits not on the PR are found — prefixes match, plain numbers and words don't", () => {
+      const pubS = require(path.join(__dirname, "../dist/main/shared/agent-publish.js"));
+      assert.deepStrictEqual(pubS.mentionedShas("Fixed in 05e1f4e0bae and a4a3958; see #1234567, deadbeef, 1234567, f71119A5FA9."), ["05e1f4e0bae", "a4a3958", "f71119a5fa9"]);
+      assert.deepStrictEqual(pubS.mentionedShas("commit/05e1f4e0baeabcdef0123456789abcdef0123456 x05e1f4e"), ["05e1f4e0baeabcdef0123456789abcdef0123456"]);
+      const pr = ["f71119a5fa92f04a12764b108d2e4b103b18643e"];
+      const replies = [{ body: "Moved into a service in 05e1f4e0bae." }, { body: "Kept as is — see f71119a5fa9." }, { body: "Done in 05e1f4e." }];
+      assert.deepStrictEqual(pubS.shasNotOnPr(replies, pr), ["05e1f4e0bae", "05e1f4e"]);
+      assert.deepStrictEqual(pubS.shasNotOnPr(replies, [...pr, "05e1f4e0bae1111111111111111111111111111111"]), []);
+      assert.deepStrictEqual(pubS.shasNotOnPr([{ body: "No commit named." }], []), []);
+    });
+
+    test("drive: a push place rebuilt after a restart is refused while the repository's config redirects a push", () => {
+      const driveM = require(path.join(__dirname, "../dist/main/main/agent/drive.js"));
+      const out = ["file:/repo/.git/config", "url.git@evil:.pushinsteadof", "file:/home/me/.gitconfig", "url.https://mirror/.insteadof", "file:/repo/.git/config", "core.sshCommand", "file:/repo/.git/worktrees/x/config.worktree", "core.gitproxy", "file:/repo/.git/config", "user.name", ""].join("\0");
+      assert.deepStrictEqual(driveM.redirectingKeys(out, "/repo/wt", ["/repo/.git", "/repo/wt"], ["/home/me/.gitconfig"]), ["url.git@evil:.pushinsteadof", "core.sshcommand", "core.gitproxy"], "your global insteadOf is yours");
+      assert.deepStrictEqual(driveM.redirectingKeys("file:/repo/.git/config\0core.bare\0", "/repo/wt", ["/repo/.git"]), []);
+      // A push URL of its own, a credential program, a proxy — and anything an include brings in.
+      const more = ["file:/repo/.git/config", "remote.origin.pushurl", "file:/repo/.git/config", "credential.helper", "file:/repo/.git/config", "http.proxy", "file:/repo/.git/config", "include.path", "file:/tmp/x", "user.name", ""].join("\0");
+      assert.deepStrictEqual(driveM.redirectingKeys(more, "/repo/wt", ["/repo/.git"], ["/home/me/.gitconfig"]), ["remote.origin.pushurl", "credential.helper", "http.proxy", "include.path", "user.name (from /tmp/x)"]);
+    });
+
+    await atest("worktrees: a run's worktree with commits not on the PR, or changed files, holds work; its git folder is found from the clone's side", async () => {
+      const wtM = require(path.join(__dirname, "../dist/main/main/agent/worktrees.js"));
+      const base = nfsA.realpathSync(nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-keep-")));
+      const g = (cwd, ...args) => {
+        const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" });
+        if (r.status !== 0) throw new Error(r.stderr);
+        return r.stdout.trim();
+      };
+      const clone = path.join(base, "clone");
+      nfsA.mkdirSync(clone);
+      g(clone, "init", "-q");
+      nfsA.writeFileSync(path.join(clone, "a.txt"), "1\n");
+      g(clone, "add", "a.txt");
+      g(clone, "commit", "-q", "-m", "base");
+      const prHead = g(clone, "rev-parse", "HEAD");
+      const dir = path.join(base, "wts", "agent-b-7");
+      g(clone, "worktree", "add", "-q", "--detach", dir, prHead);
+      const common = path.join(clone, ".git");
+      const gitDir = wtM.worktreeGitDirFor(common, dir);
+      assert.ok(gitDir && gitDir.startsWith(path.join(common, "worktrees")), String(gitDir));
+      assert.deepStrictEqual(await wtM.recoverPlace(wtM.runGit, clone, dir), { commonDir: common, worktreeGitDir: gitDir });
+      // A rewritten .git file in the worktree doesn't move it.
+      nfsA.writeFileSync(path.join(dir, ".git"), `gitdir: ${path.join(base, "elsewhere")}\n`);
+      assert.strictEqual(wtM.worktreeGitDirFor(common, dir), gitDir);
+      nfsA.writeFileSync(path.join(dir, ".git"), `gitdir: ${gitDir}\n`);
+      let w = await wtM.readLocalWork(wtM.runGit, dir, [prHead], gitDir, true);
+      assert.deepStrictEqual(w, { ahead: 0, dirty: false, head: prHead });
+      assert.deepStrictEqual(await wtM.readLocalWork(wtM.runGit, dir, [prHead], null, true), { ahead: null, dirty: null, head: null }, "no git folder named: nothing read through the worktree's own .git");
+      assert.strictEqual((await wtM.readLocalWork(wtM.runGit, dir, [prHead], gitDir)).dirty, null, "files are read only when asked (git's config vouched for)");
+      assert.strictEqual(wtM.holdsWork(w), false, "nothing but the PR: it may go");
+      // The session commits on top of the run's head, as in creatio-ui#4161.
+      for (const n of [1, 2]) {
+        nfsA.writeFileSync(path.join(dir, "a.txt"), `${n + 1}\n`);
+        g(dir, "commit", "-q", "-am", `fix ${n}`);
+      }
+      w = await wtM.readLocalWork(wtM.runGit, dir, ["f".repeat(40), prHead], gitDir, true);
+      assert.deepStrictEqual([w.ahead, w.dirty], [2, false], "an unknown PR head falls back to the run's");
+      assert.strictEqual(wtM.holdsWork(w), true);
+      nfsA.writeFileSync(path.join(dir, "new.txt"), "x");
+      w = await wtM.readLocalWork(wtM.runGit, dir, [w.head], gitDir, true);
+      assert.deepStrictEqual([w.ahead, w.dirty, wtM.holdsWork(w)], [0, false, false], "a build's leftovers (untracked) don't keep it");
+      nfsA.writeFileSync(path.join(dir, "a.txt"), "changed\n");
+      w = await wtM.readLocalWork(wtM.runGit, dir, [w.head], gitDir, true);
+      assert.deepStrictEqual([w.ahead, w.dirty, wtM.holdsWork(w)], [0, true, true], "changed tracked files are work too");
+      w = await wtM.readLocalWork(wtM.runGit, dir, ["f".repeat(40)], gitDir);
+      assert.deepStrictEqual([w.ahead, w.dirty, wtM.holdsWork(w)], [null, null, true], "nothing to compare with: kept");
+      assert.strictEqual(wtM.keepRef("62bb101d-a6bf-49ae-ab22-9bd095811d14"), "refs/prd-agent/62bb101d-a6bf-49ae-ab22-9bd095811d14");
+      assert.strictEqual(wtM.keepRef("../../heads/main"), null, "only a run id of the app's own shape");
+      nfsA.rmSync(base, { recursive: true, force: true });
+    });
+
+    // A drive that asks you something, then the session you continue from its card.
+    const askingDrive = (c) => {
+      emit(c, { type: "system", subtype: "init", session_id: "s" });
+      const text = block({ summary: "Waits on your decision", asks: [{ question: "Move the cleanup into a service, or a follow-up Jira?", options: ["Service", "Follow-up"] }], findings: [{ severity: "blocker", text: "Cleanup ownership is open", where: "" }] });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: text });
+      setImmediate(() => c.emit("exit", 0));
+    };
+    /** The session you continued writes a turn: optional replies through the run's wrapper, then its final message. */
+    const continuedTurn = (f, item, finalText, { replies = [], file } = {}) => {
+      for (const id of replies) {
+        const run = JSON.parse(nfsA.readFileSync(path.join(item.runFolder, "run.json"), "utf8"));
+        const out = path.join(run.outDir, `reply-${id}.md`);
+        nfsA.writeFileSync(out, `Answer to ${id}.`);
+        const r = spawnSync(process.execPath, [captureJs, item.runFolder, "reply", run.repo, String(run.number), String(id), out], { encoding: "utf8" });
+        if (r.status !== 0) throw new Error(r.stderr);
+      }
+      const folder = path.join(f.dir, "claude-config", "projects", item.worktree.replace(/[^a-zA-Z0-9]/g, "-"));
+      nfsA.mkdirSync(folder, { recursive: true });
+      const at = new Date(Date.now() + 1000).toISOString();
+      const target = file ?? path.join(folder, `${item.sessionId}.jsonl`);
+      nfsA.appendFileSync(target, [userLine("Service", at), asstLine(`m-${at}`, [{ type: "text", text: finalText }], "end_turn", `a-${at}`, at), tLine({ type: "system", subtype: "turn_duration" })].join("\n") + "\n");
+      // Written a while ago: still files are read, ones being written wait.
+      const past = new Date(Date.now() - 10_000);
+      nfsA.utimesSync(target, past, past);
+      return target;
+    };
+    const commitsGit = (commonDir, head, state) => async (all) => {
+      let i = 0;
+      for (;;) {
+        if (all[i] === "-c") i += 2;
+        else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+        else break;
+      }
+      const args = all.slice(i);
+      if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+      if (args[0] === "rev-parse") return args.includes("HEAD") ? `${state.commits.length ? state.commits[0][0] : head}\n` : `${commonDir}\n`;
+      if (args[0] === "remote") return "https://github.com/a/b.git\n";
+      if (args[0] === "log") return state.commits.map(([oid, subject]) => `${oid}\t${subject}\n`).join("");
+      if (args[0] === "diff") return args.includes("--stat") ? " a.ts | 2 +-" : "+x";
+      return "";
+    };
+    const followFixture = (state, extra = {}) => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const opened = [];
+      const f = agentFixture({ pr: mine, script: askingDrive, captureScript: captureJs, git: commitsGit(commonDir, A, state), tickMs: 20, openResume: async (dir, sid) => void opened.push([dir, sid]), ...extra });
+      return { f, opened };
+    };
+    const continueIt = async (f) => {
+      await until(() => only(f).some((i) => i.state === "needsYou"));
+      const item = only(f)[0];
+      assert.strictEqual(actionLabel(item), "Your call");
+      nfsA.mkdirSync(item.worktree, { recursive: true });
+      // The run's own final message is in the transcript already: the card must not take it again.
+      continuedTurn(f, item, "old");
+      await new Promise((r) => setTimeout(r, 20));
+      assert.deepStrictEqual(await f.agent.act({ type: "continue", runId: item.runId }), { ok: true });
+      assert.ok(only(f)[0].follow, "the card follows the session now");
+      return only(f)[0];
+    };
+
+    await atest("agent follow: replies recorded in the session you continued — no question left, the card offers Send instead of Your call", async () => {
+      const { f, opened } = followFixture({ commits: [] });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        assert.deepStrictEqual(opened, [[item.worktree, item.sessionId]]);
+        continuedTurn(f, item, block({ summary: "Moved it into a service; replies queued.", asks: [], findings: [{ severity: "major", text: "Jest not run", where: "" }, { severity: "minor", text: "PR description outdated", where: "" }] }), { replies: [127652457, 127652462] });
+        await until(() => only(f)[0].result.summary === "Moved it into a service; replies queued.");
+        const now = only(f)[0];
+        assert.strictEqual(now.state, "needsYou");
+        assert.deepStrictEqual(now.result.asks, [], "the old question is gone, not kept beside the new result");
+        assert.deepStrictEqual(now.result.findings.map((x) => x.severity), ["major", "minor"], "replaced, not appended");
+        assert.strictEqual(actionLabel(now), "Send 2 replies");
+        assert.strictEqual(now.headline, "Would post: 2 replies");
+        assert.deepStrictEqual(now.plan.replies.map((r) => r.replyTo), [127652457, 127652462]);
+        const log = nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8");
+        assert.match(log, /"event":"followed"/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    /**
+     * A clone with a run's worktree as git answers for it: `state.commits` on
+     * top of the run's head (`git log`), `state.ahead` counted on top of the
+     * PR (`rev-list --count HEAD ^<base>`), `state.head` the worktree's HEAD,
+     * `state.ancestors` what `merge-base --is-ancestor <x> HEAD` accepts.
+     */
+    const worktreeGit = (commonDir, A, state, calls) => async (all) => {
+      let i = 0;
+      for (;;) {
+        if (all[i] === "-c") i += 2;
+        else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+        else break;
+      }
+      const args = all.slice(i);
+      calls?.push(args);
+      if (args[0] === "config") return state.config ?? `file:${commonDir}/config\0core.bare\0`;
+      if (args[0] === "rev-parse") {
+        if (args.includes("HEAD")) return `${state.head ?? (state.commits.length ? state.commits[0][0] : A)}\n`;
+        return args.includes("--git-dir") ? `${commonDir}/worktrees/w\n` : `${commonDir}\n`;
+      }
+      if (args[0] === "remote") return "https://github.com/a/b.git\n";
+      if (args[0] === "log") return state.commits.map(([oid, subject]) => `${oid}\t${subject}\n`).join("");
+      if (args[0] === "diff") return args.includes("--stat") ? " a.ts | 2 +-" : "+x";
+      if (args[0] === "rev-list") return args.includes("--min-parents=2") ? "0\n" : `${state.ahead ?? 0}\n`;
+      if (args[0] === "status") return state.dirty ? " M a.ts\n" : "";
+      if (args[0] === "merge-base") {
+        if ([A, ...(state.ancestors ?? [])].includes(args[2])) return "";
+        throw new Error("git merge-base: not an ancestor");
+      }
+      return "";
+    };
+    /** The clone lists the run's worktree, as `git worktree add` leaves it. */
+    const listWorktree = (commonDir, worktree) => {
+      nfsA.mkdirSync(path.join(commonDir, "worktrees", "w"), { recursive: true });
+      nfsA.writeFileSync(path.join(commonDir, "worktrees", "w", "gitdir"), path.join(worktree, ".git") + "\n");
+    };
+    const fourCommits = ["1", "2", "3", "4"].map((d) => [d.repeat(40), `refactor: step ${d}`]).reverse();
+
+    await atest("agent restart: a drive's worktree is read again — the commits your session made after the run come back as a Push, not \"nothing to push\" (creatio-ui#4161, case B)", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const state = { commits: [] };
+      const f = agentFixture({ pr: mine, script: askingDrive, captureScript: captureJs, git: worktreeGit(commonDir, A, state), tickMs: 20, openResume: async () => {} });
+      let again;
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        assert.strictEqual(only(f)[0].drive.commits.length, 0);
+        f.agent.stop();
+        // Meanwhile the session made 4 commits; the worktree is still there.
+        listWorktree(commonDir, item.worktree);
+        state.commits = fourCommits;
+        state.ahead = 4;
+        again = agentFixture({ home: f.dir, pr: mine, script: askingDrive, git: worktreeGit(commonDir, A, state), tickMs: 20 });
+        assert.strictEqual(only(again)[0].needsRerun, true, "until the first snapshot names the PR's clone");
+        again.agent.onSnapshot(again.snapshot);
+        await until(() => only(again)[0].drive?.commits.length === 4);
+        const now = only(again)[0];
+        assert.strictEqual(now.needsRerun, undefined, "nothing left to run again for");
+        assert.strictEqual(now.pushTo.recovered, true, "rebuilt, not taken before the session");
+        assert.strictEqual(now.pushTo.worktreeGitDir, path.join(commonDir, "worktrees", "w"), "found from the clone's side");
+        const log = nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8");
+        assert.match(log, /"event":"recovered"/);
+        // The session's next turn settles the question: the card offers the push.
+        continuedTurn(again, now, block({ summary: "Moved into a service.", asks: [], findings: [] }));
+        await until(() => only(again)[0].result.summary === "Moved into a service.");
+        assert.strictEqual(only(again)[0].headline, "Would push 4 commits: refactor: step 4");
+        assert.strictEqual(actionLabel(only(again)[0]), "Push 4 fixes");
+      } finally {
+        f.agent.stop();
+        again?.agent.stop();
+      }
+    });
+
+    await atest("agent restart: a push place that can't be rebuilt (a push URL of its own) — the card says how many commits and where, and holds back Send", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const state = { commits: [] };
+      const f = agentFixture({ pr: mine, script: answerThreads([101, 102], () => "Moved it into a service in 4444444444."), captureScript: captureJs, git: worktreeGit(commonDir, A, state), tickMs: 20 });
+      let again;
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        f.agent.stop();
+        state.ahead = 4;
+        listWorktree(commonDir, item.worktree);
+        // The session set a push URL of its own: nothing from before it vouches for where a push would go.
+        state.config = `file:${commonDir}/config\0remote.origin.pushurl\0`;
+        again = agentFixture({ home: f.dir, pr: mine, script: askingDrive, git: worktreeGit(commonDir, A, state), tickMs: 20 });
+        again.agent.onSnapshot(again.snapshot);
+        await until(() => only(again)[0].localWork !== undefined);
+        const now = only(again)[0];
+        assert.deepStrictEqual([now.localWork.ahead, now.localWork.worktree, now.needsRerun, now.pushTo], [4, item.worktree, true, undefined]);
+        assert.match(now.headline, /^4 commits of your session couldn't be read — the repository's config sets remote\.origin\.pushurl; they are not on the PR, see /);
+        assert.strictEqual(actionLabel(now), "Unpushed work");
+        const sent = await again.agent.act({ type: "publish", runId: item.runId });
+        assert.strictEqual(sent.ok, false);
+        assert.match(sent.error, /has 4 commits the app couldn't read .*the replies may cite them/);
+      } finally {
+        f.agent.stop();
+        again?.agent.stop();
+      }
+    });
+
+    await atest("agent discard: a drive's worktree with commits you never saw on the card is kept, with a ref and its replies (creatio-ui#4161, case A)", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const state = { commits: [] };
+      const calls = [];
+      const f = agentFixture({ pr: mine, script: askingDrive, captureScript: captureJs, git: worktreeGit(commonDir, A, state, calls), tickMs: 20, openResume: async () => {} });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        // The session commits; its card has shown none of them.
+        state.head = "4".repeat(40);
+        state.ahead = 4;
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: item.runId }), { ok: true });
+        await until(() => only(f)[0].state === "done");
+        const now = only(f)[0];
+        assert.deepStrictEqual(now.localWork, { worktree: item.worktree, ahead: 4, dirty: false, reason: "4 commits not on the PR", kept: true, ref: `refs/prd-agent/${item.runId}` });
+        assert.match(now.headline, /^Dismissed — kept its worktree: 4 commits not on the PR in /);
+        assert.ok(calls.some((a) => a[0] === "update-ref" && a[1] === `refs/prd-agent/${item.runId}` && a[2] === "4".repeat(40)), "the commits keep a ref");
+        assert.ok(!calls.some((a) => a[0] === "worktree" && a[1] === "remove"), "the worktree stays");
+        assert.ok(nfsA.existsSync(item.runFolder), "so does the run folder");
+        assert.strictEqual(now.worktree, item.worktree);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent discard: commits you saw on the card, or none, go with the worktree as before", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const state = { commits: [["2".repeat(40), "fix: b"], ["1".repeat(40), "fix: a"]], ahead: 2 };
+      const calls = [];
+      const f = agentFixture({ pr: mine, script: succeed("Fixed."), git: worktreeGit(commonDir, A, state, calls) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.drive.commits.length, 2);
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        assert.deepStrictEqual(await f.agent.act({ type: "skip", runId: item.runId }), { ok: true });
+        await until(() => only(f)[0].state === "done");
+        assert.strictEqual(only(f)[0].localWork, undefined);
+        assert.ok(calls.some((a) => a[0] === "worktree" && a[1] === "remove"), "the commits you saw and discarded go");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent run again: commits in the worktree you haven't seen are said first — pressed again it runs, and they stay", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const state = { commits: [] };
+      const calls = [];
+      const f = agentFixture({ pr: mine, script: askingDrive, captureScript: captureJs, git: worktreeGit(commonDir, A, state, calls), openResume: async () => {} });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        state.head = "4".repeat(40);
+        state.ahead = 4;
+        const first = await f.agent.act({ type: "retry", runId: item.runId });
+        assert.strictEqual(first.ok, false);
+        assert.match(first.error, /has 4 commits not on the PR \(.*\)\. A new run starts from the PR's head without them/);
+        assert.strictEqual(only(f).length, 1, "nothing queued yet");
+        assert.strictEqual((await f.agent.act({ type: "retry", runId: item.runId })).ok, true);
+        await until(() => only(f).find((i) => i.runId === item.runId).state === "done");
+        // Kept once git has counted them.
+        await until(() => only(f).find((i) => i.runId === item.runId).localWork?.kept === true);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent send: a drive's replies citing a commit not on the PR are held once; a head moved only by the run's own commits doesn't stop them", async () => {
+      const A = "a".repeat(40);
+      const H = "4e".repeat(20);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const state = { commits: [] };
+      let freshHead = A;
+      let prCommits = [A];
+      const posted = [];
+      const f = agentFixture({
+        pr: mine,
+        script: answerThreads([101], () => "Moved into a service in 4e4e4e4."),
+        captureScript: captureJs,
+        git: worktreeGit(commonDir, A, state),
+        fetchPr: async () => ({ pr: { ...mine, headOid: freshHead }, state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => {
+          if (args.includes("--paginate") && args.some((a) => /pulls\/7\/commits/.test(a))) return { code: 0, stdout: prCommits.join("\n") + "\n", stderr: "" };
+          if (!opts) return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "colleague" }, in_reply_to_id: null }), stderr: "" };
+          posted.push(args[1]);
+          return { code: 0, stdout: "{}", stderr: "" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        listWorktree(commonDir, item.worktree);
+        // Held once: 4e4e4e4 is only in the worktree.
+        const held = await f.agent.act({ type: "publish", runId: item.runId });
+        assert.match(held.error, /cite 4e4e4e4, which isn't on the PR\. Push first — or press Send again/);
+        assert.strictEqual(posted.length, 0);
+        // Pushed by hand from the worktree: the PR's head is the run's own commit.
+        state.head = H;
+        state.ancestors = [H];
+        freshHead = H;
+        prCommits = [A, H];
+        only(f)[0].state = "needsYou";
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(posted, ["repos/a/b/pulls/7/comments/101/replies"]);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent send: a head moved by a commit foreign to the run still stops a drive's replies", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const f = agentFixture({
+        pr: mine,
+        script: answerThreads([101]),
+        captureScript: captureJs,
+        git: worktreeGit(commonDir, A, { commits: [] }),
+        fetchPr: async () => ({ pr: { ...mine, headOid: "9".repeat(40) }, state: "OPEN", viewer: "me" }),
+        gh: async () => ({ code: 0, stdout: "{}", stderr: "" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        nfsA.mkdirSync(item.worktree, { recursive: true });
+        listWorktree(commonDir, item.worktree);
+        assert.match((await f.agent.act({ type: "publish", runId: item.runId })).error, /new commits since this run/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent follow: commits made in the session reach the card's Push; a talk without a result block changes nothing", async () => {
+      const state = { commits: [] };
+      const { f } = followFixture(state);
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        continuedTurn(f, item, "It is a service now, I'd say.");
+        await new Promise((r) => setTimeout(r, 150));
+        assert.strictEqual(only(f)[0].result.asks.length, 1, "no block: the card is as it was");
+        assert.ok(only(f)[0].follow.seen, "that turn is taken, so it is not read again");
+        state.commits = [["3".repeat(40), "fix: tests"], ["2".repeat(40), "refactor: the cleanup moves into a service"]];
+        continuedTurn(f, item, block({ summary: "Committed.", asks: [], findings: [] }));
+        await until(() => only(f)[0].result.summary === "Committed.");
+        const now = only(f)[0];
+        assert.deepStrictEqual([now.state, now.drive.commits.length, actionLabel(now)], ["needsYou", 2, "Push 2 fixes"]);
+        assert.strictEqual(now.headline, "Would push 2 commits: fix: tests");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent follow: settled with nothing left to post or push, the card is done — and no longer followed", async () => {
+      const { f } = followFixture({ commits: [] });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        continuedTurn(f, item, block({ summary: "Opened a follow-up and answered nothing here.", asks: [], findings: [{ severity: "note", text: "Follow-up ENG-1", where: "" }] }));
+        await until(() => only(f)[0].state === "done");
+        const now = only(f)[0];
+        assert.strictEqual(now.headline, "Settled in your session");
+        assert.strictEqual(now.follow, undefined);
+        assert.strictEqual(actionLabel(now), null);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent follow: still asking, the new question replaces the old; a card you discard stops being followed; following survives a restart", async () => {
+      const { f } = followFixture({ commits: [] });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        continuedTurn(f, item, block({ summary: "One more thing.", asks: [{ question: "Keep the old filter?", options: ["Yes", "No"] }], findings: [] }));
+        await until(() => only(f)[0].result.summary === "One more thing.");
+        assert.deepStrictEqual(only(f)[0].result.asks.map((a) => a.question), ["Keep the old filter?"]);
+        assert.strictEqual(only(f)[0].headline, "Your call: Keep the old filter?");
+        f.agent.stop();
+        const saved = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).items[0];
+        assert.strictEqual(saved.follow.cwd, item.worktree, "in state.json, not only in memory");
+        // The app starts again: the same card goes on being followed.
+        const again = agentFixture({ home: f.dir, pr: f.snapshot.pullRequests[0], script: askingDrive, tickMs: 20 });
+        try {
+          continuedTurn(again, item, block({ summary: "Kept it.", asks: [], findings: [] }));
+          await until(() => only(again)[0].result.summary === "Kept it.");
+          // The drive's commits can't be read since the restart (the fake clone lists no worktree): the card stays, says why and where.
+          assert.strictEqual(only(again)[0].state, "needsYou");
+          assert.match(only(again)[0].headline, /couldn't be read — the app restarted since the run, and the clone doesn't list the run's worktree any more; they are not on the PR, see .*agent-b-7-/);
+          assert.doesNotMatch(only(again)[0].headline, /nothing to push/);
+          assert.strictEqual(only(again)[0].localWork.worktree, item.worktree);
+          assert.deepStrictEqual(await again.agent.act({ type: "skip", runId: item.runId }), { ok: true });
+          await until(() => only(again)[0].follow === undefined);
+        } finally {
+          again.agent.stop();
+        }
       } finally {
         f.agent.stop();
       }
@@ -14450,7 +15264,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(agentResult.resultCard({ output: "Plain words." }).summary, "Plain words.", "a result from before the block still has a summary");
       assert.strictEqual(agentResult.resultCard({}), null);
       for (const [scenario, mode] of [["review", "shadow"], ["brief", "on"], ["drive", "shadow"], ["afterMerge", "on"], ["rereview", "on"]]) {
-        assert.ok(agentCore.agentRules(scenario, mode).endsWith(agentResult.resultRuleFor(scenario)), `${scenario} sessions are told how to end`);
+        assert.ok(agentCore.agentRules(scenario, mode).includes(agentResult.resultRuleFor(scenario)), `${scenario} sessions are told how to end`);
       }
     });
 

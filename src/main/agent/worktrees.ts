@@ -119,3 +119,119 @@ export async function removeWorktree(git: GitRunner, checkout: string, dir: stri
     }
   });
 }
+
+/**
+ * A worktree's own git folder, found from the clone's side: the
+ * `<commonDir>/worktrees/<name>` entry whose `gitdir` names `<dir>/.git`. The
+ * worktree's `.git` file is not asked — a session could have rewritten it to
+ * send the app's git elsewhere. Null when no entry names it.
+ */
+export function worktreeGitDirFor(commonDir: string, dir: string): string | null {
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const want = real(path.join(dir, ".git"));
+  let names: string[];
+  try {
+    names = fs.readdirSync(path.join(commonDir, "worktrees"));
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    const entry = path.join(commonDir, "worktrees", name);
+    try {
+      const named = fs.readFileSync(path.join(entry, "gitdir"), "utf8").trim();
+      if (named && real(path.resolve(entry, named)) === want) return entry;
+    } catch {
+      // Not a worktree entry (or one being removed): the next.
+    }
+  }
+  return null;
+}
+
+/** Where a run's worktree's git lives, rebuilt from the clone it was made from (after a restart dropped what the run took). */
+export async function recoverPlace(git: GitRunner, checkout: string, dir: string): Promise<{ commonDir: string; worktreeGitDir: string }> {
+  if (!fs.existsSync(dir)) throw new Error("the run's worktree is gone");
+  const commonDir = await withNoHooks(async (h) => path.resolve(checkout, (await git([...safeGit(h), "rev-parse", "--git-common-dir"], checkout)).trim()));
+  const worktreeGitDir = worktreeGitDirFor(commonDir, dir);
+  if (!worktreeGitDir) throw new Error("the clone doesn't list the run's worktree any more");
+  return { commonDir, worktreeGitDir };
+}
+
+/** What a worktree holds that the PR doesn't: commits on top of the PR's head (null: none of the heads could be compared) and uncommitted changes. */
+export interface LocalWork {
+  ahead: number | null;
+  dirty: boolean | null;
+  /** The worktree's HEAD, when it could be read. */
+  head: string | null;
+}
+
+/**
+ * Counts the commits in a run's worktree that are not on the PR —
+ * `rev-list --count HEAD ^<base>` against the first of `bases` git knows (the
+ * PR's head now, then the head the run started from) — and, only when
+ * `checkFiles`, whether files are changed. Hooks and fsmonitor off, as for
+ * every app command in a worktree, and the git folder named outright: with
+ * none (`gitDir` unknown) nothing is read — the worktree's own `.git` file is
+ * the session's to rewrite.
+ *
+ * `git status` reads the files themselves, and for that runs any clean or
+ * process filter the config names — a program. So `checkFiles` only while
+ * git's config is what it was before the session (its fingerprint matches);
+ * else `dirty` stays unknown (null).
+ */
+export async function readLocalWork(
+  git: GitRunner,
+  dir: string,
+  bases: ReadonlyArray<string | null | undefined>,
+  gitDir: string | null | undefined,
+  checkFiles = false,
+): Promise<LocalWork> {
+  if (!gitDir) return { ahead: null, dirty: null, head: null };
+  return withNoHooks(async (h) => {
+    const g = (args: string[]) => git([...safeGit(h, { workTree: dir, gitDir }), ...args], dir);
+    const head = await g(["rev-parse", "HEAD"])
+      .then((o) => o.trim() || null)
+      .catch(() => null);
+    let ahead: number | null = null;
+    for (const base of bases) {
+      if (!base || !/^[0-9a-f]{7,40}$/.test(base)) continue;
+      try {
+        ahead = Number.parseInt((await g(["rev-list", "--count", "HEAD", `^${base}`])).trim(), 10) || 0;
+        break;
+      } catch {
+        // Not a commit this clone has (someone pushed since): the next base.
+      }
+    }
+    const dirty = checkFiles
+      // Changes to tracked files only: a test run's or a build's leftovers would keep every worktree.
+      ? await g(["status", "--porcelain", "--untracked-files=no", "--ignore-submodules"])
+          .then((o) => o.trim().length > 0)
+          .catch(() => null)
+      : null;
+    return { ahead, dirty, head };
+  });
+}
+
+/**
+ * Work a worktree must not be removed with: commits not on the PR (or a count
+ * git couldn't make), or files known to be changed. Files that weren't checked
+ * (`dirty` null — git's config can't be vouched for) don't keep it by
+ * themselves: every drive whose card outlived a restart would stay forever.
+ */
+export function holdsWork(w: LocalWork): boolean {
+  return w.ahead !== 0 || w.dirty === true;
+}
+
+/**
+ * The ref that keeps a run's commits reachable once its card is closed:
+ * `refs/prd-agent/<runId>` — only for a run id of the app's own shape (a
+ * UUID); the id comes from state.json, so anything else gets no ref.
+ */
+export function keepRef(runId: string): string | null {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId) ? `refs/prd-agent/${runId}` : null;
+}

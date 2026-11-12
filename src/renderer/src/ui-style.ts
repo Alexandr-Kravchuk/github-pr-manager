@@ -6,6 +6,7 @@
 
 import type { UiStyle } from "../../shared/types";
 import { isUiStyle } from "../../shared/ui-style";
+import { syncGlassDrift } from "./glass-drift";
 
 const KEY = "prd:ui-style";
 
@@ -13,6 +14,7 @@ function setAttribute(style: UiStyle): void {
   const root = document.documentElement;
   if (style === "flat") delete root.dataset.ui;
   else root.dataset.ui = style;
+  syncGlassDrift();
 }
 
 export function applyUiStyle(style: UiStyle): void {

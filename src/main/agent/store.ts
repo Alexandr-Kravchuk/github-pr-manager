@@ -233,8 +233,9 @@ export function openStore(dir: string, today: string, beforeSave?: () => void): 
       } catch {
         // No log yet.
       }
+      // A card that kept its worktree for work in it stays while it does: dropped, nothing would ever free the folder.
       store.data.items = store.data.items.filter(
-        (i) => !(i.state === "done" || i.state === "error") || Date.parse(i.finishedAt ?? i.queuedAt) >= keepAfter,
+        (i) => !(i.state === "done" || i.state === "error") || i.localWork?.kept === true || Date.parse(i.finishedAt ?? i.queuedAt) >= keepAfter,
       );
       void store.save();
     },

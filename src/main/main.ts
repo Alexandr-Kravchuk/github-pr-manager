@@ -555,6 +555,8 @@ async function refreshClaudeSessions(): Promise<ClaudeSessionInfo[]> {
     if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
       sendToRenderer("claude-sessions", claudeSessions);
     }
+    // The plan reads the sessions too; it would otherwise wait for the PRs to change.
+    agent?.sessionsChanged();
   }
   return claudeSessions;
 }

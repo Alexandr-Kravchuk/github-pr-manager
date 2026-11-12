@@ -170,7 +170,15 @@ Three layers:
   switches to it — Desktop through `claude://claude.ai/epitaxy/<hostSessionId>`,
   a CLI session through the iTerm2/Terminal tab on its tty — and launching a
   second one moves to the menu, since two sessions on one PR edit the same
-  branch),
+  branch; for the same reason the PR agent starts nothing on such a PR — not
+  its plan, not a run you ask for or answer, not one that waited in its queue
+  while the session opened (`yourSessionOn` in `main/agent/index.ts`; its own
+  run continued in your terminal counts, and so does one Desktop paused — it
+  may be waiting for your answer — whose refusal says to archive it; the plan
+  reads the same list and runs again whenever the list changes
+  (`sessionsChanged`), or a PR whose session ended would keep its reason until
+  the PR moved), and the Board offers no "Let the agent …" there
+  (`OWN_SESSION_WHY` in `shared/agent-view.ts`)),
   `settings-search.ts` (the Settings screen's tabs, which section sits on which,
   and the keywords its search box matches — every word of the query must hit a
   section's title or keywords; a setting whose label is missing there cannot be
@@ -233,9 +241,50 @@ Three layers:
   switch-off — so no reason waits for the next poll. A drive's result
   from before the app last started is marked `needsRerun` at start: its
   push and its answer are checked against what the app took in memory
-  (`pushTo`), so its card offers Run again (and Open in Claude) instead of
-  a question's buttons or a Push that would only be refused, and shows the
-  question as what the new run will ask. A refused action's message shows
+  (`pushTo`, never on disk). While its worktree is still there,
+  `recoverDrives` (and a followed turn) rebuild `pushTo` from the clone's
+  side — the worktree's git folder from `<commonDir>/worktrees/*/gitdir`,
+  not the worktree's own `.git` file, the clone's push URL, a fingerprint
+  taken now — only for the clone the app finds for the PR now
+  (`trustedCheckout`, never `checkout` from state.json alone), only for a
+  push URL that is the PR's repository, and refused while the
+  repository's config could redirect a push or run a program for it
+  (`redirectingKeys`: insteadOf, pushurl, credential/http/protocol keys,
+  sshCommand, askPass, any include) — mark it `recovered` (pushed only on
+  your click) and
+  read the commits again, those your session made since included. What
+  still can't be read becomes `localWork` (the folder and `rev-list`'s
+  count on top of the PR): the card names it, never says "nothing to
+  push", and Send is refused while it holds commits. Otherwise its card
+  offers Run again (and Open in Claude) instead of a question's buttons or
+  a Push that would only be refused, and shows the question as what the
+  new run will ask. A drive's worktree is never removed with work you
+  haven't seen (`keepForWork`: a HEAD that is not the one its card
+  showed, changed tracked files, or a count git couldn't make) — Discard, a
+  close and the sweep keep it and its run folder, write
+  `refs/prd-agent/<runId>` (create-only, a UUID run id only), and say so on
+  the card; the sweep frees it, ref and all, once that work is on the PR,
+  and pruning skips such a card. Run again says so once first. Reading a
+  worktree never goes through its own `.git` file (no git folder from the
+  clone's side: nothing is read), and `git status` — which runs the
+  config's clean filters — only while git's config matches the fingerprint
+  taken before the session. A drive's replies are held once when they cite a commit id the
+  PR doesn't have (`shasNotOnPr`), and a PR head that moved only by the
+  run's own commits (the run's head under it, it under the worktree's
+  HEAD) doesn't stop them. "Open in Claude" (`continue`)
+  does not leave the card behind: a drive's or a review's card follows the
+  session it resumed (`item.follow` in `state.json`, so a restart goes on
+  following it) on the agent's own timer — a stat per tick, the transcript's
+  tail read only once it changed and has been still for 2 s
+  (`main/agent/followup.ts`). A turn that ends with a new `prd-result`
+  block replaces the card's summary, questions and findings
+  (`shared/agent-followup.ts`: the final message of the main conversation,
+  not a subagent's, not a turn still going), and what is left is read
+  again — the replies recorded through the run's wrapper, a drive's commits
+  on top of the run's head (only while git's fingerprint still matches).
+  Nothing asked and nothing left to send or push closes the card; a turn
+  without the block changes nothing; a card that left Your move is no
+  longer followed. A refused action's message shows
   on the open card it came from, not only at the top of the Board. A
   move ready for you names itself wherever the PR shows — the Roomy line's
   button ("Send review →", "Push 2 fixes →") and the Cozy cell open its card
@@ -638,6 +687,23 @@ Three layers:
   and `StructuredOutput`, which a Workflow's agents answer through); a test
   pins that every tool the default `--allowedTools` lists grant is one the
   guard knows, so extend the guard before adding a tool to the defaults.
+- **Except a drive on your own PR, with full context** (Settings › Agent ›
+  "Your PRs: full context", `permissions.fullContextDrive`, on by default).
+  Its diff and comments are yours and your reviewers', so it runs with your
+  own Claude setup: `RunSpec.isolation: "full"` drops `--restricted`,
+  `--strict-mcp-config` and `--tools` (your settings, permission mode,
+  CLAUDE.md, hooks, plugins and MCP servers load; the drive's `--allowedTools`
+  only add to yours; only the `prd-user-skills` plugin is mounted on top), and
+  the guard file says `mode: "full"`, with no `readDirs`. `checkFullToolUse`
+  then turns into a denylist of writes to GitHub — `git push` (also through
+  `sudo`/`env`/`sh -c`, a `$(…)`, a `-c alias.`), `gh pr|issue|repo|label|…`
+  writes, `gh api` with a non-GET method, fields (but a GraphQL query) or
+  `--input`, and any tool of a GitHub/GHE MCP server but its reads — and
+  `checkRealWrite` lets writes land anywhere. This is best-effort against a
+  model that forgets the rule, not against a script that hides the call; the
+  hard boundary is still `sessionGitEnv` (no credentials, every remote
+  rewritten), and the app still pushes and posts the replies itself. Reviews,
+  briefs, re-reviews and the after-merge run never run full.
 - **The look** (Settings › Appearance › Style, `Settings.uiStyle`): `flat`
   (the default), `neumorphism`, `claymorphism`, `neobrutalism`, `bento` or
   `glassmorphism` — one list in `shared/ui-style.ts` (`UI_STYLES`, Node-free,
@@ -659,9 +725,13 @@ Three layers:
   and in the card grids (`data-pr-grid` on `PrList`'s two grids) every fifth
   card / seventh tile spans two columns with dense packing — Roomy's only
   from `md`, where it has two columns, or the span would invent one.
-  Glassmorphism: a fixed backdrop of soft colour blobs on `body` and
-  translucent cards, panels and the table with a backdrop blur; static, and
-  the table's sticky actions column takes no fill (any fill or second blur
+  Glassmorphism: a fixed backdrop of soft colour blobs and
+  translucent cards, panels and the table with a backdrop blur. The blobs
+  (a fixed `.glass-backdrop` layer) drift very slowly, but in steps:
+  `renderer/src/glass-drift.ts` moves them a few pixels once a second through
+  custom properties on that layer alone, stopped while the window is hidden or
+  reduced motion is on — a CSS animation would re-blur every card each frame.
+  The table's sticky actions column takes no fill (any fill or second blur
   showed as a lighter stripe). The rules sit outside Tailwind's layers so they beat the
   utilities; a new card or panel that should take part needs `shadow-tile`
   or the `rounded-xl border border-line` panel shape. The switch applies at
@@ -692,4 +762,9 @@ Three layers:
   `.agent-diagram svg *` sets `animation: none`.
   Related: `backdrop-blur` on the sticky header is free at rest but multiplies
   the cost of anything animating beneath it (~3x in one dev-instance A/B) — keep
-  animations under it short and finite.
+  animations under it short and finite. A JS timer that restyles a layer under
+  a `backdrop-filter` is an animation under this rule too, though the guard
+  test cannot see it. The one allowed exception is `glass-drift.ts`
+  (Glassmorphism's backdrop): about one step a second, only while the document
+  is visible, and off under reduced motion — a new one needs the same
+  justification, not a `setInterval` in place of a CSS animation.
