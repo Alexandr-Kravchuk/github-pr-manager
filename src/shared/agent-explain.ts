@@ -386,10 +386,6 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         break;
       }
       case "decide": {
-        if (item?.scenario === "drive" && item.needsRerun) {
-          rerunCard(item);
-          break;
-        }
         const q = read.asks[0];
         now = `The agent needs your decision${read.asks.length > 1 ? ` on ${read.asks.length} questions` : q ? `: ${q.question}` : ""}.`;
         ask = "Answer below — only you can decide this.";
@@ -455,6 +451,23 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         choices = [{ ...open(), primary: true }];
         next = "";
     }
+  }
+
+  // A run whose result can't be acted on any more: GitHub placed the card; the run is told as out of date, with Discard.
+  if (stage.stale && item) {
+    now = `${now ? `${now.replace(/\.$/, "")}. ` : ""}The agent's earlier run is out of date: ${lower(stage.note ?? "")}.`;
+    const first = !choices.some((c) => c.primary);
+    choices = [
+      ...choices,
+      {
+        label: "Discard",
+        primary: first,
+        does: "Closes the out-of-date run. Its worktree stays while it holds commits that are not on the PR, and a ref keeps them.",
+        act: { type: "skip", runId },
+      },
+      ...(item.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the old session in your terminal — anything from it is then yours to push or post.", act: { type: "continue", runId } } as BoardChoice] : []),
+    ];
+    if (first && !ask) ask = "Nothing to do on its result — discard it.";
   }
 
   return {

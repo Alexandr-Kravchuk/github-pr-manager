@@ -10990,25 +10990,68 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(noAnswers.choices.map((c) => c.label), ["Discard"]);
     });
 
-    test("agent board words: a drive's question or commits from before a restart offer Run again — never an answer or a push that would be refused", () => {
+    test("agent board words: a drive's question or commits from before a restart are stale — GitHub places the card, Discard comes first", () => {
       const mine = xPr();
       const ask = { summary: "", asks: [{ question: "Which stand?", options: ["eng1", "eng2"] }], findings: [], authorQuestions: [], structured: true };
       const asked = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), result: ask, sessionId: "s", worktree: "/w", needsRerun: true })]);
-      assert.deepStrictEqual([asked.owner, asked.stage.action.kind], ["you", "decide"]);
-      assert.strictEqual(asked.now, "The app restarted after this run, so it can't push anything or go on with your answer any more.");
+      assert.deepStrictEqual([asked.owner, asked.stage.column, asked.stage.action, asked.stage.ready, asked.stage.stale], ["others", "waiting", null, false, "restart"], "not Your move: it can't be answered any more");
+      assert.match(asked.now, /^Waiting for reviewers\. The agent's earlier run is out of date: stale — the app restarted after this run, so it can't push or take your answer\.$/);
       assert.deepStrictEqual(asked.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
-        ["Run again", "retry", true],
+        ["Self-review again", "enqueue", false],
+        ["Discard", "skip", true],
         ["Open in Claude", "continue", false],
-        ["Discard", "skip", false],
       ]);
-      assert.deepStrictEqual(asked.read.asks.map((a) => a.question), ["Which stand?"], "its question still reads, as what the new run will ask");
+      assert.strictEqual(asked.ask, "Nothing to do on its result — discard it.");
       const commits = xOne(mine, [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2), needsRerun: true })]);
-      assert.strictEqual(commits.stage.action.kind, "push");
-      assert.match(commits.now, /can't push its 2 commits/);
-      assert.deepStrictEqual(commits.choices.map((c) => c.label), ["Run again", "Discard"], "no Push, no session to open");
+      assert.deepStrictEqual([commits.owner, commits.stage.action, commits.stage.stale], ["others", null, "restart"], "no Push that would be refused");
+      // The PR still needs work: Your move is GitHub's say-so, with the stale run beside it.
+      const broken = xOne(xPr({ ciState: "failure", failingChecks: [] }), [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2), needsRerun: true })]);
+      assert.deepStrictEqual([broken.owner, broken.stage.action.kind, broken.stage.ready], ["you", "fixYourself", false]);
+      assert.deepStrictEqual(broken.choices.map((c) => [c.label, Boolean(c.primary)]), [["Let the agent fix it", true], ["Open on GitHub", false], ["Discard", false]]);
       // The same run before any restart: its own question and push, as ever.
       const live = xOne(mine, [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2) })]);
       assert.strictEqual(live.choices[0].label, "Push 2 fixes");
+      const liveAsk = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), result: ask, sessionId: "s", worktree: "/w" })]);
+      assert.deepStrictEqual([liveAsk.owner, liveAsk.stage.action.kind, liveAsk.stage.stale], ["you", "decide", null]);
+    });
+
+    test("agent board words: a drive the PR moved past is superseded — not Your call, with the PR's real state (creatio-ui#4140)", () => {
+      // Started from dc751e3, two questions; meanwhile the PR's head moved to 9594546 from elsewhere.
+      const from = "dc751e3be4aa00000000000000000000000000aa";
+      const head = "9594546aaaa00000000000000000000000000bbb";
+      const asks = { summary: "", asks: [{ question: "With activeStep bound to a record column…", options: [] }, { question: "Keep the default?", options: [] }], findings: [], authorQuestions: [], structured: true };
+      const run = (o = {}) => sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", key: `P|drive|${from}`, drive: { ...drive(3), base: from, head: "f00d" }, result: asks, sessionId: "s", worktree: "/w", ...o });
+      const pr = xPr({ headOid: head, reviewers: [{ login: "anna", reviewState: "pending" }] });
+      const e = xOne(pr, [run()]);
+      assert.deepStrictEqual([e.owner, e.stage.column, e.stage.action, e.stage.stale], ["others", "waiting", null, "headMoved"]);
+      assert.strictEqual(view.stageLine(e.stage, pr), "anna pending", "the card says what the PR waits on");
+      assert.strictEqual(e.stage.note, "Superseded — the PR moved past dc751e3 (now 9594546); this run's result is out of date");
+      assert.strictEqual(choice(e, "Discard").primary, true);
+      assert.ok(!e.choices.some((c) => c.act?.type === "push" || c.act?.type === "publish"), "nothing of the old run goes out from here");
+      // Keyed only, no drive read: the key's head still tells where it started.
+      const keyed = xOne(pr, [run({ drive: undefined })]);
+      assert.strictEqual(keyed.stage.stale, "headMoved");
+      // Still the head it started from: a question of yours, as ever. Abbreviated ids match.
+      assert.strictEqual(xOne(xPr({ headOid: from.slice(0, 10) }), [run()]).stage.action.kind, "decide");
+      // Its own push moved the head: not someone else's commit.
+      const pushed = xOne(xPr({ headOid: "f00d" }), [run({ result: undefined, pushed: true, plan: answers(1) })]);
+      assert.strictEqual(pushed.stage.stale, null);
+      // Unread commits in its worktree stay a move of yours whatever the head.
+      const lw = { worktree: "/w", ahead: 3, dirty: false, reason: "the app restarted since the run" };
+      assert.strictEqual(xOne(pr, [run({ needsRerun: true, localWork: lw })]).stage.action.label, "Unpushed work");
+    });
+
+    test("agent view: a stale run is not counted as ready for you — the chip, the tray and the popover", () => {
+      const ask = { summary: "", asks: [{ question: "q", options: [] }], findings: [], authorQuestions: [], structured: true };
+      const restarted = vItem({ prId: "A", scenario: "drive", state: "needsYou", finishedAt: sAgo(5), drive: drive(0), result: ask, needsRerun: true });
+      const moved = vItem({ prId: "B", scenario: "drive", state: "needsYou", finishedAt: sAgo(5), key: "B|drive|aaa111", drive: { ...drive(1), base: "aaa111" }, result: ask });
+      const fresh = vItem({ prId: "C", scenario: "drive", state: "needsYou", finishedAt: sAgo(5), key: "C|drive|ccc333", drive: { ...drive(1), base: "ccc333" }, result: ask });
+      const heads = { B: "bbb222", C: "ccc333" };
+      assert.deepStrictEqual(view.readyItems([restarted, moved, fresh], heads).map((i) => i.prId), ["C"]);
+      assert.deepStrictEqual(view.readyItems([restarted, moved, fresh]).map((i) => i.prId).sort(), ["B", "C"], "without heads only the restart is known");
+      assert.strictEqual(view.agentSummary({ items: [restarted, moved, fresh], running: [], heads, paused: false, quietUntil: null, heldUntil: null, perDay: 0, runsToday: 0 }).readyForYou, 1);
+      assert.strictEqual(view.resultAction(moved, "mine", "bbb222"), null);
+      assert.strictEqual(view.resultAction(moved, "mine", "aaa111").kind, "decide");
     });
 
     test("agent board words: commits your session left that the app couldn't read — named with their folder, never \"nothing to push\", no Send", () => {
