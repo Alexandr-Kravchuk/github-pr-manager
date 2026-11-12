@@ -12435,6 +12435,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const res = [{ kind: "resolve", threadId: "PRRT_c" }];
       assert.strictEqual((await publishMod.heldWrites(res, url, "a/b", 7, "me", resolveGh)).length, 1);
       assert.deepStrictEqual(await publishMod.heldWrites(res, url, "a/b", 7, "me", resolveGh, false), []);
+      // A held resolve: only that resolve drops out of what goes out, and of the card's count.
+      const withResolves = [...steps, { kind: "resolve", threadId: "PRRT_c" }, { kind: "resolve", threadId: "PRRT_mine" }];
+      const heldResolve = { kind: "resolve", threadId: "PRRT_c", author: "colleague", url: null };
+      const rctx = { ...ctx, held: [...held, heldResolve] };
+      assert.deepStrictEqual(pub.postedSteps(withResolves, rctx).filter((s) => s.kind === "resolve").map((s) => s.threadId), ["PRRT_mine"]);
+      assert.deepStrictEqual(pub.planRequests(withResolves, rctx).filter((r) => r.endpoint === "graphql").map((r) => r.body.variables.id), ["PRRT_mine"]);
+      const rsum = pub.summarizePlan(withResolves, rctx.held);
+      assert.deepStrictEqual([rsum.resolves, rsum.held.map((h) => h.kind)], [1, ["reply", "reply", "resolve"]]);
+      assert.strictEqual(pub.summarizePlan(withResolves).resolves, 2, "nothing held: both counted");
       // Everything held back: Publish posts nothing and says so, rather than marking an empty plan published.
       const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-held-"));
       nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), `${JSON.stringify(steps[1])}
