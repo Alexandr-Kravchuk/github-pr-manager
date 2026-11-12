@@ -110,6 +110,7 @@ for (const mod of [
   "agent-reapprove.js",
   "agent-stack.js",
   "agent-explain.js",
+  "agent-followup.js",
   "stale.js",
   "jira-status.js",
   "weather.js",
@@ -10244,7 +10245,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid, now } = {}) => {
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid, now, claudeConfigDir } = {}) => {
       // `home`: the folder of an earlier fixture — the same app started again.
       const dir = home ?? nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
@@ -10290,6 +10291,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           return c;
         },
         tickMs,
+        // Where a session continued with "Open in Claude" writes its transcript; never your real ~/.claude.
+        claudeConfigDir: claudeConfigDir ?? path.join(dir, "claude-config"),
         // A test that waits out a delay sets the clock.
         ...(now ? { now } : {}),
       });
@@ -13076,6 +13079,256 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual([only(f)[0].state, only(f)[0].published, only(f)[0].headline], ["done", true, "Published: 2 replies"]);
         assert.strictEqual((await f.agent.act({ type: "publish", runId: item.runId })).ok, false, "never twice");
         assert.strictEqual(posted.length, 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    // --- "Open in Claude": the card follows the session you continued -------------
+    const followup = require(path.join(__dirname, "../dist/main/shared/agent-followup.js"));
+    const realTranscript = nfsA.readFileSync(path.join(__dirname, "fixtures", "transcript-resumed-session.jsonl"), "utf8");
+    const tLine = (o) => JSON.stringify(o);
+    const userLine = (text, at = "2026-11-12T12:00:00.000Z") => tLine({ type: "user", uuid: `u-${text}`, timestamp: at, isSidechain: false, message: { role: "user", content: text } });
+    const asstLine = (id, blocks, stop, uuid, at = "2026-11-12T12:00:05.000Z") => tLine({ type: "assistant", uuid, timestamp: at, isSidechain: false, message: { id, role: "assistant", stop_reason: stop, content: blocks } });
+    const block = (o) => "Done.\n\n```prd-result\n" + JSON.stringify(o) + "\n```";
+
+    test("followup: a real resumed session's transcript (anonymized) ends its turn with the result the card should take", () => {
+      const end = followup.readTurnEnd(realTranscript);
+      assert.strictEqual(end.state, "ended");
+      const read = followup.resultOfTurn(end.text, "drive");
+      assert.ok(read, "the final message carries a prd-result block");
+      assert.deepStrictEqual(read.card.asks, [], "nothing is asked any more");
+      assert.deepStrictEqual(read.card.findings.map((x) => x.severity), ["major", "minor"]);
+      assert.match(read.card.findings[0].text, /^Jest, type check and lint not run/);
+      assert.match(read.card.findings[1].text, /PR description/);
+      assert.ok(!read.body.includes("prd-result"), "the block is not part of the report");
+    });
+
+    test("followup: the real transcript cut before its final message is a turn still going", () => {
+      const lines = realTranscript.trim().split("\n");
+      const finalAt = lines.findIndex((l) => /"stop_reason": "end_turn"/.test(l) && /prd-result/.test(l));
+      assert.ok(finalAt > 0);
+      // Up to the user's prompt: the model has not answered yet.
+      assert.strictEqual(followup.readTurnEnd(lines.slice(0, 1).join("\n")).state, "open");
+      // The final message's line cut off mid-write is skipped: no result is read from what is left.
+      const cut = followup.readTurnEnd(lines.slice(0, finalAt).join("\n") + "\n" + lines[finalAt].slice(0, 200));
+      assert.ok(cut.state !== "ended" || followup.resultOfTurn(cut.text, "drive") === null);
+    });
+
+    test("followup: the last block of the final message counts — not one in the middle, not one of an earlier turn", () => {
+      const first = block({ summary: "first", asks: [{ question: "Which?", options: ["a", "b"] }], findings: [] });
+      const middle = "```prd-result\n" + JSON.stringify({ summary: "draft", asks: [{ question: "Old?", options: [] }], findings: [] }) + "\n```\n\nThen I went on.";
+      const last = block({ summary: "settled", asks: [], findings: [{ severity: "minor", text: "Description", where: "" }] });
+      const text = [
+        userLine("go"),
+        asstLine("m1", [{ type: "text", text: first }], "end_turn", "a1"),
+        userLine("answer: a", "2026-11-12T12:01:00.000Z"),
+        // One message written as several lines, one per content block.
+        asstLine("m2", [{ type: "text", text: middle }], "end_turn", "a2", "2026-11-12T12:01:05.000Z"),
+        asstLine("m2", [{ type: "text", text: last }], "end_turn", "a3", "2026-11-12T12:01:06.000Z"),
+        tLine({ type: "system", subtype: "turn_duration", uuid: "s1" }),
+      ].join("\n");
+      const end = followup.readTurnEnd(text);
+      assert.deepStrictEqual([end.state, end.uuid, end.at], ["ended", "a3", "2026-11-12T12:01:06.000Z"]);
+      const read = followup.resultOfTurn(end.text, "drive");
+      assert.strictEqual(read.card.summary, "settled");
+      assert.deepStrictEqual(read.card.asks, []);
+      assert.strictEqual(read.card.findings.length, 1);
+    });
+
+    test("followup: a turn going on — a tool call, a tool's answer, your new prompt, a subagent's lines — is not read", () => {
+      const done = asstLine("m1", [{ type: "text", text: block({ summary: "x", asks: [], findings: [] }) }], "end_turn", "a1");
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), done].join("\n")).state, "ended");
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), done, userLine("more", "2026-11-12T12:02:00.000Z")].join("\n")).state, "open");
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), asstLine("m2", [{ type: "text", text: "Looking" }, { type: "tool_use", id: "t", name: "Bash", input: {} }], "tool_use", "a2")].join("\n")).state, "open");
+      const tool = tLine({ type: "user", uuid: "r", isSidechain: false, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "" }] } });
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), tool].join("\n")).state, "open");
+      // A subagent's own end does not end the session's turn.
+      const side = tLine({ type: "assistant", uuid: "sc", isSidechain: true, message: { id: "m9", stop_reason: "end_turn", content: [{ type: "text", text: "sub" }] } });
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), side].join("\n")).state, "open");
+      // No stop reason written: the turn's end logged after it counts; a message with no such line doesn't.
+      const noStop = asstLine("m3", [{ type: "text", text: "ok" }], null, "a3");
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), noStop].join("\n")).state, "open");
+      assert.strictEqual(followup.readTurnEnd([userLine("go"), noStop, tLine({ type: "system", subtype: "turn_duration" })].join("\n")).state, "ended");
+      assert.strictEqual(followup.readTurnEnd("").state, "none");
+    });
+
+    test("followup: a final message without a prd-result block leaves the card alone", () => {
+      assert.strictEqual(followup.resultOfTurn("Sure, here is how it works.", "drive"), null);
+      assert.strictEqual(followup.resultOfTurn("```prd-result\nnot json\n```", "drive"), null, "a broken block is no result either");
+    });
+
+    test("followup: a turn is new only once — after you continued, and not the one taken last", () => {
+      const end = { state: "ended", uuid: "a1", at: "2026-11-12T12:00:05.000Z", text: "" };
+      assert.strictEqual(followup.isNewTurn(end, { since: "2026-11-12T12:00:00.000Z" }), true);
+      assert.strictEqual(followup.isNewTurn(end, { since: "2026-11-12T12:00:10.000Z" }), false, "the run's own final message, from before");
+      assert.strictEqual(followup.isNewTurn(end, { since: "2026-11-12T12:00:00.000Z", seen: "a1" }), false);
+      assert.strictEqual(followup.isNewTurn({ state: "open" }, { since: "2026-11-12T12:00:00.000Z" }), false);
+    });
+
+    test("followup: what the card becomes — your call while it asks, Publish or Push while something is left, else done", () => {
+      const card = (asks, findings = []) => ({ summary: "s", asks, findings, authorQuestions: [], structured: true });
+      const ask = { question: "Move it here or a follow-up?", options: ["here", "follow-up"] };
+      const plan = { event: null, body: "", comments: [], replies: [{ replyTo: 1, body: "x" }], resolves: 0, escalations: [] };
+      const commits = { base: "a", head: "c", reasons: [], commits: [{ oid: "b", subject: "fix: one" }, { oid: "c", subject: "fix: two" }], stat: "", patch: "" };
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive" }, card([ask])), { state: "needsYou", headline: "Your call: Move it here or a follow-up?" });
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive", drive: commits, plan }, card([])), { state: "needsYou", headline: "Would push 2 commits: fix: two" });
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive", drive: { ...commits, commits: [] }, plan }, card([])).headline, "Would post: 1 reply");
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive", drive: commits }, card([]), true), { state: "done", headline: "Settled in your session" }, "pushed from the session: nothing left to push");
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive", drive: commits, pushed: true }, card([])).state, "done");
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive", plan, published: true }, card([])).state, "done", "replies already out");
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive" }, card([], [{ severity: "major", text: "Jest not run", where: "" }])).state, "done", "a major finding asks nothing of you");
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "drive" }, card([], [{ severity: "blocker", text: "Broken", where: "" }])), { state: "needsYou", headline: "Blocker left: Broken" });
+      assert.deepStrictEqual(followup.followedOutcome({ scenario: "review", plan: { ...plan, event: "COMMENT", replies: [] } }, card([])).state, "needsYou", "a review left to send");
+    });
+
+    // A drive that asks you something, then the session you continue from its card.
+    const askingDrive = (c) => {
+      emit(c, { type: "system", subtype: "init", session_id: "s" });
+      const text = block({ summary: "Waits on your decision", asks: [{ question: "Move the cleanup into a service, or a follow-up Jira?", options: ["Service", "Follow-up"] }], findings: [{ severity: "blocker", text: "Cleanup ownership is open", where: "" }] });
+      emit(c, { type: "result", subtype: "success", is_error: false, result: text });
+      setImmediate(() => c.emit("exit", 0));
+    };
+    /** The session you continued writes a turn: optional replies through the run's wrapper, then its final message. */
+    const continuedTurn = (f, item, finalText, { replies = [], file } = {}) => {
+      for (const id of replies) {
+        const run = JSON.parse(nfsA.readFileSync(path.join(item.runFolder, "run.json"), "utf8"));
+        const out = path.join(run.outDir, `reply-${id}.md`);
+        nfsA.writeFileSync(out, `Answer to ${id}.`);
+        const r = spawnSync(process.execPath, [captureJs, item.runFolder, "reply", run.repo, String(run.number), String(id), out], { encoding: "utf8" });
+        if (r.status !== 0) throw new Error(r.stderr);
+      }
+      const folder = path.join(f.dir, "claude-config", "projects", item.worktree.replace(/[^a-zA-Z0-9]/g, "-"));
+      nfsA.mkdirSync(folder, { recursive: true });
+      const at = new Date(Date.now() + 1000).toISOString();
+      const target = file ?? path.join(folder, `${item.sessionId}.jsonl`);
+      nfsA.appendFileSync(target, [userLine("Service", at), asstLine(`m-${at}`, [{ type: "text", text: finalText }], "end_turn", `a-${at}`, at), tLine({ type: "system", subtype: "turn_duration" })].join("\n") + "\n");
+      // Written a while ago: still files are read, ones being written wait.
+      const past = new Date(Date.now() - 10_000);
+      nfsA.utimesSync(target, past, past);
+      return target;
+    };
+    const commitsGit = (commonDir, head, state) => async (all) => {
+      let i = 0;
+      for (;;) {
+        if (all[i] === "-c") i += 2;
+        else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+        else break;
+      }
+      const args = all.slice(i);
+      if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+      if (args[0] === "rev-parse") return args.includes("HEAD") ? `${state.commits.length ? state.commits[0][0] : head}\n` : `${commonDir}\n`;
+      if (args[0] === "remote") return "https://github.com/a/b.git\n";
+      if (args[0] === "log") return state.commits.map(([oid, subject]) => `${oid}\t${subject}\n`).join("");
+      if (args[0] === "diff") return args.includes("--stat") ? " a.ts | 2 +-" : "+x";
+      return "";
+    };
+    const followFixture = (state, extra = {}) => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const opened = [];
+      const f = agentFixture({ pr: mine, script: askingDrive, captureScript: captureJs, git: commitsGit(commonDir, A, state), tickMs: 20, openResume: async (dir, sid) => void opened.push([dir, sid]), ...extra });
+      return { f, opened };
+    };
+    const continueIt = async (f) => {
+      await until(() => only(f).some((i) => i.state === "needsYou"));
+      const item = only(f)[0];
+      assert.strictEqual(actionLabel(item), "Your call");
+      nfsA.mkdirSync(item.worktree, { recursive: true });
+      // The run's own final message is in the transcript already: the card must not take it again.
+      continuedTurn(f, item, "old");
+      await new Promise((r) => setTimeout(r, 20));
+      assert.deepStrictEqual(await f.agent.act({ type: "continue", runId: item.runId }), { ok: true });
+      assert.ok(only(f)[0].follow, "the card follows the session now");
+      return only(f)[0];
+    };
+
+    await atest("agent follow: replies recorded in the session you continued — no question left, the card offers Send instead of Your call", async () => {
+      const { f, opened } = followFixture({ commits: [] });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        assert.deepStrictEqual(opened, [[item.worktree, item.sessionId]]);
+        continuedTurn(f, item, block({ summary: "Moved it into a service; replies queued.", asks: [], findings: [{ severity: "major", text: "Jest not run", where: "" }, { severity: "minor", text: "PR description outdated", where: "" }] }), { replies: [127652457, 127652462] });
+        await until(() => only(f)[0].result.summary === "Moved it into a service; replies queued.");
+        const now = only(f)[0];
+        assert.strictEqual(now.state, "needsYou");
+        assert.deepStrictEqual(now.result.asks, [], "the old question is gone, not kept beside the new result");
+        assert.deepStrictEqual(now.result.findings.map((x) => x.severity), ["major", "minor"], "replaced, not appended");
+        assert.strictEqual(actionLabel(now), "Send 2 replies");
+        assert.strictEqual(now.headline, "Would post: 2 replies");
+        assert.deepStrictEqual(now.plan.replies.map((r) => r.replyTo), [127652457, 127652462]);
+        const log = nfsA.readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8");
+        assert.match(log, /"event":"followed"/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent follow: commits made in the session reach the card's Push; a talk without a result block changes nothing", async () => {
+      const state = { commits: [] };
+      const { f } = followFixture(state);
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        continuedTurn(f, item, "It is a service now, I'd say.");
+        await new Promise((r) => setTimeout(r, 150));
+        assert.strictEqual(only(f)[0].result.asks.length, 1, "no block: the card is as it was");
+        assert.ok(only(f)[0].follow.seen, "that turn is taken, so it is not read again");
+        state.commits = [["3".repeat(40), "fix: tests"], ["2".repeat(40), "refactor: the cleanup moves into a service"]];
+        continuedTurn(f, item, block({ summary: "Committed.", asks: [], findings: [] }));
+        await until(() => only(f)[0].result.summary === "Committed.");
+        const now = only(f)[0];
+        assert.deepStrictEqual([now.state, now.drive.commits.length, actionLabel(now)], ["needsYou", 2, "Push 2 fixes"]);
+        assert.strictEqual(now.headline, "Would push 2 commits: fix: tests");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent follow: settled with nothing left to post or push, the card is done — and no longer followed", async () => {
+      const { f } = followFixture({ commits: [] });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        continuedTurn(f, item, block({ summary: "Opened a follow-up and answered nothing here.", asks: [], findings: [{ severity: "note", text: "Follow-up ENG-1", where: "" }] }));
+        await until(() => only(f)[0].state === "done");
+        const now = only(f)[0];
+        assert.strictEqual(now.headline, "Settled in your session");
+        assert.strictEqual(now.follow, undefined);
+        assert.strictEqual(actionLabel(now), null);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent follow: still asking, the new question replaces the old; a card you discard stops being followed; following survives a restart", async () => {
+      const { f } = followFixture({ commits: [] });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        continuedTurn(f, item, block({ summary: "One more thing.", asks: [{ question: "Keep the old filter?", options: ["Yes", "No"] }], findings: [] }));
+        await until(() => only(f)[0].result.summary === "One more thing.");
+        assert.deepStrictEqual(only(f)[0].result.asks.map((a) => a.question), ["Keep the old filter?"]);
+        assert.strictEqual(only(f)[0].headline, "Your call: Keep the old filter?");
+        f.agent.stop();
+        const saved = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).items[0];
+        assert.strictEqual(saved.follow.cwd, item.worktree, "in state.json, not only in memory");
+        // The app starts again: the same card goes on being followed.
+        const again = agentFixture({ home: f.dir, pr: f.snapshot.pullRequests[0], script: askingDrive, tickMs: 20 });
+        try {
+          continuedTurn(again, item, block({ summary: "Kept it.", asks: [], findings: [] }));
+          await until(() => only(again)[0].result.summary === "Kept it.");
+          // The drive's commits can't be read since the restart: the card stays, and says why.
+          assert.strictEqual(only(again)[0].state, "needsYou");
+          assert.match(only(again)[0].headline, /can't be read since the app restarted/);
+          assert.deepStrictEqual(await again.agent.act({ type: "skip", runId: item.runId }), { ok: true });
+          await until(() => only(again)[0].follow === undefined);
+        } finally {
+          again.agent.stop();
+        }
       } finally {
         f.agent.stop();
       }

@@ -1038,6 +1038,14 @@ export interface AgentItem {
   /** The next run continues `sessionId` instead of starting a session: after a restart, or with your answer. */
   resumeSession?: boolean;
   /**
+   * "Open in Claude" continued its session in your terminal: the app follows
+   * that session's transcript (in `cwd`'s Claude Code project folder) and puts
+   * the result of each turn it ends with a new prd-result block on this card —
+   * since: when you continued it; seen: the last final message taken (by its
+   * line's uuid). Dropped once the card leaves Your move.
+   */
+  follow?: { since: string; cwd: string; seen?: string };
+  /**
    * Your place for it in the queue (dragged, or "Run next"): lower runs first.
    * Unset, it queues by the time it was queued.
    */

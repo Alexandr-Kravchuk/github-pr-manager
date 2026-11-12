@@ -265,7 +265,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
               does: `Posts ${replies === 1 ? "the reply" : "the replies"} in the reviewers' threads under your name, signed by the agent. Nothing is pushed.`,
               act: { type: "publish", runId },
             },
-            ...(item.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them.", act: { type: "continue", runId } } as BoardChoice] : []),
+            ...(item.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them; what it ends with comes back to this card.", act: { type: "continue", runId } } as BoardChoice] : []),
             { label: "Discard", does: "Drops the replies; the agent leaves this commit to you.", act: { type: "skip", runId } },
           ];
           next = "The reviewers read your answers; when they comment again, the agent picks it up.";
@@ -358,7 +358,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         ask = "Look at the commits, then push them.";
         choices = [
           { label: stage.action?.label ?? "Push", primary: true, does: `Pushes these commits to your branch — a fast-forward, never forced${replies > 0 ? ", then posts the answers" : ""}. CI runs again.`, act: { type: "push", runId } },
-          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them.", act: { type: "continue", runId } } as BoardChoice] : []),
+          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them; what it ends with comes back to this card.", act: { type: "continue", runId } } as BoardChoice] : []),
           { label: "Discard", does: "Drops the commits; the agent leaves this commit to you.", act: { type: "skip", runId } },
         ];
         next = "CI runs on them. Green and approved, Merge comes to Your turn.";
@@ -380,7 +380,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
           ...(replies > 0
             ? [{ label: `Send ${plural(replies, "reply", "replies")} as ${replies === 1 ? "it is" : "they are"}`, does: "Posts them in the reviewers' threads without answering.", act: { type: "publish", runId } } as BoardChoice]
             : []),
-          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Answers it in the session instead.", act: { type: "continue", runId } } as BoardChoice] : []),
+          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Answers it in the session instead; once a turn there ends with a new result, this card shows it — and closes when nothing is left to send or push.", act: { type: "continue", runId } } as BoardChoice] : []),
           { label: "Discard", does: "Drops it; the agent leaves this commit to you.", act: { type: "skip", runId } },
         ];
         next = "The same session goes on with your answer and brings the result back here.";

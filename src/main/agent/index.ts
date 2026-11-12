@@ -7,6 +7,7 @@ import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPromp
 import { describePlan, disputeSteps, gitBashPath, readPlanLines, summarizePlan, type PublishStep } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
+import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
 import { AGENT_CLOSED, approvalStands, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
@@ -53,6 +54,8 @@ import { approveAgainRequest, checkBaseOnly, checkReapproval, reapproveRequest, 
 import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
 import { diagramComment, wantsDiagrams } from "../../shared/agent-diagrams";
 import { actionArgs, boardNow, clip, diffBoard, diffIdle, diffItems, itemFields, runStats, settingsDiff, type ItemMark } from "./journal";
+import { findTranscript, readTranscriptEnd } from "./followup";
+import { claudeConfigDir } from "../claude-sessions";
 import { openStore, type AgentItemRecord, type AgentLogEntry, type AgentStore, type BaseOnlyMark, type LedgerEntry, type ReapproveMark } from "./store";
 import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor, type OrchestratorRun } from "./sdlc";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
@@ -106,6 +109,8 @@ export interface AgentDeps {
   /** Called whenever what the agent shows changed. */
   onChange?: () => void;
   tickMs?: number;
+  /** Claude Code's config folder, where a session you continued writes its transcript; `CLAUDE_CONFIG_DIR` or ~/.claude by default. */
+  claudeConfigDir?: string;
 }
 
 export interface Agent {
@@ -1297,7 +1302,7 @@ export function createAgent(deps: AgentDeps): Agent {
     item.headline = runningHeadline(item);
     item.resumeSession = undefined;
     // What an earlier run of this item showed (Resume, an answer) gives way to this run's.
-    for (const k of ["output", "result", "plan", "planHash", "planEdited", "drive", "error", "published", "pushed", "interrupted"] as const) delete item[k];
+    for (const k of ["output", "result", "plan", "planHash", "planEdited", "drive", "error", "published", "pushed", "interrupted", "follow"] as const) delete item[k];
     const answer = item.answer;
     item.answer = undefined;
     if (!resume) item.checkout = checkout ?? undefined;
@@ -1552,14 +1557,9 @@ export function createAgent(deps: AgentDeps): Agent {
       } else if (item.scenario === "drive") {
         const base = keyHead(item.key) ?? pr?.headOid ?? "";
         const place = item.pushTo?.worktreeGitDir ? { workTree: dir, gitDir: item.pushTo.worktreeGitDir } : undefined;
-        // Nothing of the repository's is read before it is known unchanged:
-        // a config the session altered could make even `git log` start a program.
-        const same = place && item.pushTo ? (await gitFingerprint(git, place, item.pushTo.commonDir, item.pushTo.url).catch(() => "")) === item.pushTo.fingerprint : false;
-        const read = !same
-          ? { error: "the repository's git config, hooks or links changed during the run — the app read nothing from it" }
-          : await withNoHooks((h) => collectDrive(git, dir, base, item.reasons ?? [], h, place)).catch((e: Error) => ({ error: e.message }));
+        const read = await readDriveResult(item, dir, base, place, Boolean(pr?.stack), "during the run");
         if ("error" in read) {
-          fail("Couldn't read the run's commits", read.error);
+          fail(read.title, read.error);
         } else if (read.drive.commits.length === 0) {
           item.drive = read.drive;
           if (steps.length > 0) {
@@ -1574,10 +1574,6 @@ export function createAgent(deps: AgentDeps): Agent {
           } else {
             item.headline = "No commits — see what it found";
           }
-        } else if (!read.fastForward) {
-          fail("The run rewrote the branch's history — nothing to push", "The app pushes fast-forwards only; run it again.");
-        } else if (read.merges > 0 && pr?.stack) {
-          fail("The run made a merge commit in a stacked PR — nothing to push", `A stack merges only with a linear history; ${STACK_REBASE_HINT}.`);
         } else {
           item.drive = read.drive;
           if (steps.length > 0) {
@@ -1719,6 +1715,164 @@ export function createAgent(deps: AgentDeps): Agent {
     })();
   }
   let lastSweep = 0;
+
+  /** A transcript younger than this may be mid-write: it is read once it has been still that long. */
+  const FOLLOW_QUIET_MS = 2_000;
+  /** Each followed transcript as last read (file, time, size): an unchanged one isn't read again. */
+  const followSeen = new Map<string, string>();
+  let following = false;
+
+  /**
+   * The sessions you continued with "Open in Claude", followed on the agent's
+   * own timer — not a file watcher, which misses writes on some file systems
+   * and holds handles, and not a hook in the session, which would have to be
+   * written into your own Claude settings. Each tick costs a folder listing
+   * and a stat per followed card; a transcript is read only once it changed
+   * and has been still for a moment, and then only its tail. What is followed
+   * is in state.json (`item.follow`), so a restart goes on following it. A
+   * card that left Your move — Discard, Publish, Push, its PR merged or
+   * closed — is no longer followed.
+   */
+  async function followSessions(): Promise<void> {
+    if (following) return;
+    following = true;
+    try {
+      let dropped = false;
+      for (const item of store.data.items) {
+        if (!item.follow) continue;
+        if (item.state !== "needsYou" || !item.sessionId || !FOLLOWED.has(item.scenario)) {
+          item.follow = undefined;
+          followSeen.delete(item.runId);
+          dropped = true;
+          continue;
+        }
+        const follow = item.follow;
+        const stat = await findTranscript(deps.claudeConfigDir ?? claudeConfigDir(), follow.cwd, item.sessionId, Date.parse(follow.since)).catch(() => null);
+        if (!stat) continue;
+        const sig = `${stat.file}|${stat.mtimeMs}|${stat.size}`;
+        if (followSeen.get(item.runId) === sig) continue;
+        // Still being written: read it once it is still.
+        if (now().getTime() - stat.mtimeMs < FOLLOW_QUIET_MS) continue;
+        const end = await readTranscriptEnd(stat).catch(() => null);
+        followSeen.set(item.runId, sig);
+        if (!end || !isNewTurn(end, follow)) continue;
+        // Read while this ran: the card may have moved on meanwhile.
+        if (stopped || item.follow !== follow || item.state !== "needsYou") continue;
+        await takeTurn(item, end.uuid, end.text);
+      }
+      if (dropped) void store.save();
+    } finally {
+      following = false;
+    }
+  }
+
+  /**
+   * A drive's commits on top of `base`, read only while git looks as it did
+   * when the worktree was made — a config the session altered could make even
+   * `git log` start a program — and held to what Push accepts: a fast-forward,
+   * and no merge in a stacked PR. The run's end and a continued session's turn
+   * both read through here, so the card never offers a push Push would refuse.
+   */
+  async function readDriveResult(
+    item: AgentItemRecord,
+    dir: string,
+    base: string,
+    place: GitPlace | undefined,
+    stacked: boolean,
+    when: string,
+  ): Promise<{ drive: Awaited<ReturnType<typeof collectDrive>>["drive"] } | { title: string; error: string }> {
+    const pushTo = item.pushTo;
+    const same = place && pushTo ? (await gitFingerprint(git, place, pushTo.commonDir, pushTo.url).catch(() => "")) === pushTo.fingerprint : false;
+    if (!same) return { title: "Couldn't read the run's commits", error: `the repository's git config, hooks or links changed ${when} — the app read nothing from it` };
+    const read = await withNoHooks((h) => collectDrive(git, dir, base, item.reasons ?? [], h, place)).catch((e: Error) => ({ error: e.message }));
+    if ("error" in read) return { title: "Couldn't read the run's commits", error: read.error };
+    if (!read.fastForward) return { title: "The run rewrote the branch's history — nothing to push", error: "The app pushes fast-forwards only; run it again." };
+    if (read.merges > 0 && stacked) return { title: "The run made a merge commit in a stacked PR — nothing to push", error: `A stack merges only with a linear history; ${STACK_REBASE_HINT}.` };
+    return { drive: read.drive };
+  }
+
+  /**
+   * A turn of the session you continued ended: its prd-result replaces the
+   * card's summary, questions and findings, and what is left to post or push
+   * is read again — the replies it recorded through the run's wrapper, the
+   * commits it made on top of the run's head. A turn without the block (you
+   * only talked) leaves the card as it is.
+   */
+  async function takeTurn(item: AgentItemRecord, uuid: string, text: string): Promise<void> {
+    const follow = item.follow!;
+    follow.seen = uuid;
+    const read = resultOfTurn(text, item.scenario);
+    if (!read) {
+      void store.save();
+      return;
+    }
+    let onBranch = false;
+    let drive = item.drive;
+    let unread: string | null = null;
+    if (item.scenario === "drive" && !item.pushed) {
+      // The commits made in the session sit on top of the run's: read as a
+      // run's are, only while git looks as it did before the session.
+      const base = item.drive?.base ?? keyHead(item.key) ?? "";
+      const dir = item.worktree;
+      const pushTo = item.pushTo;
+      if (!pushTo?.worktreeGitDir || !dir || !fs.existsSync(dir) || !base) {
+        unread = "its commits can't be read since the app restarted — run it again";
+      } else {
+        const place: GitPlace = { workTree: dir, gitDir: pushTo.worktreeGitDir };
+        const got = await readDriveResult(item, dir, base, place, Boolean(snapshotPr(item.prId)?.stack), "in the session");
+        if ("error" in got) unread = got.error;
+        else {
+          drive = got.drive;
+          // Pushed from the session: the PR's head is the session's.
+          onBranch = got.drive.commits.length > 0 && snapshotPr(item.prId)?.headOid === got.drive.head;
+        }
+      }
+    }
+    // Read while git ran: the card may have moved on (Discard, an answer that started a run).
+    if (stopped || item.follow !== follow || item.state !== "needsYou") return;
+    item.result = read.card;
+    item.output = read.body;
+    item.drive = drive;
+    if (item.runFolder && !item.published) {
+      const planText = readPlanText(item.runFolder);
+      const steps = readPlanLines(planText);
+      if (steps.length > 0) {
+        const hash = planHash(planText);
+        if (item.planHash && item.planHash !== hash) item.planEdited = true;
+        item.plan = summarizePlan(steps);
+        const s = settings();
+        if (s && postsDiagrams(item, s)) item.plan.diagrams = item.diagrams!.list.length;
+        item.planHash = hash;
+      }
+    }
+    const outcome = followedOutcome(item, read.card, onBranch);
+    logRun(item, "followed", {
+      sessionId: item.sessionId,
+      detail: clip(read.card.summary),
+      data: {
+        asks: read.card.asks.length,
+        findings: read.card.findings.length,
+        ...(item.plan ? { plan: describePlan(item.plan) } : {}),
+        ...(item.drive ? { commits: item.drive.commits.length } : {}),
+        ...(onBranch ? { onBranch: true } : {}),
+        ...(unread ? { unread } : {}),
+        to: outcome.state,
+      },
+    });
+    if (unread) {
+      // What it would push is unknown: the card stays, and says why.
+      item.headline = `${read.card.asks.length > 0 ? outcome.headline : "Settled in your session"} — ${unread}`;
+    } else if (outcome.state === "done") {
+      item.follow = undefined;
+      followSeen.delete(item.runId);
+      await closeAs(item, outcome.headline);
+      return;
+    } else {
+      item.headline = outcome.headline;
+    }
+    void store.save();
+    changed();
+  }
 
   /** Closes an item a newer one replaced; it leaves the Board without a "Done today" card. */
   async function closeAs(item: AgentItemRecord, headline: string): Promise<void> {
@@ -2340,6 +2494,12 @@ export function createAgent(deps: AgentDeps): Agent {
         } catch (e) {
           return { ok: false, error: `Could not open your terminal: ${(e as Error).message}` };
         }
+        // What you settle in it comes back to this card (`followSessions`).
+        if (item.state === "needsYou" && FOLLOWED.has(item.scenario)) {
+          item.follow = { since: item.follow?.since ?? stamp(), cwd: where, ...(item.follow?.seen ? { seen: item.follow.seen } : {}) };
+          logRun(item, "following", { sessionId: item.sessionId, detail: "the session you continued in your terminal" });
+          void store.save();
+        }
         return { ok: true };
       }
       case "publish": {
@@ -2424,6 +2584,7 @@ export function createAgent(deps: AgentDeps): Agent {
 
   const loop = () => {
     if (stopped) return;
+    followSessions().catch((e: Error) => store.log({ at: stamp(), kind: "agent", event: "follow-failed", data: { error: e.message } }));
     tick();
     timer = setTimeout(loop, deps.tickMs ?? 5_000);
     timer.unref?.();

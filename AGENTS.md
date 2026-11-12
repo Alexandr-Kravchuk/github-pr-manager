@@ -235,7 +235,20 @@ Three layers:
   push and its answer are checked against what the app took in memory
   (`pushTo`), so its card offers Run again (and Open in Claude) instead of
   a question's buttons or a Push that would only be refused, and shows the
-  question as what the new run will ask. A refused action's message shows
+  question as what the new run will ask. "Open in Claude" (`continue`)
+  does not leave the card behind: a drive's or a review's card follows the
+  session it resumed (`item.follow` in `state.json`, so a restart goes on
+  following it) on the agent's own timer — a stat per tick, the transcript's
+  tail read only once it changed and has been still for 2 s
+  (`main/agent/followup.ts`). A turn that ends with a new `prd-result`
+  block replaces the card's summary, questions and findings
+  (`shared/agent-followup.ts`: the final message of the main conversation,
+  not a subagent's, not a turn still going), and what is left is read
+  again — the replies recorded through the run's wrapper, a drive's commits
+  on top of the run's head (only while git's fingerprint still matches).
+  Nothing asked and nothing left to send or push closes the card; a turn
+  without the block changes nothing; a card that left Your move is no
+  longer followed. A refused action's message shows
   on the open card it came from, not only at the top of the Board. A
   move ready for you names itself wherever the PR shows — the Roomy line's
   button ("Send review →", "Push 2 fixes →") and the Cozy cell open its card
