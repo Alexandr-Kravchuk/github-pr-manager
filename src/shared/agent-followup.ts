@@ -130,6 +130,24 @@ export function isNewTurn(end: TurnEnd, follow: { since: string; seen?: string }
   return Number.isFinite(at) && at > Date.parse(follow.since);
 }
 
+/**
+ * A session's commits the app couldn't read (after a restart, a git that
+ * changed under it): where they are and how many `git rev-list` counted on
+ * top of the PR's head — null when even that failed.
+ */
+export interface UnreadWork {
+  worktree: string;
+  ahead: number | null;
+  reason: string;
+}
+
+/** The card's line for work the app couldn't read: what is where, and that it is not on the PR. */
+export function unreadHeadline(u: UnreadWork): string {
+  const what =
+    u.ahead === null ? "Your session's commits couldn't be read" : u.ahead === 0 ? "Your session's work couldn't be read" : `${u.ahead} commit${u.ahead === 1 ? "" : "s"} of your session couldn't be read`;
+  return `${what} — ${u.reason}; ${u.ahead === 0 ? "check" : "they are not on the PR, see"} ${u.worktree}`;
+}
+
 export interface FollowedOutcome {
   state: "needsYou" | "done";
   headline: string;
@@ -146,8 +164,12 @@ export function followedOutcome(
   item: Pick<AgentItem, "scenario" | "plan" | "published" | "drive" | "pushed">,
   card: RunResultCard,
   onBranch = false,
+  unread?: UnreadWork,
 ): FollowedOutcome {
   const blocker = card.findings.some((f) => f.severity === "blocker");
+  // What the session left in the worktree is unknown: never "nothing to push",
+  // never a close — the card stays and says where the work is.
+  if (unread) return { state: "needsYou", headline: unreadHeadline(unread) };
   if (card.asks.length > 0) {
     return { state: "needsYou", headline: `Your call: ${card.asks[0].question}` };
   }

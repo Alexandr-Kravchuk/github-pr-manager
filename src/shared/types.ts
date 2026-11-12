@@ -1013,6 +1013,20 @@ export interface AgentItem {
    * only be run again (or continued in your terminal).
    */
   needsRerun?: boolean;
+  /**
+   * A drive's worktree holds work that is not on the PR and the app couldn't
+   * read it as a result (`reason`): commits a session made after a restart,
+   * or a git that changed under it. `ahead` is what `git rev-list` counted on
+   * top of the PR's head (null: not even that). Its card names the folder,
+   * never says "nothing to push", and holds its replies back — they may cite
+   * those commits. `kept`: the card was closed, and the worktree (and run
+   * folder) stayed for the work in it; `ref` keeps the commits reachable too.
+   */
+  localWork?: { worktree: string; ahead: number | null; dirty: boolean; reason: string; kept?: boolean; ref?: string };
+  /** The plan (by its fingerprint) whose replies cite commits not on the PR, warned about once: Send again posts them. */
+  shaWarned?: string;
+  /** Run again was refused once for commits in the worktree that are not on the PR: pressed again, it runs. */
+  rerunWarned?: boolean;
   /** Your choice on each thread the author pushed back on (by its first comment's id): keep your comment, or drop it. */
   disputes?: Record<string, "keep" | "drop">;
   error?: string;
@@ -1082,7 +1096,19 @@ export interface AgentItem {
    * a fingerprint of the repository's git config and hooks and your global
    * git config. A push goes out only while the fingerprint still matches.
    */
-  pushTo?: { url: string; commonDir: string; worktreeGitDir: string | null; fingerprint: string; sshSnapshot?: string };
+  pushTo?: {
+    url: string;
+    commonDir: string;
+    worktreeGitDir: string | null;
+    fingerprint: string;
+    sshSnapshot?: string;
+    /**
+     * Rebuilt after a restart from the clone and the worktree as they are now
+     * (`recoverPushTo`), not taken before the session: the fingerprint vouches
+     * only from then on. Such a drive is never pushed without your click.
+     */
+    recovered?: boolean;
+  };
 }
 
 export interface AgentDriveResult {

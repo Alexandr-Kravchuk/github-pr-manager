@@ -4,10 +4,10 @@ import path from "node:path";
 
 import { DEFAULT_AGENT_PROMPTS, languageRule } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
-import { describePlan, disputeSteps, gitBashPath, readPlanLines, summarizePlan, type PublishStep } from "../../shared/agent-publish";
+import { describePlan, disputeSteps, gitBashPath, readPlanLines, shasNotOnPr, summarizePlan, type PublishStep } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
-import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn } from "../../shared/agent-followup";
+import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
 import { AGENT_CLOSED, approvalStands, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
@@ -33,6 +33,7 @@ import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type Installed
 import {
   ghApiArgs,
   ghError,
+  hostFlag,
   planHash,
   prepareRunFolder,
   publishedCount,
@@ -47,7 +48,7 @@ import {
 import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
-import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
+import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, redirectingKeys, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { claudeSessionRoots, cutShort, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
 import { approveAgainRequest, checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
@@ -58,7 +59,9 @@ import { findTranscript, readTranscriptEnd } from "./followup";
 import { claudeConfigDir } from "../claude-sessions";
 import { openStore, type AgentItemRecord, type AgentLogEntry, type AgentStore, type BaseOnlyMark, type LedgerEntry, type ReapproveMark } from "./store";
 import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor, type OrchestratorRun } from "./sdlc";
-import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
+import { holdsWork, keepRef, prepareWorktree, readLocalWork, recoverPlace, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner, type LocalWork } from "./worktrees";
+import { normalizeRemote, prRemoteKey } from "../../shared/claude-launch";
+import os from "node:os";
 
 // The PR agent's core in the main process. It reads each dashboard snapshot,
 // asks the policy which PRs want work, queues them, and runs the queue on its
@@ -412,6 +415,7 @@ const STARTS_A_RUN: ReadonlySet<AgentAction["type"]> = new Set(["enqueue", "retr
 export function createAgent(deps: AgentDeps): Agent {
   const now = deps.now ?? (() => new Date());
   const git = deps.git ?? runGit;
+  const sshResolve = deps.sshResolve ?? ((args: string[]) => execFileSync("ssh", args, { encoding: "utf8", timeout: 15_000, env: launcherEnv(process.env), stdio: ["ignore", "pipe", "ignore"] }));
   const plugins = deps.plugins ?? (() => readInstalledPlugins());
   /** Set once everything the journal reads exists: the first saves of the constructor come before it. */
   let journalReady = false;
@@ -456,8 +460,9 @@ export function createAgent(deps: AgentDeps): Agent {
     if (item.state === "working") markInterrupted(item, now().toISOString());
     // A drive's result from before this start: its push and its answer are
     // checked against what the app took in memory before the session
-    // (`pushTo`), and that is gone — it can only be run again. Its card says
-    // so instead of offering a push or an answer that would be refused.
+    // (`pushTo`), and that is gone. Marked to run again until
+    // `recoverDrives` rebuilds where it pushes from the worktree still there
+    // and reads its commits again — the session may have made more.
     else if (item.scenario === "drive" && item.state === "needsYou" && !item.interrupted && !item.pushTo) item.needsRerun = true;
   }
   void store.save();
@@ -1061,6 +1066,11 @@ export function createAgent(deps: AgentDeps): Agent {
   }
 
   function onSnapshot(snapshot: DashboardResponse): void {
+    // The first snapshot after a start: drive results from before it are read again (their clone is checked against the PR's).
+    if (!recovering) {
+      recovering = true;
+      void recoverDrives().catch((e: Error) => store.log({ at: stamp(), kind: "agent", event: "recover-failed", data: { error: e.message } }));
+    }
     const s = settings();
     plannedWith = JSON.stringify(s);
     logSettings(s);
@@ -1355,7 +1365,7 @@ export function createAgent(deps: AgentDeps): Agent {
           });
           const place: GitPlace = { workTree: dir, gitDir: worktreeGitDir };
           // An SSH remote: your SSH settings resolved now, kept in memory — no file a session could reach.
-          const ssh = snapshotSsh(url, deps.sshResolve ?? ((args) => execFileSync("ssh", args, { encoding: "utf8", timeout: 15_000, env: launcherEnv(process.env), stdio: ["ignore", "pipe", "ignore"] })));
+          const ssh = snapshotSsh(url, sshResolve);
           item.pushTo = { url, commonDir, worktreeGitDir, fingerprint: await gitFingerprint(git, place, commonDir, url), ...(ssh !== null ? { sshSnapshot: ssh } : {}) };
         } catch (e) {
           return fail("Could not prepare the drive", (e as Error).message);
@@ -1659,6 +1669,9 @@ export function createAgent(deps: AgentDeps): Agent {
     if (publishNow) {
       // On: the app posts what the review prepared, with the same checks as your Publish.
       await publishItem(item, all, false);
+    } else if (pushNow && item.pushTo?.recovered) {
+      // Where it pushes was rebuilt after a restart, not taken before the session: only on your Push.
+      item.headline = `${item.headline} — held: the app restarted since the run started, push it yourself`;
     } else if (pushNow) {
       // On: the app pushes the drive's commits, with the same checks as your Push.
       await pushItem(item, all);
@@ -1689,6 +1702,8 @@ export function createAgent(deps: AgentDeps): Agent {
     tick();
   }
 
+  /** Drive results from before this start are read again once, at the first snapshot. */
+  let recovering = false;
   /** Worktrees being removed right now — a sweep and a close never race on one. */
   const dropping = new Set<string>();
 
@@ -1710,12 +1725,215 @@ export function createAgent(deps: AgentDeps): Agent {
     if (dropping.has(dir)) return;
     dropping.add(dir);
     try {
+      // Kept for the work in it when its card closed: freed once that work is on the PR (or gone).
+      if (item.localWork?.kept) {
+        if (!fs.existsSync(dir)) {
+          item.worktree = undefined;
+          return;
+        }
+        const work = await localWorkOf(item, dir);
+        if (work.ahead !== 0 || work.dirty === true) return;
+        await releaseKept(item);
+      } else if (item.scenario === "drive" && fs.existsSync(dir) && (await keepForWork(item, dir))) return;
       await removeWorktree(git, item.checkout, dir);
       item.worktree = undefined;
     } catch {
       // Still in use: left for the next sweep.
     } finally {
       dropping.delete(dir);
+    }
+  }
+
+  /**
+   * What a drive's worktree holds that the PR doesn't, against the PR's head
+   * now, else the head the run started from. Changed files are read only
+   * while git's config is the one fingerprinted before the session (see
+   * `readLocalWork`): never for a place rebuilt after a restart.
+   */
+  async function localWorkOf(item: AgentItemRecord, dir: string): Promise<LocalWork> {
+    const pushTo = item.pushTo;
+    const gitDir = pushTo?.worktreeGitDir ?? (await trustedCheckout(item).then((co) => (co ? recoverPlace(git, co, dir).then((p) => p.worktreeGitDir) : null)).catch(() => null));
+    const checkFiles = Boolean(
+      pushTo?.worktreeGitDir &&
+        !pushTo.recovered &&
+        (await gitFingerprint(git, { workTree: dir, gitDir: pushTo.worktreeGitDir }, pushTo.commonDir, pushTo.url).catch(() => "")) === pushTo.fingerprint,
+    );
+    return readLocalWork(git, dir, [snapshotPr(item.prId)?.headOid, item.drive?.base, keyHead(item.key)], gitDir, checkFiles).catch(() => ({ ahead: null, dirty: null, head: null }));
+  }
+
+  /**
+   * The clone a run's worktree belongs to — only when it is the one the app
+   * finds for the PR now (Settings › Claude's folders), never a path from
+   * state.json alone: a rewritten `checkout` would name a repository whose
+   * config and worktree list someone else wrote.
+   */
+  async function trustedCheckout(item: AgentItemRecord): Promise<string | null> {
+    const pr = snapshotPr(item.prId);
+    const claude = loadAll()?.claude;
+    if (!pr || !claude || !item.checkout) return null;
+    const found = deps.findCheckout(pr, claude);
+    if (!found) return null;
+    const real = (p: string) => fs.promises.realpath(p).catch(() => path.resolve(p));
+    return (await real(found)) === (await real(item.checkout)) ? found : null;
+  }
+
+  /**
+   * A drive's worktree is never removed with work in it you haven't seen:
+   * commits on top of the PR that are not the ones its card showed (a session
+   * you continued made them), changed files, or a count git couldn't make.
+   * The worktree stays, and so does its run folder (replies never sent); the
+   * commits get a ref of their own (`refs/prd-agent/<runId>`) in case the
+   * folder goes anyway, and the card says where they are. True when kept.
+   */
+  async function keepForWork(item: AgentItemRecord, dir: string): Promise<boolean> {
+    const work = await localWorkOf(item, dir);
+    // The HEAD the card showed: every commit up to it was on the card, however many of them reached the PR since.
+    const shown = Boolean(item.drive && !item.needsRerun && work.head === item.drive.head);
+    const unseen = work.ahead !== 0 && !shown;
+    if (!unseen && work.dirty !== true) return false;
+    if (!holdsWork(work)) return false;
+    let ref: string | undefined;
+    const name = keepRef(item.runId);
+    const checkout = await trustedCheckout(item).catch(() => null);
+    if (work.head && work.ahead && checkout && name && /^[0-9a-f]{40}$/.test(work.head)) {
+      const head = work.head;
+      // Created, never moved: a ref of that name already there is left as it is.
+      ref = await withNoHooks((h) => git([...safeGit(h), "update-ref", name, head, "0".repeat(40)], checkout))
+        .then(() => name)
+        .catch(() => undefined);
+    }
+    const what =
+      work.ahead === null
+        ? "work git couldn't count"
+        : [work.ahead > 0 ? `${work.ahead} commit${work.ahead === 1 ? "" : "s"} not on the PR` : null, work.dirty === true ? "changed files" : null].filter(Boolean).join(" and ");
+    item.localWork = { worktree: dir, ahead: work.ahead, dirty: work.dirty === true, reason: what, kept: true, ...(ref ? { ref } : {}) };
+    item.headline = `${item.headline} — kept its worktree: ${what} in ${dir}`;
+    logRun(item, "kept-worktree", { detail: what, data: { worktree: dir, ahead: work.ahead, dirty: work.dirty, ...(ref ? { ref } : {}) } });
+    return true;
+  }
+
+  /** A kept worktree's work reached the PR: its ref goes, and the folder with its run folder goes as any other. */
+  async function releaseKept(item: AgentItemRecord): Promise<void> {
+    const ref = item.localWork?.ref;
+    const checkout = await trustedCheckout(item).catch(() => null);
+    if (ref && checkout && ref === keepRef(item.runId)) {
+      await withNoHooks((h) => git([...safeGit(h), "update-ref", "-d", ref], checkout)).catch(() => {});
+    }
+    logRun(item, "released-worktree", { detail: "its work is on the PR" });
+    item.localWork = undefined;
+    dropRunFolder(item);
+  }
+
+  /**
+   * Where a drive pushes, rebuilt after a restart dropped what its run took
+   * (`pushTo`): the worktree's git folder found from the clone's side, the
+   * push URL of the clone's remote for the PR's repository, a fingerprint
+   * taken now. Nothing from before the session vouches for it, so a config
+   * that redirects a push is refused outright, and it is marked `recovered`:
+   * never pushed without your click.
+   */
+  async function recoverPushTo(item: AgentItemRecord): Promise<void> {
+    const dir = item.worktree;
+    if (!dir || !fs.existsSync(dir)) throw new Error("the run's worktree is gone");
+    const checkout = await trustedCheckout(item);
+    if (!checkout) throw new Error("its clone isn't the one the app finds for the PR now");
+    const { commonDir, worktreeGitDir } = await recoverPlace(git, checkout, dir);
+    const remote = remoteFor(checkout, item);
+    if (!remote) throw new Error("the clone has no remote for the PR's repository any more");
+    const place: GitPlace = { workTree: dir, gitDir: worktreeGitDir };
+    const [url, origins] = await withNoHooks(async (h) => [
+      (await git([...safeGit(h), "remote", "get-url", "--push", remote], checkout)).trim(),
+      await git([...safeGit(h, place), "config", "--list", "--show-origin", "--name-only", "-z"], dir),
+    ]);
+    // The push goes to the PR's own repository, whatever the remote's push URL says.
+    if (normalizeRemote(url) !== prRemoteKey(item)) throw new Error("the clone's push URL isn't the PR's repository");
+    const home = os.homedir();
+    const xdg = process.env.XDG_CONFIG_HOME ?? path.join(home, ".config");
+    const redirects = redirectingKeys(origins, dir, [commonDir, worktreeGitDir, dir], [
+      path.join(home, ".gitconfig"),
+      path.join(xdg, "git", "config"),
+      "/etc/gitconfig",
+      "/opt/homebrew/etc/gitconfig",
+      "/usr/local/etc/gitconfig",
+    ]);
+    if (redirects.length > 0) throw new Error(`the repository's config sets ${redirects.join(", ")}`);
+    const ssh = snapshotSsh(url, sshResolve);
+    item.pushTo = { url, commonDir, worktreeGitDir, fingerprint: await gitFingerprint(git, place, commonDir, url), ...(ssh !== null ? { sshSnapshot: ssh } : {}), recovered: true };
+  }
+
+  /** The work a drive's worktree holds that the app couldn't read as a result: what the card says, with where it is. */
+  async function unreadWorkOf(item: AgentItemRecord, dir: string | undefined, reason: string): Promise<UnreadWork & { dirty: boolean }> {
+    const work = dir && fs.existsSync(dir) ? await localWorkOf(item, dir) : { ahead: null, dirty: null, head: null };
+    return { worktree: dir ?? "its worktree", ahead: work.ahead, dirty: work.dirty === true, reason };
+  }
+  function markUnread(item: AgentItemRecord, u: UnreadWork & { dirty: boolean }): void {
+    item.localWork = { worktree: u.worktree, ahead: u.ahead, dirty: u.dirty, reason: u.reason };
+    item.needsRerun = true;
+  }
+  /** Drive cards being read again right now (start-up recovery, a followed turn): never two reads of one at once. */
+  const rereading = new Set<string>();
+
+  /**
+   * At start: each drive result waiting for you whose worktree is still
+   * there gets its push place rebuilt and its commits read again — those a
+   * session you continued made since included — so its card offers the push
+   * it has, not "nothing to push" or a Run again that would start over from
+   * the PR's head. What can't be read is named on the card with its folder.
+   */
+  async function recoverDrives(): Promise<void> {
+    const waiting = store.data.items.filter((i) => i.scenario === "drive" && i.state === "needsYou" && i.needsRerun && !i.pushTo && !i.pushed && i.worktree && i.checkout);
+    for (const item of waiting) {
+      const dir = item.worktree!;
+      if (!fs.existsSync(dir) || rereading.has(item.runId)) continue;
+      rereading.add(item.runId);
+      try {
+        await recoverOne(item, dir);
+      } finally {
+        rereading.delete(item.runId);
+      }
+    }
+    if (waiting.length > 0) {
+      void store.save();
+      changed();
+    }
+  }
+
+  async function recoverOne(item: AgentItemRecord, dir: string): Promise<void> {
+    {
+      const base = item.drive?.base ?? keyHead(item.key) ?? "";
+      const at = item.finishedAt;
+      let error: string | null = null;
+      // Moved on meanwhile (Discard, Run again, an answer): what was read is not this card's any more.
+      const stale = () => stopped || item.state !== "needsYou" || item.finishedAt !== at || item.pushed === true;
+      try {
+        await recoverPushTo(item);
+        if (stale()) {
+          item.pushTo = undefined;
+          return;
+        }
+        const got = await readDriveResult(item, dir, base, { workTree: dir, gitDir: item.pushTo!.worktreeGitDir! }, Boolean(snapshotPr(item.prId)?.stack), "since the restart");
+        if (stale()) return;
+        if ("error" in got) error = got.error;
+        else {
+          item.drive = got.drive;
+          item.needsRerun = undefined;
+          item.localWork = undefined;
+          const n = got.drive.commits.length;
+          if ((item.result?.asks.length ?? 0) === 0 && n > 0) item.headline = `Would push ${n} commit${n === 1 ? "" : "s"}: ${got.drive.commits[n - 1].subject}`;
+          logRun(item, "recovered", { detail: `${n} commit(s)`, headOid: got.drive.head });
+        }
+      } catch (e) {
+        error = (e as Error).message;
+      }
+      if (error !== null) {
+        // A place rebuilt for a result that couldn't be read is not one to push from.
+        if (item.pushTo?.recovered) item.pushTo = undefined;
+        const unread = await unreadWorkOf(item, dir, error);
+        if (stale()) return;
+        markUnread(item, unread);
+        if (unread.ahead !== 0) item.headline = unreadHeadline(unread);
+        logRun(item, "not-recovered", { detail: clip(error), data: { ahead: unread.ahead } });
+      }
     }
   }
 
@@ -1767,6 +1985,8 @@ export function createAgent(deps: AgentDeps): Agent {
         if (followSeen.get(item.runId) === sig) continue;
         // Still being written: read it once it is still.
         if (now().getTime() - stat.mtimeMs < FOLLOW_QUIET_MS) continue;
+        // Being read again at start-up: this transcript is read at a later tick.
+        if (rereading.has(item.runId)) continue;
         const end = await readTranscriptEnd(stat).catch(() => null);
         followSeen.set(item.runId, sig);
         if (!end || !isNewTurn(end, follow)) continue;
@@ -1813,6 +2033,16 @@ export function createAgent(deps: AgentDeps): Agent {
    * only talked) leaves the card as it is.
    */
   async function takeTurn(item: AgentItemRecord, uuid: string, text: string): Promise<void> {
+    // Being read again at start-up: this turn is taken at the next tick, on what that read found.
+    if (rereading.has(item.runId)) return;
+    rereading.add(item.runId);
+    try {
+      await takeTurnNow(item, uuid, text);
+    } finally {
+      rereading.delete(item.runId);
+    }
+  }
+  async function takeTurnNow(item: AgentItemRecord, uuid: string, text: string): Promise<void> {
     const follow = item.follow!;
     follow.seen = uuid;
     const read = resultOfTurn(text, item.scenario);
@@ -1823,14 +2053,26 @@ export function createAgent(deps: AgentDeps): Agent {
     let onBranch = false;
     let drive = item.drive;
     let unread: string | null = null;
+    let unreadWork: (UnreadWork & { dirty: boolean }) | null = null;
     if (item.scenario === "drive" && !item.pushed) {
       // The commits made in the session sit on top of the run's: read as a
       // run's are, only while git looks as it did before the session.
       const base = item.drive?.base ?? keyHead(item.key) ?? "";
       const dir = item.worktree;
+      // After a restart: where it pushes, rebuilt from the worktree still there.
+      if (!item.pushTo && dir && fs.existsSync(dir)) {
+        await recoverPushTo(item).catch((e: Error) => {
+          item.pushTo = undefined;
+          unread = `the app restarted since the run, and ${e.message}`;
+        });
+      }
       const pushTo = item.pushTo;
-      if (!pushTo?.worktreeGitDir || !dir || !fs.existsSync(dir) || !base) {
-        unread = "its commits can't be read since the app restarted — run it again";
+      if (unread) {
+        // Said above.
+      } else if (!dir || !fs.existsSync(dir)) {
+        unread = "the run's worktree is gone";
+      } else if (!pushTo?.worktreeGitDir || !base) {
+        unread = "the app restarted since the run";
       } else {
         const place: GitPlace = { workTree: dir, gitDir: pushTo.worktreeGitDir };
         const got = await readDriveResult(item, dir, base, place, Boolean(snapshotPr(item.prId)?.stack), "in the session");
@@ -1841,12 +2083,21 @@ export function createAgent(deps: AgentDeps): Agent {
           onBranch = got.drive.commits.length > 0 && snapshotPr(item.prId)?.headOid === got.drive.head;
         }
       }
+      if (unread) unreadWork = await unreadWorkOf(item, dir, unread);
     }
     // Read while git ran: the card may have moved on (Discard, an answer that started a run).
     if (stopped || item.follow !== follow || item.state !== "needsYou") return;
     item.result = read.card;
     item.output = read.body;
     item.drive = drive;
+    if (item.scenario === "drive" && !item.pushed) {
+      if (unreadWork) markUnread(item, unreadWork);
+      else {
+        // Read: the card's push is what the worktree holds.
+        item.localWork = undefined;
+        item.needsRerun = undefined;
+      }
+    }
     if (item.runFolder && !item.published) {
       const planText = readPlanText(item.runFolder);
       const steps = readPlanLines(planText);
@@ -1859,7 +2110,7 @@ export function createAgent(deps: AgentDeps): Agent {
         item.planHash = hash;
       }
     }
-    const outcome = followedOutcome(item, read.card, onBranch);
+    const outcome = followedOutcome(item, read.card, onBranch, unreadWork ?? undefined);
     logRun(item, "followed", {
       sessionId: item.sessionId,
       detail: clip(read.card.summary),
@@ -1873,10 +2124,7 @@ export function createAgent(deps: AgentDeps): Agent {
         to: outcome.state,
       },
     });
-    if (unread) {
-      // What it would push is unknown: the card stays, and says why.
-      item.headline = `${read.card.asks.length > 0 ? outcome.headline : "Settled in your session"} — ${unread}`;
-    } else if (outcome.state === "done") {
+    if (outcome.state === "done") {
       item.follow = undefined;
       followSeen.delete(item.runId);
       await closeAs(item, outcome.headline);
@@ -1888,13 +2136,45 @@ export function createAgent(deps: AgentDeps): Agent {
     changed();
   }
 
+  /**
+   * The PR's head moved past a drive's run head only by this run's own work:
+   * it is the worktree's HEAD or one of its ancestors, so every commit in
+   * `<run head>..<PR head>` is in the worktree. False when it can't be told.
+   */
+  async function headFromRun(item: AgentItemRecord, prHead: string): Promise<boolean> {
+    const dir = item.worktree;
+    if (!dir || !fs.existsSync(dir) || !/^[0-9a-f]{40}$/.test(prHead)) return false;
+    const gitDir = item.pushTo?.worktreeGitDir ?? (item.checkout ? await recoverPlace(git, item.checkout, dir).then((p) => p.worktreeGitDir).catch(() => null) : null);
+    if (!gitDir) return false;
+    // The run's head is under the new one (the branch went forward, not back), and the new one is in the worktree.
+    const runHead = item.plan?.commitId ?? item.drive?.base ?? keyHead(item.key);
+    if (!runHead || !/^[0-9a-f]{7,40}$/.test(runHead)) return false;
+    return withNoHooks(async (h) => {
+      const g = (args: string[]) => git([...safeGit(h, { workTree: dir, gitDir }), ...args], dir);
+      await g(["merge-base", "--is-ancestor", runHead, prHead]);
+      await g(["merge-base", "--is-ancestor", prHead, "HEAD"]);
+      return true;
+    }).catch(() => false);
+  }
+
+  /** The commit ids a drive's replies mention that are not among the PR's commits (its head counted too). */
+  async function repliesCiteMissing(item: AgentItemRecord, prHead: string | null | undefined): Promise<string[]> {
+    const replies = item.plan?.replies ?? [];
+    if (replies.length === 0 || shasNotOnPr(replies, []).length === 0) return [];
+    const r = await gh(["api", "--paginate", `repos/${item.repo}/pulls/${item.prNumber}/commits?per_page=100`, "--jq", ".[].sha", ...hostFlag(item.url)]);
+    const commits = r.code === 0 ? r.stdout.split("\n").map((l) => l.trim()).filter(Boolean) : [];
+    if (prHead) commits.push(prHead);
+    return shasNotOnPr(replies, commits);
+  }
+
   /** Closes an item a newer one replaced; it leaves the Board without a "Done today" card. */
   async function closeAs(item: AgentItemRecord, headline: string): Promise<void> {
     item.state = "done";
     item.headline = headline;
     item.finishedAt = stamp();
     await dropWorktree(item);
-    dropRunFolder(item);
+    // Kept with its worktree: the replies it recorded may answer for those commits.
+    if (!item.localWork?.kept) dropRunFolder(item);
     void store.save();
     changed();
   }
@@ -2002,7 +2282,25 @@ export function createAgent(deps: AgentDeps): Agent {
     const { pr, state, viewer } = read.fresh;
     if (state !== "OPEN") return refuse(`the PR was ${state.toLowerCase()} since`);
     const head = item.plan.commitId ?? keyHead(item.key);
-    if (head && pr.headOid && pr.headOid !== head) return refuse(`there are new commits since this ${drive ? "run" : "review"} — run it again`);
+    // A drive's replies stand on a head that moved only by this run's own
+    // commits — pushed from the session you continued, or by hand: the new
+    // head is in the run's worktree. A commit from elsewhere stops them.
+    if (head && pr.headOid && pr.headOid !== head && !(drive && (await headFromRun(item, pr.headOid)))) {
+      return refuse(`there are new commits since this ${drive ? "run" : "review"} — run it again`);
+    }
+    if (drive) {
+      // Replies that cite commits the PR doesn't have point at nothing once posted: said once, Send again posts them.
+      const missing = await repliesCiteMissing(item, pr.headOid);
+      if (missing.length > 0 && item.shaWarned !== item.planHash) {
+        item.shaWarned = item.planHash ?? "";
+        const error = `the replies cite ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? ` (+${missing.length - 3})` : ""}, not on the PR — push ${missing.length === 1 ? "it" : "them"} first, or Send again to post them as they are`;
+        logRun(item, "not-published", { detail: clip(error), data: { byYou, missing } });
+        item.headline = `Not sent — ${error}`;
+        void store.save();
+        changed();
+        return { ok: false, error: `The replies cite ${missing.join(", ")}, which ${missing.length === 1 ? "isn't" : "aren't"} on the PR. Push first — or press Send again to post them as they are.` };
+      }
+    }
     const me = viewer?.toLowerCase();
     const holdApprove =
       all.agent.scenarios.review.holdApproveOnChangeRequest && pr.reviewers.some((r) => r.reviewState === "changes_requested" && r.login.toLowerCase() !== me);
@@ -2183,7 +2481,8 @@ export function createAgent(deps: AgentDeps): Agent {
     item.state = "done";
     item.headline = headline;
     await dropWorktree(item);
-    dropRunFolder(item);
+    // Kept with its worktree: the replies it recorded may answer for those commits.
+    if (!item.localWork?.kept) dropRunFolder(item);
     void store.save();
     changed();
     announce(item, "finished");
@@ -2536,6 +2835,14 @@ export function createAgent(deps: AgentDeps): Agent {
         if (item.state !== "needsYou" || (item.scenario !== "review" && item.scenario !== "rereview" && !repliesOnly)) {
           return { ok: false, error: "Only a prepared review, or a drive's replies with nothing to push, can be published." };
         }
+        // Its worktree holds commits the app couldn't read: the replies may answer for them.
+        const unread = item.scenario === "drive" ? item.localWork : undefined;
+        if (unread && !unread.kept && unread.ahead !== 0) {
+          return {
+            ok: false,
+            error: `Its worktree has ${unread.ahead === null ? "commits" : `${unread.ahead} commit${unread.ahead === 1 ? "" : "s"}`} the app couldn't read (${unread.worktree}), and the replies may cite them — push them first (Open in Claude), then send.`,
+          };
+        }
         return publishItem(item, all, true);
       }
       case "push": {
@@ -2584,6 +2891,23 @@ export function createAgent(deps: AgentDeps): Agent {
         if (item.scenario === "reapprove" || item.scenario === "reask") return { ok: false, error: "An offer to give an approval again isn't a run — it is checked again on the next head." };
         const pr = snapshot?.pullRequests.find((p) => p.id === item.prId);
         if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+        // Commits in its worktree you haven't seen on the card: the new run
+        // starts from the PR's head without them. Said once; pressed again it
+        // runs, and the old worktree stays with them (`keepForWork`).
+        if (item.scenario === "drive" && !item.rerunWarned && item.worktree && fs.existsSync(item.worktree)) {
+          const work = await localWorkOf(item, item.worktree);
+          const shown = Boolean(item.drive && !item.needsRerun && work.head === item.drive.head && work.ahead === item.drive.commits.length);
+          if (work.ahead !== 0 && !shown) {
+            item.rerunWarned = true;
+            void store.save();
+            changed();
+            const n = work.ahead === null ? "commits" : `${work.ahead} commit${work.ahead === 1 ? "" : "s"}`;
+            return {
+              ok: false,
+              error: `Its worktree has ${n} not on the PR (${item.worktree}). A new run starts from the PR's head without them — push them first (Open in Claude), or press Run again once more: the worktree stays with them.`,
+            };
+          }
+        }
         // A drive goes again for what the PR needs now, not what it needed then.
         // Nothing broken any more: run again as a self-review.
         const found = item.scenario === "drive" ? driveReasons(pr, all.agent) : undefined;

@@ -432,3 +432,35 @@ export function readPlanLines(text: string): PublishStep[] {
 function toWire(c: PlanComment): Record<string, unknown> {
   return commentBody(c, null);
 }
+
+/**
+ * The commit ids a text mentions: 7 to 40 hex characters as a word, with at
+ * least one digit and one letter — so "deadbeef" or "1234567" (a number) are
+ * not taken for one. Lower case, each once, in order.
+ */
+export function mentionedShas(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/(?<![0-9A-Za-z])[0-9a-fA-F]{7,40}(?![0-9A-Za-z])/g)) {
+    const sha = m[0].toLowerCase();
+    if (!/[0-9]/.test(sha) || !/[a-f]/.test(sha) || out.includes(sha)) continue;
+    out.push(sha);
+  }
+  return out;
+}
+
+/**
+ * The commits replies point at that are not the PR's: a mention matches a
+ * commit of the PR when it is a prefix of its full id. A drive's replies
+ * written in a session that went on ("fixed in 05e1f4e") name commits that
+ * only reach the PR with a push — posted before it, they point at nothing.
+ */
+export function shasNotOnPr(replies: ReadonlyArray<{ body: string }>, prCommits: readonly string[]): string[] {
+  const known = prCommits.map((c) => c.toLowerCase());
+  const out: string[] = [];
+  for (const r of replies) {
+    for (const sha of mentionedShas(r.body)) {
+      if (!known.some((c) => c.startsWith(sha)) && !out.includes(sha)) out.push(sha);
+    }
+  }
+  return out;
+}

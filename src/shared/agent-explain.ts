@@ -244,6 +244,20 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
      * will ask, not as buttons.
      */
     const rerunCard = (it: AgentItem) => {
+      const lw = it.localWork && !it.localWork.kept && it.localWork.ahead !== 0 ? it.localWork : null;
+      if (lw) {
+        // Work the app couldn't read sits in the worktree: never "nothing to push", never a Run again that drops it unsaid.
+        const many = lw.ahead === null ? "commits" : plural(lw.ahead, "commit");
+        now = `Your session left ${many} in ${lw.worktree} that the app couldn't read (${lw.reason}). They are not on the PR, and its replies may cite them.`;
+        ask = "Push them from the session, then come back — the card reads them again.";
+        choices = [
+          ...(it.sessionId ? [{ label: "Open in Claude", primary: true, does: "Opens the session in that worktree; push from there. What it ends with comes back to this card.", act: { type: "continue", runId } } as BoardChoice] : []),
+          { label: "Run again", does: `Starts over from the PR's head without the ${many} — the worktree stays with them.`, act: { type: "retry", runId } },
+          { label: "Discard", does: "Closes the card; the worktree stays with the commits, and a ref keeps them.", act: { type: "skip", runId } },
+        ];
+        next = "Once they are on the PR, the replies can go out.";
+        return;
+      }
       const n = it.drive?.commits.length ?? 0;
       now = `The app restarted after this run, so it can't push ${n > 0 ? `its ${plural(n, "commit")}` : "anything"} or go on with your answer any more.`;
       ask = "Run it again — the new run redoes the work and asks you again if it still needs to.";
@@ -256,6 +270,10 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
     };
     switch (kind) {
       case "send": {
+        if (item?.scenario === "drive" && item.needsRerun && item.localWork) {
+          rerunCard(item);
+          break;
+        }
         if (item?.scenario === "drive") {
           // Your own PR, nothing to push: only its answers to the reviewers wait to go out.
           const replies = plan?.replies.length ?? 0;

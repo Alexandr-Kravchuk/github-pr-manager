@@ -237,9 +237,37 @@ Three layers:
   switch-off — so no reason waits for the next poll. A drive's result
   from before the app last started is marked `needsRerun` at start: its
   push and its answer are checked against what the app took in memory
-  (`pushTo`), so its card offers Run again (and Open in Claude) instead of
-  a question's buttons or a Push that would only be refused, and shows the
-  question as what the new run will ask. "Open in Claude" (`continue`)
+  (`pushTo`, never on disk). While its worktree is still there,
+  `recoverDrives` (and a followed turn) rebuild `pushTo` from the clone's
+  side — the worktree's git folder from `<commonDir>/worktrees/*/gitdir`,
+  not the worktree's own `.git` file, the clone's push URL, a fingerprint
+  taken now — only for the clone the app finds for the PR now
+  (`trustedCheckout`, never `checkout` from state.json alone), only for a
+  push URL that is the PR's repository, and refused while the
+  repository's config could redirect a push or run a program for it
+  (`redirectingKeys`: insteadOf, pushurl, credential/http/protocol keys,
+  sshCommand, askPass, any include) — mark it `recovered` (pushed only on
+  your click) and
+  read the commits again, those your session made since included. What
+  still can't be read becomes `localWork` (the folder and `rev-list`'s
+  count on top of the PR): the card names it, never says "nothing to
+  push", and Send is refused while it holds commits. Otherwise its card
+  offers Run again (and Open in Claude) instead of a question's buttons or
+  a Push that would only be refused, and shows the question as what the
+  new run will ask. A drive's worktree is never removed with work you
+  haven't seen (`keepForWork`: a HEAD that is not the one its card
+  showed, changed tracked files, or a count git couldn't make) — Discard, a
+  close and the sweep keep it and its run folder, write
+  `refs/prd-agent/<runId>` (create-only, a UUID run id only), and say so on
+  the card; the sweep frees it, ref and all, once that work is on the PR,
+  and pruning skips such a card. Run again says so once first. Reading a
+  worktree never goes through its own `.git` file (no git folder from the
+  clone's side: nothing is read), and `git status` — which runs the
+  config's clean filters — only while git's config matches the fingerprint
+  taken before the session. A drive's replies are held once when they cite a commit id the
+  PR doesn't have (`shasNotOnPr`), and a PR head that moved only by the
+  run's own commits (the run's head under it, it under the worktree's
+  HEAD) doesn't stop them. "Open in Claude" (`continue`)
   does not leave the card behind: a drive's or a review's card follows the
   session it resumed (`item.follow` in `state.json`, so a restart goes on
   following it) on the agent's own timer — a stat per tick, the transcript's
