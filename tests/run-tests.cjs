@@ -10797,6 +10797,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         const refused = await f.agent.act({ type: "enqueue", prId: pr.id });
         assert.deepStrictEqual(refused, { ok: false, error: 'Your Claude session "PR 7 by hand" is on this PR — carry on there, or end it first.' });
         assert.strictEqual(only(f).length, 0, "nothing queued beside it");
+        // Paused by Claude Desktop: still on it, and the refusal says how to let go of it.
+        yours.status = "paused";
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: pr.id }), { ok: false, error: 'Your Claude session "PR 7 by hand" is on this PR, paused in Claude Desktop — carry on there, or archive it first.' });
+        yours.status = "idle";
         sessions.length = 0;
         // Queued while the agent is paused, then the session opens before it starts: it waits.
         await f.agent.act({ type: "pauseAgent" });
@@ -10815,6 +10819,23 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: a session list that changed plans again — the PR whose session ended loses its 'Your Claude session is on it'", async () => {
+      const csm = require(path.join(__dirname, "../dist/main/shared/claude-sessions.js"));
+      const view = require(path.join(__dirname, "../dist/main/shared/agent-view.js"));
+      const sessions = [];
+      const f = agentFixture({ pr: reviewPr(), script: keepWorking, sessions });
+      try {
+        const pr = f.snapshot.pullRequests[0];
+        sessions.push({ id: "yours", name: "PR 7 by hand", status: "idle", where: "terminal", prKeys: [csm.prUrlKey(pr.url)], repoKeys: [], branch: null });
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.agent.getState().idle[pr.id], view.OWN_SESSION_WHY);
+        sessions.length = 0;
+        f.agent.sessionsChanged();
+        assert.notStrictEqual(f.agent.getState().idle[pr.id], view.OWN_SESSION_WHY, "planned again without waiting for the PRs to change");
+      } finally {
+        f.agent.stop();
+      }
+    });
 
     const ipcAgent = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
     test("ipc: an agent action is a known type on a run id; a hint is trimmed and bounded", () => {

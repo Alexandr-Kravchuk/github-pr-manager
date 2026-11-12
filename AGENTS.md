@@ -173,8 +173,12 @@ Three layers:
   branch; for the same reason the PR agent starts nothing on such a PR — not
   its plan, not a run you ask for or answer, not one that waited in its queue
   while the session opened (`yourSessionOn` in `main/agent/index.ts`; its own
-  run continued in your terminal counts), and the Board offers no "Let the
-  agent …" there (`OWN_SESSION_WHY` in `shared/agent-view.ts`)),
+  run continued in your terminal counts, and so does one Desktop paused — it
+  may be waiting for your answer — whose refusal says to archive it; the plan
+  reads the same list and runs again whenever the list changes
+  (`sessionsChanged`), or a PR whose session ended would keep its reason until
+  the PR moved), and the Board offers no "Let the agent …" there
+  (`OWN_SESSION_WHY` in `shared/agent-view.ts`)),
   `settings-search.ts` (the Settings screen's tabs, which section sits on which,
   and the keywords its search box matches — every word of the query must hit a
   section's title or keywords; a setting whose label is missing there cannot be

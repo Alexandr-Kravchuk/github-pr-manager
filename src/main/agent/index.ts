@@ -130,6 +130,12 @@ export interface Agent {
    * the header chip and the tray line are settings too.
    */
   refresh(): void;
+  /**
+   * The list of your Claude sessions changed: plan again with the last
+   * snapshot, or a PR whose session just ended keeps "Your Claude session is
+   * on it" (and no "Let the agent …") until the PR itself changes.
+   */
+  sessionsChanged(): void;
   stop(): void;
 }
 
@@ -773,13 +779,22 @@ export function createAgent(deps: AgentDeps): Agent {
    * working now. While it is open the agent starts nothing on that PR, even
    * when you ask: a second session answers the same threads and commits on the
    * same head beside it (PR 5035: a drive asked for while its earlier run went
-   * on in the terminal re-asked what was answered there).
+   * on in the terminal re-asked what was answered there). A session Claude
+   * Desktop paused counts too: it is often one waiting for your answer, and it
+   * goes on where it stopped once you reply. The plan uses the same list, so
+   * the Board's reason and a refusal here never disagree.
    */
-  function yourSessionOn(pr: Pick<PullRequest, "url" | "repo" | "headRefName">): ClaudeSessionInfo | null {
+  function yourSessions(): ClaudeSessionInfo[] {
     const own = new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!));
-    return sessionsForPr(pr, deps.getSessions().filter((x) => !own.has(x.id)))[0] ?? null;
+    return deps.getSessions().filter((x) => !own.has(x.id));
   }
-  const sessionOnItError = (x: ClaudeSessionInfo): string => `Your Claude session "${x.name}" is on this PR — carry on there, or end it first.`;
+  function yourSessionOn(pr: Pick<PullRequest, "url" | "repo" | "headRefName">): ClaudeSessionInfo | null {
+    return sessionsForPr(pr, yourSessions())[0] ?? null;
+  }
+  const sessionOnItError = (x: ClaudeSessionInfo): string =>
+    x.status === "paused"
+      ? `Your Claude session "${x.name}" is on this PR, paused in Claude Desktop — carry on there, or archive it first.`
+      : `Your Claude session "${x.name}" is on this PR — carry on there, or end it first.`;
 
   function newItem(job: Pick<AgentJob, "key" | "prId" | "prNumber" | "repo" | "url" | "scenario" | "mode" | "reasons">, pr: PullRequest, headline: string): AgentItemRecord {
     const item: AgentItemRecord = {
@@ -1092,8 +1107,7 @@ export function createAgent(deps: AgentDeps): Agent {
     }
     boardOn = true;
     recoverInterrupted(snapshot, s);
-    const own = new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!));
-    const sessions = deps.getSessions().filter((x) => !own.has(x.id));
+    const sessions = yourSessions();
     let dirty = false;
     // Drive attempts start over once CI is green, or once someone else pushed
     // (the head is no longer the one the agent pushed).
@@ -2973,6 +2987,13 @@ export function createAgent(deps: AgentDeps): Agent {
     refresh: () => {
       if (stopped) return;
       if (!replanIfSettingsChanged()) changed();
+    },
+    sessionsChanged: () => {
+      if (stopped || !boardOn) return;
+      const snapshot = deps.getSnapshot();
+      if (!snapshot) return;
+      onSnapshot(snapshot);
+      changed();
     },
     stop: () => {
       if (stopped) return;
