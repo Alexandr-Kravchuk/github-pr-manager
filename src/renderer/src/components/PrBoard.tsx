@@ -776,8 +776,6 @@ function YourCall({ item, asks, canAnswer, run }: { item: AgentItem; asks: RunAs
           ? "The same session goes on with your answer and comes back here."
           : item.localWork && !item.localWork.kept
             ? `Answer it in the session (Open in Claude): its work is in ${item.localWork.worktree}.`
-            : item.needsRerun
-            ? "This can't be answered any more — the app restarted since. Run it again: the new run asks this again if it still needs to."
             : "Answer it in the session: the dry run changes nothing by itself."}
       </div>
     </div>
