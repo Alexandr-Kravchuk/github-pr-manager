@@ -12190,6 +12190,66 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent publish: in On a held write keeps the review waiting for you; with none held it goes out by itself", async () => {
+      // One On review that approves and replies to comments 3 and 4; `authors` says who opened each.
+      const onReview = (authors) => {
+        const posted = [];
+        const f = agentFixture({
+          agent: { scenarios: { review: { mode: "on" } } },
+          script: (c) => {
+            const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+            const runDir = path.dirname(outDir);
+            const record = (...a) => {
+              const r = spawnSync(process.execPath, [captureJs, runDir, ...a], { encoding: "utf8" });
+              if (r.status !== 0) throw new Error(r.stderr);
+            };
+            nfsA.writeFileSync(path.join(outDir, "review.json"), JSON.stringify({ event: "APPROVE", body: "Looks good", comments: [] }));
+            record("review", "a/b", "7", path.join(outDir, "review.json"));
+            for (const id of ["3", "4"]) {
+              nfsA.writeFileSync(path.join(outDir, `r${id}.txt`), `Answer ${id}`);
+              record("reply", "a/b", "7", id, path.join(outDir, `r${id}.txt`));
+            }
+            emit(c, { type: "system", subtype: "init", session_id: "s" });
+            emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review." });
+            setImmediate(() => c.emit("exit", 0));
+          },
+          captureScript: captureJs,
+          fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+          gh: async (args, opts) => {
+            const m = /^repos\/a\/b\/pulls\/comments\/(\d+)$/.exec(args[1]);
+            if (m && !opts?.input) {
+              return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", html_url: `https://github.com/a/b/pull/7#discussion_r${m[1]}`, user: { login: authors[m[1]] } }), stderr: "" };
+            }
+            posted.push(args[1]);
+            return { code: 0, stdout: "{}", stderr: "" };
+          },
+        });
+        return { f, posted };
+      };
+      const held = onReview({ 3: "colleague", 4: "me" });
+      try {
+        held.f.agent.onSnapshot(held.f.snapshot);
+        await until(() => readLog(held.f).some((l) => l.kind === "run" && l.event === "needsYou"));
+        const end = readLog(held.f).find((l) => l.kind === "run" && l.event === "needsYou");
+        assert.strictEqual(end.data.publishNow, undefined, "On does not publish past a held write");
+        const item = only(held.f)[0];
+        assert.deepStrictEqual([item.state, item.plan.held.length, item.plan.held[0].replyTo], ["needsYou", 1, 3]);
+        assert.deepStrictEqual(held.posted, [], "nothing went out under your name");
+      } finally {
+        held.f.agent.stop();
+      }
+      // The control: nothing held, and On posts it all right after the run.
+      const clear = onReview({ 3: "me", 4: "me" });
+      try {
+        clear.f.agent.onSnapshot(clear.f.snapshot);
+        await until(() => only(clear.f).some((i) => i.state === "done"));
+        assert.strictEqual(only(clear.f)[0].published, true);
+        assert.deepStrictEqual(clear.posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/3/replies", "repos/a/b/pulls/7/comments/4/replies"]);
+      } finally {
+        clear.f.agent.stop();
+      }
+    });
+
     await atest("agent publish: a refused Publish says whether anything went out — 'nothing was posted' or 'posted N of M, then stopped'", async () => {
       // One review run that replies to comment `replyTo`; `ghFor` answers the reads and the writes.
       const publishWith = async (replyTo, ghFor) => {
