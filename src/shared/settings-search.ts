@@ -245,7 +245,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: "agentPermissions",
     tab: "agent",
     title: "Permissions",
-    keywords: ["permissions", "allowed tools", "allowlist", "push", "branch", "safety"],
+    keywords: ["permissions", "allowed tools", "allowlist", "push", "branch", "safety", "full context", "your prs", "claude.md", "mcp", "isolation", "restricted"],
   },
   {
     id: "agentDiagrams",

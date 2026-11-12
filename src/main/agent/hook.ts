@@ -40,6 +40,10 @@ export function readGuardFile(file: string | undefined): GuardRun | null {
   try {
     const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
     const run: GuardRun = {};
+    if ("mode" in raw) {
+      if (raw.mode !== "full") return null;
+      run.mode = "full";
+    }
     const folders = (v: unknown): string[] | null =>
       Array.isArray(v) ? v.filter((d): d is string => typeof d === "string" && d.length > 0 && path.isAbsolute(d)) : null;
     if (typeof raw.wrapperPath === "string" && typeof raw.outDir === "string") {
@@ -128,6 +132,8 @@ export function realRead(p: string): string | null {
  */
 export function checkRealWrite(kind: AgentRunKind, toolName: string, input: unknown, run: GuardRun | null): GuardDecision {
   if (kind !== "drive" || !isWriteTool(toolName)) return { allow: true };
+  // A full-context drive writes wherever you can (`checkFullToolUse`).
+  if (run?.mode === "full") return { allow: true };
   const file = toolFilePath(input);
   const real = realTarget(file);
   if (!real) return { allow: false, reason: `${file} is a link to nowhere; agent runs don't write through it.` };

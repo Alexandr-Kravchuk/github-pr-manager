@@ -450,7 +450,13 @@ function PermissionsSection({ agent, setAgent, inputCls }: SectionProps) {
           title="Allow pushing to your own PR's branch"
           hint="Needed to drive your PRs to green. Off makes those runs stop before the push and hand you the commit."
         />
-        <Locked>Reviews run no code from the PR&apos;s repository, and its project settings, hooks and CLAUDE.md are not loaded. The agent never pushes to anyone else&apos;s branch and never runs with permission checks skipped.</Locked>
+        <Check
+          checked={agent.permissions.fullContextDrive}
+          onChange={(fullContextDrive) => setAgent((a) => ({ ...a, permissions: { ...a.permissions, fullContextDrive } }))}
+          title="Your PRs: full context"
+          hint="Runs on your own PRs load your CLAUDE.md, hooks, plugins and MCP servers and may use any folder, stand or command — like your own sessions, with your own permission settings. They still never push or write to GitHub: the app does that after checking the commits. Off: isolated, like reviews."
+        />
+        <Locked>Reviews run no code from the PR&apos;s repository, and its project settings, hooks and CLAUDE.md are not loaded. Reviews never run with permission checks skipped; a full-context run on your PR follows your own permission settings. The agent never pushes to anyone else&apos;s branch.</Locked>
       </Dimmed>
     </section>
   );

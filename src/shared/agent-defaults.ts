@@ -188,7 +188,7 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
     quietHours: { enabled: false, from: "20:00", to: "08:00" },
     promoteAfter: 10,
   },
-  permissions: { tools: DEFAULT_AGENT_TOOLS, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: true },
+  permissions: { tools: DEFAULT_AGENT_TOOLS, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: true, fullContextDrive: true },
   // A small PR reads fine without a picture; each diagram is a model run of its own.
   diagrams: { enabled: true, minLines: 100, post: true, model: "sonnet" },
   companion: { headerChip: true, trayState: true },

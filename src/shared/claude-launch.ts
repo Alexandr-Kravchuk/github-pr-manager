@@ -474,6 +474,31 @@ export function normalizeRemote(url: string): string | null {
   }
 }
 
+/**
+ * The `git clone` that gives a PR's repository the checkout the app looks for:
+ * into the folder Settings › Claude names for that repository, else
+ * `<projects root>/<name>`, where `findCheckout` finds it by its remote. Null
+ * when the PR's URL has no host. A path with anything but plain characters is
+ * double-quoted, which zsh, bash, PowerShell and cmd all read the same way.
+ */
+export function cloneCommand(
+  pr: Pick<PullRequest, "url" | "repo">,
+  settings: Pick<ClaudeSettings, "projectsRoot" | "repoPaths"> | null | undefined,
+): string | null {
+  let host: string;
+  try {
+    host = new URL(pr.url).host;
+  } catch {
+    return null;
+  }
+  const name = pr.repo.split("/").pop();
+  if (!host || !name) return null;
+  const root = (settings?.projectsRoot || "~/Projects").replace(/[\\/]+$/, "");
+  const dir = settings?.repoPaths[pr.repo] || `${root}/${name}`;
+  const quoted = /^[\w~./:\\-]+$/.test(dir) ? dir : `"${dir}"`;
+  return `git clone https://${host}/${pr.repo}.git ${quoted}`;
+}
+
 /** `host/owner/repo` of a PR, the key its checkout's remote is matched on. */
 export function prRemoteKey(pr: Pick<PullRequest, "url" | "repo">): string | null {
   try {

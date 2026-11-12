@@ -9,7 +9,7 @@ import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
 import { AGENT_CLOSED, approvalStands, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
-import { DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
+import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
 import type {
@@ -250,6 +250,8 @@ interface RulesPr {
   baseRef?: string;
   reasons?: readonly string[];
   stack?: string | null;
+  /** A full-context drive: the user's own Claude setup is loaded (`fullContextDrive`). */
+  full?: boolean;
 }
 
 /** What a run on your own PR is for, on top of the drive rules. */
@@ -298,7 +300,10 @@ function scenarioRules(
     return (
       `${plan} You work on the user's own PR${pr ? ` (${pr.repo}#${pr.number})` : ""}, in a detached checkout of its head. ` +
       driveFocus(pr?.reasons ?? []) +
-      `Commit each fix with git (add, commit) and follow the repository's own conventions — read its CLAUDE.md and AGENTS.md first, since this session doesn't load them on its own — and end every commit message with the trailer "Co-Authored-By: Claude <noreply@anthropic.com>". ` +
+      (pr?.full
+        ? "This session runs with the user's own Claude setup: their CLAUDE.md, hooks, skills and MCP servers are loaded, and you may use stands, Jira and their other sessions as they would. Follow their rules — except where they say to push, post, reply, resolve threads, request reviewers or merge: none of that goes to GitHub from this session; the app does it. "
+        : "") +
+      `Commit each fix with git (add, commit) and follow the repository's own conventions — read its CLAUDE.md and AGENTS.md first${pr?.full ? "" : ", since this session doesn't load them on its own"} — and end every commit message with the trailer "Co-Authored-By: Claude <noreply@anthropic.com>". ` +
       `Never push and never rewrite history (no rebase, no amend of a commit that was already there): the app pushes your commits to the PR's branch as a fast-forward${later}, after checking them. ` +
       // In a stack the layer's rules (in `plan`) say what to do about a conflict instead: nothing — the stack needs a rebase.
       (stack ? "" : `Resolve a conflict by merging the base branch in — it is fetched for you as ${pr?.baseRef ?? "<remote>/<base>"}; this session's git has no network — never by rebasing. `) +
@@ -366,8 +371,13 @@ function keyCursorTime(key: string): number | null {
   return Number.isNaN(t) ? null : t;
 }
 
-/** Why the agent can't work on a PR's code. */
-const noCheckoutWhy = (repo: string): string => `No checkout of ${repo} — set its folder in Settings › Claude`;
+/** Why the agent can't work on a PR's code — with the command that clones it where the agent looks. */
+const noCheckoutWhy = (pr: PullRequest, claude: ClaudeSettings | null | undefined): string => {
+  const clone = cloneCommand(pr, claude);
+  return clone
+    ? `No checkout of ${pr.repo} — clone it with \`${clone}\`, or set its folder in Settings › Claude`
+    : `No checkout of ${pr.repo} — set its folder in Settings › Claude`;
+};
 
 /** A host to leave alone for now: its last fetch failed, or its GitHub budget is nearly spent. */
 export function hostHeld(snapshot: DashboardResponse | null, hostLabel: string): string | null {
@@ -1087,7 +1097,7 @@ export function createAgent(deps: AgentDeps): Agent {
       return orchestratorRunFor(roots, pr.url);
     };
     const plan = planJobs(snapshot.pullRequests, s, {
-      noCheckout: (pr) => (cloneOf(pr) ? null : noCheckoutWhy(pr.repo)),
+      noCheckout: (pr) => (cloneOf(pr) ? null : noCheckoutWhy(pr, claudeSettings)),
       hasOwnSession: (pr) => sessionsForPr(pr, sessions).length > 0,
       driveExhausted: (pr) => {
         const d = store.data.drive[pr.id];
@@ -1275,7 +1285,7 @@ export function createAgent(deps: AgentDeps): Agent {
     if (item.scenario !== "afterMerge" && !resume) {
       if (!pr) return;
       checkout = deps.findCheckout(pr, all.claude);
-      if (!checkout) return fail(noCheckoutWhy(pr.repo));
+      if (!checkout) return fail(noCheckoutWhy(pr, all.claude));
       remote = remoteFor(checkout, pr);
       if (!remote) return fail(`No remote of ${checkout} points at ${pr.repo}`);
     }
@@ -1296,7 +1306,8 @@ export function createAgent(deps: AgentDeps): Agent {
 
     let dir: string;
     if (resume && resumeDir) {
-      // A drive never resumes (see `act`), so no push needs preparing here.
+      // A drive resumes only to take your answer, in the same worktree, and
+      // pushes with what its first start prepared (`pushTo`, kept on the item).
       dir = resumeDir;
       checkout = item.checkout ?? null;
     } else if (pr && checkout && remote) {
@@ -1362,7 +1373,16 @@ export function createAgent(deps: AgentDeps): Agent {
     const guardFile = path.join(runDir, "guard.json");
     const hooksDir = freshHooksDir(runDir);
     const sessionId = resume ?? randomUUID();
-    writeGuardFile(guardFile, {
+    // Your own PR: your whole Claude setup (Settings › Agent › "Your PRs: full
+    // context"). Not the after-merge Jira run, which only reads.
+    const full = kind === "drive" && s.permissions.fullContextDrive;
+    writeGuardFile(guardFile, full ? {
+      mode: "full",
+      ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),
+      ...(subs ? { subs: [...subs] } : {}),
+      workDir: dir,
+      sessionId,
+    } : {
       ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),
       ...(subs ? { subs: [...subs] } : {}),
       // Relative paths mean the run's folder; a drive changes files there only.
@@ -1387,6 +1407,7 @@ export function createAgent(deps: AgentDeps): Agent {
         mode: item.mode,
         model: s.model,
         effort: s.effort,
+        isolation: full ? "full" : "restricted",
         ...(item.reasons ? { reasons: item.reasons } : {}),
         // How long it stood in the queue (a resumed run's queue time is its first run's).
         ...(!resume ? { waitedMs: Math.max(0, Date.parse(item.startedAt ?? stamp()) - Date.parse(item.queuedAt)) } : {}),
@@ -1405,6 +1426,7 @@ export function createAgent(deps: AgentDeps): Agent {
         sessionId,
         ...(resume ? { resume: true } : {}),
         kind,
+        isolation: full ? "full" : "restricted",
         prompt: resume
           ? answer
             ? answerMessage(answer, Boolean(folder))
@@ -1420,10 +1442,13 @@ export function createAgent(deps: AgentDeps): Agent {
           ...(kind === "drive" && pr && remote ? { baseRef: `${remote}/${pr.baseRefName}` } : {}),
           ...(item.reasons ? { reasons: item.reasons } : {}),
           stack: pr ? stackRules(pr, item.scenario) : null,
+          ...(full ? { full: true } : {}),
         }, s.language),
         allowedTools,
-        pluginDirs,
-        addDirs,
+        // Full context: your own plugins load as in your sessions; the skills this run mounted come on top.
+        pluginDirs: full ? mine.pluginDirs : pluginDirs,
+        // The payload folder stays named: the session writes its reply files there.
+        addDirs: full ? (folder ? [folder.outDir] : []) : addDirs,
         model: s.model,
         effort: s.effort,
         settingsFile,
@@ -2148,7 +2173,7 @@ export function createAgent(deps: AgentDeps): Agent {
     }
     // Every run you can ask for works on the PR's code: without a clone it would only fail.
     const claude = loadAll()?.claude;
-    if (!claude || !deps.findCheckout(pr, claude)) return { ok: false, error: `${noCheckoutWhy(pr.repo)}.` };
+    if (!claude || !deps.findCheckout(pr, claude)) return { ok: false, error: `${noCheckoutWhy(pr, claude)}.` };
     const key = `${pr.id}|${scenario}|${pr.headOid ?? "-"}|asked`;
     delete store.data.ledger[key];
     // Asked by you: in the scenario's own mode, and never more than Shadow when that is off.

@@ -412,7 +412,9 @@ export function validateAgent(raw: unknown): AgentSettings {
       },
       promoteAfter: num(limits.promoteAfter, "promoteAfter", d.limits.promoteAfter),
     },
-    permissions: { tools, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: bool(permissions.pushOwnBranch, d.permissions.pushOwnBranch) },
+    permissions: { tools, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: bool(permissions.pushOwnBranch, d.permissions.pushOwnBranch),
+      fullContextDrive: bool(permissions.fullContextDrive, d.permissions.fullContextDrive),
+    },
     diagrams: {
       enabled: bool(diagrams.enabled, d.diagrams.enabled),
       minLines: num(diagrams.minLines, "diagramMinLines", d.diagrams.minLines),

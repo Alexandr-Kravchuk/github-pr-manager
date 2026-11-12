@@ -8339,6 +8339,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     };
     const pick = (patch) => cl.pickClaudeLaunch({ ...quiet, ...patch }, { trackComments: true });
 
+    test("cloneCommand: clones where findCheckout looks — the repo's own folder, else <projects root>/<name>", () => {
+      assert.strictEqual(cl.cloneCommand(quiet, null), "git clone https://github.com/acme/widgets.git ~/Projects/widgets");
+      assert.strictEqual(
+        cl.cloneCommand({ url: "https://creatio.ghe.com/eng/ui/pull/1", repo: "eng/ui" }, { projectsRoot: "~/Code/", repoPaths: {} }),
+        "git clone https://creatio.ghe.com/eng/ui.git ~/Code/ui",
+      );
+      assert.strictEqual(
+        cl.cloneCommand(quiet, { projectsRoot: "", repoPaths: { "acme/widgets": "/Users/me/My Repos/w" } }),
+        'git clone https://github.com/acme/widgets.git "/Users/me/My Repos/w"',
+        "a path with a space is quoted",
+      );
+      assert.strictEqual(cl.cloneCommand({ url: "not a url", repo: "acme/widgets" }, null), null);
+    });
+
     test("claude launch: own blocked PR → drive, review due → review, own mergeable → close, else open", () => {
       assert.strictEqual(pick({ failingChecks: [{ name: "ci" }] }), "drive");
       assert.strictEqual(pick({ hasConflicts: true }), "drive");
@@ -9769,6 +9783,55 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: "gh api 'repos/acme/widgets/contents?ref=release'" }, gpr).allow, true, "quoted, it reads");
     });
 
+    test("agent guard: a full-context drive does anything but write to GitHub", () => {
+      const run = { mode: "full", workDir: "/wt", outDir: "/T/r/out", wrapperPath: "/T/r/bin/pr-review-publish.sh", subs: ["reply"] };
+      const ok = (tool, input) => guard.checkToolUse("drive", tool, input, gpr, run);
+      for (const cmd of [
+        "git status && git log -3 | head",
+        "git commit -F ~/notes.txt",
+        "stand list",
+        "npm test",
+        "gh pr view 12 --json state",
+        "gh pr checks 12",
+        "gh run view 5 --log-failed",
+        "gh api repos/acme/widgets/pulls/12/comments",
+        "gh api graphql -f query='query { viewer { login } }'",
+        "twg jira workitem get ENG-1",
+        "cat ~/.zshrc | grep x",
+        "/T/r/bin/pr-review-publish.sh reply acme/widgets 12 77 /T/r/out/reply.txt",
+      ]) assert.deepStrictEqual(ok("Bash", { command: cmd }), { allow: true }, cmd);
+      for (const cmd of [
+        "git push",
+        "git push origin HEAD",
+        "git -C /wt push",
+        "cd /wt && git push --force",
+        "FOO=1 git push",
+        "sudo /usr/bin/git push",
+        "bash -c 'git push origin x'",
+        "echo \"$(git push)\"",
+        "git -c alias.p=push p",
+        "gh pr comment 12 --body hi",
+        "gh pr review 12 --approve",
+        "gh pr merge 12",
+        "gh issue comment 3 -b x",
+        "gh release create v1",
+        "gh api -X POST repos/acme/widgets/issues/12/comments -f body=x",
+        "gh api --method=PATCH repos/acme/widgets/pulls/12",
+        "gh api repos/acme/widgets/issues/12/comments -f body=x",
+        "gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: \"x\"}) { thread { id } } }'",
+        "gh api repos/acme/widgets/pulls/12/reviews --input r.json",
+        "/T/r/bin/pr-review-publish.sh resolve PRRT_x",
+      ]) assert.strictEqual(ok("Bash", { command: cmd }).allow, false, cmd);
+      for (const tool of ["Read", "Edit", "Write", "WebFetch", "WebSearch", "mcp__clio__get-page", "mcp__ghe__pull_request_read", "mcp__ghe__get_file_contents", "mcp__ghe__list_commits", "mcp__plugin_github_github__search_code"]) {
+        assert.deepStrictEqual(ok(tool, { file_path: "/Users/me/.claude/CLAUDE.md" }), { allow: true }, tool);
+      }
+      for (const tool of ["mcp__ghe__add_issue_comment", "mcp__ghe__merge_pull_request", "mcp__ghe__push_files", "mcp__ghe__pull_request_review_write", "mcp__github__create_pull_request", "mcp__ghe__update_pull_request", "mcp__ghe__issue_write"]) {
+        assert.strictEqual(ok(tool, {}).allow, false, tool);
+      }
+      assert.strictEqual(guard.checkToolUse("review", "mcp__clio__get-page", {}, gpr, run).allow, false, "a review never runs full, whatever its guard file says");
+      assert.strictEqual(guard.checkToolUse("drive", "Edit", { file_path: "/elsewhere/a.ts" }, gpr, { ...run, mode: undefined }).allow, false, "without the mode, the isolated rules");
+    });
+
     test("agent guard: drive may build, test and commit on its own PR", () => {
       for (const cmd of ["npm test", "npm run typecheck", "git status", "git add src/x.ts", "git commit -m fix", "git log -3"]) {
         assert.strictEqual(guard.checkToolUse("drive", "Bash", { command: cmd }).allow, true, cmd);
@@ -10013,7 +10076,19 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       timeoutMs: 60_000,
       ...over,
     });
-    test("agent runner: the isolation flags are always there, and --allowedTools comes last", () => {
+    test("agent runner: full context drops the isolation flags and keeps the guard, the stream and the rules", () => {
+      const a = runner.buildClaudeArgs(spec({ kind: "drive", isolation: "full", pluginDirs: ["/p/mine"] }));
+      for (const flag of ["--restricted", "--strict-mcp-config", "--tools"]) assert.ok(!a.includes(flag), flag);
+      const at = (f) => a[a.indexOf(f) + 1];
+      assert.strictEqual(at("--permission-prompts"), "none");
+      assert.strictEqual(at("--settings"), "/s/settings.json");
+      assert.strictEqual(at("--input-format"), "stream-json");
+      assert.strictEqual(at("--plugin-dir"), "/p/mine");
+      assert.ok(a.includes("--append-system-prompt"));
+      assert.deepStrictEqual(a.slice(a.indexOf("--allowedTools")), ["--allowedTools", "Read", "Bash(gh pr view *)", "mcp__jira__get", "TaskCreate"], "the drive's rules add to yours");
+      assert.ok(runner.buildClaudeArgs(spec({ isolation: "restricted" })).includes("--restricted"));
+    });
+    test("agent runner: restricted runs carry the isolation flags, and --allowedTools comes last", () => {
       const a = runner.buildClaudeArgs(spec());
       for (const flag of ["-p", "--verbose", "--restricted", "--strict-mcp-config"]) assert.ok(a.includes(flag), flag);
       const at = (f) => a[a.indexOf(f) + 1];
@@ -10360,9 +10435,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         f.agent.onSnapshot(f.snapshot);
         await new Promise((r) => setTimeout(r, 30));
         assert.deepStrictEqual(f.agent.getState().items, []);
-        assert.strictEqual(f.agent.getState().idle.PR_R, "No checkout of a/b — set its folder in Settings › Claude");
+        assert.strictEqual(f.agent.getState().idle.PR_R, "No checkout of a/b — clone it with `git clone https://github.com/a/b.git ~/Projects/b`, or set its folder in Settings › Claude");
         assert.deepStrictEqual([f.children.length, notices], [0, []], "nothing started, no toast");
-        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: false, error: "No checkout of a/b — set its folder in Settings › Claude." });
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: false, error: "No checkout of a/b — clone it with `git clone https://github.com/a/b.git ~/Projects/b`, or set its folder in Settings › Claude." });
         assert.deepStrictEqual(f.agent.getState().items, [], "a refused ask leaves no failed card behind");
         // The repository cloned (or its folder set): the next plan picks the PR up.
         cloned = true;
@@ -12736,6 +12811,44 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.ok(driveMod.isSshUrl("git@github.com:a/b.git") && driveMod.isSshUrl("ssh://git@h/a/b") && !driveMod.isSshUrl("https://h/a/b"));
     });
 
+    await atest("agent drive: with full context off, your PR's drive is isolated like a review", async () => {
+      const mine = { ...reviewPr({ role: "author" }), ciState: "failure", headRefName: "feature/x", baseRefName: "main", headOid: "a".repeat(40) };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const f = agentFixture({
+        pr: mine,
+        agent: { permissions: { fullContextDrive: false } },
+        script: succeed("Fixed."),
+        git: async (all) => {
+          let i = 0;
+          for (;;) {
+            if (all[i] === "-c") i += 2;
+            else if (/^--(git-dir|work-tree)=/.test(all[i] ?? "")) i += 1;
+            else break;
+          }
+          const args = all.slice(i);
+          if (args[0] === "config") return `file:${commonDir}/config\0core.bare\0`;
+          if (args[0] === "rev-parse") return args.includes("HEAD") ? `${"a".repeat(40)}\n` : `${commonDir}\n`;
+          if (args[0] === "remote") return "https://github.com/a/b.git\n";
+          return "";
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length > 0);
+        const c = f.children[0];
+        for (const flag of ["--restricted", "--strict-mcp-config", "--tools"]) assert.ok(c.args.includes(flag), flag);
+        const rules = c.args[c.args.indexOf("--append-system-prompt") + 1];
+        assert.doesNotMatch(rules, /own Claude setup/);
+        const runDir = path.dirname(c.args[c.args.indexOf("--settings") + 1]);
+        const guardFile = JSON.parse(nfsA.readFileSync(path.join(runDir, "guard.json"), "utf8"));
+        assert.ok(!("mode" in guardFile));
+        assert.ok(Array.isArray(guardFile.readDirs));
+      } finally {
+        f.agent.stop();
+      }
+    });
+
     await atest("agent drive: your red PR is driven in a session that can't push; on your Push the app pushes a fast-forward and counts the attempt", async () => {
       const mine = { ...reviewPr({ role: "author" }), ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
       let freshHead = "aaa111";
@@ -12782,6 +12895,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(rules, /Never push and never rewrite history/);
         assert.match(rules, /fetched for you as origin\/main/);
         assert.ok(f.gitCalls.some((a) => a[0] === "fetch" && a.includes("+refs/heads/main:refs/remotes/origin/main")), "the app fetches the base before the session");
+        // Your own PR runs with full context by default: your Claude setup, the guard in its "full" mode.
+        for (const flag of ["--restricted", "--strict-mcp-config", "--tools"]) assert.ok(!c.args.includes(flag), flag);
+        assert.match(rules, /runs with the user's own Claude setup/);
+        const fullGuard = JSON.parse(nfsA.readFileSync(path.join(path.dirname(c.args[c.args.indexOf("--settings") + 1]), "guard.json"), "utf8"));
+        assert.strictEqual(fullGuard.mode, "full");
+        assert.ok(!("readDirs" in fullGuard), "no folder limit on reads");
         assert.strictEqual(item.pushTo.url, "https://github.com/a/b.git");
         assert.match(rules, /Co-Authored-By: Claude/);
         const guardFile = JSON.parse(nfsA.readFileSync(path.join(path.dirname(c.args[c.args.indexOf("--settings") + 1]), "guard.json"), "utf8"));

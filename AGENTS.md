@@ -638,6 +638,23 @@ Three layers:
   and `StructuredOutput`, which a Workflow's agents answer through); a test
   pins that every tool the default `--allowedTools` lists grant is one the
   guard knows, so extend the guard before adding a tool to the defaults.
+- **Except a drive on your own PR, with full context** (Settings › Agent ›
+  "Your PRs: full context", `permissions.fullContextDrive`, on by default).
+  Its diff and comments are yours and your reviewers', so it runs with your
+  own Claude setup: `RunSpec.isolation: "full"` drops `--restricted`,
+  `--strict-mcp-config` and `--tools` (your settings, permission mode,
+  CLAUDE.md, hooks, plugins and MCP servers load; the drive's `--allowedTools`
+  only add to yours; only the `prd-user-skills` plugin is mounted on top), and
+  the guard file says `mode: "full"`, with no `readDirs`. `checkFullToolUse`
+  then turns into a denylist of writes to GitHub — `git push` (also through
+  `sudo`/`env`/`sh -c`, a `$(…)`, a `-c alias.`), `gh pr|issue|repo|label|…`
+  writes, `gh api` with a non-GET method, fields (but a GraphQL query) or
+  `--input`, and any tool of a GitHub/GHE MCP server but its reads — and
+  `checkRealWrite` lets writes land anywhere. This is best-effort against a
+  model that forgets the rule, not against a script that hides the call; the
+  hard boundary is still `sessionGitEnv` (no credentials, every remote
+  rewritten), and the app still pushes and posts the replies itself. Reviews,
+  briefs, re-reviews and the after-merge run never run full.
 - **The look** (Settings › Appearance › Style, `Settings.uiStyle`): `flat`
   (the default), `neumorphism`, `claymorphism`, `neobrutalism`, `bento` or
   `glassmorphism` — one list in `shared/ui-style.ts` (`UI_STYLES`, Node-free,

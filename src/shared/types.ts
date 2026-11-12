@@ -384,6 +384,12 @@ export interface AgentSettings {
     toolsVersion: number;
     /** Allow pushing to the head branch of your own PR (drive). */
     pushOwnBranch: boolean;
+    /**
+     * A drive on your own PR runs with your whole Claude setup — CLAUDE.md,
+     * hooks, plugins, MCP servers, any folder and command — instead of
+     * isolated; writes to GitHub stay with the app.
+     */
+    fullContextDrive: boolean;
   };
   /**
    * Mermaid diagrams of the change (`shared/agent-diagrams.ts`), drawn by a
