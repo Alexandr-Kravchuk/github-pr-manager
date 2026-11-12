@@ -10140,6 +10140,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(r, new RegExp(`meant for the user in ${name}`));
         assert.match(r, /prd-result block/);
         assert.match(r, /review comments, thread replies, commit messages/);
+        assert.match(r, /author questions are not for the user/, "a brief's author questions go into a review on GitHub");
       }
       assert.strictEqual(cfg.validateAgent(undefined).language, "en");
       assert.strictEqual(cfg.validateAgent({ language: "uk" }).language, "uk");

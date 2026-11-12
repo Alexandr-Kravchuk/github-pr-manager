@@ -221,7 +221,8 @@ export function languageRule(language: AgentLanguage): string {
   const name = (AGENT_LANGUAGES.find((l) => l.id === language) ?? AGENT_LANGUAGES[0]).name;
   return (
     `Write everything meant for the user in ${name}: the task list (TaskCreate/TaskUpdate), your messages, the brief or report in your final message, ` +
-    `and the text of the prd-result block — its summary, questions, options, findings and author questions (keep its JSON keys and severity values as they are). ` +
+    `and the text of the prd-result block — its summary, questions, options and findings (keep its JSON keys and severity values as they are). ` +
+    `Its author questions are not for the user: a review asks them on the PR, so write them in the language the review comments would use, not in the user's language. ` +
     `This does not apply to what goes out to others: review comments, thread replies, commit messages and anything written to GitHub or Jira keep the language they would have anyway. ` +
     `Code, identifiers, file paths and quotes stay as they are.`
   );
