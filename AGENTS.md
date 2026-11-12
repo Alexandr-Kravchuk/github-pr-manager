@@ -659,9 +659,13 @@ Three layers:
   and in the card grids (`data-pr-grid` on `PrList`'s two grids) every fifth
   card / seventh tile spans two columns with dense packing — Roomy's only
   from `md`, where it has two columns, or the span would invent one.
-  Glassmorphism: a fixed backdrop of soft colour blobs on `body` and
-  translucent cards, panels and the table with a backdrop blur; static, and
-  the table's sticky actions column takes no fill (any fill or second blur
+  Glassmorphism: a fixed backdrop of soft colour blobs and
+  translucent cards, panels and the table with a backdrop blur. The blobs
+  (a fixed `.glass-backdrop` layer) drift very slowly, but in steps:
+  `renderer/src/glass-drift.ts` moves them a few pixels once a second through
+  custom properties on that layer alone, stopped while the window is hidden or
+  reduced motion is on — a CSS animation would re-blur every card each frame.
+  The table's sticky actions column takes no fill (any fill or second blur
   showed as a lighter stripe). The rules sit outside Tailwind's layers so they beat the
   utilities; a new card or panel that should take part needs `shadow-tile`
   or the `rounded-xl border border-line` panel shape. The switch applies at
@@ -692,4 +696,9 @@ Three layers:
   `.agent-diagram svg *` sets `animation: none`.
   Related: `backdrop-blur` on the sticky header is free at rest but multiplies
   the cost of anything animating beneath it (~3x in one dev-instance A/B) — keep
-  animations under it short and finite.
+  animations under it short and finite. A JS timer that restyles a layer under
+  a `backdrop-filter` is an animation under this rule too, though the guard
+  test cannot see it. The one allowed exception is `glass-drift.ts`
+  (Glassmorphism's backdrop): about one step a second, only while the document
+  is visible, and off under reduced motion — a new one needs the same
+  justification, not a `setInterval` in place of a CSS animation.
