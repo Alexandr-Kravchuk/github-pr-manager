@@ -12195,6 +12195,57 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent publish: a review's reply in the middle of a thread you opened is not held back, and Approve posts it to the thread's first comment", async () => {
+      const posted = [];
+      // 4 opens your thread, 5 is a colleague's answer in it; 6 is their answer in their own thread 3.
+      const comments = { 3: { login: "colleague" }, 4: { login: "me" }, 5: { login: "colleague", root: 4 }, 6: { login: "colleague", root: 3 } };
+      const f = agentFixture({
+        script: (c) => {
+          const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+          const runDir = path.dirname(outDir);
+          const record = (...a) => {
+            const r = spawnSync(process.execPath, [captureJs, runDir, ...a], { encoding: "utf8" });
+            if (r.status !== 0) throw new Error(r.stderr);
+          };
+          nfsA.writeFileSync(path.join(outDir, "review.json"), JSON.stringify({ event: "APPROVE", body: "Looks good", comments: [] }));
+          record("review", "a/b", "7", path.join(outDir, "review.json"));
+          nfsA.writeFileSync(path.join(outDir, "r5.txt"), "Fixed, thanks");
+          record("reply", "a/b", "7", "5", path.join(outDir, "r5.txt"));
+          nfsA.writeFileSync(path.join(outDir, "r6.txt"), "Agreed");
+          record("reply", "a/b", "7", "6", path.join(outDir, "r6.txt"));
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review." });
+          setImmediate(() => c.emit("exit", 0));
+        },
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => {
+          const m = /^repos\/a\/b\/pulls\/comments\/(\d+)$/.exec(args[1]);
+          if (m && !opts?.input) {
+            const c = comments[m[1]];
+            const body = { pull_request_url: "https://api.github.com/repos/a/b/pulls/7", html_url: `https://github.com/a/b/pull/7#discussion_r${m[1]}`, user: { login: c.login } };
+            if (c.root) body.in_reply_to_id = c.root;
+            return { code: 0, stdout: JSON.stringify(body), stderr: "" };
+          }
+          posted.push(args[1]);
+          return { code: 0, stdout: "{}", stderr: "" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.headline, "Would post: approve, 1 reply — 1 held back for you");
+        assert.deepStrictEqual(item.plan.replies.map((r) => r.replyTo), [5], "the card names the comment the session answered");
+        assert.deepStrictEqual(item.plan.held.map((h) => [h.replyTo, h.author]), [[6, "colleague"]], "the colleague's thread, named after whoever opened it");
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/4/replies"], "the reply lands in your thread, through its first comment");
+        assert.strictEqual(only(f)[0].headline, "Published: approve, 1 reply — 1 held back for you");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
     await atest("agent publish: in On a held write, or a check that could not run, keeps the review waiting for you; with none held it goes out by itself", async () => {
       // One On review that approves and replies to comments 3 and 4; `authors` says who opened each
       // (null: the comments can't be read).
@@ -12519,8 +12570,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /resolving colleague's thread/);
       assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /a reply in colleague's thread/);
       assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), null, "a drive answers a reviewer in theirs");
-      const myReplyInTheirs = async () => ({ code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "me" }, in_reply_to_id: 1 }), stderr: "" });
-      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 4, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, myReplyInTheirs), /doesn't open its thread/, "your reply in a colleague's thread is still theirs");
+      const myReplyInTheirs = async (args) =>
+        /comments\/1$/.test(args[1])
+          ? { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "colleague" } }), stderr: "" }
+          : { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "me" }, in_reply_to_id: 1 }), stderr: "" };
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 4, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, myReplyInTheirs), /a reply in colleague's thread/, "your reply in a colleague's thread is still theirs");
       assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), /doesn't resolve/);
       assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: null, mine: true }, gh), /login on the host is unknown/);
     });
@@ -12616,6 +12670,64 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const none = await publishMod.publishPlan(runDir, url, { ...ctx, held: held.slice(0, 1) }, { viewer: "me", mine: true }, async (a) => (posts.push(a), gh(a)));
       assert.deepStrictEqual([none.ok, none.posted, posts.length], [false, 0, 0]);
       assert.match(none.error, /nothing is left to post/);
+    });
+
+    await atest("publish: a review's reply in the middle of a thread you opened goes to the thread's first comment; in a colleague's it is held back", async () => {
+      const url = "https://github.com/a/b/pull/7";
+      // 10 opens your thread and 11 answers it; 20 opens a colleague's and 21 answers it;
+      // 30 opens yours on another PR and 31 (on this one) names it as its root.
+      const comments = {
+        10: { login: "Me" },
+        11: { login: "colleague", root: 10 },
+        20: { login: "colleague" },
+        21: { login: "me", root: 20 },
+        30: { login: "me", pr: 8 },
+        31: { login: "colleague", root: 30 },
+      };
+      const reads = [];
+      const gh = async (args) => {
+        const id = Number(/comments\/(\d+)$/.exec(args[1])[1]);
+        reads.push(id);
+        const c = comments[id];
+        if (!c) return { code: 1, stdout: "", stderr: "Not Found" };
+        const body = { pull_request_url: `https://api.github.com/repos/a/b/pulls/${c.pr ?? 7}`, html_url: `${url}#discussion_r${id}`, user: { login: c.login } };
+        if (c.root) body.in_reply_to_id = c.root;
+        return { code: 0, stdout: JSON.stringify(body), stderr: "" };
+      };
+      const mine = { viewer: "me", mine: true };
+      // Your thread: fine, and the check reads the root, not only the comment the session named.
+      assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 11, body: "x" }], url, "a/b", 7, mine, gh), null);
+      assert.deepStrictEqual(reads, [11, 10]);
+      // A colleague's thread: held, named after whoever opened it — your own reply in it doesn't make it yours.
+      const check = await publishMod.heldWrites([{ kind: "reply", replyTo: 11, body: "ok" }, { kind: "reply", replyTo: 21, body: "x" }], url, "a/b", 7, "me", gh);
+      assert.deepStrictEqual(check, { held: [{ kind: "reply", replyTo: 21, body: "x", author: "colleague", url: `${url}#discussion_r21` }], unchecked: null });
+      // A root on another PR, or one that can't be read, refuses the plan with the comment the session named.
+      assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 31, body: "x" }], url, "a/b", 7, mine, gh), "comment 30 (the thread of comment 31) is not on a/b#7");
+      comments[12] = { login: "colleague", root: 99 };
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 12, body: "x" }], url, "a/b", 7, mine, gh), /^couldn't check comment 99 \(the thread of comment 12\): /);
+      // A root that is itself a reply (GitHub said something unexpected): held, as a reply whose thread is unknown.
+      comments[13] = { login: "me", root: 11 };
+      assert.deepStrictEqual((await publishMod.heldWrites([{ kind: "reply", replyTo: 13, body: "x" }], url, "a/b", 7, "me", gh)).held.map((h) => [h.replyTo, h.author]), [[13, null]]);
+      // A drive run reads no root: it answers reviewers in their threads, as before.
+      reads.length = 0;
+      assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 21, body: "x" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), null);
+      assert.deepStrictEqual(reads, [21]);
+      // planRequests posts to the root given; with none given, to the comment named.
+      const ctx = { repo: "a/b", number: 7, signature: "s", holdApprove: false };
+      const steps = [{ kind: "reply", replyTo: 11, body: "x" }, { kind: "reply", replyTo: 10, body: "y" }];
+      assert.deepStrictEqual(pub.planRequests(steps, ctx).map((r) => r.endpoint), ["repos/a/b/pulls/7/comments/11/replies", "repos/a/b/pulls/7/comments/10/replies"]);
+      assert.deepStrictEqual(pub.planRequests(steps, { ...ctx, replyRoots: new Map([[11, 10]]) }).map((r) => [r.label, r.endpoint]), [
+        ["reply to comment 11", "repos/a/b/pulls/7/comments/10/replies"],
+        ["reply to comment 10", "repos/a/b/pulls/7/comments/10/replies"],
+      ]);
+      // publishPlan: the reply goes to the root, the rest unchanged, and the whole plan is posted.
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-root-"));
+      const plan = [{ kind: "review", event: "APPROVE", body: "b", comments: [] }, ...steps];
+      nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), plan.map((s) => JSON.stringify(s)).join("\n") + "\n");
+      const posted = [];
+      const out = await publishMod.publishPlan(runDir, url, ctx, mine, async (a, o) => (o?.input ? (posted.push(a[1]), { code: 0, stdout: "{}", stderr: "" }) : gh(a)));
+      assert.deepStrictEqual(out, { ok: true, posted: 3, total: 3 });
+      assert.deepStrictEqual(posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/10/replies", "repos/a/b/pulls/7/comments/10/replies"]);
     });
 
     test("mapPr: the author's latest thread answer, a reviewer's latest open-thread comment, and whether the branch is in a fork", () => {

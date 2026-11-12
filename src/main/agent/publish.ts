@@ -206,12 +206,34 @@ function json(text: string): unknown {
   }
 }
 
-type StepCheck = { ok: true } | { held: HeldWrite } | { error: string };
+/** `root`: a reply to a mid-thread comment of a thread you opened goes to this, its first comment. */
+type StepCheck = { ok: true; root?: number } | { held: HeldWrite } | { error: string };
+
+interface ReviewComment {
+  pull_request_url?: unknown;
+  html_url?: unknown;
+  user?: { login?: unknown };
+  in_reply_to_id?: unknown;
+}
+
+/** One review comment, checked to be on this PR. `what` names it in the refusal. */
+async function readComment(id: number, what: string, prUrl: string, repo: string, number: number, gh: GhRunner): Promise<{ comment: ReviewComment } | { error: string }> {
+  const r = await gh(["api", `repos/${repo}/pulls/comments/${id}`, ...hostFlag(prUrl)]);
+  if (r.code !== 0) return { error: `couldn't check ${what}: ${ghError(r)}` };
+  const c = (json(r.stdout) as ReviewComment | null) ?? {};
+  const url = String(c.pull_request_url ?? "").toLowerCase();
+  if (!url.endsWith(`/repos/${repo}/pulls/${number}`.toLowerCase())) return { error: `${what} is not on ${repo}#${number}` };
+  return { comment: c };
+}
+
+const loginOf = (c: ReviewComment): string | null => (typeof c.user?.login === "string" ? c.user.login : null);
 
 /**
  * One reply or resolve against GitHub: fine, held back (it lands in a thread
  * a colleague opened, and this is a review), or refused outright (another PR,
- * an unreadable target, a run that may not do it).
+ * an unreadable target, a run that may not do it). A review's reply to a
+ * comment in the middle of a thread you opened is fine too, posted to the
+ * thread's first comment (`root`) — the one GitHub takes replies to.
  */
 async function checkStep(s: PublishStep, prUrl: string, repo: string, number: number, targets: PlanTargets, gh: GhRunner): Promise<StepCheck> {
   const here = `${repo}#${number}`.toLowerCase();
@@ -235,20 +257,28 @@ async function checkStep(s: PublishStep, prUrl: string, repo: string, number: nu
     return { ok: true };
   }
   if (s.kind === "reply") {
-    const r = await gh(["api", `repos/${repo}/pulls/comments/${s.replyTo}`, ...hostFlag(prUrl)]);
-    if (r.code !== 0) return { error: `couldn't check comment ${s.replyTo}: ${ghError(r)}` };
-    const c = json(r.stdout) as { pull_request_url?: unknown; html_url?: unknown; user?: { login?: unknown }; in_reply_to_id?: unknown } | null;
-    const url = String(c?.pull_request_url ?? "").toLowerCase();
-    if (!url.endsWith(`/repos/${repo}/pulls/${number}`.toLowerCase())) return { error: `comment ${s.replyTo} is not on ${repo}#${number}` };
-    if (targets.mine) {
-      if (!me) return { error: "couldn't tell whose threads these are — your login on the host is unknown" };
-      const author = typeof c?.user?.login === "string" ? c.user.login : null;
-      const link = typeof c?.html_url === "string" ? c.html_url : null;
-      // The thread's first comment, and yours: a reply of yours in a colleague's thread is still their thread.
-      if (c?.in_reply_to_id != null || (author ?? "").toLowerCase() !== me) {
-        return { held: { kind: "reply", replyTo: s.replyTo, body: s.body, author: c?.in_reply_to_id != null ? null : author, url: link } };
-      }
+    const read = await readComment(s.replyTo, `comment ${s.replyTo}`, prUrl, repo, number, gh);
+    if ("error" in read) return read;
+    if (!targets.mine) return { ok: true };
+    if (!me) return { error: "couldn't tell whose threads these are — your login on the host is unknown" };
+    const c = read.comment;
+    const link = typeof c.html_url === "string" ? c.html_url : null;
+    const held = (author: string | null): StepCheck => ({ held: { kind: "reply", replyTo: s.replyTo, body: s.body, author, url: link } });
+    if (c.in_reply_to_id == null) {
+      // The thread's first comment: your thread, or a colleague's.
+      const author = loginOf(c);
+      return (author ?? "").toLowerCase() === me ? { ok: true } : held(author);
     }
+    // In the middle of a thread: GitHub names the thread's first comment in
+    // `in_reply_to_id` and takes replies to that one only. A reply of yours
+    // in a colleague's thread is still their thread — what counts is the root.
+    const root = Number(c.in_reply_to_id);
+    if (!Number.isInteger(root) || root <= 0) return held(null);
+    const rootRead = await readComment(root, `comment ${root} (the thread of comment ${s.replyTo})`, prUrl, repo, number, gh);
+    if ("error" in rootRead) return rootRead;
+    if (rootRead.comment.in_reply_to_id != null) return held(null);
+    const opener = loginOf(rootRead.comment);
+    return (opener ?? "").toLowerCase() === me ? { ok: true, root } : held(opener);
   }
   return { ok: true };
 }
@@ -318,11 +348,42 @@ export async function heldWrites(
 
 /**
  * Whether every thread a plan resolves and every comment it replies to is on
- * this PR — or why not. A thread id or comment id is just a value the session
- * wrote; on its own it could name a thread on any PR your account can reach.
- * Checked against GitHub before anything is posted. Every step is checked, so
- * the answer names all that is wrong at once, not one per press of Publish.
+ * this PR — or why not (`error`). A thread id or comment id is just a value
+ * the session wrote; on its own it could name a thread on any PR your account
+ * can reach. Checked against GitHub before anything is posted. Every step is
+ * checked, so the answer names all that is wrong at once, not one per press
+ * of Publish. `replyRoots`: the mid-thread replies that go to their thread's
+ * first comment instead (`PublishContext.replyRoots`).
  */
+async function checkPlan(
+  steps: readonly PublishStep[],
+  prUrl: string,
+  repo: string,
+  number: number,
+  targets: PlanTargets,
+  gh: GhRunner,
+): Promise<{ error: string | null; replyRoots: Map<number, number> }> {
+  const errors: string[] = [];
+  const held: HeldWrite[] = [];
+  const replyRoots = new Map<number, number>();
+  const checks = await checkSteps(steps, (s) => checkStep(s, prUrl, repo, number, targets, gh));
+  checks.forEach((c, i) => {
+    const s = steps[i]!;
+    if ("error" in c) {
+      if (!errors.includes(c.error)) errors.push(c.error);
+    } else if ("held" in c) held.push(c.held);
+    else if (c.root !== undefined && s.kind === "reply") replyRoots.set(s.replyTo, c.root);
+  });
+  if (held.length > 0) {
+    errors.push(
+      `${held.map(describeHeld).join("; ")} — a review answers and resolves only in threads you opened. ` +
+        `Use Edit in Claude to drop ${held.length === 1 ? "it" : "them"}, or answer there yourself on GitHub`,
+    );
+  }
+  return { error: errors.length > 0 ? errors.join("; ") : null, replyRoots };
+}
+
+/** `checkPlan`'s answer alone: why the plan may not go out, or null. */
 export async function checkPlanTargets(
   steps: readonly PublishStep[],
   prUrl: string,
@@ -331,19 +392,7 @@ export async function checkPlanTargets(
   targets: PlanTargets,
   gh: GhRunner = runGh,
 ): Promise<string | null> {
-  const errors: string[] = [];
-  const held: HeldWrite[] = [];
-  for (const c of await checkSteps(steps, (s) => checkStep(s, prUrl, repo, number, targets, gh))) {
-    if ("error" in c && !errors.includes(c.error)) errors.push(c.error);
-    else if ("held" in c) held.push(c.held);
-  }
-  if (held.length > 0) {
-    errors.push(
-      `${held.map(describeHeld).join("; ")} — a review answers and resolves only in threads you opened. ` +
-        `Use Edit in Claude to drop ${held.length === 1 ? "it" : "them"}, or answer there yourself on GitHub`,
-    );
-  }
-  return errors.length > 0 ? errors.join("; ") : null;
+  return (await checkPlan(steps, prUrl, repo, number, targets, gh)).error;
 }
 
 const PR_THREADS_QUERY =
@@ -389,7 +438,7 @@ export async function publishPlan(
   }
   const steps = readPlanLines(text);
   // Your choices go after the plan's own writes, so a retry finds them at the same place.
-  const requests = [...planRequests(steps, ctx), ...planRequests(extra, ctx)];
+  let requests = [...planRequests(steps, ctx), ...planRequests(extra, ctx)];
   // Everything it wrote was held back: Approve would post nothing and still mark it published.
   if (requests.length === 0 && (ctx.held?.length ?? 0) > 0) {
     return { ok: false, error: "nothing is left to post — everything it wrote is held back (a colleague's thread, or a comment in the middle of a thread). Answer there yourself, or Discard it", posted: 0, total: 0 };
@@ -397,8 +446,14 @@ export async function publishPlan(
   let done = Math.min(readDone(runDir), requests.length);
   // Nothing goes out unless every thread and comment the rest of the plan
   // touches is this PR's — and, for a review, yours.
-  const stray = await checkPlanTargets([...postedSteps(steps, ctx), ...postedSteps(extra, ctx)].slice(done), prUrl, ctx.repo, ctx.number, targets, gh);
+  const { error: stray, replyRoots } = await checkPlan([...postedSteps(steps, ctx), ...postedSteps(extra, ctx)].slice(done), prUrl, ctx.repo, ctx.number, targets, gh);
   if (stray) return { ok: false, error: stray, posted: done, total: requests.length };
+  if (replyRoots.size > 0) {
+    // A mid-thread reply in a thread you opened goes to the thread's first
+    // comment. The same steps in the same order: only those endpoints change.
+    const rooted = { ...ctx, replyRoots };
+    requests = [...planRequests(steps, rooted), ...planRequests(extra, rooted)];
+  }
   for (let i = done; i < requests.length; i++) {
     const req = requests[i];
     const r = await gh(ghApiArgs(req, prUrl), { input: JSON.stringify(req.body) });

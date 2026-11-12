@@ -233,12 +233,20 @@ export interface PublishContext {
   allowApprove?: boolean;
   /** Writes set aside when the run ended (`HeldWrite`): they are not posted, and the rest goes out without them. */
   held?: ReadonlyArray<Pick<HeldWrite, "replyTo" | "threadId">>;
+  /**
+   * A reply to a comment in the middle of a thread you opened, by the comment
+   * it names → the thread's first comment, where it is posted instead: GitHub
+   * takes replies to a thread's first comment only. Filled by the publish
+   * check, which verified each root is on this PR and yours.
+   */
+  replyRoots?: ReadonlyMap<number, number>;
 }
 
 /**
  * A reply or resolve the session recorded in a thread a colleague opened (or,
- * with no `author`, a reply to a comment in the middle of a thread — GitHub
- * takes replies to a thread's first comment only). A review answers and
+ * with no `author`, a reply to a comment in the middle of a thread whose first
+ * comment GitHub doesn't name; in a thread you opened such a reply goes to its
+ * first comment instead — `PublishContext.replyRoots`). A review answers and
  * resolves only in threads you opened, so the app sets it
  * aside when the run ends and shows it to you, instead of failing the whole
  * publish on it once you press Approve.
@@ -260,7 +268,7 @@ export interface HeldWrite {
 /**
  * "a reply in anna's thread" — one held write as a person reads it, said the
  * same on the card and in a refused publish. No author on a reply: it answers
- * a comment in the middle of a thread, whoever opened it.
+ * a comment in the middle of a thread whose first comment GitHub didn't name.
  */
 export function heldLabel(h: Pick<HeldWrite, "kind" | "author">): string {
   if (h.kind === "reply") return h.author ? `a reply in ${h.author}'s thread` : "a reply to a comment that doesn't open its thread";
@@ -352,7 +360,7 @@ export function planRequests(steps: readonly PublishStep[], ctx: PublishContext)
       case "comment":
         return { label: `comment on ${s.comment.path}`, endpoint: `${base}/comments`, body: { ...commentBody(s.comment, ctx.signature), commit_id: s.commitId } };
       case "reply":
-        return { label: `reply to comment ${s.replyTo}`, endpoint: `${base}/comments/${s.replyTo}/replies`, body: { body: signedBody(s.body, ctx.signature) } };
+        return { label: `reply to comment ${s.replyTo}`, endpoint: `${base}/comments/${ctx.replyRoots?.get(s.replyTo) ?? s.replyTo}/replies`, body: { body: signedBody(s.body, ctx.signature) } };
       case "resolve":
         return { label: `resolve ${s.threadId}`, endpoint: "graphql", body: { query: RESOLVE_MUTATION, variables: { id: s.threadId } } };
       case "note":
