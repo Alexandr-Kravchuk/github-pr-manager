@@ -114,7 +114,12 @@ Three layers:
   PR" button: which prompt a PR's state picks — blocked → drive, review due →
   review, own mergeable → close, else the bare link — plus the shell quoting;
   the renderer imports it for the tooltip, while finding the checkout by git
-  remote live in `main/claude-launch.ts` and opening the terminal in
+  remote — in the projects folder, or with none set in the usual places
+  (`checkoutRoots`: `~/Projects`, `~/source/repos`, `~/src`, `~/code`…, so a
+  fresh install finds clones it was never told about — under your home only,
+  never a drive root's `C:\Projects`, which any user of the machine may
+  create and plant a "checkout" in for the agent to run git in) —
+  live in `main/claude-launch.ts` and opening the terminal in
   `main/terminal.ts`, and the
   renderer sends only the PR id (plus a picked kind and an in-terminal
   boolean) so nothing it supplies reaches the shell; while Settings open
@@ -142,7 +147,8 @@ Three layers:
   under the user's own account) — an `APPROVE` of a review with no Blocker
   and no Major, posted with `commit_id` of the head it read; a default prompt is stored empty and an old default saved
   verbatim is read through `PREVIOUS_DEFAULT_PROMPTS`, so a changed default
-  reaches every user who never edited it. Each
+  reaches every user who never edited it — the agent's prompts too
+  (`toStoredSettings`, `PREVIOUS_DEFAULT_AGENT_PROMPTS`). Each
   prompt starts with `groupMarker(kind, key)`: the session scanner records it
   as the session's `groups` instead of binding the session to every PR it
   lists (a marker line counts even with no PR link, since a custom template
@@ -197,7 +203,10 @@ Three layers:
   what is happening, what is needed from you, what to read, every button with
   what it does, and what comes next; `explainBoard` orders them) and
   `agent-defaults.ts`
-  (the Agent tab's defaults and bounds), `agent-stream.ts` (a run's
+  (the Agent tab's defaults and bounds: off until switched on, then every
+  scenario On — the settings the agent is run with day to day, so a fresh
+  install works without a round of tuning; Shadow is a per-scenario choice
+  and a merge is only ever offered), `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (where a
   PR stands — `boardStage`: the column is whose move it is, the agent's
@@ -606,6 +615,22 @@ Three layers:
   keeps the branch while open PRs build on it (`builtOn` in
   `main/agent/merge.ts`): gh's own delete can win the race with GitHub's
   retargeting and close them.
+- **A repository with no checkout of yours is cloned by the agent**
+  (Settings › Agent › "Clone a repository it has no checkout of", on by
+  default; `main/agent/clones.ts`) rather than left with "No checkout": into
+  `userData/agent/clones/<host>/<owner>/<repo>`, never your folders —
+  blobless, one branch, no tags, no working tree, made under a `.partial`
+  name and renamed when complete, one clone in the making per repository.
+  The clone signs in through gh like the rest of the app: its own config
+  resets the credential helpers and names `gh auth git-credential`, so a
+  later fetch, a run's worktree and a drive's push use gh's token for that
+  host and no credential manager opens a window behind the app. A plan does
+  not wait on a missing checkout while cloning is on; the run clones after it
+  holds its slot (a clone can take minutes). A drive's session has no
+  network and a blobless clone lacks old file contents, so before a drive in
+  such a clone the app runs the base diffs and the merge of the base
+  (`prefetchForDrive`) and git fetches what they read. The re-approve and
+  base-only checks use the agent's clone too, making one if needed.
 - **An agent session reads its own folders only, and uses only the tools the
   guard names.** A PR's diff, description or comments can tell a review to
   read `~/.config/gh/hosts.yml`, `~/.ssh/*` or `userData` and quote it in a

@@ -54,6 +54,7 @@ import { diagramComment, wantsDiagrams } from "../../shared/agent-diagrams";
 import { actionArgs, boardNow, clip, diffBoard, diffIdle, diffItems, itemFields, runStats, settingsDiff, type ItemMark } from "./journal";
 import { openStore, type AgentItemRecord, type AgentLogEntry, type AgentStore, type BaseOnlyMark, type LedgerEntry, type ReapproveMark } from "./store";
 import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor, type OrchestratorRun } from "./sdlc";
+import { ensureAgentClone, findAgentClone, isAgentClone, prefetchForDrive } from "./clones";
 import { prepareWorktree, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner } from "./worktrees";
 
 // The PR agent's core in the main process. It reads each dashboard snapshot,
@@ -365,7 +366,8 @@ function keyCursorTime(key: string): number | null {
 }
 
 /** Why the agent can't work on a PR's code. */
-const noCheckoutWhy = (repo: string): string => `No checkout of ${repo} — set its folder in Settings › Claude`;
+const noCheckoutWhy = (repo: string): string =>
+  `No checkout of ${repo} — set its folder in Settings › Claude, or let the agent clone it (Settings › Agent)`;
 
 /** A host to leave alone for now: its last fetch failed, or its GitHub budget is nearly spent. */
 export function hostHeld(snapshot: DashboardResponse | null, hostLabel: string): string | null {
@@ -453,6 +455,12 @@ export function createAgent(deps: AgentDeps): Agent {
     }
   };
   const settings = (): AgentSettings | null => loadAll()?.agent ?? null;
+  /** Your checkout of the PR's repository, else the clone the agent made of it earlier. */
+  const knownCheckout = (pr: PullRequest, claude: ClaudeSettings): string | null =>
+    deps.findCheckout(pr, claude) ?? findAgentClone(deps.dir, pr);
+  /** `knownCheckout`, else — when Settings › Agent lets it — a clone the agent makes now; null if that fails. */
+  const checkoutOrClone = async (pr: PullRequest, claude: ClaudeSettings): Promise<string | null> =>
+    knownCheckout(pr, claude) ?? (settings()?.cloneMissing ? await ensureAgentClone(git, deps.dir, pr).catch(() => null) : null);
   const changed = () => deps.onChange?.();
   const stamp = () => now().toISOString();
   const findItem = (runId: string) => store.data.items.find((i) => i.runId === runId);
@@ -819,9 +827,9 @@ export function createAgent(deps: AgentDeps): Agent {
     const fields = { prId: pr.id, prNumber: pr.number, repo: pr.repo, scenario: job.scenario, ...(pr.headOid ? { headOid: pr.headOid } : {}) };
     void (async () => {
       try {
-        // The push is checked in your clone of the repository: without one, nothing is given again.
+        // The push is checked in your clone of the repository (or the agent's): without one, nothing is given again.
         const claude = loadAll()?.claude;
-        const checkout = claude ? deps.findCheckout(pr, claude) : null;
+        const checkout = claude ? await checkoutOrClone(pr, claude) : null;
         const remote = checkout ? remoteFor(checkout, pr) : null;
         const found = await checkReapproval(
           gh,
@@ -1003,7 +1011,7 @@ export function createAgent(deps: AgentDeps): Agent {
     void (async () => {
       try {
         const claude = loadAll()?.claude;
-        const checkout = claude ? deps.findCheckout(pr, claude) : null;
+        const checkout = claude ? await checkoutOrClone(pr, claude) : null;
         const remote = checkout ? remoteFor(checkout, pr) : null;
         const found = await checkBaseOnly(
           gh,
@@ -1073,7 +1081,7 @@ export function createAgent(deps: AgentDeps): Agent {
     const clones = new Map<string, string | null>();
     const cloneOf = (pr: PullRequest): string | null => {
       const repoUrl = pr.url.replace(/\/pull\/\d+.*$/, "");
-      if (!clones.has(repoUrl)) clones.set(repoUrl, claudeSettings ? deps.findCheckout(pr, claudeSettings) : null);
+      if (!clones.has(repoUrl)) clones.set(repoUrl, claudeSettings ? knownCheckout(pr, claudeSettings) : null);
       return clones.get(repoUrl) ?? null;
     };
     const rootsByClone = new Map<string | null, string[]>();
@@ -1085,7 +1093,8 @@ export function createAgent(deps: AgentDeps): Agent {
       return orchestratorRunFor(roots, pr.url);
     };
     const plan = planJobs(snapshot.pullRequests, s, {
-      noCheckout: (pr) => (cloneOf(pr) ? null : noCheckoutWhy(pr.repo)),
+      // No checkout yet is no reason to wait when the agent may clone one: the run makes it.
+      noCheckout: (pr) => (cloneOf(pr) || s.cloneMissing ? null : noCheckoutWhy(pr.repo)),
       hasOwnSession: (pr) => sessionsForPr(pr, sessions).length > 0,
       driveExhausted: (pr) => {
         const d = store.data.drive[pr.id];
@@ -1272,10 +1281,13 @@ export function createAgent(deps: AgentDeps): Agent {
     }
     if (item.scenario !== "afterMerge" && !resume) {
       if (!pr) return;
-      checkout = deps.findCheckout(pr, all.claude);
-      if (!checkout) return fail(noCheckoutWhy(pr.repo));
-      remote = remoteFor(checkout, pr);
-      if (!remote) return fail(`No remote of ${checkout} points at ${pr.repo}`);
+      checkout = knownCheckout(pr, all.claude);
+      // None yet: cloned below, once the run holds its slot — a clone can take minutes.
+      if (!checkout && !s.cloneMissing) return fail(noCheckoutWhy(pr.repo));
+      if (checkout) {
+        remote = remoteFor(checkout, pr);
+        if (!remote) return fail(`No remote of ${checkout} points at ${pr.repo}`);
+      }
     }
 
     store.data.ledger[item.key] = { state: "started", at: stamp(), runId: item.runId };
@@ -1291,6 +1303,18 @@ export function createAgent(deps: AgentDeps): Agent {
     if (!resume) item.checkout = checkout ?? undefined;
     void store.save();
     changed();
+
+    if (!resume && pr && item.scenario !== "afterMerge" && !checkout) {
+      try {
+        checkout = await ensureAgentClone(git, deps.dir, pr);
+      } catch (e) {
+        return fail(`Could not clone ${pr.repo}`, (e as Error).message);
+      }
+      remote = remoteFor(checkout, pr);
+      if (!remote) return fail(`No remote of ${checkout} points at ${pr.repo}`);
+      item.checkout = checkout;
+      void store.save();
+    }
 
     let dir: string;
     if (resume && resumeDir) {
@@ -1314,6 +1338,7 @@ export function createAgent(deps: AgentDeps): Agent {
           const [url, commonDir, worktreeGitDir] = await withNoHooks(async (h) => {
             if (isPlainBranch(pr.baseRefName)) {
               await git([...safeGit(h), "fetch", "--no-tags", remote, `+refs/heads/${pr.baseRefName}:refs/remotes/${remote}/${pr.baseRefName}`], clone).catch(() => {});
+              if (isAgentClone(deps.dir, clone)) await prefetchForDrive(git, safeGit(h), dir, `refs/remotes/${remote}/${pr.baseRefName}`);
             }
             return [
               (await git([...safeGit(h), "remote", "get-url", "--push", remote], clone)).trim(),
@@ -2146,7 +2171,7 @@ export function createAgent(deps: AgentDeps): Agent {
     }
     // Every run you can ask for works on the PR's code: without a clone it would only fail.
     const claude = loadAll()?.claude;
-    if (!claude || !deps.findCheckout(pr, claude)) return { ok: false, error: `${noCheckoutWhy(pr.repo)}.` };
+    if (!claude || (!knownCheckout(pr, claude) && !settings()?.cloneMissing)) return { ok: false, error: `${noCheckoutWhy(pr.repo)}.` };
     const key = `${pr.id}|${scenario}|${pr.headOid ?? "-"}|asked`;
     delete store.data.ledger[key];
     // Asked by you: in the scenario's own mode, and never more than Shadow when that is off.

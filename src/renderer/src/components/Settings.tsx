@@ -1020,12 +1020,13 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               <input
                 id="claude-root"
                 value={claude.projectsRoot}
-                placeholder="~/Projects"
+                placeholder="~/Projects, ~/source/repos, ~/src…"
                 onChange={(e) => setClaude((prev) => ({ ...prev, projectsRoot: e.target.value }))}
                 className={inputCls}
               />
               <p className="mt-1 text-xs text-fg-faint">
-                Its subfolders are matched to a PR by their git remote. A folder set below wins.
+                Its subfolders are matched to a PR by their git remote. Left empty, the usual places
+                are searched. A folder set below wins.
               </p>
             </div>
             <label className={cn("flex items-start gap-3", claude.enabled ? undefined : "hidden")}>

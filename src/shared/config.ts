@@ -10,6 +10,7 @@ import {
   DEFAULT_AGENT_TOOLS,
   isClockTime,
   migrateTools,
+  PREVIOUS_DEFAULT_AGENT_PROMPTS,
   type AgentBoundKey,
 } from "./agent-defaults";
 import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS, PREVIOUS_DEFAULT_PROMPTS } from "./claude-launch";
@@ -273,7 +274,11 @@ export function validateClaude(raw: unknown): ClaudeSettings {
   const rawAgentPrompts = (
     typeof obj.agentPrompts === "object" && obj.agentPrompts !== null ? obj.agentPrompts : {}
   ) as Record<string, unknown>;
-  const agentPrompt = (k: AgentPromptKey): string => str(rawAgentPrompts[k]) || DEFAULT_AGENT_PROMPTS[k];
+  // The same rule for the agent's prompts: stored empty while default, an old default read as today's.
+  const agentPrompt = (k: AgentPromptKey): string => {
+    const saved = str(rawAgentPrompts[k]);
+    return !saved || PREVIOUS_DEFAULT_AGENT_PROMPTS[k]?.includes(saved) ? DEFAULT_AGENT_PROMPTS[k] : saved;
+  };
   return {
     enabled: typeof obj.enabled === "boolean" ? obj.enabled : d.enabled,
     projectsRoot: str(obj.projectsRoot),
@@ -364,6 +369,7 @@ export function validateAgent(raw: unknown): AgentSettings {
     effort: oneOf(obj.effort, ["", "low", "medium", "high"] as const, d.effort),
     worktreeDir: str(obj.worktreeDir),
     removeWorktree: bool(obj.removeWorktree, d.removeWorktree),
+    cloneMissing: bool(obj.cloneMissing, d.cloneMissing),
     repos: (list(obj.repos) ?? []).filter((r) => /^[^/\s]+\/[^/\s]+$/.test(r)),
     scenarios: {
       review: {
@@ -456,17 +462,22 @@ function validateJira(raw: unknown): JiraSettings | undefined {
 }
 
 /**
- * What `persistSettings` writes: the settings with every Claude prompt that is
- * still its default stored empty. An empty prompt reads back as the default,
- * so a later release that changes a default reaches every user who never
- * edited it — a verbatim copy would keep the old text in force.
+ * What `persistSettings` writes: the settings with every Claude prompt and
+ * every agent prompt that is still its default stored empty. An empty prompt
+ * reads back as the default, so a later release that changes a default reaches
+ * every user who never edited it — a verbatim copy would keep the old text in
+ * force.
  */
 export function toStoredSettings(settings: Settings): Settings {
   const prompts = { ...settings.claude.prompts };
   for (const k of Object.keys(prompts) as (keyof typeof prompts)[]) {
     if (prompts[k] === DEFAULT_CLAUDE_PROMPTS[k]) prompts[k] = "";
   }
-  return { ...settings, claude: { ...settings.claude, prompts } };
+  const agentPrompts = { ...settings.claude.agentPrompts };
+  for (const k of Object.keys(agentPrompts) as AgentPromptKey[]) {
+    if (agentPrompts[k] === DEFAULT_AGENT_PROMPTS[k]) agentPrompts[k] = "";
+  }
+  return { ...settings, claude: { ...settings.claude, prompts, agentPrompts } };
 }
 
 /**

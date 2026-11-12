@@ -71,7 +71,7 @@ function GeneralSection({ agent, setAgent, inputCls }: SectionProps) {
         checked={agent.enabled}
         onChange={(enabled) => setAgent((a) => ({ ...a, enabled }))}
         title="Run the PR agent"
-        hint="Works on your PRs in the background with Claude Code: reviews, re-reviews, drives your PRs to green and prepares merges. Off until you switch it on; whatever posts starts in Shadow."
+        hint="Works on your PRs in the background with Claude Code: reviews, re-reviews, drives your PRs to green and prepares merges. Off until you switch it on, then every scenario is On; set one to Shadow to see what it prepares before it goes out. A merge always waits for your click."
       />
       <Dimmed off={!agent.enabled}>
         <div className="grid gap-3 sm:grid-cols-2">
@@ -112,6 +112,12 @@ function GeneralSection({ agent, setAgent, inputCls }: SectionProps) {
             />
           </div>
         </div>
+        <Check
+          checked={agent.cloneMissing}
+          onChange={(cloneMissing) => setAgent((a) => ({ ...a, cloneMissing }))}
+          title="Clone a repository it has no checkout of"
+          hint="A PR whose repository isn't in your projects folder gets a lightweight clone of the agent's own (no file contents until a run needs them), in the app's data folder. Off: such a PR waits until you set its folder in Settings › Claude."
+        />
         <div>
           <span className="block text-xs font-medium text-fg-muted">Repositories</span>
           <div className="mt-1.5 flex flex-wrap gap-4 text-sm text-fg-secondary">
@@ -121,7 +127,7 @@ function GeneralSection({ agent, setAgent, inputCls }: SectionProps) {
                 setOnlyThese(false);
                 setAgent((a) => ({ ...a, repos: [] }));
               }}
-              label="Every repository with a checkout"
+              label={agent.cloneMissing ? "Every repository" : "Every repository with a checkout"}
             />
             <Radio
               checked={onlyThese}

@@ -314,7 +314,12 @@ export interface AgentSettings {
   worktreeDir: string;
   /** Remove a run's worktree once its PR is merged or closed. */
   removeWorktree: boolean;
-  /** "owner/name" the agent may work in; empty = every repository with a checkout. */
+  /**
+   * A PR whose repository has no checkout of yours: the agent clones it into a
+   * folder of its own (`userData/agent/clones`, blobless) instead of skipping it.
+   */
+  cloneMissing: boolean;
+  /** "owner/name" the agent may work in; empty = every repository (with a checkout, or one the agent clones). */
   repos: string[];
   scenarios: {
     /** A review requested of you personally, on a PR within the size limit. */

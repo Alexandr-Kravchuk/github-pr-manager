@@ -70,9 +70,49 @@ export function parseRemoteUrls(text: string): string[] {
 }
 
 /**
+ * Where people keep their clones, searched when no projects folder is set: a
+ * fresh install should find a checkout in `~/source/repos` (Visual Studio's
+ * default) or `~/src` as readily as in `~/Projects`, rather than report "no
+ * checkout" for every PR until a folder is typed in.
+ *
+ * Under your home only, never a drive root's `C:\Projects`: any user of the
+ * machine may create a folder there, and a "checkout" planted in it with the
+ * PR's remote would become the folder the agent runs git in — its
+ * `.git/config` theirs — and the one a Claude session opens. A folder you set
+ * in Settings is your choice and is searched as it is.
+ */
+const USUAL_HOME_ROOTS = ["Projects", "source/repos", "src", "code", "git", "repos", "dev", "Developer", "workspace", "GitHub", "Documents/GitHub"];
+
+/**
+ * The folders whose subfolders are matched to a PR: the projects folder when
+ * one is set — your choice, searched alone — else the usual places under your
+ * home, in order, each once (Windows and macOS file names ignore case).
+ */
+export function checkoutRoots(projectsRoot: string, platform: NodeJS.Platform = process.platform, home: string = os.homedir()): string[] {
+  if (projectsRoot.trim()) return [expandHome(projectsRoot.trim())];
+  // Never a relative folder: with no home known, `join` would make one, read against the app's cwd.
+  if (!home) return [];
+  const p = platform === "win32" ? path.win32 : path.posix;
+  const all = USUAL_HOME_ROOTS.map((r) => p.join(home, ...r.split("/")));
+  const seen = new Set<string>();
+  return all.filter((r) => {
+    const k = platform === "linux" ? r : r.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+/** Where a missing checkout was looked for, in words for an error. */
+export function checkoutRootsText(projectsRoot: string): string {
+  return projectsRoot.trim() ? projectsRoot.trim() : "~/Projects or the usual folders in your home (~/source/repos, ~/src, ~/code, ~/git…)";
+}
+
+/**
  * The PR's local checkout: the explicit `repoPaths` entry when set, else the
- * first subfolder of the projects root whose git remote is the PR's repository
- * on the PR's host. Null when neither finds one.
+ * first subfolder of the projects folder (or, with none set, of the usual
+ * folders — `checkoutRoots`) whose git remote is the PR's repository on the
+ * PR's host. Null when neither finds one.
  */
 export function findCheckout(
   pr: Pick<PullRequest, "url" | "repo">,
@@ -85,17 +125,18 @@ export function findCheckout(
   }
   const key = prRemoteKey(pr);
   if (!key) return null;
-  const root = expandHome(settings.projectsRoot || "~/Projects");
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const dir = path.join(root, entry.name);
-    if (readRemoteUrls(dir).some((u) => normalizeRemote(u) === key)) return dir;
+  for (const root of checkoutRoots(settings.projectsRoot)) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(root, entry.name);
+      if (readRemoteUrls(dir).some((u) => normalizeRemote(u) === key)) return dir;
+    }
   }
   return null;
 }
@@ -193,7 +234,7 @@ export async function launchClaude(
   if (!dir) {
     const where = settings.repoPaths[pr.repo]
       ? `the folder set for it in Settings (${settings.repoPaths[pr.repo]}) does not exist`
-      : `no checkout of it was found in ${settings.projectsRoot || "~/Projects"}`;
+      : `no checkout of it was found in ${checkoutRootsText(settings.projectsRoot)}`;
     return { ok: false, error: `${pr.repo}: ${where}. Set its folder in Settings → Claude.` };
   }
   const kind = opts.kind ?? pickClaudeLaunch(pr, opts);
@@ -272,7 +313,7 @@ export async function launchGroup(
     const repos = [...new Set(prs.map((p) => p.repo))].join(", ");
     return {
       ok: false,
-      error: `No checkout of ${repos} was found in ${settings.projectsRoot || "~/Projects"}. Set its folder in Settings → Claude.`,
+      error: `No checkout of ${repos} was found in ${checkoutRootsText(settings.projectsRoot)}. Set its folder in Settings → Claude.`,
     };
   }
   // A review runs in its own PR's checkout when that is not the parent's

@@ -8449,14 +8449,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(ss.toSettingsTab("agent"), "agent");
     });
 
-    test("agent settings: off by default, every posting scenario starts in shadow, merge only offers", () => {
+    test("agent settings: off by default, then every scenario at work — On, the brief on, merge only offers, a missing clone made", () => {
       const ad = require(path.join(__dirname, "../dist/main/shared/agent-defaults.js"));
       const a = cfg.defaultSettings().agent;
       assert.strictEqual(a.enabled, false);
       assert.deepStrictEqual(a, cfg.validateAgent(undefined));
       assert.deepStrictEqual(a, ad.DEFAULT_AGENT_SETTINGS);
-      for (const k of ["review", "rereview", "driveCi", "driveComments"]) assert.strictEqual(a.scenarios[k].mode, "shadow", k);
-      assert.strictEqual(a.scenarios.merge.mode, "offer");
+      // The settings the agent is run with day to day: a fresh install works without a round of tuning.
+      for (const k of ["review", "rereview", "selfReview", "driveCi", "driveComments", "reapprove"]) assert.strictEqual(a.scenarios[k].mode, "on", k);
+      assert.strictEqual(a.scenarios.brief.mode, "on");
+      assert.strictEqual(a.scenarios.merge.mode, "offer", "a merge waits for your click, always");
+      assert.strictEqual(a.cloneMissing, true);
       assert.deepStrictEqual([a.scenarios.review.maxLines, a.scenarios.review.maxFiles, a.limits.parallel, a.limits.perDay], [400, 15, 2, 30]);
       for (const rule of a.permissions.tools.review) assert.ok(!/push|Edit|Write/.test(rule), `review must not write: ${rule}`);
     });
@@ -8474,6 +8477,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         repos: ["acme/widgets", "not a repo", " acme/gadgets ", 7],
         scenarios: {
           review: { mode: "auto", maxLines: 0, maxFiles: "40" },
+          rereview: { mode: "shadow" },
           brief: { mode: "shadow" },
           merge: { mode: "on", method: "fast-forward" },
           driveCi: { maxAttempts: 99 },
@@ -8484,7 +8488,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(a.enabled, true);
       assert.strictEqual(a.effort, "");
       assert.deepStrictEqual(a.repos, ["acme/widgets", "acme/gadgets"]);
-      assert.strictEqual(a.scenarios.review.mode, "shadow");
+      assert.strictEqual(a.scenarios.review.mode, "on", "an unknown mode is the default");
+      assert.strictEqual(a.scenarios.rereview.mode, "shadow", "a mode you chose is kept");
       assert.deepStrictEqual([a.scenarios.review.maxLines, a.scenarios.review.maxFiles], [1, 40]);
       assert.strictEqual(a.scenarios.brief.mode, "on", "a brief has no shadow mode — it posts nothing either way");
       assert.strictEqual(a.scenarios.merge.mode, "offer", "there is no mode that merges by itself");
@@ -9818,7 +9823,24 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(spawnSync(process.execPath, [hookJs, "review", url], { input: "not json", encoding: "utf8" }).status, 2);
     });
 
-    const agentOn = (extra = {}) => cfg.validateAgent({ enabled: true, ...extra });
+    // The posting scenarios in Shadow — what the tests below were written
+    // against. The defaults are On (a fresh install works right away), so a
+    // test of Shadow says so here, and one of On sets its mode itself.
+    const SHADOW_SCENARIOS = {
+      review: { mode: "shadow" },
+      rereview: { mode: "shadow" },
+      selfReview: { mode: "shadow" },
+      driveCi: { mode: "shadow" },
+      driveComments: { mode: "shadow" },
+      reapprove: { mode: "shadow" },
+    };
+    /** `scenarios` over a base, one scenario at a time — a test's `{ review: { maxLines } }` keeps the base's mode. */
+    const overScenarios = (base, over = {}) => {
+      const out = { ...base };
+      for (const [k, v] of Object.entries(over)) out[k] = { ...(base[k] ?? {}), ...v };
+      return out;
+    };
+    const agentOn = (extra = {}) => cfg.validateAgent({ enabled: true, ...extra, scenarios: overScenarios(SHADOW_SCENARIOS, extra.scenarios) });
     const reviewPr = (over = {}) => ({
       ...github.mapPr(
         rawPr({
@@ -10167,7 +10189,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const rawGitCalls = [];
       const children = [];
       // Diagrams and re-approve off unless a test asks: both call gh of their own.
-      const quiet = (over) => ({ diagrams: { enabled: false }, ...over, scenarios: { reapprove: { mode: "off", askReviewers: true }, ...(over.scenarios ?? {}) } });
+      const quiet = (over) => ({
+        diagrams: { enabled: false },
+        ...over,
+        scenarios: overScenarios({ ...SHADOW_SCENARIOS, reapprove: { mode: "off", askReviewers: true } }, over.scenarios),
+      });
       let settings = cfg.validateSettings({ hosts: [], agent: quiet({ enabled, ...agentOver }) });
       const agent = agentCore.createAgent({
         onChange,
@@ -10336,18 +10362,19 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
-    await atest("agent: without a checkout the PR waits and says why — nothing queued, failed or notified, and asking for a run is refused", async () => {
+    await atest("agent: without a checkout and with cloning off, the PR waits and says why — nothing queued, failed or notified, and asking for a run is refused", async () => {
       let cloned = false;
       const notices = [];
-      const f = agentFixture({ checkout: () => cloned, script: () => {}, notify: (n) => notices.push(n.kind) });
+      const f = agentFixture({ checkout: () => cloned, script: () => {}, notify: (n) => notices.push(n.kind), agent: { cloneMissing: false } });
       try {
         f.agent.onSnapshot(f.snapshot);
         f.agent.onSnapshot(f.snapshot);
         await new Promise((r) => setTimeout(r, 30));
         assert.deepStrictEqual(f.agent.getState().items, []);
-        assert.strictEqual(f.agent.getState().idle.PR_R, "No checkout of a/b — set its folder in Settings › Claude");
+        const why = "No checkout of a/b — set its folder in Settings › Claude, or let the agent clone it (Settings › Agent)";
+        assert.strictEqual(f.agent.getState().idle.PR_R, why);
         assert.deepStrictEqual([f.children.length, notices], [0, []], "nothing started, no toast");
-        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: false, error: "No checkout of a/b — set its folder in Settings › Claude." });
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: false, error: `${why}.` });
         assert.deepStrictEqual(f.agent.getState().items, [], "a refused ask leaves no failed card behind");
         // The repository cloned (or its folder set): the next plan picks the PR up.
         cloned = true;
@@ -10357,6 +10384,169 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       } finally {
         f.agent.stop();
       }
+    });
+
+    await atest("agent: without a checkout the agent clones the repository itself — blobless, signed in through gh — and the run works in it", async () => {
+      const made = [];
+      const gitImpl = async (args) => {
+        const sub = gitSub(args);
+        if (sub[0] === "clone") {
+          const target = sub[sub.length - 1];
+          made.push(target);
+          nfsA.mkdirSync(path.join(target, ".git"), { recursive: true });
+          nfsA.writeFileSync(path.join(target, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
+        }
+        return "";
+      };
+      const f = agentFixture({ checkout: false, script: () => {}, git: gitImpl });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.agent.getState().idle.PR_R, undefined, "no checkout is no reason to wait");
+        await until(() => f.children.length === 1);
+        const clone = path.join(f.dir, "agent", "clones", "github.com", "a", "b");
+        assert.deepStrictEqual(made, [`${clone}.partial`], "made under a .partial name");
+        assert.ok(nfsA.existsSync(path.join(clone, ".git", "config")), "and renamed when complete");
+        assert.ok(!nfsA.existsSync(`${clone}.partial`));
+        const cloneCall = f.rawGitCalls.find((a) => gitSub(a)[0] === "clone");
+        assert.deepStrictEqual(gitSub(cloneCall).slice(0, 7), ["clone", "--filter=blob:none", "--no-checkout", "--single-branch", "--no-tags", "--origin", "origin"]);
+        assert.ok(cloneCall.join(" ").includes("-c credential.helper= -c credential.helper=!gh auth git-credential"), "the credential helpers reset, then gh's");
+        assert.ok(cloneCall.some((a) => /^core\.hooksPath=/.test(a)), "no hook runs");
+        assert.ok(f.gitCalls.some((a) => a[0] === "fetch" && a[3] === "pull/7/head"), "then the worktree, from the clone");
+        assert.strictEqual(f.agent.getState().items[0].checkout, clone);
+        // The next run on the repository finds the clone and makes no second one.
+        assert.strictEqual(require(path.join(__dirname, "../dist/main/main/agent/clones.js")).findAgentClone(path.join(f.dir, "agent"), f.snapshot.pullRequests[0]), clone);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a clone that fails fails the run with git's words and leaves no half-made clone", async () => {
+      const f = agentFixture({
+        checkout: false,
+        script: () => {},
+        git: async (args) => {
+          const sub = gitSub(args);
+          if (sub[0] === "clone") {
+            nfsA.mkdirSync(path.join(sub[sub.length - 1], ".git"), { recursive: true });
+            throw new Error("git clone: fatal: Authentication failed");
+          }
+          return "";
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().items.some((i) => i.state === "error"));
+        const item = f.agent.getState().items[0];
+        assert.strictEqual(item.headline, "Could not clone a/b");
+        assert.match(item.error ?? "", /Authentication failed/);
+        assert.strictEqual(f.children.length, 0, "no session started");
+        const clone = path.join(f.dir, "agent", "clones", "github.com", "a", "b");
+        assert.ok(!nfsA.existsSync(clone) && !nfsA.existsSync(`${clone}.partial`));
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("agent clones: one folder per host and repository, https only, nothing a URL part could climb out of", () => {
+      const cl = require(path.join(__dirname, "../dist/main/main/agent/clones.js"));
+      const root = path.join(os.tmpdir(), "prd-agentdir");
+      assert.deepStrictEqual(cl.agentClonePlace(root, { url: "https://github.com/a/b/pull/7", repo: "a/b" }), {
+        url: "https://github.com/a/b.git",
+        dir: path.join(root, "clones", "github.com", "a", "b"),
+      });
+      assert.strictEqual(cl.agentClonePlace(root, { url: "https://creatio.ghe.com/eng/core/pull/1", repo: "eng/core" }).url, "https://creatio.ghe.com/eng/core.git");
+      assert.strictEqual(cl.agentClonePlace(root, { url: "http://github.com/a/b/pull/7", repo: "a/b" }), null, "https only");
+      assert.strictEqual(cl.agentClonePlace(root, { url: "not a url", repo: "a/b" }), null);
+      for (const repo of ["a", "a/b/c", "a/..", "../b", "/b"]) assert.strictEqual(cl.agentClonePlace(root, { url: "https://github.com/x/y/pull/1", repo }), null, repo);
+      assert.ok(cl.isAgentClone(root, path.join(root, "clones", "github.com", "a", "b")));
+      assert.ok(!cl.isAgentClone(root, path.join(root, "clones")), "the folder of clones is no clone");
+      assert.ok(!cl.isAgentClone(root, path.join(root, "runs", "x")));
+      assert.ok(!cl.isAgentClone(root, path.join(root, "clones", "..", "x")));
+    });
+
+    await atest("agent clones: the clone keeps gh as its only credential helper — checked on a real repository", async () => {
+      const cl = require(path.join(__dirname, "../dist/main/main/agent/clones.js"));
+      const repo = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-clonecfg-"));
+      spawnSync("git", ["init", "-q", repo]);
+      const cmds = cl.cloneCommands("https://github.com/a/b.git", repo, path.join(repo, "no-hooks"));
+      assert.strictEqual(cmds.length, 3);
+      for (const args of cmds.slice(1)) {
+        const r = spawnSync("git", args, { encoding: "utf8" });
+        assert.strictEqual(r.status, 0, r.stderr);
+      }
+      const got = spawnSync("git", ["-C", repo, "config", "--local", "--get-all", "credential.helper"], { encoding: "utf8" }).stdout.split("\n");
+      assert.deepStrictEqual(got.slice(0, 2), ["", "!gh auth git-credential"], "an empty value resets the helpers of every config below, then gh's");
+    });
+
+    await atest("agent clones: two runs share one clone in the making; a made one is reused without git", async () => {
+      const cl = require(path.join(__dirname, "../dist/main/main/agent/clones.js"));
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-clones-"));
+      const pr = { url: "https://github.com/a/b/pull/7", repo: "a/b" };
+      let clones = 0;
+      let release;
+      const gate = new Promise((r) => (release = r));
+      const git = async (args) => {
+        const sub = gitSub(args);
+        if (sub[0] === "clone") {
+          clones += 1;
+          await gate;
+          nfsA.mkdirSync(path.join(sub[sub.length - 1], ".git"), { recursive: true });
+          nfsA.writeFileSync(path.join(sub[sub.length - 1], ".git", "config"), "");
+        }
+        return "";
+      };
+      const a = cl.ensureAgentClone(git, root, pr);
+      const b = cl.ensureAgentClone(git, root, pr);
+      release();
+      const [da, db] = await Promise.all([a, b]);
+      assert.strictEqual(da, db);
+      assert.strictEqual(clones, 1);
+      assert.strictEqual(await cl.ensureAgentClone(async () => assert.fail("no git for a clone that exists"), root, pr), da);
+    });
+
+    test("checkout: with no projects folder set, the usual places in your home are searched — never a drive root; yours alone when set", () => {
+      const launcherM = require(path.join(__dirname, "../dist/main/main/claude-launch.js"));
+      assert.deepStrictEqual(launcherM.checkoutRoots("D:\\work", "win32", "C:\\Users\\me"), ["D:\\work"], "your folder, searched alone");
+      const win = launcherM.checkoutRoots("", "win32", "C:\\Users\\me");
+      assert.strictEqual(win[0], "C:\\Users\\me\\Projects");
+      for (const r of ["C:\\Users\\me\\source\\repos", "C:\\Users\\me\\src"]) assert.ok(win.includes(r), r);
+      // Any user of the machine may create C:\Projects: a checkout planted there would be run in.
+      assert.ok(win.every((r) => r.startsWith("C:\\Users\\me\\")), `only under your home: ${win.join(", ")}`);
+      assert.strictEqual(new Set(win.map((r) => r.toLowerCase())).size, win.length, "each once");
+      const linux = launcherM.checkoutRoots("", "linux", "/home/me");
+      assert.strictEqual(linux[0], "/home/me/Projects");
+      assert.ok(linux.includes("/home/me/source/repos") && linux.every((r) => r.startsWith("/home/me/")));
+      for (const platform of ["linux", "win32", "darwin"]) assert.deepStrictEqual(launcherM.checkoutRoots("", platform, ""), [], `never a folder relative to the app's (${platform})`);
+    });
+
+    test("checkout: a clone in ~/source/repos is found with no projects folder set", () => {
+      const launcherM = require(path.join(__dirname, "../dist/main/main/claude-launch.js"));
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-home-"));
+      const co = path.join(home, "source", "repos", "widgets");
+      nfsA.mkdirSync(path.join(co, ".git"), { recursive: true });
+      nfsA.writeFileSync(path.join(co, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:a/b.git\n');
+      const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+      process.env.HOME = home;
+      process.env.USERPROFILE = home;
+      try {
+        const pr = { url: "https://github.com/a/b/pull/7", repo: "a/b" };
+        assert.strictEqual(launcherM.findCheckout(pr, { projectsRoot: "", repoPaths: {} }), co);
+        assert.strictEqual(launcherM.findCheckout(pr, { projectsRoot: path.join(home, "elsewhere"), repoPaths: {} }), null, "a folder you set is the only one");
+      } finally {
+        for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+    });
+
+    test("settings: an agent prompt left at its default is stored empty, so a later default reaches it; your own is kept", () => {
+      const ad2 = require(path.join(__dirname, "../dist/main/shared/agent-defaults.js"));
+      const s = cfg.validateSettings({ hosts: [], claude: { agentPrompts: { triage: "My own triage {url}", rereview: ad2.DEFAULT_AGENT_PROMPTS.rereview } } });
+      const stored = cfg.toStoredSettings(s);
+      assert.strictEqual(stored.claude.agentPrompts.triage, "My own triage {url}");
+      for (const k of ["rereview", "afterMerge", "selfReview", "validateComments"]) assert.strictEqual(stored.claude.agentPrompts[k], "", k);
+      const back = cfg.validateSettings(JSON.parse(JSON.stringify(stored)));
+      assert.strictEqual(back.claude.agentPrompts.rereview, ad2.DEFAULT_AGENT_PROMPTS.rereview, "empty reads back as today's default");
+      assert.strictEqual(back.claude.agentPrompts.triage, "My own triage {url}");
+      assert.deepStrictEqual(ad2.PREVIOUS_DEFAULT_AGENT_PROMPTS, {}, "no default has changed yet — add the old text here when one does");
     });
 
     await atest("agent: a run that fails reports it and drops its worktree", async () => {
@@ -10962,7 +11152,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
       const base = cfg.validateAgent({ enabled: true });
       assert.strictEqual(journal.settingsDiff(base, cfg.validateAgent({ enabled: true })), null);
-      assert.deepStrictEqual(journal.settingsDiff(base, cfg.validateAgent({ enabled: true, scenarios: { review: { mode: "on" } } })), { "scenarios.review.mode": ["shadow", "on"] });
+      assert.deepStrictEqual(journal.settingsDiff(base, cfg.validateAgent({ enabled: true, scenarios: { review: { mode: "shadow" } } })), { "scenarios.review.mode": ["on", "shadow"] });
 
       const progress = { ...stream.initialProgress(), toolCalls: 31, steps: [{ id: "1", subject: "a", status: "completed" }, { id: "2", subject: "b", status: "in_progress" }] };
       const ok = journal.runStats({ startedAt: jAt(0) }, { progress: { ...progress, result: { subtype: "success", isError: false, text: "", denials: 1, deniedTools: ["Edit"], turns: 9, costUsd: 0.5, tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } } }, exitCode: 0, timedOut: false, stopped: false, stderr: "noise" }, jAt(4));
@@ -12547,7 +12737,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.ok(ad.DEFAULT_AGENT_TOOLS.drive.includes("Bash(twg *)"));
       const migrated = cfg.validateAgent({ permissions: { tools: { drive: ["Read"] }, toolsVersion: 2 } });
       assert.deepStrictEqual(migrated.permissions.tools.drive, ["Read", "Bash(twg *)"], "only what came after the version it was saved at");
-      assert.strictEqual(cfg.validateAgent(undefined).scenarios.selfReview.mode, "shadow");
+      assert.strictEqual(cfg.validateAgent(undefined).scenarios.selfReview.mode, "on");
     });
 
     await atest("drive: commits on top of the head are read oldest first; a rewritten history is not a fast-forward", async () => {
