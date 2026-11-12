@@ -10825,7 +10825,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // A write held back in a colleague's thread is said in the words, not only shown.
       const heldPlan = { ...plan("APPROVE"), held: [{ kind: "reply", replyTo: 3, author: "colleague", url: null, body: "b" }] };
       const h = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: heldPlan })]);
-      assert.match(h.now, /suggests approving\. It also wrote in a colleague's thread; a review answers only in yours, so that stays out/);
+      assert.match(h.now, /suggests approving\. It also wrote in a colleague's thread; a review answers only in threads you opened, to their first comment, so that stays out/);
+      // A reply to a mid-thread comment may sit in your own thread: it is not called a colleague's.
+      const midPlan = { ...plan("APPROVE"), held: [...heldPlan.held, { kind: "reply", replyTo: 4, author: null, url: null, body: "b" }] };
+      const mid = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: midPlan })]);
+      assert.match(mid.now, /It also wrote in a colleague's thread and to a comment in the middle of a thread; .* so those stay out/);
       // Request changes, with the comments counted, and the re-review after.
       const rc = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: plan("REQUEST_CHANGES") })]);
       assert.strictEqual(rc.now, "The agent drafted a review that requests changes: 1 inline comment.");

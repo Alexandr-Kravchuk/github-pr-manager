@@ -629,14 +629,15 @@ function gist(text: string): string {
 }
 
 /**
- * What the review wanted to write in threads a colleague opened. A review
+ * What the review wanted to write in threads a colleague opened, or to a
+ * comment in the middle of a thread (whoever opened it). A review
  * answers and resolves only in threads you opened, so these stay out of what
  * Approve sends; each links to its thread, where you can answer yourself.
  */
 function HeldBack({ held }: { held: HeldWrite[] }) {
   return (
     <div className="mt-2 rounded-md border border-amber-500/50 bg-amber-500/[0.07] p-2 text-xs">
-      <div className="font-medium text-amber-800 dark:text-amber-300">Not sent — {held.length === 1 ? "it lands" : "they land"} in a colleague&apos;s thread</div>
+      <div className="font-medium text-amber-800 dark:text-amber-300">Not sent — {held.length === 1 ? "this one stays" : "these stay"} with you</div>
       {held.map((h, i) => (
         <div key={h.replyTo ?? h.threadId ?? i} className="mt-1.5">
           <div className="text-fg-subtle">

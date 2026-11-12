@@ -285,8 +285,17 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
             : `The agent drafted a review that ${plan?.event === "REQUEST_CHANGES" ? "requests changes" : "comments"}: ${plural(n, "inline comment")}.`;
         }
         if (pushedBack > 0) now += ` The author pushed back on ${plural(pushedBack, "comment")} — your call below.`;
-        const held = plan?.held?.length ?? 0;
-        if (held > 0) now += ` It also wrote in ${held === 1 ? "a colleague's thread" : `${held} colleagues' threads`}; a review answers only in yours, so that stays out — it is shown below.`;
+        const held = plan?.held ?? [];
+        // A reply with no author answers a comment mid-thread — maybe in your own thread, so not "a colleague's".
+        const midThread = held.filter((h) => h.kind === "reply" && !h.author).length;
+        const theirs = held.length - midThread;
+        const where = [
+          theirs > 0 && (theirs === 1 ? "in a colleague's thread" : `in ${theirs} colleagues' threads`),
+          midThread > 0 && (midThread === 1 ? "to a comment in the middle of a thread" : `to ${midThread} comments in the middle of threads`),
+        ].filter(Boolean);
+        if (held.length > 0) {
+          now += ` It also wrote ${where.join(" and ")}; a review answers only in threads you opened, to their first comment, so ${held.length === 1 ? "that stays" : "those stay"} out — shown below.`;
+        }
         ask = approve ? "Read the summary, then approve — or discard it." : pushedBack > 0 ? "Decide on the pushed-back comments, check the rest, then send." : "Check what goes out, then send — or edit or discard it.";
         choices = [
           {

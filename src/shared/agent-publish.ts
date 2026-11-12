@@ -236,8 +236,10 @@ export interface PublishContext {
 }
 
 /**
- * A reply or resolve the session recorded in a thread a colleague opened. A
- * review answers and resolves only in threads you opened, so the app sets it
+ * A reply or resolve the session recorded in a thread a colleague opened (or,
+ * with no `author`, a reply to a comment in the middle of a thread — GitHub
+ * takes replies to a thread's first comment only). A review answers and
+ * resolves only in threads you opened, so the app sets it
  * aside when the run ends and shows it to you, instead of failing the whole
  * publish on it once you press Approve.
  */

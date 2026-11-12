@@ -361,7 +361,7 @@ export async function publishPlan(
   const requests = [...planRequests(steps, ctx), ...planRequests(extra, ctx)];
   // Everything it wrote was held back: Approve would post nothing and still mark it published.
   if (requests.length === 0 && (ctx.held?.length ?? 0) > 0) {
-    return { ok: false, error: "nothing is left to post — everything it wrote lands in colleagues' threads. Answer there yourself, or Discard it", posted: 0, total: 0 };
+    return { ok: false, error: "nothing is left to post — everything it wrote is held back (a colleague's thread, or a comment in the middle of a thread). Answer there yourself, or Discard it", posted: 0, total: 0 };
   }
   let done = Math.min(readDone(runDir), requests.length);
   // Nothing goes out unless every thread and comment the rest of the plan
