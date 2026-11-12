@@ -38,3 +38,6 @@ next-env.d.ts
 
 # internal planning docs — kept locally, not published in the public repo
 /docs/
+
+# The PR agent's per-run git worktrees (Settings › Agent › Worktree folder default)
+.claude/worktrees/
