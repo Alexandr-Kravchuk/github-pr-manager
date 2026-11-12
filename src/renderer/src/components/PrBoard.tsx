@@ -321,7 +321,8 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
     <Row label="Read this">
       <div className="space-y-2">
         {sends && plan.escalations.length > 0 && item && <Disputes item={item} plan={plan} run={run} />}
-        {sends && (plan.held?.length ?? 0) > 0 && <HeldBack held={plan.held ?? []} />}
+        {/* Still yours to answer after the rest went out: kept on the done card too. */}
+        {plan && (sends || item?.published) && (plan.held?.length ?? 0) > 0 && <HeldBack held={plan.held ?? []} />}
         {r.error && <pre className="whitespace-pre-wrap rounded-md bg-red-500/10 p-2 font-mono text-[11px] text-red-800 dark:text-red-200">{r.error}</pre>}
         {r.summary && <p className="whitespace-pre-wrap text-sm leading-snug text-fg-secondary">{r.summary}</p>}
         {r.findings.length > 0 && <FindingsList findings={r.findings} />}

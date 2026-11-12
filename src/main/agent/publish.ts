@@ -260,10 +260,40 @@ export function describeHeld(h: HeldWrite): string {
 }
 
 /**
+ * Each step's check with at most `CHECKS_AT_ONCE` in flight, in the steps'
+ * order: every gh call may sit out its 60 s timeout on an unreachable host,
+ * and checked one after another a plan of N replies waited N of them.
+ */
+const CHECKS_AT_ONCE = 4;
+async function checkSteps(steps: readonly PublishStep[], check: (s: PublishStep) => Promise<StepCheck>): Promise<StepCheck[]> {
+  const out: StepCheck[] = new Array<StepCheck>(steps.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < steps.length) {
+      const i = next++;
+      out[i] = await check(steps[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CHECKS_AT_ONCE, steps.length) }, worker));
+  return out;
+}
+
+/**
+ * What the run-end check found: the replies and resolves a review would
+ * write in threads a colleague opened, and — when a target couldn't be
+ * checked — why (`unchecked`). Then those targets are left to
+ * `checkPlanTargets`, which refuses them at publish with the reason, so On
+ * must not send the plan by itself.
+ */
+export interface HeldCheck {
+  held: HeldWrite[];
+  unchecked: string | null;
+}
+
+/**
  * The replies and resolves of a review that land in threads a colleague
  * opened. Read when the run ends, so the card shows them as held back and
- * Approve posts the rest; a target the check can't read is left to
- * `checkPlanTargets`, which refuses it at publish with the reason.
+ * Approve posts the rest.
  */
 export async function heldWrites(
   steps: readonly PublishStep[],
@@ -274,14 +304,16 @@ export async function heldWrites(
   gh: GhRunner = runGh,
   /** Re-review: resolving is off in Settings — a resolve that would never go out isn't held back either. */
   allowResolve?: boolean,
-): Promise<HeldWrite[]> {
-  const out: HeldWrite[] = [];
-  for (const s of postedSteps(steps, { allowResolve })) {
-    if (s.kind !== "reply" && s.kind !== "resolve") continue;
-    const c = await checkStep(s, prUrl, repo, number, { viewer, mine: true }, gh);
-    if ("held" in c) out.push(c.held);
+): Promise<HeldCheck> {
+  const writes = postedSteps(steps, { allowResolve }).filter((s) => s.kind === "reply" || s.kind === "resolve");
+  const checks = await checkSteps(writes, (s) => checkStep(s, prUrl, repo, number, { viewer, mine: true }, gh));
+  const held: HeldWrite[] = [];
+  const errors: string[] = [];
+  for (const c of checks) {
+    if ("held" in c) held.push(c.held);
+    else if ("error" in c && !errors.includes(c.error)) errors.push(c.error);
   }
-  return out;
+  return { held, unchecked: errors.length > 0 ? errors.join("; ") : null };
 }
 
 /**
@@ -301,8 +333,7 @@ export async function checkPlanTargets(
 ): Promise<string | null> {
   const errors: string[] = [];
   const held: HeldWrite[] = [];
-  for (const s of steps) {
-    const c = await checkStep(s, prUrl, repo, number, targets, gh);
+  for (const c of await checkSteps(steps, (s) => checkStep(s, prUrl, repo, number, targets, gh))) {
     if ("error" in c && !errors.includes(c.error)) errors.push(c.error);
     else if ("held" in c) held.push(c.held);
   }

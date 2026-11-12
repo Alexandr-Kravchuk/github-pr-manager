@@ -1472,6 +1472,8 @@ export function createAgent(deps: AgentDeps): Agent {
     if (!cut) item.cuts = undefined;
     let publishNow = false;
     let pushNow = false;
+    // Why the run-end thread check couldn't run, when it couldn't: the log tells it from "nothing held".
+    let heldUnchecked: string | null = null;
     // A finished review or brief gets its diagrams before it reaches you: still
     // "working", its slot stays taken and nothing can be sent without them.
     const finished = !cut && !entry.takeOver && !entry.offStop && !outcome.stopped && !outcome.timedOut && result && !result.isError && result.subtype === "success";
@@ -1570,11 +1572,15 @@ export function createAgent(deps: AgentDeps): Agent {
           }
         }
       } else if (steps.length > 0) {
-        item.plan = await summarizeReview(item, steps, s);
+        const review = await summarizeReview(item, steps, s);
+        item.plan = review.plan;
+        heldUnchecked = review.unchecked;
         item.planHash = planHash(planText);
         item.headline = `Would post: ${describePlan(item.plan)}`;
-        // A write held back is yours to answer: On waits for you rather than send the rest past it.
-        publishNow = item.mode === "on" && !item.plan.held?.length;
+        // A write held back is yours to answer, and one that couldn't be checked would only
+        // be refused at publish: On waits for you rather than send the rest past either.
+        publishNow = item.mode === "on" && !item.plan.held?.length && !heldUnchecked;
+        if (item.mode === "on" && heldUnchecked) item.headline += " — waits for you: couldn't check whose threads its replies land in";
       } else {
         // Nothing captured to post: there's nothing to send — the report says what it found.
         item.state = "done";
@@ -1608,6 +1614,7 @@ export function createAgent(deps: AgentDeps): Agent {
           ...(item.result ? { asks: item.result.asks.length, findings: item.result.findings.length, structured: item.result.structured } : {}),
           ...(publishNow ? { publishNow: true } : {}),
           ...(pushNow ? { pushNow: true } : {}),
+          ...(heldUnchecked ? { heldUnchecked } : {}),
         },
       });
     }
@@ -1729,18 +1736,21 @@ export function createAgent(deps: AgentDeps): Agent {
    * A review's plan as the card shows it, with its replies and resolves in
    * colleagues' threads set aside (`held`): a review answers only in threads
    * you opened, and finding that out on Approve failed the whole publish —
-   * the approve with it — over a write you never needed to send. When the PR
-   * or your login can't be read now, nothing is set aside here and the check
-   * at publish refuses such a write with its reason, as before.
+   * the approve with it — over a write you never needed to send. When a
+   * target can't be checked now (`unchecked`: the PR, your login or a comment
+   * out of reach), it is not set aside: the check at publish refuses it with
+   * its reason, so On leaves such a plan for you instead of sending it.
    */
-  async function summarizeReview(item: AgentItemRecord, steps: readonly PublishStep[], s: AgentSettings): Promise<PublishSummary> {
+  async function summarizeReview(item: AgentItemRecord, steps: readonly PublishStep[], s: AgentSettings): Promise<{ plan: PublishSummary; unchecked: string | null }> {
     const plan = summarizePlan(steps);
-    if (!steps.some((st) => st.kind === "reply" || st.kind === "resolve")) return plan;
+    if (!steps.some((st) => st.kind === "reply" || st.kind === "resolve")) return { plan, unchecked: null };
     const read = await fresh(item, snapshotPr(item.prId)?.roles ?? ["reviewer"]);
-    if (!read.ok || !read.fresh.viewer) return plan;
-    const held = await heldWrites(steps, item.url, item.repo, item.prNumber, read.fresh.viewer, gh, item.scenario === "rereview" ? s.scenarios.rereview.resolve : undefined).catch(() => []);
+    if (!read.ok) return { plan, unchecked: read.error };
+    if (!read.fresh.viewer) return { plan, unchecked: "your login on the host is unknown" };
+    const allowResolve = item.scenario === "rereview" ? s.scenarios.rereview.resolve : undefined;
+    const { held, unchecked } = await heldWrites(steps, item.url, item.repo, item.prNumber, read.fresh.viewer, gh, allowResolve).catch((e: Error) => ({ held: [], unchecked: e.message }));
     // The same filter Publish applies (`postedSteps`), so the card counts what goes out.
-    return held.length === 0 ? plan : summarizePlan(steps, held);
+    return { plan: held.length === 0 ? plan : summarizePlan(steps, held), unchecked };
   }
 
   /**
@@ -1865,7 +1875,7 @@ export function createAgent(deps: AgentDeps): Agent {
       // Edited in the session since you saw it: show the new plan, post nothing.
       if (publishedCount(item.runFolder) > 0) return refuse("part of it went out already and the rest changed in the session — run it again");
       const text = readPlanText(item.runFolder);
-      item.plan = drive ? summarizePlan(readPlanLines(text)) : await summarizeReview(item, readPlanLines(text), all.agent);
+      item.plan = drive ? summarizePlan(readPlanLines(text)) : (await summarizeReview(item, readPlanLines(text), all.agent)).plan;
       if (postsDiagrams(item, all.agent)) item.plan.diagrams = item.diagrams!.list.length;
       item.planHash = planHash(text);
       item.planEdited = true;

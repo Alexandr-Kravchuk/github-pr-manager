@@ -601,7 +601,7 @@ function mockAgentState(): AgentState {
     item(118, { state: "error", headline: "No checkout of acme/clio-knowledge: set its folder in Settings > Claude", finishedAt: iso(30 * 60_000) }),
     item(929, {
       state: "needsYou",
-      headline: "Would post: request changes, 1 inline comment, 1 reply, 1 held back for you, 1 diagram",
+      headline: "Would post: request changes, 1 inline comment, 1 reply, 1 diagram — 1 held back for you",
       diagrams: {
         checked: true,
         list: [

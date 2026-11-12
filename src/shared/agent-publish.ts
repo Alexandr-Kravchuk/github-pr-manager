@@ -428,12 +428,13 @@ export function describePlan(p: PublishSummary): string {
     n(p.replies.length, "reply", "replies"),
     n(p.resolves, "resolve", "resolves"),
     n(p.escalations?.length ?? 0, "dispute for you", "disputes for you"),
-    n(p.held?.length ?? 0, "held back for you", "held back for you"),
     n(p.diagrams ?? 0, "diagram", "diagrams"),
   ]) {
     if (part) parts.push(part);
   }
-  return parts.length ? parts.join(", ") : "nothing";
+  // Held writes never go out: a clause of their own, so "Published: …" lists only what reached GitHub.
+  const held = p.held?.length ?? 0;
+  return `${parts.length ? parts.join(", ") : "nothing"}${held ? ` — ${held} held back for you` : ""}`;
 }
 
 /**
