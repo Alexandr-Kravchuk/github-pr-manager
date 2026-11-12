@@ -279,14 +279,17 @@ function escalatedTargets(steps: readonly PublishStep[]): Set<number> {
  */
 export function postedSteps(steps: readonly PublishStep[], ctx: Pick<PublishContext, "allowResolve" | "held">): PublishStep[] {
   const escalated = escalatedTargets(steps);
-  const heldReplies = new Set((ctx.held ?? []).flatMap((h) => (h.replyTo !== undefined ? [h.replyTo] : [])));
-  const heldThreads = new Set((ctx.held ?? []).flatMap((h) => (h.threadId !== undefined ? [h.threadId] : [])));
+  const isHeld = heldTest(ctx.held ?? []);
   return steps.filter(
-    (s) =>
-      s.kind !== "escalate" &&
-      !(s.kind === "reply" && (escalated.has(s.replyTo) || heldReplies.has(s.replyTo))) &&
-      !(s.kind === "resolve" && (ctx.allowResolve === false || heldThreads.has(s.threadId))),
+    (s) => s.kind !== "escalate" && !isHeld(s) && !(s.kind === "reply" && escalated.has(s.replyTo)) && !(s.kind === "resolve" && ctx.allowResolve === false),
   );
+}
+
+/** Whether a step is one of the writes set aside — the one test `postedSteps` and `summarizePlan` share. */
+function heldTest(held: ReadonlyArray<Pick<HeldWrite, "replyTo" | "threadId">>): (s: PublishStep) => boolean {
+  const replies = new Set(held.flatMap((h) => (h.replyTo !== undefined ? [h.replyTo] : [])));
+  const threads = new Set(held.flatMap((h) => (h.threadId !== undefined ? [h.threadId] : [])));
+  return (s) => (s.kind === "reply" && replies.has(s.replyTo)) || (s.kind === "resolve" && threads.has(s.threadId));
 }
 
 /** The reply that drops your comment in a thread where the author pushed back. */
@@ -380,10 +383,17 @@ export interface PublishSummary {
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
-export function summarizePlan(steps: readonly PublishStep[]): PublishSummary {
+/**
+ * The plan as the Board shows it. `held` (a review's writes set aside when the
+ * run ended) leaves them out the way `postedSteps` does, and lists them apart,
+ * so what the card counts is what Publish sends.
+ */
+export function summarizePlan(steps: readonly PublishStep[], held: readonly HeldWrite[] = []): PublishSummary {
   const out: PublishSummary = { event: null, body: "", comments: [], replies: [], resolves: 0, escalations: [] };
   const escalated = escalatedTargets(steps);
+  const isHeld = heldTest(held);
   for (const s of steps) {
+    if (isHeld(s)) continue;
     if (s.kind === "review") {
       out.event = s.event;
       out.body = clip(s.body, 20_000);
@@ -402,6 +412,7 @@ export function summarizePlan(steps: readonly PublishStep[]): PublishSummary {
   }
   out.comments = out.comments.slice(0, 100);
   out.replies = out.replies.slice(0, 100);
+  if (held.length > 0) out.held = held.map((h) => (h.body !== undefined ? { ...h, body: clip(h.body, 4_000) } : h));
   return out;
 }
 

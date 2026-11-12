@@ -1739,12 +1739,8 @@ export function createAgent(deps: AgentDeps): Agent {
     const read = await fresh(item, snapshotPr(item.prId)?.roles ?? ["reviewer"]);
     if (!read.ok || !read.fresh.viewer) return plan;
     const held = await heldWrites(steps, item.url, item.repo, item.prNumber, read.fresh.viewer, gh, item.scenario === "rereview" ? s.scenarios.rereview.resolve : undefined).catch(() => []);
-    if (held.length === 0) return plan;
-    const heldReplies = new Set(held.flatMap((h) => (h.replyTo !== undefined ? [h.replyTo] : [])));
-    plan.replies = plan.replies.filter((r) => !heldReplies.has(r.replyTo));
-    plan.resolves -= held.filter((h) => h.kind === "resolve").length;
-    plan.held = held.map((h) => (h.body !== undefined && h.body.length > 4_000 ? { ...h, body: `${h.body.slice(0, 4_000)}…` } : h));
-    return plan;
+    // The same filter Publish applies (`postedSteps`), so the card counts what goes out.
+    return held.length === 0 ? plan : summarizePlan(steps, held);
   }
 
   /**

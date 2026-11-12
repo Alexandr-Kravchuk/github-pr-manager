@@ -12425,6 +12425,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(pub.heldLabel({ kind: "resolve", author: null }), "resolving a thread you didn't open");
       assert.deepStrictEqual(await publishMod.heldWrites(steps, url, "a/b", 7, "me", async () => ({ code: 1, stdout: "", stderr: "boom" })), [], "unreadable: left to the publish check");
       assert.strictEqual(pub.describePlan({ ...pub.summarizePlan(steps.slice(0, 1)), held }), "approve, 2 held back for you");
+      // The card's summary leaves out what postedSteps leaves out, and clips what it lists.
+      const sum = pub.summarizePlan(steps, [...held.slice(0, 1), { ...held[1], body: "x".repeat(5_000) }]);
+      assert.strictEqual(pub.describePlan(sum), "approve, 1 reply, 2 held back for you");
+      assert.deepStrictEqual(sum.replies.map((r) => r.replyTo), pub.postedSteps(steps, ctx).filter((s) => s.kind === "reply").map((s) => s.replyTo));
+      assert.strictEqual(sum.held[1].body.length, 4_001);
       // A resolve that resolving-off would never send is not held back either.
       const resolveGh = async () => ({ code: 0, stdout: JSON.stringify({ data: { node: { pullRequest: { number: 7, repository: { nameWithOwner: "a/b" } }, comments: { nodes: [{ url: "u", author: { login: "colleague" } }] } } } }), stderr: "" });
       const res = [{ kind: "resolve", threadId: "PRRT_c" }];
