@@ -274,9 +274,11 @@ export async function heldWrites(
   number: number,
   viewer: string | null,
   gh: GhRunner = runGh,
+  /** Re-review: resolving is off in Settings — a resolve that would never go out isn't held back either. */
+  allowResolve?: boolean,
 ): Promise<HeldWrite[]> {
   const out: HeldWrite[] = [];
-  for (const s of postedSteps(steps, {})) {
+  for (const s of postedSteps(steps, { allowResolve })) {
     if (s.kind !== "reply" && s.kind !== "resolve") continue;
     const c = await checkStep(s, prUrl, repo, number, { viewer, mine: true }, gh);
     if ("held" in c) out.push(c.held);
@@ -359,6 +361,10 @@ export async function publishPlan(
   const steps = readPlanLines(text);
   // Your choices go after the plan's own writes, so a retry finds them at the same place.
   const requests = [...planRequests(steps, ctx), ...planRequests(extra, ctx)];
+  // Everything it wrote was held back: Approve would post nothing and still mark it published.
+  if (requests.length === 0 && (ctx.held?.length ?? 0) > 0) {
+    return { ok: false, error: "nothing is left to post — everything it wrote lands in colleagues' threads. Answer there yourself, or Discard it", posted: 0, total: 0 };
+  }
   let done = Math.min(readDone(runDir), requests.length);
   // Nothing goes out unless every thread and comment the rest of the plan
   // touches is this PR's — and, for a review, yours.

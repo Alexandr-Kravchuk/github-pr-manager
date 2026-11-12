@@ -12418,6 +12418,19 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(all, /Edit in Claude to drop them/);
       assert.deepStrictEqual(await publishMod.heldWrites(steps, url, "a/b", 7, "me", async () => ({ code: 1, stdout: "", stderr: "boom" })), [], "unreadable: left to the publish check");
       assert.strictEqual(pub.describePlan({ ...pub.summarizePlan(steps.slice(0, 1)), held }), "approve, 2 held back for you");
+      // A resolve that resolving-off would never send is not held back either.
+      const resolveGh = async () => ({ code: 0, stdout: JSON.stringify({ data: { node: { pullRequest: { number: 7, repository: { nameWithOwner: "a/b" } }, comments: { nodes: [{ url: "u", author: { login: "colleague" } }] } } } }), stderr: "" });
+      const res = [{ kind: "resolve", threadId: "PRRT_c" }];
+      assert.strictEqual((await publishMod.heldWrites(res, url, "a/b", 7, "me", resolveGh)).length, 1);
+      assert.deepStrictEqual(await publishMod.heldWrites(res, url, "a/b", 7, "me", resolveGh, false), []);
+      // Everything held back: Publish posts nothing and says so, rather than marking an empty plan published.
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-held-"));
+      nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), `${JSON.stringify(steps[1])}
+`);
+      const posts = [];
+      const none = await publishMod.publishPlan(runDir, url, { ...ctx, held: held.slice(0, 1) }, { viewer: "me", mine: true }, async (a) => (posts.push(a), gh(a)));
+      assert.deepStrictEqual([none.ok, none.posted, posts.length], [false, 0, 0]);
+      assert.match(none.error, /nothing is left to post/);
     });
 
     test("mapPr: the author's latest thread answer, a reviewer's latest open-thread comment, and whether the branch is in a fork", () => {

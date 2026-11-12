@@ -1570,7 +1570,7 @@ export function createAgent(deps: AgentDeps): Agent {
           }
         }
       } else if (steps.length > 0) {
-        item.plan = await summarizeReview(item, steps);
+        item.plan = await summarizeReview(item, steps, s);
         item.planHash = planHash(planText);
         item.headline = `Would post: ${describePlan(item.plan)}`;
         // A write held back is yours to answer: On waits for you rather than send the rest past it.
@@ -1733,12 +1733,12 @@ export function createAgent(deps: AgentDeps): Agent {
    * or your login can't be read now, nothing is set aside here and the check
    * at publish refuses such a write with its reason, as before.
    */
-  async function summarizeReview(item: AgentItemRecord, steps: readonly PublishStep[]): Promise<PublishSummary> {
+  async function summarizeReview(item: AgentItemRecord, steps: readonly PublishStep[], s: AgentSettings): Promise<PublishSummary> {
     const plan = summarizePlan(steps);
     if (!steps.some((st) => st.kind === "reply" || st.kind === "resolve")) return plan;
     const read = await fresh(item, snapshotPr(item.prId)?.roles ?? ["reviewer"]);
     if (!read.ok || !read.fresh.viewer) return plan;
-    const held = await heldWrites(steps, item.url, item.repo, item.prNumber, read.fresh.viewer, gh).catch(() => []);
+    const held = await heldWrites(steps, item.url, item.repo, item.prNumber, read.fresh.viewer, gh, item.scenario === "rereview" ? s.scenarios.rereview.resolve : undefined).catch(() => []);
     if (held.length === 0) return plan;
     const heldReplies = new Set(held.flatMap((h) => (h.replyTo !== undefined ? [h.replyTo] : [])));
     plan.replies = plan.replies.filter((r) => !heldReplies.has(r.replyTo));
@@ -1869,7 +1869,7 @@ export function createAgent(deps: AgentDeps): Agent {
       // Edited in the session since you saw it: show the new plan, post nothing.
       if (publishedCount(item.runFolder) > 0) return refuse("part of it went out already and the rest changed in the session — run it again");
       const text = readPlanText(item.runFolder);
-      item.plan = drive ? summarizePlan(readPlanLines(text)) : await summarizeReview(item, readPlanLines(text));
+      item.plan = drive ? summarizePlan(readPlanLines(text)) : await summarizeReview(item, readPlanLines(text), all.agent);
       if (postsDiagrams(item, all.agent)) item.plan.diagrams = item.diagrams!.list.length;
       item.planHash = planHash(text);
       item.planEdited = true;
