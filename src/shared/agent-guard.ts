@@ -43,6 +43,12 @@ export function guardPrFromUrl(url: string): GuardPr | null {
  * plugin folders a skill's Workflow script may come from.
  */
 export interface GuardRun {
+  /**
+   * "full": a drive on your own PR that runs with your own Claude setup
+   * (`checkFullToolUse`) — every tool and folder, minus writes to GitHub.
+   * Absent: the isolated rules below.
+   */
+  mode?: "full";
   wrapperPath?: string;
   outDir?: string;
   /** Plugin folders: a Workflow may run a script from inside one of these, and from nowhere else. */
@@ -1161,6 +1167,7 @@ export function checkToolUse(
   run: GuardRun | null = null,
   real: RealPath = asWritten,
 ): GuardDecision {
+  if (run?.mode === "full" && kind === "drive") return checkFullToolUse(toolName, input, pr, run);
   if (NEVER.has(toolName)) return deny(`${toolName} is not available to agent runs.`);
   if (toolName === "Workflow") return checkWorkflow(input, run);
   if (READ_TOOLS.has(toolName)) return checkRead(toolName, input, run, real);
@@ -1185,6 +1192,188 @@ export function checkToolUse(
   }
   if (SESSION_TOOLS.has(toolName)) return { allow: true };
   return deny(`${toolName || "That tool"} is not one of the tools agent runs may use.`);
+}
+
+// ---------------------------------------------------------------------------
+// Full context: a drive on your own PR (Settings › Agent › "Your PRs: full
+// context"). The session runs with your CLAUDE.md, hooks, plugins and MCP
+// servers, reads and writes anywhere you can, runs any command. What it still
+// may not do is write to GitHub — the app pushes the commits and posts the
+// replies itself, after your click in Shadow. This is a denylist and a
+// best-effort one: it stops a model that forgets the rule (`git push`,
+// `gh pr comment`, a GitHub MCP write tool), not a script that hides the call
+// (`sh script.sh`, `python -c`). The hard boundary for the push is the
+// session's environment (`sessionGitEnv`): no credentials, every remote URL
+// rewritten to one git can't reach.
+// ---------------------------------------------------------------------------
+
+/** Programs that run the next word as the command: their own flags and assignments are skipped. */
+const COMMAND_PREFIXES = new Set(["sudo", "env", "command", "exec", "nohup", "time", "xargs", "nice", "caffeinate"]);
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
+
+/** A lenient split for full-context runs: quotes are taken off, operators and substitutions start a new command. */
+export function looseCommands(command: string): string[][] {
+  const out: string[][] = [];
+  let words: string[] = [];
+  let cur = "";
+  let inWord = false;
+  const endWord = () => {
+    if (inWord) words.push(cur);
+    cur = "";
+    inWord = false;
+  };
+  const endCommand = () => {
+    endWord();
+    if (words.length > 0) out.push(words);
+    words = [];
+  };
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === "'" || ch === '"') {
+      const end = command.indexOf(ch, i + 1);
+      const stop = end < 0 ? command.length : end;
+      const inner = command.slice(i + 1, stop);
+      // A substitution inside double quotes runs too.
+      if (ch === '"' && /\$\(|`/.test(inner)) for (const c of looseCommands(inner.replace(/^[^$`]*(\$\(|`)/, ""))) out.push(c);
+      cur += inner;
+      inWord = true;
+      i = stop;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      cur += command[++i];
+      inWord = true;
+      continue;
+    }
+    if (";&|()`\n\r{}".includes(ch) || (ch === "$" && command[i + 1] === "(")) {
+      endCommand();
+      continue;
+    }
+    if (ch === " " || ch === "\t") {
+      endWord();
+      continue;
+    }
+    cur += ch;
+    inWord = true;
+  }
+  endCommand();
+  return out;
+}
+
+/** The program and its arguments, past assignments and `sudo`/`env`/`xargs`-like prefixes; the program by its base name. */
+function commandCore(words: string[]): string[] {
+  let i = 0;
+  for (;;) {
+    while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++;
+    const name = (words[i] ?? "").split("/").pop() ?? "";
+    if (!COMMAND_PREFIXES.has(name)) break;
+    i++;
+    while (i < words.length && words[i].startsWith("-")) i++;
+  }
+  const rest = words.slice(i);
+  if (rest.length > 0) rest[0] = rest[0].split("/").pop() ?? rest[0];
+  return rest;
+}
+
+const GH_WRITES: Record<string, ReadonlySet<string> | "all-but-read"> = {
+  pr: new Set(["comment", "review", "merge", "edit", "close", "create", "ready", "reopen", "lock", "unlock", "update-branch"]),
+  issue: new Set(["create", "comment", "edit", "close", "reopen", "delete", "transfer", "pin", "unpin", "lock", "unlock", "develop"]),
+  repo: new Set(["create", "edit", "delete", "fork", "rename", "archive", "unarchive", "sync"]),
+  label: new Set(["create", "edit", "delete", "clone"]),
+  secret: new Set(["set", "delete"]),
+  variable: new Set(["set", "delete"]),
+  release: "all-but-read",
+  gist: new Set(["create", "edit", "delete", "rename"]),
+};
+const GH_RELEASE_READS = new Set(["list", "view", "download"]);
+
+function fullGhApi(args: string[]): GuardDecision {
+  let endpoint: string | null = null;
+  const fields: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const eq = a.indexOf("=");
+    const name = a.startsWith("--") && eq > 0 ? a.slice(0, eq) : a;
+    const attached = a.startsWith("--") && eq > 0 ? a.slice(eq + 1) : null;
+    const value = (): string => attached ?? args[++i] ?? "";
+    if (name === "-X" || name === "--method") {
+      if (value().toUpperCase() !== "GET") return deny("This session doesn't write to GitHub — the app pushes and posts after your click.");
+    } else if (/^-X./.test(a)) {
+      if (a.slice(2).toUpperCase() !== "GET") return deny("This session doesn't write to GitHub — the app pushes and posts after your click.");
+    } else if (FIELD_FLAGS.has(name) || /^-[fF]./.test(a)) {
+      fields.push(/^-[fF]./.test(a) ? a.slice(2) : value());
+    } else if (name === "--input") {
+      return deny("gh api --input sends a request body; this session doesn't write to GitHub.");
+    } else if (!a.startsWith("-") && endpoint === null) {
+      endpoint = a;
+    }
+  }
+  if (fields.length === 0) return { allow: true };
+  // With fields gh sends a POST: only a GraphQL query is a read.
+  if (endpoint === "graphql" && !fields.some((f) => /\bmutation\b/i.test(f))) return { allow: true };
+  return deny("That gh api call writes to GitHub; this session doesn't — the app pushes and posts after your click.");
+}
+
+function fullCommand(words: string[], pr: GuardPr | null, run: GuardRun, depth: number): GuardDecision {
+  if (run.wrapperPath && run.outDir && words[0] && samePath(words[0], run.wrapperPath)) return checkWrapper(words, pr, run.outDir, run.subs);
+  const w = commandCore(words);
+  const prog = w[0] ?? "";
+  if (SHELLS.has(prog)) {
+    const c = w.indexOf("-c");
+    if (c > 0 && w[c + 1] !== undefined && depth < 3) return checkFullBash(w[c + 1], pr, run, depth + 1);
+    return { allow: true };
+  }
+  if (prog === "git") {
+    let i = 1;
+    for (; i < w.length && w[i].startsWith("-"); i++) {
+      if (w[i] === "-c" && /^alias\./i.test(w[i + 1] ?? "")) return deny("git aliases set on the command line are not allowed here.");
+      if (["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(w[i])) i++;
+    }
+    const sub = w[i] ?? "";
+    if (sub === "push" || sub === "send-pack") return deny("This session doesn't push — the app pushes your branch after your click.");
+    return { allow: true };
+  }
+  if (prog === "gh") {
+    const group = w[1] ?? "";
+    const sub = w[2] ?? "";
+    if (group === "api") return fullGhApi(w.slice(2));
+    const writes = GH_WRITES[group];
+    if (writes === "all-but-read" ? sub !== "" && !GH_RELEASE_READS.has(sub) : writes?.has(sub)) {
+      return deny(`gh ${group} ${sub} writes to GitHub; this session doesn't — the app pushes and posts the replies after your click.`);
+    }
+  }
+  return { allow: true };
+}
+
+export function checkFullBash(command: string, pr: GuardPr | null, run: GuardRun, depth = 0): GuardDecision {
+  for (const words of looseCommands(command)) {
+    const d = fullCommand(words, pr, run, depth);
+    if (!d.allow) return d;
+  }
+  return { allow: true };
+}
+
+/** The read tools of a GitHub MCP server; any other tool of it writes. */
+const GITHUB_MCP_READ = /^(get_|list_|search_)|_read$|^(actions_get|actions_list|projects_get|projects_list|web_search|semantic_issue_similarity_search|check_dependency_vulnerabilities)$/;
+
+/** `mcp__<server>__<tool>`: a GitHub (or GHE) server's tool that writes. */
+export function isGithubMcpWrite(toolName: string): boolean {
+  const m = /^mcp__(.+?)__(.+)$/.exec(toolName);
+  if (!m) return false;
+  if (!/(^|[_-])(github|ghe)([_-]|$)/i.test(m[1])) return false;
+  return !GITHUB_MCP_READ.test(m[2]);
+}
+
+/** A full-context drive: everything but writing to GitHub. */
+export function checkFullToolUse(toolName: string, input: unknown, pr: GuardPr | null, run: GuardRun): GuardDecision {
+  if (toolName === "Bash") {
+    const command = typeof (input as { command?: unknown } | null)?.command === "string" ? (input as { command: string }).command : "";
+    return checkFullBash(command, pr, run);
+  }
+  if (isGithubMcpWrite(toolName)) {
+    return deny(`${toolName} writes to GitHub; this session doesn't — the app pushes and posts the replies after your click.`);
+  }
+  return { allow: true };
 }
 
 const RUN_KINDS: readonly AgentRunKind[] = ["review", "brief", "rereview", "drive", "afterMerge"];

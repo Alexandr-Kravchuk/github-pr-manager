@@ -17,6 +17,10 @@ import type { AgentRunKind } from "../../shared/types";
 //   --plugin-dir         only the plugins the prompt's skills come from;
 //   --settings           the app's own file, carrying only the guard hook;
 //   --permission-prompts none — anything the rules don't allow is refused, not asked.
+// A drive on your own PR may run with full context instead (`isolation:
+// "full"`, Settings › Agent): none of the isolation above, your whole Claude
+// setup, with the guard hook refusing writes to GitHub and `sessionGitEnv`
+// keeping the push to the app.
 // A hint is a user message on stdin, pause is an `interrupt` control request
 // (the process stays alive), resume is another user message.
 
@@ -26,6 +30,13 @@ export interface RunSpec {
   /** Continue `sessionId` (`--resume`) — a run the app's closing interrupted — rather than start it. */
   resume?: boolean;
   kind: AgentRunKind;
+  /**
+   * "restricted" (the default): isolated from your Claude setup, as above.
+   * "full": a drive on your own PR — your settings, CLAUDE.md, hooks, plugins
+   * and MCP servers load as in your own sessions; only the app's guard hook
+   * (writes to GitHub) and the push block in `env` stay.
+   */
+  isolation?: "restricted" | "full";
   prompt: string;
   appendSystemPrompt: string;
   allowedTools: string[];
@@ -114,6 +125,7 @@ export function builtInTools(allowedTools: readonly string[]): string[] {
 }
 
 export function buildClaudeArgs(spec: RunSpec): string[] {
+  const full = spec.isolation === "full";
   return [
     "-p",
     "--verbose",
@@ -123,8 +135,7 @@ export function buildClaudeArgs(spec: RunSpec): string[] {
     "stream-json",
     spec.resume ? "--resume" : "--session-id",
     spec.sessionId,
-    "--restricted",
-    "--strict-mcp-config",
+    ...(full ? [] : ["--restricted", "--strict-mcp-config"]),
     "--permission-prompts",
     "none",
     "--settings",
@@ -135,8 +146,8 @@ export function buildClaudeArgs(spec: RunSpec): string[] {
     ...(spec.addDirs ?? []).flatMap((d) => ["--add-dir", d]),
     ...(spec.model ? ["--model", spec.model] : []),
     ...(spec.effort ? ["--effort", spec.effort] : []),
-    "--tools",
-    builtInTools(spec.allowedTools).join(","),
+    // Full context keeps every built-in tool; its rules only add to yours.
+    ...(full ? [] : ["--tools", builtInTools(spec.allowedTools).join(",")]),
     // Last: it takes every argument after it.
     "--allowedTools",
     ...spec.allowedTools,

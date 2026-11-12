@@ -8,7 +8,7 @@
 import { resultCard, type RunAsk, type RunFinding } from "./agent-result";
 import type { PublishSummary } from "./agent-publish";
 import { currentStep } from "./agent-stream";
-import { queueOrder, runFor, stageColumns, stageLine, type BoardStage, type StageCard, type StageContext } from "./agent-view";
+import { isOwnSessionWhy, queueOrder, runFor, stageColumns, stageLine, type BoardStage, type StageCard, type StageContext } from "./agent-view";
 import type { AgentAction, AgentItem, AgentState, PullRequest } from "./types";
 
 /** Whose move it is: yours, the agent's, someone else's (the author, reviewers), or nobody's. */
@@ -157,8 +157,11 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
   const runId = item?.runId ?? "";
   const prId = card.prId;
   const kind = stage.action?.kind ?? null;
-  // Starting a run only works while the agent is on, and never on a PR an SDLC run has.
-  const canStart = state.enabled && !stage.sdlc;
+  // Starting a run only works while the agent is on, never on a PR an SDLC run
+  // has, and never beside a Claude session of yours on it: the main process
+  // refuses that too, since two sessions on one PR answer the same threads twice.
+  const sessionOnIt = isOwnSessionWhy(stage.why);
+  const canStart = state.enabled && !stage.sdlc && !sessionOnIt;
   const open = (label = lane === "review" ? "Review on GitHub myself" : "Open on GitHub"): BoardChoice => ({ label, does: "Opens the PR in your browser.", url });
   let owner: BoardOwner = "done";
   let waitingOn: string | null = null;
@@ -241,6 +244,20 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
      * will ask, not as buttons.
      */
     const rerunCard = (it: AgentItem) => {
+      const lw = it.localWork && !it.localWork.kept && it.localWork.ahead !== 0 ? it.localWork : null;
+      if (lw) {
+        // Work the app couldn't read sits in the worktree: never "nothing to push", never a Run again that drops it unsaid.
+        const many = lw.ahead === null ? "commits" : plural(lw.ahead, "commit");
+        now = `Your session left ${many} in ${lw.worktree} that the app couldn't read (${lw.reason}). They are not on the PR, and its replies may cite them.`;
+        ask = "Push them from the session, then come back — the card reads them again.";
+        choices = [
+          ...(it.sessionId ? [{ label: "Open in Claude", primary: true, does: "Opens the session in that worktree; push from there. What it ends with comes back to this card.", act: { type: "continue", runId } } as BoardChoice] : []),
+          { label: "Run again", does: `Starts over from the PR's head without the ${many} — the worktree stays with them.`, act: { type: "retry", runId } },
+          { label: "Discard", does: "Closes the card; the worktree stays with the commits, and a ref keeps them.", act: { type: "skip", runId } },
+        ];
+        next = "Once they are on the PR, the replies can go out.";
+        return;
+      }
       const n = it.drive?.commits.length ?? 0;
       now = `The app restarted after this run, so it can't push ${n > 0 ? `its ${plural(n, "commit")}` : "anything"} or go on with your answer any more.`;
       ask = "Run it again — the new run redoes the work and asks you again if it still needs to.";
@@ -253,6 +270,10 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
     };
     switch (kind) {
       case "send": {
+        if (item?.scenario === "drive" && item.needsRerun && item.localWork) {
+          rerunCard(item);
+          break;
+        }
         if (item?.scenario === "drive") {
           // Your own PR, nothing to push: only its answers to the reviewers wait to go out.
           const replies = plan?.replies.length ?? 0;
@@ -265,7 +286,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
               does: `Posts ${replies === 1 ? "the reply" : "the replies"} in the reviewers' threads under your name, signed by the agent. Nothing is pushed.`,
               act: { type: "publish", runId },
             },
-            ...(item.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them.", act: { type: "continue", runId } } as BoardChoice] : []),
+            ...(item.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them; what it ends with comes back to this card.", act: { type: "continue", runId } } as BoardChoice] : []),
             { label: "Discard", does: "Drops the replies; the agent leaves this commit to you.", act: { type: "skip", runId } },
           ];
           next = "The reviewers read your answers; when they comment again, the agent picks it up.";
@@ -369,7 +390,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         ask = "Look at the commits, then push them.";
         choices = [
           { label: stage.action?.label ?? "Push", primary: true, does: `Pushes these commits to your branch — a fast-forward, never forced${replies > 0 ? ", then posts the answers" : ""}. CI runs again.`, act: { type: "push", runId } },
-          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them.", act: { type: "continue", runId } } as BoardChoice] : []),
+          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them; what it ends with comes back to this card.", act: { type: "continue", runId } } as BoardChoice] : []),
           { label: "Discard", does: "Drops the commits; the agent leaves this commit to you.", act: { type: "skip", runId } },
         ];
         next = "CI runs on them. Green and approved, Merge comes to Your turn.";
@@ -391,7 +412,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
           ...(replies > 0
             ? [{ label: `Send ${plural(replies, "reply", "replies")} as ${replies === 1 ? "it is" : "they are"}`, does: "Posts them in the reviewers' threads without answering.", act: { type: "publish", runId } } as BoardChoice]
             : []),
-          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Answers it in the session instead.", act: { type: "continue", runId } } as BoardChoice] : []),
+          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Answers it in the session instead; once a turn there ends with a new result, this card shows it — and closes when nothing is left to send or push.", act: { type: "continue", runId } } as BoardChoice] : []),
           { label: "Discard", does: "Drops it; the agent leaves this commit to you.", act: { type: "skip", runId } },
         ];
         next = "The same session goes on with your answer and brings the result back here.";
@@ -417,7 +438,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         const who = again ? (pr?.myReReviewDue ? "The author answered your review" : "Your review was asked for again") : pr?.requestedOfMe ? "Your review is requested" : "Your team's review is requested";
         const why = stage.why ? ` — the agent didn't ${again ? "re-review" : "review"} it: ${lower(stage.why)}` : "";
         now = `${who}${why}.`;
-        ask = canStart ? `Let the agent ${again ? "re-review" : "review"} it — or do it yourself.` : "Review it on GitHub.";
+        ask = canStart ? `Let the agent ${again ? "re-review" : "review"} it — or do it yourself.` : sessionOnIt ? "Carry on in your Claude session — the agent stays off this PR while it is open." : "Review it on GitHub.";
         choices = canStart
           ? [{ label: again ? "Let the agent re-review" : "Let the agent review", primary: true, does: "The agent starts now; its draft comes back here. Nothing is posted until you send it.", act: { type: "enqueue", prId } }, open()]
           : [{ ...open(), primary: true }];
@@ -427,7 +448,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
       case "fixYourself": {
         const why = stage.why ? ` The agent: ${lower(stage.why)}.` : "";
         now = `${now}.${why}`;
-        ask = canStart ? "Let the agent fix it — or fix it yourself." : "Fix it on GitHub or in your clone.";
+        ask = canStart ? "Let the agent fix it — or fix it yourself." : sessionOnIt ? "Carry on in your Claude session — the agent stays off this PR while it is open." : "Fix it on GitHub or in your clone.";
         choices = canStart
           ? [{ label: "Let the agent fix it", primary: true, does: "The agent fixes it in a separate checkout; you see the commits before anything is pushed.", act: { type: "enqueue", prId } }, open()]
           : [{ ...open(), primary: true }];

@@ -229,3 +229,45 @@ export async function gitFingerprint(git: GitRunner, place: GitPlace, commonDir:
   }
   return h.digest("hex");
 }
+
+/**
+ * Settings in the repository's own config that would send a push somewhere
+ * else or start a program for it — `url.<x>.insteadOf`/`pushInsteadOf`
+ * rewrite even a URL given outright, `core.sshCommand`/`core.gitProxy` run
+ * one. Read from `git config --list --show-origin --name-only -z`; only keys
+ * from files under `repoDirs` count (your global config is yours). A push
+ * place rebuilt after a restart (`recovered`) has no fingerprint from before
+ * the session to vouch for these, so it is refused while any is there.
+ */
+export function redirectingKeys(out: string, cwd: string, repoDirs: readonly string[], userFiles: readonly string[] = []): string[] {
+  const parts = out.split("\0");
+  const found: string[] = [];
+  const inRepo = (file: string) =>
+    repoDirs.some((d) => {
+      const rel = path.relative(path.resolve(d), file);
+      return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+    });
+  const users = new Set(userFiles.map((f) => path.resolve(f)));
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const origin = parts[i];
+    const key = parts[i + 1].toLowerCase();
+    // An include sends git to a file nobody vouches for: refused whatever it holds.
+    if (/^include(if\..+)?\.path$/.test(key)) found.push(key);
+    if (!origin.startsWith("file:")) continue;
+    const file = path.resolve(cwd, origin.slice(5));
+    if (!inRepo(file)) {
+      // Your own config files are yours; a file from anywhere else came in through an include.
+      if (!users.has(file)) found.push(`${key} (from ${file})`);
+      continue;
+    }
+    if (
+      /^url\..+\.(push)?insteadof$/.test(key) ||
+      /^remote\..+\.(pushurl|receivepack|uploadpack|proxy)$/.test(key) ||
+      /^(credential|http|protocol)\./.test(key) ||
+      ["core.sshcommand", "core.gitproxy", "core.askpass"].includes(key)
+    ) {
+      found.push(key);
+    }
+  }
+  return [...new Set(found)];
+}

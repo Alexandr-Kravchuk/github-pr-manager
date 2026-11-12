@@ -448,8 +448,12 @@
  * Glassmorphism (Settings › Appearance): `data-ui="glassmorphism"`. A
  * colourful backdrop of soft blobs fixed behind the page, and cards, panels
  * and the header as frosted glass over it: translucent fill, a backdrop blur,
- * a bright hairline edge and a soft shadow. Static on purpose — a blur is free
- * at rest, but anything animating under it costs (see AGENTS.md).
+ * a bright hairline edge and a soft shadow. The blobs drift, very slowly, but
+ * never through a CSS animation: `renderer/src/glass-drift.ts` moves them by a
+ * few pixels once a second through custom properties set on `.glass-backdrop`
+ * alone (on :root they would restyle the whole tree), and only while the
+ * window is visible — one repaint a second instead of a frame per vsync, since
+ * every blur above has to be redrawn whenever the blobs move (see AGENTS.md).
  */
 :root[data-ui="glassmorphism"] {
   --canvas: #e9ecfa;
@@ -458,10 +462,10 @@
   --line: rgb(255 255 255 / 0.6);
   --line-strong: rgb(255 255 255 / 0.75);
   --tile-shadow: 0 8px 32px rgb(31 38 135 / 0.14);
-  --glass-backdrop: radial-gradient(40rem 30rem at 8% 12%, rgb(167 139 250 / 0.55), transparent 70%),
-    radial-gradient(36rem 28rem at 92% 18%, rgb(56 189 248 / 0.5), transparent 70%),
-    radial-gradient(44rem 34rem at 70% 95%, rgb(244 114 182 / 0.45), transparent 70%),
-    radial-gradient(30rem 24rem at 20% 85%, rgb(52 211 153 / 0.35), transparent 70%);
+  --glass-c1: rgb(167 139 250 / 0.55);
+  --glass-c2: rgb(56 189 248 / 0.5);
+  --glass-c3: rgb(244 114 182 / 0.45);
+  --glass-c4: rgb(52 211 153 / 0.35);
 }
 @media (prefers-color-scheme: dark) {
   :root[data-ui="glassmorphism"] {
@@ -471,15 +475,26 @@
     --line: rgb(255 255 255 / 0.12);
     --line-strong: rgb(255 255 255 / 0.2);
     --tile-shadow: 0 8px 32px rgb(0 0 0 / 0.45);
-    --glass-backdrop: radial-gradient(40rem 30rem at 8% 12%, rgb(124 58 237 / 0.45), transparent 70%),
-      radial-gradient(36rem 28rem at 92% 18%, rgb(14 165 233 / 0.35), transparent 70%),
-      radial-gradient(44rem 34rem at 70% 95%, rgb(219 39 119 / 0.32), transparent 70%),
-      radial-gradient(30rem 24rem at 20% 85%, rgb(16 185 129 / 0.25), transparent 70%);
+    --glass-c1: rgb(124 58 237 / 0.45);
+    --glass-c2: rgb(14 165 233 / 0.35);
+    --glass-c3: rgb(219 39 119 / 0.32);
+    --glass-c4: rgb(16 185 129 / 0.25);
   }
 }
-:root[data-ui="glassmorphism"] body {
-  background: var(--glass-backdrop), var(--canvas);
-  background-attachment: fixed;
+.glass-backdrop {
+  display: none;
+}
+:root[data-ui="glassmorphism"] .glass-backdrop {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(40rem 30rem at var(--b1x, 8%) var(--b1y, 12%), var(--glass-c1), transparent 70%),
+    radial-gradient(36rem 28rem at var(--b2x, 92%) var(--b2y, 18%), var(--glass-c2), transparent 70%),
+    radial-gradient(44rem 34rem at var(--b3x, 70%) var(--b3y, 95%), var(--glass-c3), transparent 70%),
+    radial-gradient(30rem 24rem at var(--b4x, 20%) var(--b4y, 85%), var(--glass-c4), transparent 70%);
 }
 [data-ui="glassmorphism"] :is(.shadow-tile, .rounded-xl.border.border-line, section.rounded-lg.border.border-line, .table-scroll) {
   -webkit-backdrop-filter: blur(18px) saturate(160%);

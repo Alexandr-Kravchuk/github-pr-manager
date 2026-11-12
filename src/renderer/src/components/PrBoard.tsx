@@ -345,7 +345,7 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
         )}
         {commits && item?.drive && (
           <div>
-            <div className="text-xs font-medium text-fg">{item.needsRerun ? "What it committed — never pushed; the new run makes it again" : "What gets pushed"}</div>
+            <div className="text-xs font-medium text-fg">{item.localWork && !item.localWork.kept ? "What the app read before — the session's later commits are only in the worktree" : item.needsRerun ? "What it committed — never pushed; the new run makes it again" : "What gets pushed"}</div>
             <DriveView drive={item.drive} />
             {item.plan && item.plan.replies.length > 0 && <PlanView plan={item.plan} />}
           </div>
@@ -805,7 +805,9 @@ function YourCall({ item, asks, canAnswer, run }: { item: AgentItem; asks: RunAs
       <div className="mt-1.5 text-[11px] text-fg-faint">
         {canAnswer
           ? "The same session goes on with your answer and comes back here."
-          : item.needsRerun
+          : item.localWork && !item.localWork.kept
+            ? `Answer it in the session (Open in Claude): its work is in ${item.localWork.worktree}.`
+            : item.needsRerun
             ? "This can't be answered any more — the app restarted since. Run it again: the new run asks this again if it still needs to."
             : "Answer it in the session: the dry run changes nothing by itself."}
       </div>

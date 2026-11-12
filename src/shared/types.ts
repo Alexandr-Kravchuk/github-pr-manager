@@ -292,6 +292,9 @@ export type AgentPromptKey = "triage" | "rereview" | "afterMerge" | "selfReview"
 /** Off never runs; shadow does the work and waits for you before posting; on posts and tells you after. */
 export type AgentMode = "off" | "shadow" | "on";
 
+/** The language the agent speaks to you in (`AGENT_LANGUAGES` in agent-defaults.ts). */
+export type AgentLanguage = "en" | "uk" | "pl";
+
 /** The kinds of session the agent starts — each has its own tool set. */
 export type AgentRunKind = "review" | "brief" | "rereview" | "drive" | "afterMerge";
 
@@ -310,6 +313,11 @@ export interface AgentSettings {
   model: string;
   /** Effort for agent runs; "" = Claude Code's default. */
   effort: "" | "low" | "medium" | "high";
+  /**
+   * What the agent writes to you in: its task list, questions, briefs and
+   * results. What it posts on GitHub, commits or writes to Jira is not affected.
+   */
+  language: AgentLanguage;
   /** Where each run's git worktree goes; "" = `<checkout>/.claude/worktrees`. */
   worktreeDir: string;
   /** Remove a run's worktree once its PR is merged or closed. */
@@ -376,6 +384,12 @@ export interface AgentSettings {
     toolsVersion: number;
     /** Allow pushing to the head branch of your own PR (drive). */
     pushOwnBranch: boolean;
+    /**
+     * A drive on your own PR runs with your whole Claude setup — CLAUDE.md,
+     * hooks, plugins, MCP servers, any folder and command — instead of
+     * isolated; writes to GitHub stay with the app.
+     */
+    fullContextDrive: boolean;
   };
   /**
    * Mermaid diagrams of the change (`shared/agent-diagrams.ts`), drawn by a
@@ -999,6 +1013,20 @@ export interface AgentItem {
    * only be run again (or continued in your terminal).
    */
   needsRerun?: boolean;
+  /**
+   * A drive's worktree holds work that is not on the PR and the app couldn't
+   * read it as a result (`reason`): commits a session made after a restart,
+   * or a git that changed under it. `ahead` is what `git rev-list` counted on
+   * top of the PR's head (null: not even that). Its card names the folder,
+   * never says "nothing to push", and holds its replies back — they may cite
+   * those commits. `kept`: the card was closed, and the worktree (and run
+   * folder) stayed for the work in it; `ref` keeps the commits reachable too.
+   */
+  localWork?: { worktree: string; ahead: number | null; dirty: boolean; reason: string; kept?: boolean; ref?: string };
+  /** The plan (by its fingerprint) whose replies cite commits not on the PR, warned about once: Send again posts them. */
+  shaWarned?: string;
+  /** Run again was refused once for commits in the worktree that are not on the PR: pressed again, it runs. */
+  rerunWarned?: boolean;
   /** Your choice on each thread the author pushed back on (by its first comment's id): keep your comment, or drop it. */
   disputes?: Record<string, "keep" | "drop">;
   error?: string;
@@ -1023,6 +1051,14 @@ export interface AgentItem {
   reapproval?: { logins: string[]; oldHead: string };
   /** The next run continues `sessionId` instead of starting a session: after a restart, or with your answer. */
   resumeSession?: boolean;
+  /**
+   * "Open in Claude" continued its session in your terminal: the app follows
+   * that session's transcript (in `cwd`'s Claude Code project folder) and puts
+   * the result of each turn it ends with a new prd-result block on this card —
+   * since: when you continued it; seen: the last final message taken (by its
+   * line's uuid). Dropped once the card leaves Your move.
+   */
+  follow?: { since: string; cwd: string; seen?: string };
   /**
    * Your place for it in the queue (dragged, or "Run next"): lower runs first.
    * Unset, it queues by the time it was queued.
@@ -1060,7 +1096,19 @@ export interface AgentItem {
    * a fingerprint of the repository's git config and hooks and your global
    * git config. A push goes out only while the fingerprint still matches.
    */
-  pushTo?: { url: string; commonDir: string; worktreeGitDir: string | null; fingerprint: string; sshSnapshot?: string };
+  pushTo?: {
+    url: string;
+    commonDir: string;
+    worktreeGitDir: string | null;
+    fingerprint: string;
+    sshSnapshot?: string;
+    /**
+     * Rebuilt after a restart from the clone and the worktree as they are now
+     * (`recoverPushTo`), not taken before the session: the fingerprint vouches
+     * only from then on. Such a drive is never pushed without your click.
+     */
+    recovered?: boolean;
+  };
 }
 
 export interface AgentDriveResult {
