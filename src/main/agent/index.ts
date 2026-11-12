@@ -762,6 +762,20 @@ export function createAgent(deps: AgentDeps): Agent {
   /** The PR as the dashboard last saw it (merged ones drop out of the snapshot; their after-merge run still needs a name). */
   const snapshotPr = (prId: string) => deps.getSnapshot()?.pullRequests.find((p) => p.id === prId) ?? null;
 
+  /**
+   * A Claude session of yours on the PR — one you started, or a run of the
+   * agent's you continued in your terminal — never a run of the agent's that is
+   * working now. While it is open the agent starts nothing on that PR, even
+   * when you ask: a second session answers the same threads and commits on the
+   * same head beside it (PR 5035: a drive asked for while its earlier run went
+   * on in the terminal re-asked what was answered there).
+   */
+  function yourSessionOn(pr: Pick<PullRequest, "url" | "repo" | "headRefName">): ClaudeSessionInfo | null {
+    const own = new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!));
+    return sessionsForPr(pr, deps.getSessions().filter((x) => !own.has(x.id)))[0] ?? null;
+  }
+  const sessionOnItError = (x: ClaudeSessionInfo): string => `Your Claude session "${x.name}" is on this PR — carry on there, or end it first.`;
+
   function newItem(job: Pick<AgentJob, "key" | "prId" | "prNumber" | "repo" | "url" | "scenario" | "mode" | "reasons">, pr: PullRequest, headline: string): AgentItemRecord {
     const item: AgentItemRecord = {
       runId: randomUUID(),
@@ -2308,6 +2322,13 @@ export function createAgent(deps: AgentDeps): Agent {
       }
       // One run per PR at a time.
       if (store.data.items.some((i) => i.prId === item.prId && i.state === "working")) continue;
+      // A session of yours opened on it while this waited in the queue: it waits for that session to end.
+      const live = pr ? yourSessionOn(pr) : null;
+      if (live) {
+        item.headline = `Queued — your Claude session "${live.name}" is on it`;
+        holds.add(`#${pr!.number}: your Claude session is on it`);
+        continue;
+      }
       void run(item, pr, all).catch((e) => console.warn(`[agent] run failed: ${(e as Error).message}`));
     }
     noteHold(holds.size > 0 ? [...holds].sort().join("; ") : null);
@@ -2325,6 +2346,8 @@ export function createAgent(deps: AgentDeps): Agent {
     if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
       return { ok: false, error: "The agent is already on this PR." };
     }
+    const live = yourSessionOn(pr);
+    if (live) return { ok: false, error: sessionOnItError(live) };
     // Every run you can ask for works on the PR's code: without a clone it would only fail.
     const claude = loadAll()?.claude;
     if (!claude || !deps.findCheckout(pr, claude)) return { ok: false, error: `${noCheckoutWhy(pr, claude)}.` };
@@ -2453,10 +2476,14 @@ export function createAgent(deps: AgentDeps): Agent {
         if (!item.worktree || !fs.existsSync(item.worktree)) return { ok: false, error: "Its folder is gone — run it again." };
         // A drive pushes only what the app checked before its first session; after a restart that is gone.
         if (item.scenario === "drive" && !item.pushTo) return { ok: false, error: "Since the app restarted, a drive starts over — run it again, or answer in a session." };
-        if (!snapshotPr(item.prId)) return { ok: false, error: "That PR is not on the dashboard any more." };
+        const answered = snapshotPr(item.prId);
+        if (!answered) return { ok: false, error: "That PR is not on the dashboard any more." };
         if (store.data.items.some((i) => i.prId === item.prId && i !== item && (i.state === "queued" || i.state === "working"))) {
           return { ok: false, error: "The agent is already on this PR." };
         }
+        // Its own session continued in your terminal counts too: resuming it here would run it twice.
+        const live = yourSessionOn(answered);
+        if (live) return { ok: false, error: sessionOnItError(live) };
         item.state = "queued";
         item.resumeSession = true;
         item.answer = action.text;

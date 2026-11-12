@@ -8,7 +8,7 @@
 import { resultCard, type RunAsk, type RunFinding } from "./agent-result";
 import type { PublishSummary } from "./agent-publish";
 import { currentStep } from "./agent-stream";
-import { queueOrder, runFor, stageColumns, stageLine, type BoardStage, type StageCard, type StageContext } from "./agent-view";
+import { isOwnSessionWhy, queueOrder, runFor, stageColumns, stageLine, type BoardStage, type StageCard, type StageContext } from "./agent-view";
 import type { AgentAction, AgentItem, AgentState, PullRequest } from "./types";
 
 /** Whose move it is: yours, the agent's, someone else's (the author, reviewers), or nobody's. */
@@ -157,8 +157,11 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
   const runId = item?.runId ?? "";
   const prId = card.prId;
   const kind = stage.action?.kind ?? null;
-  // Starting a run only works while the agent is on, and never on a PR an SDLC run has.
-  const canStart = state.enabled && !stage.sdlc;
+  // Starting a run only works while the agent is on, never on a PR an SDLC run
+  // has, and never beside a Claude session of yours on it: the main process
+  // refuses that too, since two sessions on one PR answer the same threads twice.
+  const sessionOnIt = isOwnSessionWhy(stage.why);
+  const canStart = state.enabled && !stage.sdlc && !sessionOnIt;
   const open = (label = lane === "review" ? "Review on GitHub myself" : "Open on GitHub"): BoardChoice => ({ label, does: "Opens the PR in your browser.", url });
   let owner: BoardOwner = "done";
   let waitingOn: string | null = null;
@@ -406,7 +409,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         const who = again ? (pr?.myReReviewDue ? "The author answered your review" : "Your review was asked for again") : pr?.requestedOfMe ? "Your review is requested" : "Your team's review is requested";
         const why = stage.why ? ` — the agent didn't ${again ? "re-review" : "review"} it: ${lower(stage.why)}` : "";
         now = `${who}${why}.`;
-        ask = canStart ? `Let the agent ${again ? "re-review" : "review"} it — or do it yourself.` : "Review it on GitHub.";
+        ask = canStart ? `Let the agent ${again ? "re-review" : "review"} it — or do it yourself.` : sessionOnIt ? "Carry on in your Claude session — the agent stays off this PR while it is open." : "Review it on GitHub.";
         choices = canStart
           ? [{ label: again ? "Let the agent re-review" : "Let the agent review", primary: true, does: "The agent starts now; its draft comes back here. Nothing is posted until you send it.", act: { type: "enqueue", prId } }, open()]
           : [{ ...open(), primary: true }];
@@ -416,7 +419,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
       case "fixYourself": {
         const why = stage.why ? ` The agent: ${lower(stage.why)}.` : "";
         now = `${now}.${why}`;
-        ask = canStart ? "Let the agent fix it — or fix it yourself." : "Fix it on GitHub or in your clone.";
+        ask = canStart ? "Let the agent fix it — or fix it yourself." : sessionOnIt ? "Carry on in your Claude session — the agent stays off this PR while it is open." : "Fix it on GitHub or in your clone.";
         choices = canStart
           ? [{ label: "Let the agent fix it", primary: true, does: "The agent fixes it in a separate checkout; you see the commits before anything is pushed.", act: { type: "enqueue", prId } }, open()]
           : [{ ...open(), primary: true }];

@@ -3,6 +3,19 @@ import type { PlanStep } from "./agent-stream";
 import { isReviewDue } from "./pr-filter";
 import type { AgentItem, AgentRunState, AgentSettings, AgentState, PullRequest } from "./types";
 
+/**
+ * Why the agent leaves a PR alone while a Claude session of yours holds it — the
+ * plan's reason, and the one the Board reads to offer no "Let the agent …" on
+ * that PR: a second session on one PR edits the same branch and answers the
+ * same threads twice.
+ */
+export const OWN_SESSION_WHY = "Your Claude session is on it";
+
+/** True when `why` says a Claude session of yours holds the PR. */
+export function isOwnSessionWhy(why: string | null | undefined): boolean {
+  return typeof why === "string" && why.toLowerCase().includes(OWN_SESSION_WHY.toLowerCase());
+}
+
 // How the agent's state reads on the dashboard: where each PR stands on the
 // Board and what its card, the chip, the tray and a notification say about
 // it. Node-free (the renderer value-imports it) and pure, so the rules are

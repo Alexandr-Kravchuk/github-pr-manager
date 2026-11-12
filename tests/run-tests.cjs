@@ -10786,6 +10786,36 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent act: nothing starts on a PR a Claude session of yours is on — asked, or waiting in the queue", async () => {
+      const csm = require(path.join(__dirname, "../dist/main/shared/claude-sessions.js"));
+      const sessions = [];
+      const f = agentFixture({ pr: reviewPr({ requestedOfMe: false }), script: keepWorking, sessions });
+      try {
+        const pr = f.snapshot.pullRequests[0];
+        const yours = { id: "yours", name: "PR 7 by hand", status: "idle", where: "terminal", prKeys: [csm.prUrlKey(pr.url)], repoKeys: [], branch: null };
+        sessions.push(yours);
+        const refused = await f.agent.act({ type: "enqueue", prId: pr.id });
+        assert.deepStrictEqual(refused, { ok: false, error: 'Your Claude session "PR 7 by hand" is on this PR — carry on there, or end it first.' });
+        assert.strictEqual(only(f).length, 0, "nothing queued beside it");
+        sessions.length = 0;
+        // Queued while the agent is paused, then the session opens before it starts: it waits.
+        await f.agent.act({ type: "pauseAgent" });
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: pr.id }), { ok: true });
+        sessions.push(yours);
+        await f.agent.act({ type: "resumeAgent" });
+        await until(() => /your Claude session "PR 7 by hand" is on it/.test(only(f)[0]?.headline ?? ""));
+        assert.strictEqual(only(f)[0].state, "queued");
+        assert.strictEqual(f.children.length, 0, "no session started");
+        // The session ends: the next tick starts the run.
+        sessions.length = 0;
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().running.length === 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+
     const ipcAgent = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
     test("ipc: an agent action is a known type on a run id; a hint is trimmed and bounded", () => {
       const RID = "00000000-0000-4000-8000-000000000001";
@@ -10958,6 +10988,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // The same run before any restart: its own question and push, as ever.
       const live = xOne(mine, [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2) })]);
       assert.strictEqual(live.choices[0].label, "Push 2 fixes");
+    });
+
+    test("agent board words: no \"Let the agent …\" beside a Claude session of yours on the PR", () => {
+      const view2 = require(path.join(__dirname, "../dist/main/shared/agent-view.js"));
+      const idle = { P: view2.OWN_SESSION_WHY, R: "yours — " + view2.OWN_SESSION_WHY.toLowerCase() };
+      const board = (pr) => ex.explainBoard([pr], [pr], xState([]), { today: sToday, idle }).entries[0];
+      const review = board(xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true }));
+      assert.ok(!review.choices.some((c) => c.act), "nothing that starts the agent");
+      assert.strictEqual(review.ask, "Carry on in your Claude session — the agent stays off this PR while it is open.");
+      const red = board(xPr({ id: "R", ciState: "failure", failingChecks: [{ name: "build" }] }));
+      assert.ok(!red.choices.some((c) => c.act?.type === "enqueue"), "your PR with red CI: no Let the agent fix it");
     });
 
     test("agent board words: a review nobody started is the agent's to start — unless the agent is off", () => {

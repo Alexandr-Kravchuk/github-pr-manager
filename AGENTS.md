@@ -170,7 +170,11 @@ Three layers:
   switches to it — Desktop through `claude://claude.ai/epitaxy/<hostSessionId>`,
   a CLI session through the iTerm2/Terminal tab on its tty — and launching a
   second one moves to the menu, since two sessions on one PR edit the same
-  branch),
+  branch; for the same reason the PR agent starts nothing on such a PR — not
+  its plan, not a run you ask for or answer, not one that waited in its queue
+  while the session opened (`yourSessionOn` in `main/agent/index.ts`; its own
+  run continued in your terminal counts), and the Board offers no "Let the
+  agent …" there (`OWN_SESSION_WHY` in `shared/agent-view.ts`)),
   `settings-search.ts` (the Settings screen's tabs, which section sits on which,
   and the keywords its search box matches — every word of the query must hit a
   section's title or keywords; a setting whose label is missing there cannot be
