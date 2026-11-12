@@ -255,6 +255,16 @@ export interface HeldWrite {
   url: string | null;
 }
 
+/**
+ * "a reply in anna's thread" — one held write as a person reads it, said the
+ * same on the card and in a refused publish. No author on a reply: it answers
+ * a comment in the middle of a thread, whoever opened it.
+ */
+export function heldLabel(h: Pick<HeldWrite, "kind" | "author">): string {
+  if (h.kind === "reply") return h.author ? `a reply in ${h.author}'s thread` : "a reply to a comment that doesn't open its thread";
+  return `resolving ${h.author ? `${h.author}'s thread` : "a thread you didn't open"}`;
+}
+
 /** Comment ids the session handed back to you: replies to them are held back. */
 function escalatedTargets(steps: readonly PublishStep[]): Set<number> {
   return new Set(steps.flatMap((s) => (s.kind === "escalate" ? [s.replyTo] : [])));

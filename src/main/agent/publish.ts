@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { isUsableWrapperPath, planRequests, postedSteps, readPlanLines, type HeldWrite, type PublishContext, type PublishRequest, type PublishStep, type PublishSub } from "../../shared/agent-publish";
+import { heldLabel, isUsableWrapperPath, planRequests,postedSteps, readPlanLines, type HeldWrite, type PublishContext, type PublishRequest, type PublishStep, type PublishSub } from "../../shared/agent-publish";
 import { launcherEnv } from "../../shared/claude-launch";
 import { PLAN_FILE, type CaptureRun } from "./capture";
 
@@ -255,9 +255,7 @@ async function checkStep(s: PublishStep, prUrl: string, repo: string, number: nu
 
 /** "a reply in a-kravchuk's thread (https://…)" — one held write, as a person reads it. */
 export function describeHeld(h: HeldWrite): string {
-  // No author on a reply: it answers a comment in the middle of a thread, whoever opened it.
-  const what =
-    h.kind === "reply" ? (h.author ? `a reply in ${h.author}'s thread` : "a reply to a comment that doesn't open its thread") : `resolving ${h.author ? `${h.author}'s thread` : "a thread you didn't open"}`;
+  const what = heldLabel(h);
   return h.url ? `${what} (${h.url})` : what;
 }
 

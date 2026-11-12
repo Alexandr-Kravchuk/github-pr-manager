@@ -3,7 +3,8 @@ import { useContext, useEffect, useState, type FormEvent, type ReactNode } from 
 // Node-free (see AGENTS.md): the Board in plain words, the queue, the summary line.
 import { explainBoard, type BoardChoice, type BoardEntry, type BoardOwner } from "../../../shared/agent-explain";
 import { agentSummary, queueOrder, todayKey } from "../../../shared/agent-view";
-import type { HeldWrite, PublishSummary } from "../../../shared/agent-publish";
+// Node-free too: a held write is worded once, for the card and the publish refusal alike.
+import { heldLabel, type HeldWrite, type PublishSummary } from "../../../shared/agent-publish";
 import type { FindingSeverity, RunAsk, RunFinding } from "../../../shared/agent-result";
 import type { AgentAction, AgentItem, AgentState, MergeMethod, PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
@@ -639,7 +640,7 @@ function HeldBack({ held }: { held: HeldWrite[] }) {
       {held.map((h, i) => (
         <div key={h.replyTo ?? h.threadId ?? i} className="mt-1.5">
           <div className="text-fg-subtle">
-            {h.kind === "reply" ? (h.author ? `Reply in ${h.author}'s thread` : "Reply to a comment that doesn't open its thread") : `Resolve ${h.author ? `${h.author}'s thread` : "a thread you didn't open"}`}
+            {heldLabel(h).replace(/^./, (c) => c.toUpperCase())}
             {h.url && (
               <button type="button" onClick={() => openUrl(h.url!)} className={cn(LINK, "ml-1.5")}>
                 open it ↗

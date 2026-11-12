@@ -12416,6 +12416,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const all = await publishMod.checkPlanTargets(steps, url, "a/b", 7, { viewer: "me", mine: true }, gh);
       assert.match(all, /a reply in colleague's thread \(https:\/\/github\.com\/a\/b\/pull\/7#discussion_r3\); a reply in other's thread/);
       assert.match(all, /Edit in Claude to drop them/);
+      // One wording for the card (Node-free, shared) and the refusal.
+      assert.strictEqual(publishMod.describeHeld(held[0]), `${pub.heldLabel(held[0])} (${url}#discussion_r3)`);
+      assert.strictEqual(pub.heldLabel({ kind: "resolve", author: null }), "resolving a thread you didn't open");
       assert.deepStrictEqual(await publishMod.heldWrites(steps, url, "a/b", 7, "me", async () => ({ code: 1, stdout: "", stderr: "boom" })), [], "unreadable: left to the publish check");
       assert.strictEqual(pub.describePlan({ ...pub.summarizePlan(steps.slice(0, 1)), held }), "approve, 2 held back for you");
       // A resolve that resolving-off would never send is not held back either.
