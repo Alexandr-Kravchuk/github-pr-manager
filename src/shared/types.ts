@@ -292,6 +292,9 @@ export type AgentPromptKey = "triage" | "rereview" | "afterMerge" | "selfReview"
 /** Off never runs; shadow does the work and waits for you before posting; on posts and tells you after. */
 export type AgentMode = "off" | "shadow" | "on";
 
+/** The language the agent speaks to you in (`AGENT_LANGUAGES` in agent-defaults.ts). */
+export type AgentLanguage = "en" | "uk" | "pl";
+
 /** The kinds of session the agent starts — each has its own tool set. */
 export type AgentRunKind = "review" | "brief" | "rereview" | "drive" | "afterMerge";
 
@@ -310,6 +313,11 @@ export interface AgentSettings {
   model: string;
   /** Effort for agent runs; "" = Claude Code's default. */
   effort: "" | "low" | "medium" | "high";
+  /**
+   * What the agent writes to you in: its task list, questions, briefs and
+   * results. What it posts on GitHub, commits or writes to Jira is not affected.
+   */
+  language: AgentLanguage;
   /** Where each run's git worktree goes; "" = `<checkout>/.claude/worktrees`. */
   worktreeDir: string;
   /** Remove a run's worktree once its PR is merged or closed. */

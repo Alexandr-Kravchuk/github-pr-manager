@@ -1,10 +1,10 @@
-import { useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { useId, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 
 // Node-free, like notify.ts — value-imported for the defaults and the number bounds,
 // the same ones `validateAgent` clamps with in the main process.
-import { AGENT_BOUNDS, DEFAULT_AGENT_SIGNATURE, DEFAULT_AGENT_TOOLS, type AgentBoundKey } from "../../../shared/agent-defaults";
+import { AGENT_BOUNDS, AGENT_LANGUAGES, DEFAULT_AGENT_SIGNATURE, DEFAULT_AGENT_TOOLS, type AgentBoundKey } from "../../../shared/agent-defaults";
 import type { SettingsSectionId } from "../../../shared/settings-search";
-import type { AgentMode, AgentRunKind, AgentSettings, MergeMethod } from "../../../shared/types";
+import type { AgentLanguage, AgentMode, AgentRunKind, AgentSettings, MergeMethod } from "../../../shared/types";
 import { cn } from "../format";
 
 /** The Agent tab's sections — their ids, titles and search words live in settings-search.ts. */
@@ -96,6 +96,33 @@ function GeneralSection({ agent, setAgent, inputCls }: SectionProps) {
               <option value="high">High</option>
             </select>
           </Field>
+          <div className="sm:col-span-2">
+            <Field
+              label="Language"
+              hint="What the agent writes to you in: its plan, questions, briefs and results. Comments it posts on GitHub, commits and Jira are not affected."
+            >
+              <div role="radiogroup" aria-label="Agent language" className="mt-1 flex flex-wrap gap-1.5">
+                {AGENT_LANGUAGES.map((l) => (
+                  <button
+                    key={l.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={agent.language === l.id}
+                    onClick={() => setAgent((a) => ({ ...a, language: l.id }))}
+                    className={cn(
+                      "flex items-center gap-2 rounded-md border px-2.5 py-1 text-sm",
+                      agent.language === l.id
+                        ? "border-sky-600 bg-sky-500/15 font-medium text-sky-800 dark:text-sky-200"
+                        : "border-line-strong text-fg-muted hover:bg-elevated",
+                    )}
+                  >
+                    <Flag id={l.id} />
+                    {l.label}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          </div>
           <Field label="Worktree folder" hint="Each run works in its own git worktree, so your checkout is never touched.">
             <input
               value={agent.worktreeDir}
@@ -558,6 +585,48 @@ function Check({ checked, onChange, title, hint }: { checked: boolean; onChange:
         {hint && <span className="block text-xs text-fg-faint">{hint}</span>}
       </span>
     </label>
+  );
+}
+
+/**
+ * A country's flag as inline SVG: flag emoji show as two letters on Windows.
+ * English takes the Union Jack; its clip paths get ids of their own per instance.
+ */
+function Flag({ id }: { id: AgentLanguage }) {
+  const uid = useId().replace(/:/g, "");
+  const box = "h-3 w-[1.125rem] shrink-0 overflow-hidden rounded-[2px] ring-1 ring-black/10";
+  if (id === "uk") {
+    return (
+      <svg viewBox="0 0 3 2" className={box} aria-hidden="true">
+        <rect width="3" height="1" fill="#0057B7" />
+        <rect y="1" width="3" height="1" fill="#FFD700" />
+      </svg>
+    );
+  }
+  if (id === "pl") {
+    return (
+      <svg viewBox="0 0 8 5" className={box} aria-hidden="true">
+        <rect width="8" height="2.5" fill="#FFFFFF" />
+        <rect y="2.5" width="8" height="2.5" fill="#DC143C" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 60 30" preserveAspectRatio="none" className={box} aria-hidden="true">
+      <clipPath id={`${uid}s`}>
+        <path d="M0,0 v30 h60 v-30 z" />
+      </clipPath>
+      <clipPath id={`${uid}t`}>
+        <path d="M30,15 h30 v15 z v15 h-30 z h-30 v-15 z v-15 h30 z" />
+      </clipPath>
+      <g clipPath={`url(#${uid}s)`}>
+        <path d="M0,0 v30 h60 v-30 z" fill="#012169" />
+        <path d="M0,0 L60,30 M60,0 L0,30" stroke="#fff" strokeWidth="6" />
+        <path d="M0,0 L60,30 M60,0 L0,30" clipPath={`url(#${uid}t)`} stroke="#C8102E" strokeWidth="4" />
+        <path d="M30,0 v30 M0,15 h60" stroke="#fff" strokeWidth="10" />
+        <path d="M30,0 v30 M0,15 h60" stroke="#C8102E" strokeWidth="6" />
+      </g>
+    </svg>
   );
 }
 

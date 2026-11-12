@@ -10133,6 +10133,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    test("agent language: the rule names the chosen language and keeps GitHub posts out of it", () => {
+      assert.match(agentCore.agentRules("review", "shadow"), /meant for the user in English/, "English by default");
+      for (const [id, name] of [["uk", "Ukrainian"], ["pl", "Polish"]]) {
+        const r = agentCore.agentRules("drive", "on", null, null, id);
+        assert.match(r, new RegExp(`meant for the user in ${name}`));
+        assert.match(r, /prd-result block/);
+        assert.match(r, /review comments, thread replies, commit messages/);
+      }
+      assert.strictEqual(cfg.validateAgent(undefined).language, "en");
+      assert.strictEqual(cfg.validateAgent({ language: "uk" }).language, "uk");
+      assert.strictEqual(cfg.validateAgent({ language: "pl" }).language, "pl");
+      assert.strictEqual(cfg.validateAgent({ language: "de" }).language, "en", "an unknown language falls back");
+    });
+
     test("agent: a host whose fetch failed or whose budget is nearly spent is held", () => {
       const snap = { pullRequests: [], errors: [{ hostLabel: "A", message: "x" }], rateLimits: [{ hostLabel: "B", remaining: 10, limit: 5000, cost: 1, resetAt: "" }, { hostLabel: "C", remaining: 4000, limit: 5000, cost: 1, resetAt: "" }] };
       assert.strictEqual(agentCore.hostHeld(snap, "A"), "Host unreachable");
@@ -14171,7 +14185,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(agentResult.resultCard({ output: "Plain words." }).summary, "Plain words.", "a result from before the block still has a summary");
       assert.strictEqual(agentResult.resultCard({}), null);
       for (const [scenario, mode] of [["review", "shadow"], ["brief", "on"], ["drive", "shadow"], ["afterMerge", "on"], ["rereview", "on"]]) {
-        assert.ok(agentCore.agentRules(scenario, mode).endsWith(agentResult.resultRuleFor(scenario)), `${scenario} sessions are told how to end`);
+        assert.ok(agentCore.agentRules(scenario, mode).includes(agentResult.resultRuleFor(scenario)), `${scenario} sessions are told how to end`);
       }
     });
 

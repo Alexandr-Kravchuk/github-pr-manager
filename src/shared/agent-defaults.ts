@@ -1,4 +1,4 @@
-import type { AgentPromptKey, AgentRunKind, AgentSettings } from "./types";
+import type { AgentLanguage, AgentPromptKey, AgentRunKind, AgentSettings } from "./types";
 
 // The PR agent's defaults and the bounds of its numbers. Node-free like
 // `notify.ts`, because the renderer value-imports it: the Agent tab of Settings
@@ -160,6 +160,7 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   enabled: false,
   model: "",
   effort: "",
+  language: "en",
   worktreeDir: "",
   removeWorktree: true,
   repos: [],
@@ -198,4 +199,30 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
 /** "HH:MM" on a 24-hour clock. */
 export function isClockTime(value: string): boolean {
   return /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+}
+
+/** The languages the agent can speak to you in, in the order Settings shows them. */
+export const AGENT_LANGUAGES: ReadonlyArray<{ id: AgentLanguage; label: string; name: string }> = [
+  { id: "en", label: "English", name: "English" },
+  { id: "uk", label: "Українська", name: "Ukrainian" },
+  { id: "pl", label: "Polski", name: "Polish" },
+];
+
+export function isAgentLanguage(value: unknown): value is AgentLanguage {
+  return AGENT_LANGUAGES.some((l) => l.id === value);
+}
+
+/**
+ * The session rule for the language: everything the user reads in the app is
+ * in it, everything that leaves for GitHub, git or Jira is not — a review
+ * comment is read by the PR's author and the team, not by the user.
+ */
+export function languageRule(language: AgentLanguage): string {
+  const name = (AGENT_LANGUAGES.find((l) => l.id === language) ?? AGENT_LANGUAGES[0]).name;
+  return (
+    `Write everything meant for the user in ${name}: the task list (TaskCreate/TaskUpdate), your messages, the brief or report in your final message, ` +
+    `and the text of the prd-result block — its summary, questions, options, findings and author questions (keep its JSON keys and severity values as they are). ` +
+    `This does not apply to what goes out to others: review comments, thread replies, commit messages and anything written to GitHub or Jira keep the language they would have anyway. ` +
+    `Code, identifiers, file paths and quotes stay as they are.`
+  );
 }

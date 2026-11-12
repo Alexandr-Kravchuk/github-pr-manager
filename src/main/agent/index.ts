@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { DEFAULT_AGENT_PROMPTS } from "../../shared/agent-defaults";
+import { DEFAULT_AGENT_PROMPTS, languageRule } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, disputeSteps, gitBashPath, readPlanLines, summarizePlan, type PublishStep } from "../../shared/agent-publish";
 import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
@@ -16,6 +16,7 @@ import type {
   AgentAction,
   AgentActionResult,
   AgentItem,
+  AgentLanguage,
   AgentRunKind,
   AgentSettings,
   AgentState,
@@ -237,8 +238,9 @@ export function agentRules(
   mode: "shadow" | "on",
   folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null = null,
   pr: RulesPr | null = null,
+  language: AgentLanguage = "en",
 ): string {
-  return `${scenarioRules(scenario, mode, folder, pr)} ${resultRuleFor(scenario)}`;
+  return `${scenarioRules(scenario, mode, folder, pr)} ${resultRuleFor(scenario)} ${languageRule(language)}`;
 }
 
 /** The PR a session's rules name: its place, a drive's base, why it runs — and, in a GitHub stack, its layer (`stackRules`). */
@@ -1418,7 +1420,7 @@ export function createAgent(deps: AgentDeps): Agent {
           ...(kind === "drive" && pr && remote ? { baseRef: `${remote}/${pr.baseRefName}` } : {}),
           ...(item.reasons ? { reasons: item.reasons } : {}),
           stack: pr ? stackRules(pr, item.scenario) : null,
-        }),
+        }, s.language),
         allowedTools,
         pluginDirs,
         addDirs,
