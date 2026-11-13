@@ -43,7 +43,7 @@ export interface RunProgress {
   /** The latest thing it said. */
   lastText: string | null;
   toolCalls: number;
-  /** The latest Claude usage-limit reading: the scheduler holds runs back while it is not "allowed". */
+  /** The latest Claude usage-limit reading: the scheduler holds runs back once it says "rejected" (`usageHoldUntil`). */
   rateLimit: { status: string; resetsAt: number | null } | null;
   /**
    * Background tasks the session is still running — a skill's Workflow runs
@@ -271,6 +271,18 @@ export function applyStreamEvent(p: RunProgress, ev: unknown): RunProgress {
 }
 
 /** The current step: the one in progress, else the first not done. */
+/**
+ * Until when (ms) the scheduler holds its queue for a usage-limit reading, or
+ * null to go on. Only "rejected" — the limit is reached — holds: Claude Code
+ * also sends "allowed_warning" once a window passes a threshold (75% of the
+ * seven-day window, say), and holding on that stopped every run for days of
+ * usage still left.
+ */
+export function usageHoldUntil(rateLimit: RunProgress["rateLimit"]): number | null {
+  if (!rateLimit || rateLimit.status !== "rejected" || !rateLimit.resetsAt) return null;
+  return rateLimit.resetsAt * 1000;
+}
+
 export function currentStep(p: Pick<RunProgress, "steps">): PlanStep | null {
   return p.steps.find((s) => s.status === "in_progress") ?? p.steps.find((s) => s.status !== "completed") ?? null;
 }

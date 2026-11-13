@@ -5,7 +5,7 @@ import path from "node:path";
 import { DEFAULT_AGENT_PROMPTS, languageRule } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, disputeSteps, gitBashPath, readPlanLines, shasNotOnPr, summarizePlan, type PublishStep, type PublishSummary } from "../../shared/agent-publish";
-import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
+import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
@@ -1508,9 +1508,8 @@ export function createAgent(deps: AgentDeps): Agent {
           entry.recent = [...entry.recent, { at: stamp(), text: progress.activity }].slice(-RECENT_MAX);
         }
         entry.progress = progress;
-        if (progress.rateLimit && progress.rateLimit.status !== "allowed" && progress.rateLimit.resetsAt) {
-          heldUntil = progress.rateLimit.resetsAt * 1000;
-        }
+        const hold = usageHoldUntil(progress.rateLimit);
+        if (hold !== null) heldUntil = hold;
         changed();
       },
       deps.spawner,
