@@ -27,13 +27,6 @@
     ${endif}
   FunctionEnd
 
-  Function DashboardFinishShow
-    ${if} ${isUpdated}
-      # An interactive updater must not offer a trust action either.
-      ShowWindow $mui.FinishPage.ShowReadme ${SW_HIDE}
-    ${endif}
-  FunctionEnd
-
   !define MUI_FINISHPAGE_RUN
   !define MUI_FINISHPAGE_RUN_FUNCTION "StartApp"
   !define MUI_FINISHPAGE_SHOWREADME
@@ -42,4 +35,12 @@
   !define MUI_FINISHPAGE_SHOWREADME_FUNCTION "InstallDashboardTrust"
   !define MUI_PAGE_CUSTOMFUNCTION_SHOW "DashboardFinishShow"
   !insertmacro MUI_PAGE_FINISH
+
+  Function DashboardFinishShow
+    ${if} ${isUpdated}
+      # An interactive updater must not offer a trust action either.
+      ShowWindow $mui.FinishPage.ShowReadme ${SW_HIDE}
+    ${endif}
+  FunctionEnd
+
 !macroend
