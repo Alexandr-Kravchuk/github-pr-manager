@@ -9971,6 +9971,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(r.jobs.map((j) => j.prId), ["OLD", "NEW"]);
     });
 
+    test("agent-stream: only a rejected usage limit holds the queue, a warning does not", () => {
+      // The seven-day window past 75% reads "allowed_warning" (recorded from claude 2.1.314).
+      assert.strictEqual(stream.usageHoldUntil({ status: "allowed_warning", resetsAt: 1794592800 }), null);
+      assert.strictEqual(stream.usageHoldUntil({ status: "allowed", resetsAt: 1794592800 }), null);
+      assert.strictEqual(stream.usageHoldUntil({ status: "rejected", resetsAt: 1794592800 }), 1794592800000);
+      assert.strictEqual(stream.usageHoldUntil({ status: "rejected", resetsAt: null }), null);
+      assert.strictEqual(stream.usageHoldUntil(null), null);
+    });
+
     // Events recorded from a real `claude -p` session (2.1.270), trimmed.
     const recorded = [
       { type: "system", subtype: "init", session_id: "s-1", tools: ["Read"] },
