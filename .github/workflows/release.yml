@@ -52,10 +52,11 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Trust the public signing certificate on the build runner
+        timeout-minutes: 2
         shell: pwsh
         run: |
-          Import-Certificate -FilePath build/windows-signing/PR-Dashboard.cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
-          Import-Certificate -FilePath build/windows-signing/PR-Dashboard.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
+          Import-Certificate -FilePath build/windows-signing/PR-Dashboard.cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Import-Certificate -FilePath build/windows-signing/PR-Dashboard.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
       - name: Build signed Windows installer
         run: npx --no-install electron-builder --win nsis --publish never --config.forceCodeSigning=true
         env:
