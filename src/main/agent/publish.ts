@@ -216,14 +216,66 @@ interface ReviewComment {
   in_reply_to_id?: unknown;
 }
 
-/** One review comment, checked to be on this PR. `what` names it in the refusal. */
-async function readComment(id: number, what: string, prUrl: string, repo: string, number: number, gh: GhRunner): Promise<{ comment: ReviewComment } | { error: string }> {
-  const r = await gh(["api", `repos/${repo}/pulls/comments/${id}`, ...hostFlag(prUrl)]);
-  if (r.code !== 0) return { error: `couldn't check ${what}: ${ghError(r)}` };
-  const c = (json(r.stdout) as ReviewComment | null) ?? {};
-  const url = String(c.pull_request_url ?? "").toLowerCase();
-  if (!url.endsWith(`/repos/${repo}/pulls/${number}`.toLowerCase())) return { error: `${what} is not on ${repo}#${number}` };
-  return { comment: c };
+type CommentRead = { comment: ReviewComment } | { error: string };
+
+/**
+ * One check of a plan against the PR: where it is, whose threads it may
+ * touch, and each review comment read once however many steps name it — a
+ * thread's first comment is read for every mid-thread reply in it.
+ */
+interface CheckScope {
+  prUrl: string;
+  repo: string;
+  number: number;
+  targets: PlanTargets;
+  gh: GhRunner;
+  /** A review comment, checked to be on this PR. `what` names it in the refusal. */
+  comment(id: number, what: string): Promise<CommentRead>;
+  /** The comments the session handed back to you (`escalate`): the author pushed back there. */
+  escalated: ReadonlySet<number>;
+  /** The first comments of their threads: a review doesn't answer in those threads either. */
+  escalatedThreads: ReadonlySet<number>;
+}
+
+function checkScope(prUrl: string, repo: string, number: number, targets: PlanTargets, gh: GhRunner, escalated: ReadonlySet<number>): CheckScope {
+  const reads = new Map<number, Promise<GhResult>>();
+  const comment = async (id: number, what: string): Promise<CommentRead> => {
+    let read = reads.get(id);
+    if (!read) reads.set(id, (read = gh(["api", `repos/${repo}/pulls/comments/${id}`, ...hostFlag(prUrl)])));
+    const r = await read;
+    if (r.code !== 0) return { error: `couldn't check ${what}: ${ghError(r)}` };
+    const c = (json(r.stdout) as ReviewComment | null) ?? {};
+    const url = String(c.pull_request_url ?? "").toLowerCase();
+    if (!url.endsWith(`/repos/${repo}/pulls/${number}`.toLowerCase())) return { error: `${what} is not on ${repo}#${number}` };
+    return { comment: c };
+  };
+  return { prUrl, repo, number, targets, gh, comment, escalated, escalatedThreads: new Set() };
+}
+
+/**
+ * The scope with the threads of the escalated comments read in. Only a
+ * review needs them; one that can't be read is said (`errors`), and the
+ * replies in its thread are then not told apart from the rest.
+ */
+async function withEscalatedThreads(scope: CheckScope, errors: string[]): Promise<CheckScope> {
+  if (!scope.targets.mine || scope.escalated.size === 0) return scope;
+  const threads = new Set<number>();
+  for (const id of scope.escalated) {
+    const read = await scope.comment(id, `comment ${id} (handed back to you)`);
+    if ("error" in read) {
+      if (!errors.includes(read.error)) errors.push(read.error);
+      continue;
+    }
+    threads.add(threadRootOf(id, read.comment) ?? id);
+  }
+  return { ...scope, escalatedThreads: threads };
+}
+
+/** The first comment of the thread `c` (comment `id`) sits in: itself, the one GitHub names, or null when it names a malformed id. */
+function threadRootOf(id: number, c: ReviewComment): number | null {
+  if (c.in_reply_to_id == null) return id;
+  const root = Number(c.in_reply_to_id);
+  return Number.isInteger(root) && root > 0 ? root : null;
 }
 
 const loginOf = (c: ReviewComment): string | null => (typeof c.user?.login === "string" ? c.user.login : null);
@@ -233,9 +285,13 @@ const loginOf = (c: ReviewComment): string | null => (typeof c.user?.login === "
  * a colleague opened, and this is a review), or refused outright (another PR,
  * an unreadable target, a run that may not do it). A review's reply to a
  * comment in the middle of a thread you opened is fine too, posted to the
- * thread's first comment (`root`) — the one GitHub takes replies to.
+ * thread's first comment (`root`) — the one GitHub takes replies to. A
+ * review's reply in a thread it handed back to you is held as well, by the
+ * thread, not by the comment: the author pushed back there, and a review
+ * doesn't argue with them on your behalf.
  */
-async function checkStep(s: PublishStep, prUrl: string, repo: string, number: number, targets: PlanTargets, gh: GhRunner): Promise<StepCheck> {
+async function checkStep(s: PublishStep, scope: CheckScope): Promise<StepCheck> {
+  const { prUrl, repo, number, targets, gh } = scope;
   const here = `${repo}#${number}`.toLowerCase();
   const me = targets.viewer?.toLowerCase() ?? null;
   if (s.kind === "resolve") {
@@ -257,28 +313,32 @@ async function checkStep(s: PublishStep, prUrl: string, repo: string, number: nu
     return { ok: true };
   }
   if (s.kind === "reply") {
-    const read = await readComment(s.replyTo, `comment ${s.replyTo}`, prUrl, repo, number, gh);
+    const read = await scope.comment(s.replyTo, `comment ${s.replyTo}`);
     if ("error" in read) return read;
     if (!targets.mine) return { ok: true };
     if (!me) return { error: "couldn't tell whose threads these are — your login on the host is unknown" };
     const c = read.comment;
     const link = typeof c.html_url === "string" ? c.html_url : null;
-    const held = (author: string | null): StepCheck => ({ held: { kind: "reply", replyTo: s.replyTo, body: s.body, author, url: link } });
-    if (c.in_reply_to_id == null) {
-      // The thread's first comment: your thread, or a colleague's.
-      const author = loginOf(c);
-      return (author ?? "").toLowerCase() === me ? { ok: true } : held(author);
-    }
-    // In the middle of a thread: GitHub names the thread's first comment in
+    const held = (author: string | null, escalated?: true): StepCheck => ({
+      held: { kind: "reply", replyTo: s.replyTo, body: s.body, author, url: link, ...(escalated ? { escalated } : {}) },
+    });
+    // In the middle of a thread GitHub names the thread's first comment in
     // `in_reply_to_id` and takes replies to that one only. A reply of yours
     // in a colleague's thread is still their thread — what counts is the root.
-    const root = Number(c.in_reply_to_id);
-    if (!Number.isInteger(root) || root <= 0) return held(null);
-    const rootRead = await readComment(root, `comment ${root} (the thread of comment ${s.replyTo})`, prUrl, repo, number, gh);
-    if ("error" in rootRead) return rootRead;
-    if (rootRead.comment.in_reply_to_id != null) return held(null);
-    const opener = loginOf(rootRead.comment);
-    return (opener ?? "").toLowerCase() === me ? { ok: true, root } : held(opener);
+    const root = threadRootOf(s.replyTo, c);
+    if (root === null) return held(null);
+    let opener = loginOf(c);
+    if (root !== s.replyTo) {
+      const rootRead = await scope.comment(root, `comment ${root} (the thread of comment ${s.replyTo})`);
+      if ("error" in rootRead) return rootRead;
+      if (rootRead.comment.in_reply_to_id != null) return held(null);
+      opener = loginOf(rootRead.comment);
+    }
+    if ((opener ?? "").toLowerCase() !== me) return held(opener);
+    // Your thread, but handed back to you: no answer goes into it. Your own
+    // answer to the escalated comment (a dispute you dropped) still does.
+    if (scope.escalatedThreads.has(root) && !scope.escalated.has(s.replyTo)) return held(opener, true);
+    return root === s.replyTo ? { ok: true } : { ok: true, root };
   }
   return { ok: true };
 }
@@ -336,9 +396,10 @@ export async function heldWrites(
   allowResolve?: boolean,
 ): Promise<HeldCheck> {
   const writes = postedSteps(steps, { allowResolve }).filter((s) => s.kind === "reply" || s.kind === "resolve");
-  const checks = await checkSteps(writes, (s) => checkStep(s, prUrl, repo, number, { viewer, mine: true }, gh));
-  const held: HeldWrite[] = [];
   const errors: string[] = [];
+  const scope = await withEscalatedThreads(checkScope(prUrl, repo, number, { viewer, mine: true }, gh, escalatedIds(steps)), errors);
+  const checks = await checkSteps(writes, (s) => checkStep(s, scope));
+  const held: HeldWrite[] = [];
   for (const c of checks) {
     if ("held" in c) held.push(c.held);
     else if ("error" in c && !errors.includes(c.error)) errors.push(c.error);
@@ -353,7 +414,9 @@ export async function heldWrites(
  * can reach. Checked against GitHub before anything is posted. Every step is
  * checked, so the answer names all that is wrong at once, not one per press
  * of Publish. `replyRoots`: the mid-thread replies that go to their thread's
- * first comment instead (`PublishContext.replyRoots`).
+ * first comment instead (`PublishContext.replyRoots`). `escalated`: the
+ * comments the session handed back to you, when `steps` (what goes out) no
+ * longer carries its `escalate` steps.
  */
 async function checkPlan(
   steps: readonly PublishStep[],
@@ -362,11 +425,13 @@ async function checkPlan(
   number: number,
   targets: PlanTargets,
   gh: GhRunner,
+  escalated: ReadonlySet<number> = escalatedIds(steps),
 ): Promise<{ error: string | null; replyRoots: Map<number, number> }> {
   const errors: string[] = [];
   const held: HeldWrite[] = [];
   const replyRoots = new Map<number, number>();
-  const checks = await checkSteps(steps, (s) => checkStep(s, prUrl, repo, number, targets, gh));
+  const scope = await withEscalatedThreads(checkScope(prUrl, repo, number, targets, gh, escalated), errors);
+  const checks = await checkSteps(steps, (s) => checkStep(s, scope));
   checks.forEach((c, i) => {
     const s = steps[i]!;
     if ("error" in c) {
@@ -381,6 +446,11 @@ async function checkPlan(
     );
   }
   return { error: errors.length > 0 ? errors.join("; ") : null, replyRoots };
+}
+
+/** The comments a plan handed back to you. */
+function escalatedIds(steps: readonly PublishStep[]): Set<number> {
+  return new Set(steps.flatMap((s) => (s.kind === "escalate" ? [s.replyTo] : [])));
 }
 
 /** `checkPlan`'s answer alone: why the plan may not go out, or null. */
@@ -441,12 +511,20 @@ export async function publishPlan(
   let requests = [...planRequests(steps, ctx), ...planRequests(extra, ctx)];
   // Everything it wrote was held back: Approve would post nothing and still mark it published.
   if (requests.length === 0 && (ctx.held?.length ?? 0) > 0) {
-    return { ok: false, error: "nothing is left to post — everything it wrote is held back (a colleague's thread, or a comment in the middle of a thread). Answer there yourself, or Discard it", posted: 0, total: 0 };
+    return { ok: false, error: "nothing is left to post — everything it wrote is held back (a colleague's thread, a thread handed back to you, or a comment whose thread GitHub didn't name). Answer there yourself, or Discard it", posted: 0, total: 0 };
   }
   let done = Math.min(readDone(runDir), requests.length);
   // Nothing goes out unless every thread and comment the rest of the plan
   // touches is this PR's — and, for a review, yours.
-  const { error: stray, replyRoots } = await checkPlan([...postedSteps(steps, ctx), ...postedSteps(extra, ctx)].slice(done), prUrl, ctx.repo, ctx.number, targets, gh);
+  const { error: stray, replyRoots } = await checkPlan(
+    [...postedSteps(steps, ctx), ...postedSteps(extra, ctx)].slice(done),
+    prUrl,
+    ctx.repo,
+    ctx.number,
+    targets,
+    gh,
+    escalatedIds(steps),
+  );
   if (stray) return { ok: false, error: stray, posted: done, total: requests.length };
   if (replyRoots.size > 0) {
     // A mid-thread reply in a thread you opened goes to the thread's first

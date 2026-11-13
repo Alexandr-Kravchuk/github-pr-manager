@@ -10969,11 +10969,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // A write held back in a colleague's thread is said in the words, not only shown.
       const heldPlan = { ...plan("APPROVE"), held: [{ kind: "reply", replyTo: 3, author: "colleague", url: null, body: "b" }] };
       const h = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: heldPlan })]);
-      assert.match(h.now, /suggests approving\. It also wrote in a colleague's thread; a review answers only in threads you opened, to their first comment, so that stays out/);
+      assert.match(h.now, /suggests approving\. It also wrote in a colleague's thread; a review answers only in threads you opened, and not where the author pushed back, so that stays out/);
       // A reply to a mid-thread comment may sit in your own thread: it is not called a colleague's.
       const midPlan = { ...plan("APPROVE"), held: [...heldPlan.held, { kind: "reply", replyTo: 4, author: null, url: null, body: "b" }] };
       const mid = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: midPlan })]);
-      assert.match(mid.now, /It also wrote in a colleague's thread and to a comment in the middle of a thread; .* so those stay out/);
+      assert.match(mid.now, /It also wrote in a colleague's thread and to a comment whose thread GitHub didn't name; .* so those stay out/);
+      // A reply in a thread of yours it handed back to you is said as that, not as a colleague's.
+      const backPlan = { ...plan("APPROVE"), held: [{ kind: "reply", replyTo: 6, author: "me", url: null, body: "b", escalated: true }, ...midPlan.held] };
+      const back = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: backPlan })]);
+      assert.match(back.now, /It also wrote in a colleague's thread and in a thread it handed back to you and to a comment whose thread GitHub didn't name; .* so those stay out/);
       // Request changes, with the comments counted, and the re-review after.
       const rc = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: plan("REQUEST_CHANGES") })]);
       assert.strictEqual(rc.now, "The agent drafted a review that requests changes: 1 inline comment.");
@@ -12871,9 +12875,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         return { code: 0, stdout: JSON.stringify(body), stderr: "" };
       };
       const mine = { viewer: "me", mine: true };
-      // Your thread: fine, and the check reads the root, not only the comment the session named.
-      assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 11, body: "x" }], url, "a/b", 7, mine, gh), null);
-      assert.deepStrictEqual(reads, [11, 10]);
+      // Your thread: fine, and the check reads the root, not only the comment the session named —
+      // once, however many replies sit in that thread.
+      comments[14] = { login: "colleague", root: 10 };
+      assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 11, body: "x" }, { kind: "reply", replyTo: 14, body: "y" }], url, "a/b", 7, mine, gh), null);
+      assert.deepStrictEqual([...reads].sort((a, b) => a - b), [10, 11, 14]);
       // A colleague's thread: held, named after whoever opened it — your own reply in it doesn't make it yours.
       const check = await publishMod.heldWrites([{ kind: "reply", replyTo: 11, body: "ok" }, { kind: "reply", replyTo: 21, body: "x" }], url, "a/b", 7, "me", gh);
       assert.deepStrictEqual(check, { held: [{ kind: "reply", replyTo: 21, body: "x", author: "colleague", url: `${url}#discussion_r21` }], unchecked: null });
@@ -12881,6 +12887,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 31, body: "x" }], url, "a/b", 7, mine, gh), "comment 30 (the thread of comment 31) is not on a/b#7");
       comments[12] = { login: "colleague", root: 99 };
       assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 12, body: "x" }], url, "a/b", 7, mine, gh), /^couldn't check comment 99 \(the thread of comment 12\): /);
+      // At run end the same is said, not held: On then waits for you instead of sending it by itself.
+      for (const replyTo of [31, 12]) {
+        const step = [{ kind: "reply", replyTo, body: "x" }];
+        assert.deepStrictEqual(await publishMod.heldWrites(step, url, "a/b", 7, "me", gh), { held: [], unchecked: await publishMod.checkPlanTargets(step, url, "a/b", 7, mine, gh) });
+      }
+      // A malformed root id: held as a reply whose thread is unknown, and nothing but the comment itself is read.
+      comments[15] = { login: "colleague", root: "abc" };
+      reads.length = 0;
+      assert.deepStrictEqual((await publishMod.heldWrites([{ kind: "reply", replyTo: 15, body: "x" }], url, "a/b", 7, "me", gh)).held.map((h) => [h.replyTo, h.author]), [[15, null]]);
+      assert.deepStrictEqual(reads, [15]);
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 15, body: "x" }], url, "a/b", 7, mine, gh), /a reply to a comment that doesn't open its thread/);
       // A root that is itself a reply (GitHub said something unexpected): held, as a reply whose thread is unknown.
       comments[13] = { login: "me", root: 11 };
       assert.deepStrictEqual((await publishMod.heldWrites([{ kind: "reply", replyTo: 13, body: "x" }], url, "a/b", 7, "me", gh)).held.map((h) => [h.replyTo, h.author]), [[13, null]]);
@@ -12904,6 +12921,63 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const out = await publishMod.publishPlan(runDir, url, ctx, mine, async (a, o) => (o?.input ? (posted.push(a[1]), { code: 0, stdout: "{}", stderr: "" }) : gh(a)));
       assert.deepStrictEqual(out, { ok: true, posted: 3, total: 3 });
       assert.deepStrictEqual(posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/10/replies", "repos/a/b/pulls/7/comments/10/replies"]);
+      // A resumed publish (the second reply failed) posts only what is left, still to the root.
+      const resumeDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-root-"));
+      nfsA.writeFileSync(path.join(resumeDir, "plan.jsonl"), plan.map((s) => JSON.stringify(s)).join("\n") + "\n");
+      const tries = [];
+      let fail = true;
+      const post = async (a, o) => {
+        if (!o?.input) return gh(a);
+        tries.push(a[1]);
+        if (fail && tries.length === 2) return { code: 1, stdout: "", stderr: "boom" };
+        return { code: 0, stdout: "{}", stderr: "" };
+      };
+      assert.deepStrictEqual(await publishMod.publishPlan(resumeDir, url, ctx, mine, post), { ok: false, error: "reply to comment 11: boom", posted: 1, total: 3 });
+      fail = false;
+      tries.length = 0;
+      assert.deepStrictEqual(await publishMod.publishPlan(resumeDir, url, ctx, mine, post), { ok: true, posted: 3, total: 3 });
+      assert.deepStrictEqual(tries, ["repos/a/b/pulls/7/comments/10/replies", "repos/a/b/pulls/7/comments/10/replies"]);
+    });
+
+    await atest("publish: a thread the review handed back to you gets no reply of the review's — matched by thread, not by the comment it escalated", async () => {
+      const url = "https://github.com/a/b/pull/7";
+      // You opened thread 4; the author pushed back in 5 and again in 6.
+      const comments = { 4: { login: "me" }, 5: { login: "author", root: 4 }, 6: { login: "author", root: 4 }, 8: { login: "me" } };
+      const gh = async (args) => {
+        const id = Number(/comments\/(\d+)$/.exec(args[1])[1]);
+        const c = comments[id];
+        const body = { pull_request_url: "https://api.github.com/repos/a/b/pulls/7", html_url: `${url}#discussion_r${id}`, user: { login: c.login } };
+        if (c.root) body.in_reply_to_id = c.root;
+        return { code: 0, stdout: JSON.stringify(body), stderr: "" };
+      };
+      const mine = { viewer: "me", mine: true };
+      // The session escalates 5 and still answers 6 and 4 (thread 4), and 8 (a thread of yours with no dispute).
+      const steps = [
+        { kind: "review", event: "APPROVE", body: "b", comments: [] },
+        { kind: "escalate", replyTo: 5, body: "they disagree" },
+        { kind: "reply", replyTo: 6, body: "no, really" },
+        { kind: "reply", replyTo: 4, body: "as I said" },
+        { kind: "reply", replyTo: 8, body: "fixed" },
+      ];
+      const check = await publishMod.heldWrites(steps, url, "a/b", 7, "me", gh);
+      assert.strictEqual(check.unchecked, null);
+      assert.deepStrictEqual(check.held.map((h) => [h.replyTo, h.escalated, h.author]), [[6, true, "me"], [4, true, "me"]]);
+      assert.strictEqual(pub.heldLabel(check.held[0]), "a reply in a thread handed back to you");
+      // Unheld (a plan edited since), the publish check refuses them by name.
+      assert.match(await publishMod.checkPlanTargets(steps, url, "a/b", 7, mine, gh), /^a reply in a thread handed back to you \(.*discussion_r6\); a reply in a thread handed back to you \(.*discussion_r4\) — /);
+      // Held: Approve posts the review and the reply in the undisputed thread, and your "drop" answer
+      // to the comment that was escalated still goes out — to the thread's first comment.
+      const ctx = { repo: "a/b", number: 7, signature: "s", holdApprove: false, held: check.held };
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-esc-"));
+      nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), steps.map((x) => JSON.stringify(x)).join("\n") + "\n");
+      const posted = [];
+      const extra = pub.disputeSteps([{ replyTo: 5 }], { 5: "drop" }, new Map());
+      const out = await publishMod.publishPlan(runDir, url, ctx, mine, async (a, o) => (o?.input ? (posted.push(a[1]), { code: 0, stdout: "{}", stderr: "" }) : gh(a)), undefined, extra);
+      assert.deepStrictEqual(out, { ok: true, posted: 3, total: 3 });
+      assert.deepStrictEqual(posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/8/replies", "repos/a/b/pulls/7/comments/4/replies"]);
+      // An escalated comment that can't be read: said, so On waits for you; nothing is held on a guess.
+      const unread = await publishMod.heldWrites(steps, url, "a/b", 7, "me", async (args) => (/comments\/5$/.test(args[1]) ? { code: 1, stdout: "", stderr: "boom" } : gh(args)));
+      assert.match(unread.unchecked, /^couldn't check comment 5 \(handed back to you\): /);
     });
 
     test("mapPr: the author's latest thread answer, a reviewer's latest open-thread comment, and whether the branch is in a fork", () => {

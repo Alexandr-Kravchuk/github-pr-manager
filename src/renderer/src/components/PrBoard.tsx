@@ -630,10 +630,11 @@ function gist(text: string): string {
 }
 
 /**
- * What the review wanted to write in threads a colleague opened, or to a
- * comment in the middle of a thread (whoever opened it). A review
- * answers and resolves only in threads you opened, so these stay out of what
- * Approve sends; each links to its thread, where you can answer yourself.
+ * What the review wanted to write in threads a colleague opened, in a thread
+ * it handed back to you, or to a comment whose thread GitHub didn't name. A
+ * review answers and resolves only in threads you opened, and not where the
+ * author pushed back, so these stay out of what Approve sends; each links to
+ * its thread, where you can answer yourself.
  */
 function HeldBack({ held }: { held: HeldWrite[] }) {
   return (
