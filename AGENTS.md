@@ -782,3 +782,14 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   (Glassmorphism's backdrop): about one step a second, only while the document
   is visible, and off under reduced motion — a new one needs the same
   justification, not a `setInterval` in place of a CSS animation.
+
+## Windows release signing
+
+GitHub Actions Release signs Windows builds using `WIN_CSC_LINK` (base64 PFX)
+and `WIN_CSC_KEY_PASSWORD` secrets. `forceCodeSigning` is required in CI. Before
+upload, `scripts/verify-windows-release.ps1` checks the app and installer against
+`build/windows-signing/PR-Dashboard.cer`, checks timestamps and updater publisher
+verification, then stages dash-named assets with `WINDOWS-TRUST.md`. Keep private
+keys outside Git and the renderer. Certificate rotation must update the secrets,
+public certificate and documented fingerprint together. Self-signed trust is a
+one-time user action; do not claim it guarantees no SmartScreen warnings.

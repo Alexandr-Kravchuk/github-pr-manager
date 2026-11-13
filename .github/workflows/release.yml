@@ -15,6 +15,11 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Upload to a draft GitHub Release (disable for a signing smoke test)
+        type: boolean
+        default: true
 
 jobs:
   test:
@@ -46,7 +51,41 @@ jobs:
           cache: "npm"
       - run: npm ci
       - run: npm run build
-      - name: Build and publish Windows installer
-        run: npx --no-install electron-builder --win nsis --publish always
+      - name: Trust the public signing certificate on the build runner
+        shell: pwsh
+        run: |
+          Import-Certificate -FilePath build/windows-signing/PR-Dashboard.cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+          Import-Certificate -FilePath build/windows-signing/PR-Dashboard.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
+      - name: Build signed Windows installer
+        run: npx --no-install electron-builder --win nsis --publish never --config.forceCodeSigning=true
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+      - name: Verify signatures and prepare release assets
+        shell: pwsh
+        run: ./scripts/verify-windows-release.ps1
+      - name: Keep verified assets for a signing smoke test
+        if: ${{ !inputs.publish }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-windows
+          path: dist/windows-release/*
+          if-no-files-found: error
+      - name: Upload Windows assets to a draft release
+        if: ${{ inputs.publish }}
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "v$(node -p "require('./package.json').version")"
+          $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases" --paginate | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not list releases' }
+          $release = @($releases | Where-Object tag_name -eq $tag)
+          if ($release.Count -gt 1) { throw "Duplicate releases for $tag" }
+          if ($release.Count -eq 0) {
+            gh release create $tag --draft --title "Release $($tag.Substring(1))" --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release' }
+          } elseif (-not $release[0].draft) { throw "Release $tag is already published" }
+          $assets = @(Get-ChildItem dist/windows-release -File | ForEach-Object FullName)
+          gh release upload $tag @assets --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not upload release assets' }

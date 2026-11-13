@@ -238,7 +238,28 @@ To cut a release:
 
 > First-time setup the maintainer does once: create the App Store Connect API key
 > (Issuer ID + Key ID + `.p8`) and export the Developer ID Application `.p12`.
-> Windows builds are **unsigned** for now (SmartScreen will warn on first run).
+> New Windows builds are signed by **Alex Kravchuk** with a project self-signed
+> certificate. Each release includes `PR-Dashboard.cer` and `WINDOWS-TRUST.md`.
+> Follow the [Windows trust instructions](build/windows-signing/WINDOWS-TRUST.md)
+> once per account to trust the certificate. SmartScreen warnings may still appear;
+> older unsigned releases remain unsigned.
+
+### Windows signing maintenance
+
+The Release workflow uses repository secrets `WIN_CSC_LINK` (base64 PKCS#12/PFX)
+and `WIN_CSC_KEY_PASSWORD`. The public certificate is committed at
+`build/windows-signing/PR-Dashboard.cer`; never commit its private key or password.
+Keep an encrypted backup of the PFX and its password in your secrets manager.
+The workflow requires signing and verifies both the app and installer against the
+committed certificate, including timestamps, before uploading any Windows assets.
+It also checks that the updater retains publisher verification.
+
+The certificate expires on 12 November 2031. To rotate it, replace both GitHub
+secrets and the public certificate, update the fingerprint in `WINDOWS-TRUST.md`,
+and test a Windows build. Keep the publisher name `Alex Kravchuk` consistent for
+updater verification; users must trust the replacement certificate before updating.
+The corporate-host `release-win.ps1` route does not configure these CI secrets and
+is not the signed GitHub Actions release path.
 
 ## Structure
 
