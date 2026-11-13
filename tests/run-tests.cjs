@@ -10975,6 +10975,18 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(send.does, /^Posts an approval on GitHub under your name, signed by the agent/);
       assert.match(e.next, /author can merge/);
       assert.ok(choice(e, "Discard"), "and a way out");
+      // A write held back in a colleague's thread is said in the words, not only shown.
+      const heldPlan = { ...plan("APPROVE"), held: [{ kind: "reply", replyTo: 3, author: "colleague", url: null, body: "b" }] };
+      const h = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: heldPlan })]);
+      assert.match(h.now, /suggests approving\. It also wrote in a colleague's thread; a review answers only in threads you opened, and not where the author pushed back, so that stays out/);
+      // A reply to a mid-thread comment may sit in your own thread: it is not called a colleague's.
+      const midPlan = { ...plan("APPROVE"), held: [...heldPlan.held, { kind: "reply", replyTo: 4, author: null, url: null, body: "b" }] };
+      const mid = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: midPlan })]);
+      assert.match(mid.now, /It also wrote in a colleague's thread and to a comment whose thread GitHub didn't name; .* so those stay out/);
+      // A reply in a thread of yours it handed back to you is said as that, not as a colleague's.
+      const backPlan = { ...plan("APPROVE"), held: [{ kind: "reply", replyTo: 6, author: "me", url: null, body: "b", escalated: true }, ...midPlan.held] };
+      const back = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: backPlan })]);
+      assert.match(back.now, /It also wrote in a colleague's thread and in a thread it handed back to you and to a comment whose thread GitHub didn't name; .* so those stay out/);
       // Request changes, with the comments counted, and the re-review after.
       const rc = xOne(xPr({ roles: ["reviewer"] }), [sIt({ state: "needsYou", plan: plan("REQUEST_CHANGES") })]);
       assert.strictEqual(rc.now, "The agent drafted a review that requests changes: 1 inline comment.");
@@ -10999,25 +11011,100 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(noAnswers.choices.map((c) => c.label), ["Discard"]);
     });
 
-    test("agent board words: a drive's question or commits from before a restart offer Run again — never an answer or a push that would be refused", () => {
+    test("agent board words: a drive's question or commits from before a restart are stale — GitHub places the card, Discard comes first", () => {
       const mine = xPr();
       const ask = { summary: "", asks: [{ question: "Which stand?", options: ["eng1", "eng2"] }], findings: [], authorQuestions: [], structured: true };
       const asked = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), result: ask, sessionId: "s", worktree: "/w", needsRerun: true })]);
-      assert.deepStrictEqual([asked.owner, asked.stage.action.kind], ["you", "decide"]);
-      assert.strictEqual(asked.now, "The app restarted after this run, so it can't push anything or go on with your answer any more.");
+      assert.deepStrictEqual([asked.owner, asked.stage.column, asked.stage.action, asked.stage.ready, asked.stage.stale], ["others", "waiting", null, false, "restart"], "not Your move: it can't be answered any more");
+      assert.match(asked.now, /^Waiting for reviewers\. The agent's earlier run is out of date: stale — the app restarted after this run, so it can't push or take your answer\.$/);
       assert.deepStrictEqual(asked.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
-        ["Run again", "retry", true],
+        ["Self-review again", "enqueue", false],
+        ["Discard", "skip", true],
         ["Open in Claude", "continue", false],
-        ["Discard", "skip", false],
       ]);
-      assert.deepStrictEqual(asked.read.asks.map((a) => a.question), ["Which stand?"], "its question still reads, as what the new run will ask");
+      assert.strictEqual(asked.ask, "Nothing to do on its result — discard it.");
       const commits = xOne(mine, [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2), needsRerun: true })]);
-      assert.strictEqual(commits.stage.action.kind, "push");
-      assert.match(commits.now, /can't push its 2 commits/);
-      assert.deepStrictEqual(commits.choices.map((c) => c.label), ["Run again", "Discard"], "no Push, no session to open");
+      assert.deepStrictEqual([commits.owner, commits.stage.action, commits.stage.stale], ["others", null, "restart"], "no Push that would be refused");
+      assert.deepStrictEqual(commits.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
+        ["Self-review again", "enqueue", false],
+        ["Discard", "skip", true],
+      ], "no Run again, no Push, no session to open");
+      assert.strictEqual(commits.now, "Waiting for reviewers. The agent's earlier run is out of date: stale — the app restarted after this run, so it can't push or take your answer.");
+      // The PR still needs work: Your move is GitHub's say-so, with the stale run beside it.
+      const broken = xOne(xPr({ ciState: "failure", failingChecks: [] }), [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2), needsRerun: true })]);
+      assert.deepStrictEqual([broken.owner, broken.stage.action.kind, broken.stage.ready], ["you", "fixYourself", false]);
+      assert.deepStrictEqual(broken.choices.map((c) => [c.label, Boolean(c.primary)]), [["Let the agent fix it", true], ["Open on GitHub", false], ["Discard", false]]);
       // The same run before any restart: its own question and push, as ever.
       const live = xOne(mine, [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2) })]);
       assert.strictEqual(live.choices[0].label, "Push 2 fixes");
+      const liveAsk = xOne(mine, [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(0), result: ask, sessionId: "s", worktree: "/w" })]);
+      assert.deepStrictEqual([liveAsk.owner, liveAsk.stage.action.kind, liveAsk.stage.stale], ["you", "decide", null]);
+    });
+
+    test("agent board words: a drive the PR moved past is superseded — not Your call, with the PR's real state (creatio-ui#4140)", () => {
+      // Started from dc751e3, two questions; meanwhile the PR's head moved to 9594546 from elsewhere.
+      const from = "dc751e3be4aa00000000000000000000000000aa";
+      const head = "9594546aaaa00000000000000000000000000bbb";
+      const asks = { summary: "", asks: [{ question: "With activeStep bound to a record column…", options: [] }, { question: "Keep the default?", options: [] }], findings: [], authorQuestions: [], structured: true };
+      const run = (o = {}) => sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", key: `P|drive|${from}`, drive: { ...drive(3), base: from, head: "f00d" }, result: asks, sessionId: "s", worktree: "/w", ...o });
+      const pr = xPr({ headOid: head, reviewers: [{ login: "anna", reviewState: "pending" }] });
+      const e = xOne(pr, [run()]);
+      assert.deepStrictEqual([e.owner, e.stage.column, e.stage.action, e.stage.stale], ["others", "waiting", null, "headMoved"]);
+      assert.strictEqual(view.stageLine(e.stage, pr), "anna pending", "the card says what the PR waits on");
+      assert.strictEqual(e.stage.note, "Superseded — the PR moved past dc751e3 (now 9594546); this run's result is out of date");
+      assert.strictEqual(choice(e, "Discard").primary, true);
+      assert.ok(!e.choices.some((c) => c.act?.type === "push" || c.act?.type === "publish"), "nothing of the old run goes out from here");
+      // Keyed only, no drive read: the key's head still tells where it started.
+      const keyed = xOne(pr, [run({ drive: undefined })]);
+      assert.strictEqual(keyed.stage.stale, "headMoved");
+      // Still the head it started from: a question of yours, as ever. Abbreviated ids match.
+      assert.strictEqual(xOne(xPr({ headOid: from.slice(0, 10) }), [run()]).stage.action.kind, "decide");
+      // Its own push moved the head: not someone else's commit.
+      const pushed = xOne(xPr({ headOid: "f00d" }), [run({ result: undefined, pushed: true, plan: answers(1) })]);
+      assert.strictEqual(pushed.stage.stale, null);
+      // Pushed from the session you continued in Claude — `pushed` is never set there — all of it or only its first commit.
+      const viaSession = { ...drive(3), base: from, head: head };
+      viaSession.commits[2].oid = head;
+      const continued = xOne(pr, [run({ drive: viaSession })]);
+      assert.deepStrictEqual([continued.stage.stale, continued.stage.action.kind], [null, "decide"], "its new question is still your call");
+      assert.strictEqual(xOne(xPr({ headOid: "c0" }), [run()]).stage.stale, null, "a partial push: the head is the run's first commit");
+      // An empty run head matches no PR head.
+      assert.strictEqual(xOne(pr, [run({ drive: { ...drive(0), base: from, head: "" } })]).stage.stale, "headMoved");
+      // The toast agrees with the Board: no "Your call" for a run the PR moved past.
+      assert.strictEqual(view.agentNoticeTitle("needsYou", run(), head), null);
+      assert.strictEqual(view.agentNoticeTitle("needsYou", run(), from), "Your call on #1");
+      assert.strictEqual(view.agentNoticeTitle("needsYou", run({ drive: viaSession }), head), "Your call on #1");
+      // Unread commits in its worktree stay a move of yours whatever the head.
+      const lw = { worktree: "/w", ahead: 3, dirty: false, reason: "the app restarted since the run" };
+      assert.strictEqual(xOne(pr, [run({ needsRerun: true, localWork: lw })]).stage.action.label, "Unpushed work");
+    });
+
+    test("agent view: a stale run is not counted as ready for you — the chip, the tray and the popover", () => {
+      const ask = { summary: "", asks: [{ question: "q", options: [] }], findings: [], authorQuestions: [], structured: true };
+      const restarted = vItem({ prId: "A", scenario: "drive", state: "needsYou", finishedAt: sAgo(5), drive: drive(0), result: ask, needsRerun: true });
+      const moved = vItem({ prId: "B", scenario: "drive", state: "needsYou", finishedAt: sAgo(5), key: "B|drive|aaa111", drive: { ...drive(1), base: "aaa111" }, result: ask });
+      const fresh = vItem({ prId: "C", scenario: "drive", state: "needsYou", finishedAt: sAgo(5), key: "C|drive|ccc333", drive: { ...drive(1), base: "ccc333" }, result: ask });
+      const heads = { B: "bbb222", C: "ccc333" };
+      assert.deepStrictEqual(view.readyItems([restarted, moved, fresh], heads).map((i) => i.prId), ["C"]);
+      assert.deepStrictEqual(view.readyItems([restarted, moved, fresh]).map((i) => i.prId).sort(), ["B", "C"], "without heads only the restart is known");
+      assert.strictEqual(view.agentSummary({ items: [restarted, moved, fresh], running: [], heads, paused: false, quietUntil: null, heldUntil: null, perDay: 0, runsToday: 0 }).readyForYou, 1);
+      assert.strictEqual(view.resultAction(moved, "mine", "bbb222"), null);
+      assert.strictEqual(view.resultAction(moved, "mine", "aaa111").kind, "decide");
+    });
+
+    await atest("agent state: heads carries each PR's head from the snapshot — what the chip, the tray and the popover tell a superseded run by", async () => {
+      const f = agentFixture({ enabled: false, script: () => {}, pr: { ...reviewPr(), headOid: "h1" } });
+      try {
+        f.snapshot.pullRequests.push({ ...reviewPr({ id: "PR_X" }), headOid: null });
+        const s = f.agent.getState();
+        assert.deepStrictEqual(s.heads, { PR_R: "h1" }, "a PR without a known head is left out");
+        const ask = { summary: "", asks: [{ question: "q", options: [] }], findings: [], authorQuestions: [], structured: true };
+        const moved = vItem({ prId: "PR_R", scenario: "drive", state: "needsYou", finishedAt: sAgo(5), key: "PR_R|drive|old1", drive: { ...drive(1), base: "old1" }, result: ask });
+        assert.strictEqual(view.agentSummary({ ...s, items: [moved] }).readyForYou, 0, "started from a commit the PR moved past");
+        assert.strictEqual(view.agentSummary({ ...s, items: [moved], heads: { PR_R: "old1" } }).readyForYou, 1, "the same run on its own head");
+      } finally {
+        f.agent.stop();
+      }
     });
 
     test("agent board words: commits your session left that the app couldn't read — named with their folder, never \"nothing to push\", no Send", () => {
@@ -11252,6 +11339,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const line = (pr, items) => view.stageLine(stage(pr, items), pr);
       const esc = { ...plan("REQUEST_CHANGES", 1), escalations: [{ replyTo: 9, body: "b" }] };
       assert.strictEqual(line(rPr(), [sIt({ state: "needsYou", plan: esc })]), "Request changes · 1 comment · 1 reply · 1 pushed back");
+      const held = { ...plan("APPROVE", 0), held: [{ kind: "reply", replyTo: 3, author: "colleague", url: null, body: "b" }] };
+      assert.strictEqual(line(rPr(), [sIt({ state: "needsYou", plan: held })]), "Approve · 1 comment · 1 held back");
       assert.strictEqual(line(sPr(), [sIt({ scenario: "drive", reasons: ["self"], state: "needsYou", drive: drive(2) })]), "Self-review: 2 fixes ready to push");
       assert.strictEqual(
         line(sPr(), [sIt({ scenario: "drive", reasons: ["comments"], state: "needsYou", drive: drive(1), plan: plan("COMMENT", 2) })]),
@@ -12319,6 +12408,232 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(plugins.mountUserSkills("/nope", owned, mount, skills), { prompt: "/nope", pluginDirs: [] });
     });
 
+    await atest("agent publish: a review's reply in a colleague's thread is held back when the run ends, and Approve posts the rest", async () => {
+      const posted = [];
+      const authors = { 3: "colleague", 4: "me" };
+      const f = agentFixture({
+        script: (c) => {
+          const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+          const runDir = path.dirname(outDir);
+          const record = (...a) => {
+            const r = spawnSync(process.execPath, [captureJs, runDir, ...a], { encoding: "utf8" });
+            if (r.status !== 0) throw new Error(r.stderr);
+          };
+          nfsA.writeFileSync(path.join(outDir, "review.json"), JSON.stringify({ event: "APPROVE", body: "Looks good", comments: [] }));
+          record("review", "a/b", "7", path.join(outDir, "review.json"));
+          nfsA.writeFileSync(path.join(outDir, "r3.txt"), "Follow-up on your question");
+          record("reply", "a/b", "7", "3", path.join(outDir, "r3.txt"));
+          nfsA.writeFileSync(path.join(outDir, "r4.txt"), "Fixed, thanks");
+          record("reply", "a/b", "7", "4", path.join(outDir, "r4.txt"));
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review." });
+          setImmediate(() => c.emit("exit", 0));
+        },
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => {
+          const m = /^repos\/a\/b\/pulls\/comments\/(\d+)$/.exec(args[1]);
+          if (m && !opts?.input) {
+            return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", html_url: `https://github.com/a/b/pull/7#discussion_r${m[1]}`, user: { login: authors[m[1]] } }), stderr: "" };
+          }
+          posted.push(args[1]);
+          return { code: 0, stdout: "{}", stderr: "" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.headline, "Would post: approve, 1 reply — 1 held back for you");
+        assert.deepStrictEqual(item.plan.replies.map((r) => r.replyTo), [4]);
+        assert.deepStrictEqual(item.plan.held.map((h) => [h.kind, h.replyTo, h.author, h.body]), [["reply", 3, "colleague", "Follow-up on your question"]]);
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/4/replies"], "the approve goes out; the colleague's thread gets nothing");
+        // What went out, and apart from it what didn't — in the headline and in the published record.
+        const done = only(f)[0];
+        assert.strictEqual(done.headline, "Published: approve, 1 reply — 1 held back for you");
+        assert.strictEqual(readLog(f).find((l) => l.kind === "run" && l.event === "published").detail, "approve, 1 reply — 1 held back for you");
+        assert.strictEqual(done.plan.held.length, 1, "the done card still shows it, to answer yourself");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent publish: a review's reply in the middle of a thread you opened is not held back, and Approve posts it to the thread's first comment", async () => {
+      const posted = [];
+      // 4 opens your thread, 5 is a colleague's answer in it; 6 is their answer in their own thread 3.
+      const comments = { 3: { login: "colleague" }, 4: { login: "me" }, 5: { login: "colleague", root: 4 }, 6: { login: "colleague", root: 3 } };
+      const f = agentFixture({
+        script: (c) => {
+          const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+          const runDir = path.dirname(outDir);
+          const record = (...a) => {
+            const r = spawnSync(process.execPath, [captureJs, runDir, ...a], { encoding: "utf8" });
+            if (r.status !== 0) throw new Error(r.stderr);
+          };
+          nfsA.writeFileSync(path.join(outDir, "review.json"), JSON.stringify({ event: "APPROVE", body: "Looks good", comments: [] }));
+          record("review", "a/b", "7", path.join(outDir, "review.json"));
+          nfsA.writeFileSync(path.join(outDir, "r5.txt"), "Fixed, thanks");
+          record("reply", "a/b", "7", "5", path.join(outDir, "r5.txt"));
+          nfsA.writeFileSync(path.join(outDir, "r6.txt"), "Agreed");
+          record("reply", "a/b", "7", "6", path.join(outDir, "r6.txt"));
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review." });
+          setImmediate(() => c.emit("exit", 0));
+        },
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => {
+          const m = /^repos\/a\/b\/pulls\/comments\/(\d+)$/.exec(args[1]);
+          if (m && !opts?.input) {
+            const c = comments[m[1]];
+            const body = { pull_request_url: "https://api.github.com/repos/a/b/pulls/7", html_url: `https://github.com/a/b/pull/7#discussion_r${m[1]}`, user: { login: c.login } };
+            if (c.root) body.in_reply_to_id = c.root;
+            return { code: 0, stdout: JSON.stringify(body), stderr: "" };
+          }
+          posted.push(args[1]);
+          return { code: 0, stdout: "{}", stderr: "" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "needsYou"));
+        const item = only(f)[0];
+        assert.strictEqual(item.headline, "Would post: approve, 1 reply — 1 held back for you");
+        assert.deepStrictEqual(item.plan.replies.map((r) => r.replyTo), [5], "the card names the comment the session answered");
+        assert.deepStrictEqual(item.plan.held.map((h) => [h.replyTo, h.author]), [[6, "colleague"]], "the colleague's thread, named after whoever opened it");
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: item.runId }), { ok: true });
+        assert.deepStrictEqual(posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/4/replies"], "the reply lands in your thread, through its first comment");
+        assert.strictEqual(only(f)[0].headline, "Published: approve, 1 reply — 1 held back for you");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent publish: in On a held write, or a check that could not run, keeps the review waiting for you; with none held it goes out by itself", async () => {
+      // One On review that approves and replies to comments 3 and 4; `authors` says who opened each
+      // (null: the comments can't be read).
+      const onReview = (authors) => {
+        const posted = [];
+        const f = agentFixture({
+          agent: { scenarios: { review: { mode: "on" } } },
+          script: (c) => {
+            const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+            const runDir = path.dirname(outDir);
+            const record = (...a) => {
+              const r = spawnSync(process.execPath, [captureJs, runDir, ...a], { encoding: "utf8" });
+              if (r.status !== 0) throw new Error(r.stderr);
+            };
+            nfsA.writeFileSync(path.join(outDir, "review.json"), JSON.stringify({ event: "APPROVE", body: "Looks good", comments: [] }));
+            record("review", "a/b", "7", path.join(outDir, "review.json"));
+            for (const id of ["3", "4"]) {
+              nfsA.writeFileSync(path.join(outDir, `r${id}.txt`), `Answer ${id}`);
+              record("reply", "a/b", "7", id, path.join(outDir, `r${id}.txt`));
+            }
+            emit(c, { type: "system", subtype: "init", session_id: "s" });
+            emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review." });
+            setImmediate(() => c.emit("exit", 0));
+          },
+          captureScript: captureJs,
+          fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+          gh: async (args, opts) => {
+            const m = /^repos\/a\/b\/pulls\/comments\/(\d+)$/.exec(args[1]);
+            if (m && !opts?.input) {
+              if (!authors) return { code: 1, stdout: "", stderr: "HTTP 502" };
+              return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", html_url: `https://github.com/a/b/pull/7#discussion_r${m[1]}`, user: { login: authors[m[1]] } }), stderr: "" };
+            }
+            posted.push(args[1]);
+            return { code: 0, stdout: "{}", stderr: "" };
+          },
+        });
+        return { f, posted };
+      };
+      const held = onReview({ 3: "colleague", 4: "me" });
+      try {
+        held.f.agent.onSnapshot(held.f.snapshot);
+        await until(() => readLog(held.f).some((l) => l.kind === "run" && l.event === "needsYou"));
+        const end = readLog(held.f).find((l) => l.kind === "run" && l.event === "needsYou");
+        assert.strictEqual(end.data.publishNow, undefined, "On does not publish past a held write");
+        const item = only(held.f)[0];
+        assert.deepStrictEqual([item.state, item.plan.held.length, item.plan.held[0].replyTo], ["needsYou", 1, 3]);
+        assert.deepStrictEqual(held.posted, [], "nothing went out under your name");
+      } finally {
+        held.f.agent.stop();
+      }
+      // The check couldn't run: not "nothing held" — On waits rather than publish into the refusal.
+      const unread = onReview(null);
+      try {
+        unread.f.agent.onSnapshot(unread.f.snapshot);
+        await until(() => readLog(unread.f).some((l) => l.kind === "run" && l.event === "needsYou"));
+        const end = readLog(unread.f).find((l) => l.kind === "run" && l.event === "needsYou");
+        assert.strictEqual(end.data.publishNow, undefined);
+        assert.match(end.data.heldUnchecked, /couldn't check comment 3: HTTP 502/, "the log tells it from nothing held");
+        const item = only(unread.f)[0];
+        assert.strictEqual(item.headline, "Would post: approve, 2 replies — waits for you: couldn't check whose threads its replies land in");
+        assert.deepStrictEqual(unread.posted, []);
+      } finally {
+        unread.f.agent.stop();
+      }
+      // The control: nothing held, and On posts it all right after the run.
+      const clear = onReview({ 3: "me", 4: "me" });
+      try {
+        clear.f.agent.onSnapshot(clear.f.snapshot);
+        await until(() => only(clear.f).some((i) => i.state === "done"));
+        assert.strictEqual(only(clear.f)[0].published, true);
+        assert.deepStrictEqual(clear.posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/3/replies", "repos/a/b/pulls/7/comments/4/replies"]);
+      } finally {
+        clear.f.agent.stop();
+      }
+    });
+
+    await atest("agent publish: a refused Publish says whether anything went out — 'nothing was posted' or 'posted N of M, then stopped'", async () => {
+      // One review run that replies to comment `replyTo`; `ghFor` answers the reads and the writes.
+      const publishWith = async (replyTo, ghFor) => {
+        const posted = [];
+        const f = agentFixture({
+          script: (c) => {
+            const outDir = c.args[c.args.indexOf("--add-dir") + 1];
+            const runDir = path.dirname(outDir);
+            const record = (...a) => {
+              const r = spawnSync(process.execPath, [captureJs, runDir, ...a], { encoding: "utf8" });
+              if (r.status !== 0) throw new Error(r.stderr);
+            };
+            nfsA.writeFileSync(path.join(outDir, "review.json"), JSON.stringify({ event: "APPROVE", body: "Looks good", comments: [] }));
+            record("review", "a/b", "7", path.join(outDir, "review.json"));
+            nfsA.writeFileSync(path.join(outDir, "r.txt"), "Fixed, thanks");
+            record("reply", "a/b", "7", String(replyTo), path.join(outDir, "r.txt"));
+            emit(c, { type: "system", subtype: "init", session_id: "s" });
+            emit(c, { type: "result", subtype: "success", is_error: false, result: "Prepared the review." });
+            setImmediate(() => c.emit("exit", 0));
+          },
+          captureScript: captureJs,
+          fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+          gh: async (args, opts) => {
+            if (opts?.input) posted.push(args[1]);
+            return ghFor(args, opts);
+          },
+        });
+        try {
+          f.agent.onSnapshot(f.snapshot);
+          await until(() => only(f).some((i) => i.state === "needsYou"));
+          return { out: await f.agent.act({ type: "publish", runId: only(f)[0].runId }), posted };
+        } finally {
+          f.agent.stop();
+        }
+      };
+      const comment = (prNumber) => ({ code: 0, stdout: JSON.stringify({ pull_request_url: `https://api.github.com/repos/a/b/pulls/${prNumber}`, html_url: "u", user: { login: "me" } }), stderr: "" });
+      // A reply to a comment on another PR: refused before any write.
+      const before = await publishWith(9, async (args, opts) => (opts?.input ? { code: 0, stdout: "{}", stderr: "" } : comment(8)));
+      assert.strictEqual(before.out.ok, false);
+      assert.match(before.out.error, /^nothing was posted: comment 9 is not on a\/b#7/);
+      assert.deepStrictEqual(before.posted, []);
+      // The review lands, the reply fails: it says how far it got.
+      const midway = await publishWith(4, async (args, opts) => (!opts?.input ? comment(7) : /replies$/.test(args[1]) ? { code: 1, stdout: "", stderr: "HTTP 502" } : { code: 0, stdout: "{}", stderr: "" }));
+      assert.strictEqual(midway.out.ok, false);
+      assert.match(midway.out.error, /^posted 1 of 2, then stopped: reply to comment 4: HTTP 502/);
+      assert.deepStrictEqual(midway.posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/4/replies"]);
+    });
+
     await atest("agent publish: a shadow review's writes are captured, then posted on your Publish — signed, once, at the head it saw", async () => {
       const posted = [];
       const notices = [];
@@ -12516,13 +12831,237 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "colleague" } }), stderr: "" };
       };
       const url = "https://github.com/a/b/pull/7";
-      assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /not yours/);
-      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /colleague's thread/);
+      assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /resolving colleague's thread/);
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, gh), /a reply in colleague's thread/);
       assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 3, body: "x" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), null, "a drive answers a reviewer in theirs");
-      const myReplyInTheirs = async () => ({ code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "me" }, in_reply_to_id: 1 }), stderr: "" });
-      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 4, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, myReplyInTheirs), /not the start of a thread/, "your reply in a colleague's thread is still theirs");
+      const myReplyInTheirs = async (args) =>
+        /comments\/1$/.test(args[1])
+          ? { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "colleague" } }), stderr: "" }
+          : { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", user: { login: "me" }, in_reply_to_id: 1 }), stderr: "" };
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 4, body: "x" }], url, "a/b", 7, { viewer: "me", mine: true }, myReplyInTheirs), /a reply in colleague's thread/, "your reply in a colleague's thread is still theirs");
       assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), /doesn't resolve/);
       assert.match(await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_c" }], url, "a/b", 7, { viewer: null, mine: true }, gh), /login on the host is unknown/);
+    });
+
+    await atest("publish: target checks run a few at a time, in order, so an unreachable host costs one timeout, not one per step", async () => {
+      const url = "https://github.com/a/b/pull/7";
+      let inFlight = 0;
+      let most = 0;
+      const slowDown = async (args) => {
+        inFlight += 1;
+        most = Math.max(most, inFlight);
+        await new Promise((r) => setTimeout(r, 20));
+        inFlight -= 1;
+        const id = /comments\/(\d+)$/.exec(args[1])[1];
+        return { code: 1, stdout: "", stderr: `down ${id}` };
+      };
+      const steps = [1, 2, 3, 4, 5, 6].map((id) => ({ kind: "reply", replyTo: id, body: "x" }));
+      const refusal = await publishMod.checkPlanTargets(steps, url, "a/b", 7, { viewer: "me", mine: true }, slowDown);
+      assert.ok(most > 1 && most <= 4, `at most 4 at once, more than 1 (saw ${most})`);
+      assert.match(refusal, /^couldn't check comment 1: .*; couldn't check comment 2: .*couldn't check comment 6: /, "every target named, in the plan's order");
+      most = 0;
+      const check = await publishMod.heldWrites(steps, url, "a/b", 7, "me", slowDown);
+      assert.ok(most > 1 && most <= 4, `the run-end check too (saw ${most})`);
+      assert.match(check.unchecked, /comment 1: .*comment 6: /);
+    });
+
+    await atest("publish: a review's writes in colleagues' threads are held back, named all at once, and skipped by Publish", async () => {
+      const url = "https://github.com/a/b/pull/7";
+      const authors = { 3: "colleague", 4: "me", 5: "other" };
+      const gh = async (args) => {
+        const id = Number(/comments\/(\d+)$/.exec(args[1])[1]);
+        return { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/7", html_url: `${url}#discussion_r${id}`, user: { login: authors[id] } }), stderr: "" };
+      };
+      const steps = [
+        { kind: "review", event: "APPROVE", body: "b", comments: [] },
+        { kind: "reply", replyTo: 3, body: "follow-up" },
+        { kind: "reply", replyTo: 4, body: "fixed" },
+        { kind: "reply", replyTo: 5, body: "also" },
+      ];
+      const check = await publishMod.heldWrites(steps, url, "a/b", 7, "me", gh);
+      assert.strictEqual(check.unchecked, null);
+      const held = check.held;
+      assert.deepStrictEqual(held.map((h) => [h.replyTo, h.author, h.url]), [[3, "colleague", `${url}#discussion_r3`], [5, "other", `${url}#discussion_r5`]]);
+      assert.strictEqual(held[0].body, "follow-up", "the card shows what it would have said");
+      // Publish leaves them out and checks only what goes out.
+      const ctx = { repo: "a/b", number: 7, signature: "s", holdApprove: false, held };
+      assert.deepStrictEqual(pub.planRequests(steps, ctx).map((r) => r.endpoint), ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/4/replies"]);
+      assert.strictEqual(await publishMod.checkPlanTargets(pub.postedSteps(steps, ctx), url, "a/b", 7, { viewer: "me", mine: true }, gh), null);
+      // Unheld (a plan edited since), every one is named at once, with its link and what to do.
+      const all = await publishMod.checkPlanTargets(steps, url, "a/b", 7, { viewer: "me", mine: true }, gh);
+      assert.match(all, /a reply in colleague's thread \(https:\/\/github\.com\/a\/b\/pull\/7#discussion_r3\); a reply in other's thread/);
+      assert.match(all, /Edit in Claude to drop them/);
+      // One wording for the card (Node-free, shared) and the refusal.
+      assert.strictEqual(publishMod.describeHeld(held[0]), `${pub.heldLabel(held[0])} (${url}#discussion_r3)`);
+      assert.strictEqual(pub.heldLabel({ kind: "resolve", author: null }), "resolving a thread you didn't open");
+      // Mixed: a comment on another PR is refused and a colleague's thread named, in one answer.
+      const elsewhereGh = async (args) => (/comments\/8$/.test(args[1]) ? { code: 0, stdout: JSON.stringify({ pull_request_url: "https://api.github.com/repos/a/b/pulls/8" }), stderr: "" } : gh(args));
+      const mixed = await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 8, body: "x" }, steps[1]], url, "a/b", 7, { viewer: "me", mine: true }, elsewhereGh);
+      assert.match(mixed, /^comment 8 is not on a\/b#7; a reply in colleague's thread \(.*discussion_r3\) — a review answers and resolves only in threads you opened/);
+      // The same problem twice is said once.
+      const twice = await publishMod.checkPlanTargets([{ kind: "resolve", threadId: "PRRT_a" }, { kind: "resolve", threadId: "PRRT_b" }], url, "a/b", 7, { viewer: null, mine: true }, gh);
+      assert.strictEqual(twice, "couldn't tell whose threads these are — your login on the host is unknown");
+      // Unreadable: nothing held — left to the publish check — and said, so On doesn't send it by itself.
+      const unread = await publishMod.heldWrites(steps, url, "a/b", 7, "me", async () => ({ code: 1, stdout: "", stderr: "boom" }));
+      assert.deepStrictEqual(unread.held, []);
+      assert.match(unread.unchecked, /^couldn't check comment 3: /);
+      // Held writes are a clause of their own, never one of the parts that went out.
+      assert.strictEqual(pub.describePlan({ ...pub.summarizePlan(steps.slice(0, 1)), held }), "approve — 2 held back for you");
+      // The card's summary leaves out what postedSteps leaves out, and clips what it lists.
+      const sum = pub.summarizePlan(steps, [...held.slice(0, 1), { ...held[1], body: "x".repeat(5_000) }]);
+      assert.strictEqual(pub.describePlan(sum), "approve, 1 reply — 2 held back for you");
+      assert.deepStrictEqual(sum.replies.map((r) => r.replyTo), pub.postedSteps(steps, ctx).filter((s) => s.kind === "reply").map((s) => s.replyTo));
+      assert.strictEqual(sum.held[1].body.length, 4_001);
+      // A resolve that resolving-off would never send is not held back either.
+      const resolveGh = async () => ({ code: 0, stdout: JSON.stringify({ data: { node: { pullRequest: { number: 7, repository: { nameWithOwner: "a/b" } }, comments: { nodes: [{ url: "u", author: { login: "colleague" } }] } } } }), stderr: "" });
+      const res = [{ kind: "resolve", threadId: "PRRT_c" }];
+      assert.strictEqual((await publishMod.heldWrites(res, url, "a/b", 7, "me", resolveGh)).held.length, 1);
+      assert.deepStrictEqual((await publishMod.heldWrites(res, url, "a/b", 7, "me", resolveGh, false)).held, []);
+      // A held resolve: only that resolve drops out of what goes out, and of the card's count.
+      const withResolves = [...steps, { kind: "resolve", threadId: "PRRT_c" }, { kind: "resolve", threadId: "PRRT_mine" }];
+      const heldResolve = { kind: "resolve", threadId: "PRRT_c", author: "colleague", url: null };
+      const rctx = { ...ctx, held: [...held, heldResolve] };
+      assert.deepStrictEqual(pub.postedSteps(withResolves, rctx).filter((s) => s.kind === "resolve").map((s) => s.threadId), ["PRRT_mine"]);
+      assert.deepStrictEqual(pub.planRequests(withResolves, rctx).filter((r) => r.endpoint === "graphql").map((r) => r.body.variables.id), ["PRRT_mine"]);
+      const rsum = pub.summarizePlan(withResolves, rctx.held);
+      assert.deepStrictEqual([rsum.resolves, rsum.held.map((h) => h.kind)], [1, ["reply", "reply", "resolve"]]);
+      assert.strictEqual(pub.summarizePlan(withResolves).resolves, 2, "nothing held: both counted");
+      // Everything held back: Publish posts nothing and says so, rather than marking an empty plan published.
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-held-"));
+      nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), `${JSON.stringify(steps[1])}
+`);
+      const posts = [];
+      const none = await publishMod.publishPlan(runDir, url, { ...ctx, held: held.slice(0, 1) }, { viewer: "me", mine: true }, async (a) => (posts.push(a), gh(a)));
+      assert.deepStrictEqual([none.ok, none.posted, posts.length], [false, 0, 0]);
+      assert.match(none.error, /nothing is left to post/);
+    });
+
+    await atest("publish: a review's reply in the middle of a thread you opened goes to the thread's first comment; in a colleague's it is held back", async () => {
+      const url = "https://github.com/a/b/pull/7";
+      // 10 opens your thread and 11 answers it; 20 opens a colleague's and 21 answers it;
+      // 30 opens yours on another PR and 31 (on this one) names it as its root.
+      const comments = {
+        10: { login: "Me" },
+        11: { login: "colleague", root: 10 },
+        20: { login: "colleague" },
+        21: { login: "me", root: 20 },
+        30: { login: "me", pr: 8 },
+        31: { login: "colleague", root: 30 },
+      };
+      const reads = [];
+      const gh = async (args) => {
+        const id = Number(/comments\/(\d+)$/.exec(args[1])[1]);
+        reads.push(id);
+        const c = comments[id];
+        if (!c) return { code: 1, stdout: "", stderr: "Not Found" };
+        const body = { pull_request_url: `https://api.github.com/repos/a/b/pulls/${c.pr ?? 7}`, html_url: `${url}#discussion_r${id}`, user: { login: c.login } };
+        if (c.root) body.in_reply_to_id = c.root;
+        return { code: 0, stdout: JSON.stringify(body), stderr: "" };
+      };
+      const mine = { viewer: "me", mine: true };
+      // Your thread: fine, and the check reads the root, not only the comment the session named —
+      // once, however many replies sit in that thread.
+      comments[14] = { login: "colleague", root: 10 };
+      assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 11, body: "x" }, { kind: "reply", replyTo: 14, body: "y" }], url, "a/b", 7, mine, gh), null);
+      assert.deepStrictEqual([...reads].sort((a, b) => a - b), [10, 11, 14]);
+      // A colleague's thread: held, named after whoever opened it — your own reply in it doesn't make it yours.
+      const check = await publishMod.heldWrites([{ kind: "reply", replyTo: 11, body: "ok" }, { kind: "reply", replyTo: 21, body: "x" }], url, "a/b", 7, "me", gh);
+      assert.deepStrictEqual(check, { held: [{ kind: "reply", replyTo: 21, body: "x", author: "colleague", url: `${url}#discussion_r21` }], unchecked: null });
+      // A root on another PR, or one that can't be read, refuses the plan with the comment the session named.
+      assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 31, body: "x" }], url, "a/b", 7, mine, gh), "comment 30 (the thread of comment 31) is not on a/b#7");
+      comments[12] = { login: "colleague", root: 99 };
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 12, body: "x" }], url, "a/b", 7, mine, gh), /^couldn't check comment 99 \(the thread of comment 12\): /);
+      // At run end the same is said, not held: On then waits for you instead of sending it by itself.
+      for (const replyTo of [31, 12]) {
+        const step = [{ kind: "reply", replyTo, body: "x" }];
+        assert.deepStrictEqual(await publishMod.heldWrites(step, url, "a/b", 7, "me", gh), { held: [], unchecked: await publishMod.checkPlanTargets(step, url, "a/b", 7, mine, gh) });
+      }
+      // A malformed root id: held as a reply whose thread is unknown, and nothing but the comment itself is read.
+      comments[15] = { login: "colleague", root: "abc" };
+      reads.length = 0;
+      assert.deepStrictEqual((await publishMod.heldWrites([{ kind: "reply", replyTo: 15, body: "x" }], url, "a/b", 7, "me", gh)).held.map((h) => [h.replyTo, h.author]), [[15, null]]);
+      assert.deepStrictEqual(reads, [15]);
+      assert.match(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 15, body: "x" }], url, "a/b", 7, mine, gh), /a reply to a comment that doesn't open its thread/);
+      // A root that is itself a reply (GitHub said something unexpected): held, as a reply whose thread is unknown.
+      comments[13] = { login: "me", root: 11 };
+      assert.deepStrictEqual((await publishMod.heldWrites([{ kind: "reply", replyTo: 13, body: "x" }], url, "a/b", 7, "me", gh)).held.map((h) => [h.replyTo, h.author]), [[13, null]]);
+      // A drive run reads no root: it answers reviewers in their threads, as before.
+      reads.length = 0;
+      assert.strictEqual(await publishMod.checkPlanTargets([{ kind: "reply", replyTo: 21, body: "x" }], url, "a/b", 7, { viewer: "me", mine: false }, gh), null);
+      assert.deepStrictEqual(reads, [21]);
+      // planRequests posts to the root given; with none given, to the comment named.
+      const ctx = { repo: "a/b", number: 7, signature: "s", holdApprove: false };
+      const steps = [{ kind: "reply", replyTo: 11, body: "x" }, { kind: "reply", replyTo: 10, body: "y" }];
+      assert.deepStrictEqual(pub.planRequests(steps, ctx).map((r) => r.endpoint), ["repos/a/b/pulls/7/comments/11/replies", "repos/a/b/pulls/7/comments/10/replies"]);
+      assert.deepStrictEqual(pub.planRequests(steps, { ...ctx, replyRoots: new Map([[11, 10]]) }).map((r) => [r.label, r.endpoint]), [
+        ["reply to comment 11", "repos/a/b/pulls/7/comments/10/replies"],
+        ["reply to comment 10", "repos/a/b/pulls/7/comments/10/replies"],
+      ]);
+      // publishPlan: the reply goes to the root, the rest unchanged, and the whole plan is posted.
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-root-"));
+      const plan = [{ kind: "review", event: "APPROVE", body: "b", comments: [] }, ...steps];
+      nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), plan.map((s) => JSON.stringify(s)).join("\n") + "\n");
+      const posted = [];
+      const out = await publishMod.publishPlan(runDir, url, ctx, mine, async (a, o) => (o?.input ? (posted.push(a[1]), { code: 0, stdout: "{}", stderr: "" }) : gh(a)));
+      assert.deepStrictEqual(out, { ok: true, posted: 3, total: 3 });
+      assert.deepStrictEqual(posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/10/replies", "repos/a/b/pulls/7/comments/10/replies"]);
+      // A resumed publish (the second reply failed) posts only what is left, still to the root.
+      const resumeDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-root-"));
+      nfsA.writeFileSync(path.join(resumeDir, "plan.jsonl"), plan.map((s) => JSON.stringify(s)).join("\n") + "\n");
+      const tries = [];
+      let fail = true;
+      const post = async (a, o) => {
+        if (!o?.input) return gh(a);
+        tries.push(a[1]);
+        if (fail && tries.length === 2) return { code: 1, stdout: "", stderr: "boom" };
+        return { code: 0, stdout: "{}", stderr: "" };
+      };
+      assert.deepStrictEqual(await publishMod.publishPlan(resumeDir, url, ctx, mine, post), { ok: false, error: "reply to comment 11: boom", posted: 1, total: 3 });
+      fail = false;
+      tries.length = 0;
+      assert.deepStrictEqual(await publishMod.publishPlan(resumeDir, url, ctx, mine, post), { ok: true, posted: 3, total: 3 });
+      assert.deepStrictEqual(tries, ["repos/a/b/pulls/7/comments/10/replies", "repos/a/b/pulls/7/comments/10/replies"]);
+    });
+
+    await atest("publish: a thread the review handed back to you gets no reply of the review's — matched by thread, not by the comment it escalated", async () => {
+      const url = "https://github.com/a/b/pull/7";
+      // You opened thread 4; the author pushed back in 5 and again in 6.
+      const comments = { 4: { login: "me" }, 5: { login: "author", root: 4 }, 6: { login: "author", root: 4 }, 8: { login: "me" } };
+      const gh = async (args) => {
+        const id = Number(/comments\/(\d+)$/.exec(args[1])[1]);
+        const c = comments[id];
+        const body = { pull_request_url: "https://api.github.com/repos/a/b/pulls/7", html_url: `${url}#discussion_r${id}`, user: { login: c.login } };
+        if (c.root) body.in_reply_to_id = c.root;
+        return { code: 0, stdout: JSON.stringify(body), stderr: "" };
+      };
+      const mine = { viewer: "me", mine: true };
+      // The session escalates 5 and still answers 6 and 4 (thread 4), and 8 (a thread of yours with no dispute).
+      const steps = [
+        { kind: "review", event: "APPROVE", body: "b", comments: [] },
+        { kind: "escalate", replyTo: 5, body: "they disagree" },
+        { kind: "reply", replyTo: 6, body: "no, really" },
+        { kind: "reply", replyTo: 4, body: "as I said" },
+        { kind: "reply", replyTo: 8, body: "fixed" },
+      ];
+      const check = await publishMod.heldWrites(steps, url, "a/b", 7, "me", gh);
+      assert.strictEqual(check.unchecked, null);
+      assert.deepStrictEqual(check.held.map((h) => [h.replyTo, h.escalated, h.author]), [[6, true, "me"], [4, true, "me"]]);
+      assert.strictEqual(pub.heldLabel(check.held[0]), "a reply in a thread handed back to you");
+      // Unheld (a plan edited since), the publish check refuses them by name.
+      assert.match(await publishMod.checkPlanTargets(steps, url, "a/b", 7, mine, gh), /^a reply in a thread handed back to you \(.*discussion_r6\); a reply in a thread handed back to you \(.*discussion_r4\) — /);
+      // Held: Approve posts the review and the reply in the undisputed thread, and your "drop" answer
+      // to the comment that was escalated still goes out — to the thread's first comment.
+      const ctx = { repo: "a/b", number: 7, signature: "s", holdApprove: false, held: check.held };
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-esc-"));
+      nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), steps.map((x) => JSON.stringify(x)).join("\n") + "\n");
+      const posted = [];
+      const extra = pub.disputeSteps([{ replyTo: 5 }], { 5: "drop" }, new Map());
+      const out = await publishMod.publishPlan(runDir, url, ctx, mine, async (a, o) => (o?.input ? (posted.push(a[1]), { code: 0, stdout: "{}", stderr: "" }) : gh(a)), undefined, extra);
+      assert.deepStrictEqual(out, { ok: true, posted: 3, total: 3 });
+      assert.deepStrictEqual(posted, ["repos/a/b/pulls/7/reviews", "repos/a/b/pulls/7/comments/8/replies", "repos/a/b/pulls/7/comments/4/replies"]);
+      // An escalated comment that can't be read: said, so On waits for you; nothing is held on a guess.
+      const unread = await publishMod.heldWrites(steps, url, "a/b", 7, "me", async (args) => (/comments\/5$/.test(args[1]) ? { code: 1, stdout: "", stderr: "boom" } : gh(args)));
+      assert.match(unread.unchecked, /^couldn't check comment 5 \(handed back to you\): /);
     });
 
     test("mapPr: the author's latest thread answer, a reviewer's latest open-thread comment, and whether the branch is in a fork", () => {
@@ -13048,6 +13587,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(rules, /review-not-posted/);
         assert.match(rules, /escalate a\/b 7 <replyTo> <file>/);
         assert.match(rules, /don't argue with your colleague/);
+        assert.match(rules, /Reply and resolve only in threads you opened/);
         f.agent.onSnapshot(f.snapshot);
         assert.strictEqual(only(f).length, 1, "the same answer is re-reviewed once");
       } finally {

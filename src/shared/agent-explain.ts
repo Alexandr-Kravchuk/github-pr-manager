@@ -238,10 +238,11 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
     owner = "you";
     const plan = read.plan;
     /**
-     * A drive's result from before the app restarted (`needsRerun`): its push
-     * and its answer would only be refused, so the card offers what still
-     * works — running it again — and shows its question as what the new run
-     * will ask, not as buttons.
+     * A drive's result from before the app restarted (`needsRerun`) that is
+     * still a card of yours: commits in its worktree the app couldn't read
+     * (a push card), or replies with a worktree it couldn't read again (a
+     * send card). A restarted run with questions or plain commits is stale
+     * (`staleRun`) and never reaches here.
      */
     const rerunCard = (it: AgentItem) => {
       const lw = it.localWork && !it.localWork.kept && it.localWork.ahead !== 0 ? it.localWork : null;
@@ -306,6 +307,19 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
             : `The agent drafted a review that ${plan?.event === "REQUEST_CHANGES" ? "requests changes" : "comments"}: ${plural(n, "inline comment")}.`;
         }
         if (pushedBack > 0) now += ` The author pushed back on ${plural(pushedBack, "comment")} — your call below.`;
+        const held = plan?.held ?? [];
+        // A reply with no author answers a comment mid-thread whose thread GitHub didn't name — maybe yours, so not "a colleague's".
+        const handedBack = held.filter((h) => h.kind === "reply" && h.escalated).length;
+        const midThread = held.filter((h) => h.kind === "reply" && !h.author && !h.escalated).length;
+        const theirs = held.length - midThread - handedBack;
+        const where = [
+          theirs > 0 && (theirs === 1 ? "in a colleague's thread" : `in ${theirs} colleagues' threads`),
+          handedBack > 0 && (handedBack === 1 ? "in a thread it handed back to you" : `in ${handedBack} threads it handed back to you`),
+          midThread > 0 && (midThread === 1 ? "to a comment whose thread GitHub didn't name" : `to ${midThread} comments whose threads GitHub didn't name`),
+        ].filter(Boolean);
+        if (held.length > 0) {
+          now += ` It also wrote ${where.join(" and ")}; a review answers only in threads you opened, and not where the author pushed back, so ${held.length === 1 ? "that stays" : "those stay"} out — shown below.`;
+        }
         ask = approve ? "Read the summary, then approve — or discard it." : pushedBack > 0 ? "Decide on the pushed-back comments, check the rest, then send." : "Check what goes out, then send — or edit or discard it.";
         choices = [
           {
@@ -367,7 +381,8 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         break;
       }
       case "push": {
-        if (item?.needsRerun) {
+        // After a restart only commits the app couldn't read keep a push card (a stale run is no move of yours).
+        if (item?.needsRerun && item.localWork) {
           rerunCard(item);
           break;
         }
@@ -386,10 +401,6 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         break;
       }
       case "decide": {
-        if (item?.scenario === "drive" && item.needsRerun) {
-          rerunCard(item);
-          break;
-        }
         const q = read.asks[0];
         now = `The agent needs your decision${read.asks.length > 1 ? ` on ${read.asks.length} questions` : q ? `: ${q.question}` : ""}.`;
         ask = "Answer below — only you can decide this.";
@@ -455,6 +466,23 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         choices = [{ ...open(), primary: true }];
         next = "";
     }
+  }
+
+  // A run whose result can't be acted on any more: GitHub placed the card; the run is told as out of date, with Discard.
+  if (stage.stale && item) {
+    now = `${now ? `${now.replace(/\.$/, "")}. ` : ""}The agent's earlier run is out of date: ${lower(stage.note ?? "")}.`;
+    const first = !choices.some((c) => c.primary);
+    choices = [
+      ...choices,
+      {
+        label: "Discard",
+        primary: first,
+        does: "Closes the out-of-date run. Its worktree stays while it holds commits that are not on the PR, and a ref keeps them.",
+        act: { type: "skip", runId },
+      },
+      ...(item.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the old session in your terminal — anything from it is then yours to push or post.", act: { type: "continue", runId } } as BoardChoice] : []),
+    ];
+    if (first && !ask) ask = "Nothing to do on its result — discard it.";
   }
 
   return {

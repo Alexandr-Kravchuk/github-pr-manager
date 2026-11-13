@@ -1139,6 +1139,11 @@ export interface AgentState {
   running: AgentRunState[];
   /** Why each PR on the dashboard is idle, by PR id. */
   idle: Record<string, string>;
+  /**
+   * Each PR's head commit now, by PR id — what tells a result the PR moved
+   * past (`staleRun`) where no PR is at hand: the chip, the tray, the popover.
+   */
+  heads?: Record<string, string>;
   runsToday: number;
   perDay: number;
   parallel: number;

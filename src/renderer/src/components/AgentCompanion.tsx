@@ -257,7 +257,7 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
   const sum = agentSummary(state);
   const waiting = sum.readyForYou;
   // The moves ready for you, oldest first — each one click from its card.
-  const waitingItems = readyItems(state.items);
+  const waitingItems = readyItems(state.items, state.heads);
   const go = (runId?: string) => {
     onClose();
     focusItem(runId);
@@ -335,7 +335,7 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
                 className="mt-1 flex w-full items-baseline gap-2 rounded-md px-1 py-0.5 text-left hover:bg-amber-500/10"
               >
                 <span className="shrink-0 font-medium text-fg-secondary">#{it.prNumber}</span>
-                <span className="shrink-0 font-medium text-amber-800 dark:text-amber-300">{resultAction(it, laneOfScenario(it.scenario))?.label}</span>
+                <span className="shrink-0 font-medium text-amber-800 dark:text-amber-300">{resultAction(it, laneOfScenario(it.scenario), state.heads?.[it.prId] ?? null)?.label}</span>
                 <span className="min-w-0 flex-1 truncate text-fg-subtle">{card?.asks[0]?.question ?? card?.summary ?? it.headline}</span>
               </button>
             );

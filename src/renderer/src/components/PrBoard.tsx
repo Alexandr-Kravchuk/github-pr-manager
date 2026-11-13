@@ -3,7 +3,8 @@ import { useContext, useEffect, useState, type FormEvent, type ReactNode } from 
 // Node-free (see AGENTS.md): the Board in plain words, the queue, the summary line.
 import { explainBoard, type BoardChoice, type BoardEntry, type BoardOwner } from "../../../shared/agent-explain";
 import { agentSummary, queueOrder, todayKey } from "../../../shared/agent-view";
-import type { PublishSummary } from "../../../shared/agent-publish";
+// Node-free too: a held write is worded once, for the card and the publish refusal alike.
+import { heldLabel, type HeldWrite, type PublishSummary } from "../../../shared/agent-publish";
 import type { FindingSeverity, RunAsk, RunFinding } from "../../../shared/agent-result";
 import type { AgentAction, AgentItem, AgentState, MergeMethod, PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
@@ -320,6 +321,8 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
     <Row label="Read this">
       <div className="space-y-2">
         {sends && plan.escalations.length > 0 && item && <Disputes item={item} plan={plan} run={run} />}
+        {/* Still yours to answer after the rest went out: kept on the done card too. */}
+        {plan && (sends || item?.published) && (plan.held?.length ?? 0) > 0 && <HeldBack held={plan.held ?? []} />}
         {r.error && <pre className="whitespace-pre-wrap rounded-md bg-red-500/10 p-2 font-mono text-[11px] text-red-800 dark:text-red-200">{r.error}</pre>}
         {r.summary && <p className="whitespace-pre-wrap text-sm leading-snug text-fg-secondary">{r.summary}</p>}
         {r.findings.length > 0 && <FindingsList findings={r.findings} />}
@@ -342,7 +345,7 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
         )}
         {commits && item?.drive && (
           <div>
-            <div className="text-xs font-medium text-fg">{item.localWork && !item.localWork.kept ? "What the app read before — the session's later commits are only in the worktree" : item.needsRerun ? "What it committed — never pushed; the new run makes it again" : "What gets pushed"}</div>
+            <div className="text-xs font-medium text-fg">{item.localWork && !item.localWork.kept ? "What the app read before — the session's later commits are only in the worktree" : "What gets pushed"}</div>
             <DriveView drive={item.drive} />
             {item.plan && item.plan.replies.length > 0 && <PlanView plan={item.plan} />}
           </div>
@@ -627,6 +630,35 @@ function gist(text: string): string {
 }
 
 /**
+ * What the review wanted to write in threads a colleague opened, in a thread
+ * it handed back to you, or to a comment whose thread GitHub didn't name. A
+ * review answers and resolves only in threads you opened, and not where the
+ * author pushed back, so these stay out of what Approve sends; each links to
+ * its thread, where you can answer yourself.
+ */
+function HeldBack({ held }: { held: HeldWrite[] }) {
+  return (
+    <div className="mt-2 rounded-md border border-amber-500/50 bg-amber-500/[0.07] p-2 text-xs">
+      <div className="font-medium text-amber-800 dark:text-amber-300">Not sent — {held.length === 1 ? "this one stays" : "these stay"} with you</div>
+      {held.map((h, i) => (
+        <div key={h.replyTo ?? h.threadId ?? i} className="mt-1.5">
+          <div className="text-fg-subtle">
+            {heldLabel(h).replace(/^./, (c) => c.toUpperCase())}
+            {h.url && (
+              <button type="button" onClick={() => openUrl(h.url!)} className={cn(LINK, "ml-1.5")}>
+                open it ↗
+              </button>
+            )}
+          </div>
+          {h.body && <div className="mt-0.5 whitespace-pre-wrap text-fg-secondary">{h.body}</div>}
+        </div>
+      ))}
+      <div className="mt-1.5 text-[11px] text-fg-faint">A review answers and resolves only in threads you opened. The rest goes out without these; answer there yourself if it is worth saying.</div>
+    </div>
+  );
+}
+
+/**
  * The threads where the author pushed back on your comment: keep it (the
  * thread stays open) or drop it (a short "fair point" and the thread is
  * resolved) — applied when the review is sent, no new session. Undecided
@@ -776,8 +808,6 @@ function YourCall({ item, asks, canAnswer, run }: { item: AgentItem; asks: RunAs
           ? "The same session goes on with your answer and comes back here."
           : item.localWork && !item.localWork.kept
             ? `Answer it in the session (Open in Claude): its work is in ${item.localWork.worktree}.`
-            : item.needsRerun
-            ? "This can't be answered any more — the app restarted since. Run it again: the new run asks this again if it still needs to."
             : "Answer it in the session: the dry run changes nothing by itself."}
       </div>
     </div>
