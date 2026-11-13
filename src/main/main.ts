@@ -40,6 +40,7 @@ import { createAgent, type Agent, type AgentNotice } from "./agent";
 import { findCheckout, launchClaude, launchGroup, resumeClaudeSession } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
+import { devUserDataDir, seedDevUserData } from "./dev-user-data";
 import { clearJiraCaches, deleteTask, fetchTaskInfo, transitionTask } from "../shared/jira";
 import { shouldNotifyJiraAuth } from "../shared/jira-health";
 import type { CloseStaleResult, JiraTaskInfo } from "../shared/stale";
@@ -86,6 +87,22 @@ import { whatsNewFor } from "../shared/whats-new";
 import { createWeatherService } from "./weather";
 import { locate } from "./locate";
 import { forgetLocation, readSavedLocation, saveLocation } from "./weather-location";
+
+// A build run from source keeps its data apart from the installed app's (see
+// dev-user-data.ts). First thing at load: the single-instance lock below and
+// every file under userData follow the folder set here, and Electron takes a
+// new userData only before `ready`.
+if (!app.isPackaged) {
+  const releaseDir = app.getPath("userData");
+  const devDir = devUserDataDir(releaseDir);
+  try {
+    const seeded = seedDevUserData(releaseDir, devDir);
+    if (seeded.length) console.log("[main] dev data folder seeded from the installed app:", seeded.join(", "));
+  } catch (e) {
+    console.error("[main] could not seed the dev data folder:", e);
+  }
+  app.setPath("userData", devDir);
+}
 
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;

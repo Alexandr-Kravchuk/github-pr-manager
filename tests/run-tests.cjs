@@ -524,7 +524,9 @@ test("main gates startup + window-all-closed on the acquired single-instance loc
 // newer than this snapshot before requiring).
 const bootBaseline = new Set(Object.keys(require.cache));
 
-const bootCompiledMain = (lockGranted) => {
+// `appOverrides` replaces members of the fake `app`; by default it is a packaged
+// build, so a boot never moves userData (an unpackaged one seeds a dev folder).
+const bootCompiledMain = (lockGranted, appOverrides = {}) => {
   const mainJs = path.join(__dirname, "../dist/main/main/main.js");
   const elPath = require.resolve("electron", { paths: [path.dirname(mainJs)] });
   for (const k of Object.keys(require.cache)) {
@@ -535,6 +537,7 @@ const bootCompiledMain = (lockGranted) => {
   const updaterEvents = [];
   let quits = 0;
   const fakeApp = {
+    isPackaged: true,
     requestSingleInstanceLock: () => lockGranted,
     quit: () => quits++,
     on: (event, cb) => {
@@ -547,6 +550,7 @@ const bootCompiledMain = (lockGranted) => {
     getAppPath: () => path.join(__dirname, ".."),
     setAppUserModelId: () => {},
     isReady: () => false,
+    ...appOverrides,
   };
   class FakeBrowserWindow {
     static getAllWindows() {
@@ -658,6 +662,130 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     r.cleanup();
   }
 });
+
+// --- a build run from source keeps its data apart from the installed app -----
+// Both are named "PR Dashboard", so they shared one userData: a branch's dev
+// build rewrote the release's settings.json in its own shape, and the release
+// the next auto-update restarted read what it didn't know as defaults.
+{
+  const fsSync = require("node:fs");
+  const devUserData = require(path.join(__dirname, "../dist/main/main/dev-user-data.js"));
+  const withFolders = (fn) => {
+    const root = fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-dev-data-"));
+    const release = path.join(root, "PR Dashboard");
+    fsSync.mkdirSync(release);
+    try {
+      fn(release, devUserData.devUserDataDir(release));
+    } finally {
+      fsSync.rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const writeJson = (file, value) => fsSync.writeFileSync(file, JSON.stringify(value));
+  const readJson = (file) => JSON.parse(fsSync.readFileSync(file, "utf8"));
+
+  test("devUserDataDir: the installed app's folder with a (dev) suffix", () =>
+    assert.strictEqual(devUserData.devUserDataDir(path.join("x", "PR Dashboard")), path.join("x", "PR Dashboard (dev)")));
+
+  test("seedDevUserData: copies the installed app's files once, the agent switched off", () =>
+    withFolders((release, dev) => {
+      writeJson(path.join(release, "settings.json"), { hosts: [{ label: "GH" }], agent: { enabled: true, model: "m" } });
+      writeJson(path.join(release, "seen-state.json"), { PR_1: 1 });
+      writeJson(path.join(release, "window-state.json"), { isMaximized: true });
+      fsSync.writeFileSync(path.join(release, "jira-token.enc"), "secret");
+      const written = devUserData.seedDevUserData(release, dev);
+      assert.deepStrictEqual(written.sort(), ["seen-state.json", "settings.json", "window-state.json"]);
+      const settings = readJson(path.join(dev, "settings.json"));
+      assert.strictEqual(settings.agent.enabled, false, "two agents on the same PRs is what this must not start");
+      assert.strictEqual(settings.agent.model, "m");
+      assert.deepStrictEqual(settings.hosts, [{ label: "GH" }]);
+      assert.ok(!fsSync.existsSync(path.join(dev, "jira-token.enc")), "the token's key does not travel with it");
+      // Seeded once: a later launch copies nothing over what the dev build changed.
+      writeJson(path.join(dev, "settings.json"), { hosts: [] });
+      writeJson(path.join(release, "ignored-state.json"), { PR_2: true });
+      assert.deepStrictEqual(devUserData.seedDevUserData(release, dev), []);
+      assert.deepStrictEqual(readJson(path.join(dev, "settings.json")), { hosts: [] });
+      // The release folder is only read.
+      assert.strictEqual(readJson(path.join(release, "settings.json")).agent.enabled, true);
+    }));
+
+  test("seedDevUserData: unreadable or missing settings leave the dev build to start fresh", () =>
+    withFolders((release, dev) => {
+      fsSync.writeFileSync(path.join(release, "settings.json"), "{ not json");
+      writeJson(path.join(release, "seen-state.json"), {});
+      assert.deepStrictEqual(devUserData.seedDevUserData(release, dev), ["seen-state.json"]);
+      assert.ok(!fsSync.existsSync(path.join(dev, "settings.json")));
+      // A file the dev folder has already is never overwritten.
+      writeJson(path.join(dev, "seen-state.json"), { mine: 1 });
+      writeJson(path.join(release, "settings.json"), { hosts: [] });
+      assert.deepStrictEqual(devUserData.seedDevUserData(release, dev), ["settings.json"]);
+      assert.deepStrictEqual(readJson(path.join(dev, "seen-state.json")), { mine: 1 });
+    }));
+
+  test("main.js wiring: an unpackaged build moves userData to its own folder before the single-instance lock", () =>
+    withFolders((release, dev) => {
+      writeJson(path.join(release, "settings.json"), { hosts: [], agent: { enabled: true } });
+      const calls = [];
+      const r = bootCompiledMain(true, {
+        isPackaged: false,
+        getPath: (name) => (name === "userData" ? release : os.tmpdir()),
+        setPath: (name, value) => calls.push(["setPath", name, value]),
+        requestSingleInstanceLock: () => {
+          calls.push(["lock"]);
+          return true;
+        },
+      });
+      try {
+        assert.deepStrictEqual(calls, [["setPath", "userData", dev], ["lock"]]);
+        assert.strictEqual(readJson(path.join(dev, "settings.json")).agent.enabled, false);
+      } finally {
+        r.cleanup();
+      }
+    }));
+
+  test("persistSettings: Save keeps the fields of the file on disk this build doesn't know", () =>
+    withFolders((userData) => {
+      const settingsJs = path.join(__dirname, "../dist/main/main/settings.js");
+      const elPath = require.resolve("electron", { paths: [path.dirname(settingsJs)] });
+      const hadElectron = require.cache[elPath];
+      const settingsPath = require.resolve(settingsJs);
+      require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: { app: { getPath: () => userData } } };
+      delete require.cache[settingsPath];
+      try {
+        const settings = require(settingsJs);
+        const file = path.join(userData, "settings.json");
+        // What the agent refactor branch wrote: its drive switches under `drive`.
+        writeJson(file, {
+          hosts: [],
+          theme: "dark",
+          agent: { scenarios: { drive: { ci: { mode: "on", maxAttempts: 2 } }, markReady: { mode: "off" } } },
+        });
+        // The release's own Save path for a theme switch: load, change, persist.
+        settings.persistSettings({ ...settings.loadSettings(), theme: "light" });
+        const saved = readJson(file);
+        assert.strictEqual(saved.theme, "light");
+        assert.deepStrictEqual(saved.agent.scenarios.drive, { ci: { mode: "on", maxAttempts: 2 } });
+        assert.deepStrictEqual(saved.agent.scenarios.markReady, { mode: "off" });
+        // A first save, with no file yet, writes just this build's settings.
+        fsSync.rmSync(file);
+        settings.persistSettings({ hosts: [] });
+        assert.ok(!("drive" in readJson(file).agent.scenarios));
+      } finally {
+        delete require.cache[settingsPath];
+        if (hadElectron) require.cache[elPath] = hadElectron;
+        else delete require.cache[elPath];
+      }
+    }));
+
+  test("main.js wiring: a packaged build keeps the installed app's userData", () => {
+    let moved = 0;
+    const r = bootCompiledMain(true, { setPath: () => moved++ });
+    try {
+      assert.strictEqual(moved, 0);
+    } finally {
+      r.cleanup();
+    }
+  });
+}
 
 // --- tray controller, verified against a mocked Electron --------------------
 // `tray.ts` is Electron-only, so it is exercised by requiring the COMPILED
@@ -1556,6 +1684,77 @@ test("validateSettings: jira with invalid baseUrl throws", () =>
     () => cfg.validateSettings({ hosts: [], jira: { baseUrl: "http://", email: "me@x.com" } }),
     /jira\.baseUrl/,
   ));
+
+// --- keepUnknownSettings: a save never erases what another build wrote --------
+// Loading reads a field this build doesn't know as nothing, so before this one
+// Save erased it: the agent refactor branch's `scenarios.drive` / `markReady`
+// vanished under the release, and the branch dropped the release's `uiStyle`.
+{
+  const saveOver = (previous, raw = previous) =>
+    cfg.keepUnknownSettings(previous, cfg.toStoredSettings(cfg.validateSettings(raw)));
+
+  test("keepUnknownSettings: another build's fields survive, at any depth", () => {
+    const previous = {
+      hosts: [],
+      newTopLevel: { a: 1 },
+      agent: {
+        scenarios: {
+          drive: { ci: { mode: "on", maxAttempts: 2 }, comments: { mode: "on" } },
+          markReady: { mode: "off" },
+          review: { mode: "on", futureKnob: 7 },
+        },
+      },
+    };
+    const out = saveOver(previous);
+    assert.deepStrictEqual(out.newTopLevel, { a: 1 });
+    assert.deepStrictEqual(out.agent.scenarios.drive, previous.agent.scenarios.drive);
+    assert.deepStrictEqual(out.agent.scenarios.markReady, { mode: "off" });
+    assert.strictEqual(out.agent.scenarios.review.futureKnob, 7, "an unknown key inside a known block is kept too");
+    assert.strictEqual(out.agent.scenarios.review.mode, "on");
+    // And the file still reads back as this build's settings.
+    assert.strictEqual(cfg.validateSettings(out).agent.scenarios.review.mode, "on");
+  });
+
+  test("keepUnknownSettings: what this build knows comes from this save, not the file", () => {
+    const previous = { hosts: [], theme: "dark", agent: { scenarios: { driveCi: { mode: "on" } } } };
+    const out = saveOver(previous, { hosts: [], theme: "light", agent: { scenarios: { driveCi: { mode: "shadow" } } } });
+    assert.strictEqual(out.theme, "light");
+    assert.strictEqual(out.agent.scenarios.driveCi.mode, "shadow");
+  });
+
+  test("keepUnknownSettings: a cleared Jira site, email or repo path stays cleared", () => {
+    const previous = {
+      hosts: [],
+      jira: { baseUrl: "https://org.atlassian.net", email: "me@x.com" },
+      claude: { repoPaths: { "o/a": "C:\\a", "o/b": "C:\\b" } },
+    };
+    assert.strictEqual(saveOver(previous, { hosts: [] }).jira, undefined, "Jira cleared");
+    const noEmail = saveOver(previous, { hosts: [], jira: { baseUrl: "https://org.atlassian.net" } });
+    assert.deepStrictEqual(noEmail.jira, { baseUrl: "https://org.atlassian.net" }, "email cleared");
+    const oneRepo = saveOver(previous, { hosts: [], claude: { repoPaths: { "o/a": "C:\\a" } } });
+    assert.deepStrictEqual(oneRepo.claude.repoPaths, { "o/a": "C:\\a" }, "a map's keys are data, not fields");
+  });
+
+  test("keepUnknownSettings: arrays are this save's whole; retired fields are dropped", () => {
+    const host = { label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"] };
+    const previous = { hosts: [{ ...host, extra: true }, host], oldSecret: "x", agent: { gone: 1 } };
+    const stored = cfg.toStoredSettings(cfg.validateSettings({ hosts: [host] }));
+    const out = cfg.keepUnknownSettings(previous, stored, ["oldSecret", "agent.gone"]);
+    assert.strictEqual(out.hosts.length, 1);
+    assert.strictEqual(out.hosts[0].extra, undefined);
+    assert.ok(!("oldSecret" in out) && !("gone" in out.agent), "a retired path is not carried");
+  });
+
+  test("keepUnknownSettings: nothing usable on disk leaves the save as it is", () => {
+    const stored = cfg.toStoredSettings(cfg.validateSettings({ hosts: [] }));
+    for (const previous of [undefined, null, "text", [1, 2], 42]) {
+      assert.deepStrictEqual(cfg.keepUnknownSettings(previous, stored), stored);
+    }
+    const proto = cfg.keepUnknownSettings(JSON.parse('{"__proto__": {"polluted": true}}'), stored);
+    assert.strictEqual(Object.getPrototypeOf(proto), Object.prototype);
+    assert.strictEqual({}.polluted, undefined);
+  });
+}
 
 // --- toPublicConfig ----------------------------------------------------------
 test("toPublicConfig: strips graphqlUrl, keeps label + repos", () => {

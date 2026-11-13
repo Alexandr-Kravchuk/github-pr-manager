@@ -498,6 +498,20 @@ Three layers:
   process compiles in `tsc --watch` and Electron restarts after each clean
   build: it reads `dist/main` only at startup, so a one-off compile kept a dev
   app on stale main code while the renderer hot-reloaded and looked current.
+- **A build run from source has its own data folder**, `<userData> (dev)`
+  (`main/dev-user-data.ts`, set at the top of `main.ts` while
+  `!app.isPackaged`, before the single-instance lock). Both builds are named
+  "PR Dashboard", so every worktree's dev build used to read and write the
+  installed app's `settings.json` and agent state: a branch with a reshaped
+  setting saved it in its shape, and the release the next auto-update
+  restarted read it as defaults — "settings reset on every update". The first
+  dev launch copies `settings.json` (agent switched **off**), seen, ignored,
+  window and weather-location state from the installed app, once — never the
+  Jira token, whose key on Windows lives in the folder's own Chromium state.
+  Dev and release no longer share the single-instance lock, so both can run at
+  once: two pollers, two sets of toasts, and two agents on the same PRs if you
+  switch the dev one on. Delete the `(dev)` folder's `settings.json` to seed it
+  again.
 - `npm run build` — `tsc` (main) + `vite` (renderer) → `dist/`.
 - `npm run typecheck` and `npm test` — the gate before any push.
 - `npm run package` / `npm run package:dir` — electron-builder (dmg / nsis).
@@ -544,6 +558,17 @@ Three layers:
   in-progress edit (a half-typed Jira token) was rejected instead.
 - Settings never contain tokens; tokens are resolved per host via `gh` at fetch
   time (`config.ts`).
+- **A save never erases a field another build wrote.** Loading reads a field
+  this build doesn't know (or a value it doesn't accept) as its default, so
+  `persistSettings` merges the file on disk back in (`keepUnknownSettings` in
+  `shared/config.ts`): every field outside this build's known shape — the
+  defaults plus the optional `jira` — is kept at any depth, while a known one
+  always comes from the save, so a cleared Jira site or removed repo path stays
+  gone (an empty object in the shape, like `claude.repoPaths`, is a map owned
+  whole; arrays too). Renaming or reshaping a field therefore needs both
+  directions: read the old key, and expect an older build to keep writing it.
+  A field removed on purpose — a moved secret — goes in
+  `RETIRED_SETTINGS_FIELDS`, or the merge keeps it alive.
 - Jira is read through the Atlassian `twg` CLI first, the API token second —
   the `gh` model again: twg signs in with OAuth and refreshes itself, so there
   is nothing to expire. `shared/jira-pass.ts` picks the source per pass (twg

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
 
-import { ConfigError, defaultSettings, toStoredSettings, validateSettings } from "../shared/config";
+import { ConfigError, defaultSettings, keepUnknownSettings, toStoredSettings, validateSettings } from "../shared/config";
 import type { Settings } from "../shared/types";
 import { parseWhatsNewRecord, type WhatsNewRecord } from "../shared/whats-new";
 
@@ -67,11 +67,25 @@ export function acknowledgeVersion(version: string): void {
   saveWhatsNewRecord({ acknowledgedVersion: version });
 }
 
-/** Validates and writes settings. Throws ConfigError on an invalid shape. */
+/**
+ * Validates and writes settings, keeping the fields of the file on disk that
+ * this build does not know (`keepUnknownSettings`). Throws ConfigError on an
+ * invalid shape.
+ */
 export function persistSettings(raw: unknown): Settings {
   const settings = validateSettings(raw);
   const file = settingsPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(toStoredSettings(settings), null, 2), "utf8");
+  const stored = keepUnknownSettings(readRawSettings(file), toStoredSettings(settings));
+  fs.writeFileSync(file, JSON.stringify(stored, null, 2), "utf8");
   return settings;
+}
+
+/** The settings file as JSON, unvalidated; undefined when it is missing or unreadable. */
+function readRawSettings(file: string): unknown {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return undefined;
+  }
 }
