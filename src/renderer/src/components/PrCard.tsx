@@ -82,14 +82,20 @@ const REVIEWER_RING: Record<Reviewer["reviewState"], string> = {
   approved: "ring-emerald-500",
   changes_requested: "ring-red-500",
   pending: "ring-amber-500",
+  dismissed: "ring-line-strong",
+  commented: "ring-line-strong",
+};
+
+const REVIEWER_LABEL: Record<Reviewer["reviewState"], string> = {
+  approved: "approved",
+  changes_requested: "changes requested",
+  pending: "pending",
+  dismissed: "review dismissed",
+  commented: "commented",
 };
 
 function ReviewerBadge({ r }: { r: Reviewer }) {
-  const label = r.reviewState === "approved"
-    ? "approved"
-    : r.reviewState === "changes_requested"
-      ? "changes requested"
-      : "pending";
+  const label = REVIEWER_LABEL[r.reviewState];
   return r.avatarUrl ? (
     <img
       src={r.avatarUrl}

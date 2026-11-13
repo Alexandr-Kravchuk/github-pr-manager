@@ -498,8 +498,12 @@ export interface PublicConfig {
   uiStyle?: UiStyle;
 }
 
-/** State of an individual reviewer on a PR. */
-export type ReviewerState = "approved" | "changes_requested" | "pending";
+/**
+ * State of an individual reviewer on a PR. `dismissed`: their review (usually an
+ * approval) was dismissed, typically by a push; `commented`: they only left
+ * comments. Neither is a verdict — only `approved` / `changes_requested` are.
+ */
+export type ReviewerState = "approved" | "changes_requested" | "pending" | "dismissed" | "commented";
 
 /** An individual reviewer and their current review state. */
 export interface Reviewer {

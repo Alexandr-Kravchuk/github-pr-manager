@@ -120,7 +120,7 @@ export function mergeBlocker(pr: PullRequest, s: AgentSettings): string | null {
   if (pr.ciState === "pending") return "CI is still running";
   if (pr.awaitingReview) return "Waiting for reviewers";
   if (!pr.canBeMerged) return "Not mergeable yet";
-  if (m.requireAllReviewers && pr.reviewers.some((r) => r.reviewState !== "approved")) return "Not every requested reviewer approved";
+  if (m.requireAllReviewers && pr.reviewers.some((r) => r.reviewState === "pending" || r.reviewState === "changes_requested")) return "Not every requested reviewer approved";
   if (m.requireThreadsResolved && pr.unresolvedThreads > 0) return `${pr.unresolvedThreads} unresolved thread${pr.unresolvedThreads === 1 ? "" : "s"}`;
   if (m.requireChecksGreen && pr.checks.length > 0 && pr.ciState !== "success") return "Not every check is green";
   return null;

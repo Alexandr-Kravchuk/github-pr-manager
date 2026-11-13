@@ -956,7 +956,7 @@ export function createAgent(deps: AgentDeps): Agent {
         req = reapproveRequest(item.repo, item.prNumber, head, r.oldHead, all.agent.policy.signature);
       } else {
         // Not who approved since, or is asked already.
-        const settled = new Set(pr.reviewers.filter((x) => x.reviewState !== "changes_requested").map((x) => x.login.toLowerCase()));
+        const settled = new Set(pr.reviewers.filter((x) => x.reviewState === "approved" || x.reviewState === "pending").map((x) => x.login.toLowerCase()));
         logins = r.logins.filter((l) => !settled.has(l.toLowerCase()));
         if (logins.length === 0) {
           await closeAs(item, "Your reviewers are asked again already");

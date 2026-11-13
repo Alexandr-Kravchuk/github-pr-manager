@@ -200,7 +200,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
   } else if (stage.column === "waiting") {
     owner = "others";
     if (lane === "mine") {
-      const pending = pr?.reviewers.filter((r) => r.reviewState !== "approved").map((r) => r.login) ?? [];
+      const pending = pr?.reviewers.filter((r) => r.reviewState === "pending" || r.reviewState === "changes_requested").map((r) => r.login) ?? [];
       const changes = pr?.reviewers.filter((r) => r.reviewState === "changes_requested").map((r) => r.login) ?? [];
       waitingOn = pr?.blockedByStack ? "The PR below it" : pending.length > 0 ? pending.join(", ") : "Reviewers";
       now = pr?.blockedByStack

@@ -803,7 +803,9 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
   if (stage.column === "waiting" && pr) {
     if (stage.lane === "mine") {
       if (pr.blockedByStack) return "Waits for the PR below it in the stack";
-      const parts = pr.reviewers.map((r) => (r.reviewState === "approved" ? `${r.login} ✓` : r.reviewState === "changes_requested" ? `${r.login} asked for changes` : `${r.login} pending`));
+      const parts = pr.reviewers
+        .filter((r) => r.reviewState !== "commented")
+        .map((r) => (r.reviewState === "approved" ? `${r.login} ✓` : r.reviewState === "changes_requested" ? `${r.login} asked for changes` : r.reviewState === "dismissed" ? `${r.login}'s review dismissed` : `${r.login} pending`));
       return parts.length > 0 ? parts.join(" · ") : "Waiting for reviewers";
     }
     const verdict = pr.viewerHasReviewed ? (pr.viewerApproved ? "You approved" : "You asked for changes") : pr.roles.includes("reviewed") ? "You commented" : "Waiting for the author";

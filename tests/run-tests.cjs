@@ -1952,6 +1952,27 @@ test("approval feedback: only fresh author EYES on the exact review clears it", 
   const noAuthor = github.mapPr(rawPr({ author: null, latestOpinionatedReviews: { nodes: [acknowledged] } }), "GH", ["author"], "auth");
   assert.strictEqual(noAuthor.hasUnaddressedReviewFeedback, true);
 });
+test("mapPr: reviewers whose approval a push dismissed, and commenters, are listed too", () => {
+  const user = (login) => ({ __typename: "User", login, avatarUrl: "" });
+  const pr = github.mapPr(
+    rawPr({
+      reviewDecision: null,
+      reviewRequests: { totalCount: 1, nodes: [{ requestedReviewer: user("asked") }] },
+      latestOpinionatedReviews: { nodes: [] },
+      latestReviews: { nodes: [
+        { author: user("asked"), state: "DISMISSED" },
+        { author: user("gone"), state: "DISMISSED" },
+        { author: user("talker"), state: "COMMENTED" },
+        { author: user("auth"), state: "COMMENTED" },
+        { author: { __typename: "Bot", login: "copilot", avatarUrl: "" }, state: "COMMENTED" },
+      ] },
+    }),
+    "GH", ["author"], "auth",
+  );
+  assert.deepStrictEqual(pr.reviewers.map((r) => `${r.login}:${r.reviewState}`), ["asked:pending", "gone:dismissed", "talker:commented"]);
+  assert.strictEqual(pr.hasHumanApproval, false);
+  assert.deepStrictEqual(require(path.join(__dirname, "../dist/main/shared/pr-table.js")).approvalTally(pr), { approved: 0, total: 2 });
+});
 const canMerge = (overrides) => github.mapPr(rawPr(overrides), "GH", ["authored"], null).canBeMerged;
 const failingRollup = {
   nodes: [{ commit: { statusCheckRollup: { state: "FAILURE", contexts: {

@@ -101,6 +101,11 @@ fragment PrFields on PullRequest {
       reactions(first: 100, content: EYES) { nodes { content createdAt user { login } } }
     }
   }
+  # Every reviewer's latest review of any kind, DISMISSED and COMMENTED included —
+  # only for the avatar row, so an approval a push dismissed still shows who it was.
+  latestReviews(first: 15) {
+    nodes { author { __typename login avatarUrl } state }
+  }
   comments { totalCount }
   # last, not first — see the note above this fragment before changing it.
   reviewThreads(last: 100) {
@@ -355,6 +360,10 @@ interface RawPr {
       commit?: { oid: string } | null;
       reactions?: { nodes: Array<{ content: string; createdAt: string; user: { login: string } | null }> };
     }>;
+  };
+  // Optional: fixtures and older cached reads may lack it.
+  latestReviews?: {
+    nodes: Array<{ author: { __typename: string; login: string; avatarUrl: string } | null; state: string }>;
   };
   comments: { totalCount: number };
   reviewThreads: {
@@ -749,6 +758,20 @@ export function mapPr(
       login: r.author.login,
       avatarUrl: r.author.avatarUrl,
       reviewState: r.state === "APPROVED" ? "approved" : "changes_requested",
+    });
+    seenLogins.add(r.author.login);
+  }
+  // Then everyone else who reviewed: an approval a push dismissed (GitHub's grey
+  // check) and plain comments. The PR's author and bots are left out — GitHub's
+  // sidebar lists neither as a reviewer.
+  for (const r of pr.latestReviews?.nodes ?? []) {
+    if (!r.author || r.author.__typename !== "User" || seenLogins.has(r.author.login)) continue;
+    if (r.author.login === authorLogin) continue;
+    if (r.state !== "DISMISSED" && r.state !== "COMMENTED") continue;
+    reviewers.push({
+      login: r.author.login,
+      avatarUrl: r.author.avatarUrl,
+      reviewState: r.state === "DISMISSED" ? "dismissed" : "commented",
     });
     seenLogins.add(r.author.login);
   }

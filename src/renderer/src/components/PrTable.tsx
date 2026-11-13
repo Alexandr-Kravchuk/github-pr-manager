@@ -80,6 +80,8 @@ const REVIEWER_RING: Record<ReviewerState, string> = {
   approved: "ring-emerald-500",
   changes_requested: "ring-red-500",
   pending: "ring-line-strong",
+  dismissed: "ring-line-strong",
+  commented: "ring-line-strong",
 };
 
 /** Avatars shown before the rest collapse into "+N". */
