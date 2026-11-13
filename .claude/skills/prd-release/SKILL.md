@@ -2,8 +2,8 @@
 name: prd-release
 description: >-
   Cut a new PR Dashboard (github-pr-manager) desktop release end-to-end for Alex:
-  macOS (signed + notarized DMG/ZIP) and Windows (NSIS installer, unsigned unless
-  built on the corporate host), both
+  macOS (signed + notarized DMG/ZIP) and Windows (Authenticode-signed NSIS
+  installer with optional current-user certificate trust), both
   attached to one GitHub Release with working electron-updater feeds. Triggers ONLY
   inside the Alexandr-Kravchuk/github-pr-manager repository when Alex says "реліз",
   "створи реліз", "новий реліз", "зроби реліз", "release" and wants it shipped (not
@@ -132,9 +132,8 @@ release under a new version. That is exactly what turned v1.15.0 into v1.15.1: b
 platforms built and notarized fine, and every upload bounced off a release created
 without `--draft`.
 
-Both upload scripts resolve the release from the `/releases` LIST by tag (draft-aware) and
-upload **by ID**, so creating the draft first keeps mac + Windows on one release with no
-duplicate drafts. If it doesn't exist yet, each script creates its own draft — avoid that
+The macOS script resolves drafts by ID; the Windows workflow checks the releases
+list before uploading to the tag. Creating the draft first keeps both on one release. If it doesn't exist yet, each script creates its own draft — avoid that
 race by creating it here.
 
 Notes style: see **Release notes** below.
@@ -192,19 +191,42 @@ Pass `--ref vX.Y.Z` and then **check the run's `headSha` equals the tag** — th
 otherwise checks out the default branch, which is the same class of wrong-commit build the
 `git diff --stat` gate exists to prevent on macOS.
 
-Two consequences of this route, both of which belong in the report to Alex:
+Windows signing is configured in the workflow, not on the old SSH host:
 
-- The `.exe` is **not Authenticode-signed**. Signing lives in `scripts/release-win.ps1`,
-  which runs `signtool` on the corporate Windows host (`ts1`) and is a separate, heavier
-  route: it needs VPN, does its own `git checkout main; git reset --hard origin/main`
-  (so it builds origin/main's TIP, correct only while the tag IS the tip), and carries
-  PowerShell 5.1 quoting traps — `&&` is not a separator (use `;`), invoke via `-File`,
-  `-Token` is mandatory, no `head`/`grep` on the remote. Use it only when Alex asks for a
-  signed installer; otherwise Windows users get a SmartScreen warning on install.
-- The workflow publishes with `electron-builder --publish always`, which resolves the
-  draft release **by tag on its own**. Creating the draft in Step 3 first is what keeps
-  mac and Windows on one release — verify afterwards that exactly ONE draft exists
-  (see Step 6) before publishing anything.
+- `WIN_CSC_LINK` contains a base64 PFX and `WIN_CSC_KEY_PASSWORD` its password in
+  GitHub Secrets. Never print them or attach private keys to a release.
+- The workflow imports the public certificate into the ephemeral runner's
+  **LocalMachine** Root and TrustedPublisher stores. CurrentUser Root can hang on
+  an invisible Windows consent dialog on CI; do not switch the runner back to it.
+- electron-builder builds with `--publish never --config.forceCodeSigning=true`.
+  `scripts/verify-windows-release.ps1` checks app and installer Authenticode
+  signatures against `build/windows-signing/PR-Dashboard.cer`, timestamps, updater
+  publisher verification and the embedded trust files before staging uploads.
+- The workflow uploads dash-named files to an existing draft (or creates one with
+  generated notes). Pre-create the draft with reviewed notes as above. Confirm
+  the workflow finished successfully and its head SHA is the tag.
+- `build/installer.nsh` offers an **unchecked** finish-page checkbox, **Trust this
+  certificate for my Windows account**. It runs the embedded script as the desktop
+  user. `-FromInstaller` refuses elevated imports, including shell-launch fallbacks.
+  Silent installs and updates never install trust. Uninstall keeps user trust.
+- Keep `PR-Dashboard.cer`, `Install-PR-Dashboard-Trust.ps1` and `WINDOWS-TRUST.md`
+  as separate release assets, even though they are also embedded in the installer.
+  The script pins SHA-256 and validity and only imports into CurrentUser stores.
+- Explain that this is a **self-signed project certificate**, publisher
+  **Alex Kravchuk**, not a publicly trusted CA certificate. Trusting it authorizes
+  code signed with its key. The installer cannot avoid its first-launch SmartScreen
+  check by embedding a certificate; SmartScreen warnings can still appear.
+
+For a signing/installer smoke test without publishing a release:
+
+```bash
+gh workflow run release.yml --ref <branch-or-sha> -f publish=false
+```
+
+The successful run provides a `signed-windows` artifact with the installer, update
+feed, blockmap and three trust files. Use `publish=true` (the default) for a release.
+Do not use `scripts/release-win.ps1` as the signed release path; it does not configure
+these secrets or perform this workflow's verification.
 
 ## Step 6 — Verify, and verify the right things
 
@@ -214,7 +236,7 @@ feed reachable, release published, `releases/latest` correct.
 Run these too:
 
 ```bash
-# 1. all 8 assets, dash-named, no dot-named duplicates
+# 1. all 11 assets, dash-named, no dot-named duplicates
 gh release view vX.Y.Z --json assets -q '.assets[] | "\(.name)  \(.size)"'
 
 # 2. both feeds fetch the way electron-updater fetches them
@@ -236,9 +258,26 @@ the result you want — so chaining it with `&&` silently swallows whatever chec
 Expected asset set: `latest-mac.yml`, `latest.yml`,
 `PR-Dashboard-X.Y.Z-universal.dmg` (+ `.blockmap`),
 `PR-Dashboard-X.Y.Z-universal-mac.zip` (+ `.blockmap`),
-`PR-Dashboard-Setup-X.Y.Z.exe` (+ `.blockmap`). The Actions route produces these same
+`PR-Dashboard-Setup-X.Y.Z.exe` (+ `.blockmap`), `PR-Dashboard.cer`,
+`Install-PR-Dashboard-Trust.ps1` and `WINDOWS-TRUST.md` — **11 assets total**.
+The Actions route produces these same
 dash-names — but it is a different code path from `release-win.ps1`, so diff the name
 inside `latest.yml` against the uploaded asset rather than assuming.
+
+Verify the published Windows installer SHA-512 against `latest.yml`, not only
+macOS's hash. Download the three trust assets through the authenticated asset API
+while the release is a draft. Compare the certificate bytes with the committed
+`.cer`; compare script and Markdown text with CRLF normalized (Windows checkout
+uses CRLF). Check the script's pinned SHA-256 against the certificate. Confirm the
+CI log says app and installer signatures, signer, timestamps and updater publisher
+were verified. The installer smoke test must also pass with embedded files present
+and no CurrentUser trust added by silent installation. A real interactive check of
+the unchecked finish option and desktop-user launch is separate from silent CI;
+report if that UI path was not exercised.
+
+After publishing, verify public downloads for **both feeds and all three trust
+assets**, and confirm `releases/latest` points at the new version. Existing immutable
+releases cannot receive the new assets; ship a new version rather than changing them.
 
 Note on `animate-pulse`: it legitimately appears in the built **CSS** as an unused rule,
 because Tailwind's content scanner picks the string out of the *comments* in `App.tsx` /
@@ -305,6 +344,7 @@ or just wait for the task notification.
 
 ## Report to Alex (Ukrainian, short)
 
-Version, release URL, that both platforms' assets and **both** feeds are in place, the
+Version, release URL, that both platforms' assets, **both** feeds and all three
+Windows trust assets are in place, the
 installed-version → new-version transition is real, and 1–2 lines on what shipped. Mention
 any hook you softened.

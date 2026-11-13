@@ -68,6 +68,10 @@ jobs:
       - name: Verify signatures and prepare release assets
         shell: pwsh
         run: ./scripts/verify-windows-release.ps1
+      - name: Test the compiled Windows installer
+        timeout-minutes: 7
+        shell: pwsh
+        run: ./tests/windows-installer.smoke.ps1
       - name: Keep verified assets for a signing smoke test
         if: ${{ !inputs.publish }}
         uses: actions/upload-artifact@v4

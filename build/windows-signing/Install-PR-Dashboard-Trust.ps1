@@ -8,8 +8,20 @@
   No administrator rights are needed. The certificate's SHA-256 fingerprint is
   pinned here; a different certificate is refused before any trust is changed.
 #>
+param([switch]$FromInstaller)
+
 $ErrorActionPreference = 'Stop'
 try {
+  if ($FromInstaller) {
+    # A shell-launch fallback must never trust the elevated administrator's account.
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+      $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
+      if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'Installer trust setup must run without elevation. Run the separate script from your normal Windows account.'
+      }
+    } finally { $identity.Dispose() }
+  }
   $certPath = Join-Path $PSScriptRoot 'PR-Dashboard.cer'
   $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certPath)
   $sha256 = [System.Security.Cryptography.SHA256]::Create()

@@ -5,6 +5,23 @@ self-signed code-signing certificate. This is a project certificate, not a
 certificate issued by a public certificate authority. Trusting it is optional;
 SmartScreen reputation warnings may still appear.
 
+## Optional trust from the installer
+
+At the end of an interactive installation, select **Trust this certificate for my
+Windows account** and click **Finish**. The option is off by default. It launches
+PowerShell as the desktop user and uses the public certificate embedded in the
+installer. Confirm Windows' certificate prompt after checking the fingerprint
+below. Read the success or error in the PowerShell window, then close it.
+
+Only the current user's certificate stores are changed, including with an
+all-users installation. If a non-elevated launch is unavailable, the script refuses
+an elevated import; use the separate script from your normal account instead.
+Silent installations and app updates do not run trust setup. Uninstalling the app
+does not remove certificate trust; use the removal instructions below.
+
+The first installer launch can still show SmartScreen: Windows checks the installer
+before it can offer this option. Corporate policy can also prevent importing trust.
+
 ## Install trust with the PowerShell script
 
 1. Download `Install-PR-Dashboard-Trust.ps1` and `PR-Dashboard.cer` from the same

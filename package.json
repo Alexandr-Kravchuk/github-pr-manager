@@ -73,6 +73,17 @@
             "x64"
           ]
         }
+      ],
+      "extraFiles": [
+        {
+          "from": "build/windows-signing",
+          "to": "windows-signing",
+          "filter": [
+            "PR-Dashboard.cer",
+            "Install-PR-Dashboard-Trust.ps1",
+            "WINDOWS-TRUST.md"
+          ]
+        }
       ]
     },
     "mac": {
@@ -108,7 +119,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh"
     }
   }
 }

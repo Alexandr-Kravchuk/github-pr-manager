@@ -795,3 +795,10 @@ checks validity before importing, and installs trust in CurrentUser only. Keep p
 keys outside Git and the renderer. Certificate rotation must update the secrets,
 public certificate and documented fingerprint together. Self-signed trust is a
 one-time user action; do not claim it guarantees no SmartScreen warnings.
+
+`build/installer.nsh` adds an unchecked finish-page trust option; trust is never
+an install hook. Silent installs and updates skip it. `win.extraFiles` embeds the
+public certificate, trust script and instructions in `windows-signing/`. The finish
+action uses `StdUtils.ExecShellAsUser`; `-FromInstaller` refuses an elevated token
+so a shell fallback cannot change the administrator's trust. Separate release
+assets remain the alternative. Uninstall does not remove user-managed trust.

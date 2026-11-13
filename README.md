@@ -243,7 +243,9 @@ To cut a release:
 > `Install-PR-Dashboard-Trust.ps1` and `WINDOWS-TRUST.md`. Download the script and
 > certificate into the same folder, then right-click the script → Run with PowerShell.
 > Follow the [Windows trust instructions](build/windows-signing/WINDOWS-TRUST.md)
-> once per account to trust the certificate. SmartScreen warnings may still appear;
+> once per account to trust the certificate. The interactive installer also offers
+> an unchecked **Trust this certificate for my Windows account** option on Finish;
+> silent installs and app updates never install trust. SmartScreen warnings may still appear;
 > older unsigned releases remain unsigned.
 
 ### Windows signing maintenance

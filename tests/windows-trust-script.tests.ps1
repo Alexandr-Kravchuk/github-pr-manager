@@ -36,6 +36,20 @@ try {
     $refused = $true
   }
   if (-not $refused -or $global:prdTrustImports -ne 2) { throw 'Changed certificate must fail before importing' }
+  if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+      $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
+      if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        $refused = $false
+        try { & $script -FromInstaller 2>$null } catch {
+          if ($_.Exception.Message -notlike '*without elevation*') { throw }
+          $refused = $true
+        }
+        if (-not $refused -or $global:prdTrustImports -ne 2) { throw 'Elevated installer import was not refused' }
+      }
+    } finally { $identity.Dispose() }
+  }
   Write-Host 'Trust-script tests passed: current-user imports, repeat run, tampered certificate refusal.'
 } finally {
   Remove-Item $folder -Recurse -Force
