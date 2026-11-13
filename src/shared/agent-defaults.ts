@@ -71,6 +71,8 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
     "Bash(gh pr view *)",
     "Bash(gh pr diff *)",
     "Bash(gh api *)",
+    // The re-review runs the review skill, which stops without the PR's Jira task.
+    "Bash(twg *)",
   ],
   drive: [
     "Read",
@@ -114,12 +116,14 @@ export const DEFAULT_AGENT_TOOLS: Record<AgentRunKind, string[]> = {
  * it, so each version names what it added, and loading a list saved under an
  * older version adds those rules (once: the list is saved at this version).
  */
-export const AGENT_TOOLS_VERSION = 3;
+export const AGENT_TOOLS_VERSION = 4;
 export const AGENT_TOOL_ADDITIONS: ReadonlyArray<{ version: number; add: Partial<Record<AgentRunKind, string[]>> }> = [
   // Drive couldn't merge the base in (a conflict) nor read the threads it answers: every drive ended "No commits".
   { version: 2, add: { drive: ["Bash(gh pr diff *)", "Bash(gh api *)", "Bash(git show *)", "Bash(git merge-base *)", "Bash(git merge *)"] } },
   // The self-review of your own PR runs the review skill, which reads the PR's Jira task.
   { version: 3, add: { drive: ["Bash(twg *)"] } },
+  // The re-review runs the same skill: without twg every re-review aborted and said "nothing to post".
+  { version: 4, add: { rereview: ["Bash(twg *)"] } },
 ];
 
 /** A saved tool list brought up to date: the rules added to the defaults since it was saved, appended. */

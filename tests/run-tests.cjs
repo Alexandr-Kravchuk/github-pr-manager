@@ -13274,6 +13274,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(cfg.validateAgent(undefined).scenarios.selfReview.mode, "shadow");
     });
 
+    test("agent tools: a re-review reads Jira, so rereview lists twg; a list saved before gets it", () => {
+      assert.ok(ad.DEFAULT_AGENT_TOOLS.rereview.includes("Bash(twg *)"));
+      const saved = ["Read", "Skill", "Bash(gh api *)"];
+      const migrated = cfg.validateAgent({ permissions: { tools: { rereview: saved }, toolsVersion: 3 } });
+      assert.deepStrictEqual(migrated.permissions.tools.rereview, [...saved, "Bash(twg *)"], "only what came after the version it was saved at");
+      // Saved at this version, a twg you removed stays removed.
+      const mine = cfg.validateAgent({ permissions: { tools: { rereview: saved }, toolsVersion: ad.AGENT_TOOLS_VERSION } });
+      assert.deepStrictEqual(mine.permissions.tools.rereview, saved);
+      // The guard lets a re-review read the task, and only read it.
+      const pr = guard.guardPrFromUrl("https://creatio.ghe.com/eng/core/pull/7");
+      assert.strictEqual(guard.checkToolUse("rereview", "Bash", { command: "twg jira workitem get ENG-1 -o json" }, pr).allow, true);
+      assert.strictEqual(guard.checkToolUse("rereview", "Bash", { command: "twg jira workitem transition ENG-1" }, pr).allow, false);
+    });
+
     await atest("drive: commits on top of the head are read oldest first; a rewritten history is not a fast-forward", async () => {
       const repo = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-drive-"));
       const g = (...args) => spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
