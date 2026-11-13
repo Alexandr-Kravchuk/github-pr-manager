@@ -687,6 +687,7 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
         p.comments.length > 0 ? count(p.comments.length, "comment") : null,
         p.replies.length > 0 ? count(p.replies.length, "reply", "replies") : null,
         p.escalations.length > 0 ? `${p.escalations.length} pushed back` : null,
+        (p.held?.length ?? 0) > 0 ? `${p.held!.length} held back` : null,
       ]
         .filter(Boolean)
         .join(" · ");

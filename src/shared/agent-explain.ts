@@ -306,6 +306,19 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
             : `The agent drafted a review that ${plan?.event === "REQUEST_CHANGES" ? "requests changes" : "comments"}: ${plural(n, "inline comment")}.`;
         }
         if (pushedBack > 0) now += ` The author pushed back on ${plural(pushedBack, "comment")} — your call below.`;
+        const held = plan?.held ?? [];
+        // A reply with no author answers a comment mid-thread whose thread GitHub didn't name — maybe yours, so not "a colleague's".
+        const handedBack = held.filter((h) => h.kind === "reply" && h.escalated).length;
+        const midThread = held.filter((h) => h.kind === "reply" && !h.author && !h.escalated).length;
+        const theirs = held.length - midThread - handedBack;
+        const where = [
+          theirs > 0 && (theirs === 1 ? "in a colleague's thread" : `in ${theirs} colleagues' threads`),
+          handedBack > 0 && (handedBack === 1 ? "in a thread it handed back to you" : `in ${handedBack} threads it handed back to you`),
+          midThread > 0 && (midThread === 1 ? "to a comment whose thread GitHub didn't name" : `to ${midThread} comments whose threads GitHub didn't name`),
+        ].filter(Boolean);
+        if (held.length > 0) {
+          now += ` It also wrote ${where.join(" and ")}; a review answers only in threads you opened, and not where the author pushed back, so ${held.length === 1 ? "that stays" : "those stay"} out — shown below.`;
+        }
         ask = approve ? "Read the summary, then approve — or discard it." : pushedBack > 0 ? "Decide on the pushed-back comments, check the rest, then send." : "Check what goes out, then send — or edit or discard it.";
         choices = [
           {

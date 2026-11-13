@@ -231,6 +231,52 @@ export interface PublishContext {
   allowResolve?: boolean;
   /** Re-review: approve once your threads are closed (Settings › Agent › re-review: approve). Absent = yes; off turns an approve into a comment. */
   allowApprove?: boolean;
+  /** Writes set aside when the run ended (`HeldWrite`): they are not posted, and the rest goes out without them. */
+  held?: ReadonlyArray<Pick<HeldWrite, "replyTo" | "threadId">>;
+  /**
+   * A reply to a comment in the middle of a thread you opened, by the comment
+   * it names → the thread's first comment, where it is posted instead: GitHub
+   * takes replies to a thread's first comment only. Filled by the publish
+   * check, which verified each root is on this PR and yours.
+   */
+  replyRoots?: ReadonlyMap<number, number>;
+}
+
+/**
+ * A reply or resolve the session recorded in a thread a colleague opened (or,
+ * with no `author`, a reply to a comment in the middle of a thread whose first
+ * comment GitHub doesn't name; in a thread you opened such a reply goes to its
+ * first comment instead — `PublishContext.replyRoots`), or — `escalated` — a
+ * reply in a thread of yours it handed back to you. A review answers and
+ * resolves only in threads you opened, and not where the author pushed back, so the app sets it
+ * aside when the run ends and shows it to you, instead of failing the whole
+ * publish on it once you press Approve.
+ */
+export interface HeldWrite {
+  kind: "reply" | "resolve";
+  /** The comment a reply answers. */
+  replyTo?: number;
+  /** The thread a resolve closes. */
+  threadId?: string;
+  /** What the reply would have said. */
+  body?: string;
+  /** Who opened the thread, when GitHub said. */
+  author: string | null;
+  /** The thread on GitHub, when GitHub said. */
+  url: string | null;
+  /** A reply in a thread the session handed back to you (`escalate`): the author pushed back there. */
+  escalated?: boolean;
+}
+
+/**
+ * "a reply in anna's thread" — one held write as a person reads it, said the
+ * same on the card and in a refused publish. No author on a reply: it answers
+ * a comment in the middle of a thread whose first comment GitHub didn't name.
+ */
+export function heldLabel(h: Pick<HeldWrite, "kind" | "author" | "escalated">): string {
+  if (h.kind === "reply" && h.escalated) return "a reply in a thread handed back to you";
+  if (h.kind === "reply") return h.author ? `a reply in ${h.author}'s thread` : "a reply to a comment that doesn't open its thread";
+  return `resolving ${h.author ? `${h.author}'s thread` : "a thread you didn't open"}`;
 }
 
 /** Comment ids the session handed back to you: replies to them are held back. */
@@ -243,11 +289,19 @@ function escalatedTargets(steps: readonly PublishStep[]): Set<number> {
  * writes), no reply to a thread that was escalated, no resolve when resolving
  * is off. `planRequests` and the publish progress both count over this list.
  */
-export function postedSteps(steps: readonly PublishStep[], ctx: Pick<PublishContext, "allowResolve">): PublishStep[] {
+export function postedSteps(steps: readonly PublishStep[], ctx: Pick<PublishContext, "allowResolve" | "held">): PublishStep[] {
   const escalated = escalatedTargets(steps);
+  const isHeld = heldTest(ctx.held ?? []);
   return steps.filter(
-    (s) => s.kind !== "escalate" && !(s.kind === "reply" && escalated.has(s.replyTo)) && !(s.kind === "resolve" && ctx.allowResolve === false),
+    (s) => s.kind !== "escalate" && !isHeld(s) && !(s.kind === "reply" && escalated.has(s.replyTo)) && !(s.kind === "resolve" && ctx.allowResolve === false),
   );
+}
+
+/** Whether a step is one of the writes set aside — the one test `postedSteps` and `summarizePlan` share. */
+function heldTest(held: ReadonlyArray<Pick<HeldWrite, "replyTo" | "threadId">>): (s: PublishStep) => boolean {
+  const replies = new Set(held.flatMap((h) => (h.replyTo !== undefined ? [h.replyTo] : [])));
+  const threads = new Set(held.flatMap((h) => (h.threadId !== undefined ? [h.threadId] : [])));
+  return (s) => (s.kind === "reply" && replies.has(s.replyTo)) || (s.kind === "resolve" && threads.has(s.threadId));
 }
 
 /** The reply that drops your comment in a thread where the author pushed back. */
@@ -310,7 +364,7 @@ export function planRequests(steps: readonly PublishStep[], ctx: PublishContext)
       case "comment":
         return { label: `comment on ${s.comment.path}`, endpoint: `${base}/comments`, body: { ...commentBody(s.comment, ctx.signature), commit_id: s.commitId } };
       case "reply":
-        return { label: `reply to comment ${s.replyTo}`, endpoint: `${base}/comments/${s.replyTo}/replies`, body: { body: signedBody(s.body, ctx.signature) } };
+        return { label: `reply to comment ${s.replyTo}`, endpoint: `${base}/comments/${ctx.replyRoots?.get(s.replyTo) ?? s.replyTo}/replies`, body: { body: signedBody(s.body, ctx.signature) } };
       case "resolve":
         return { label: `resolve ${s.threadId}`, endpoint: "graphql", body: { query: RESOLVE_MUTATION, variables: { id: s.threadId } } };
       case "note":
@@ -335,14 +389,23 @@ export interface PublishSummary {
   commitId?: string;
   /** Diagrams that go out with it, as one comment (set by the app after drawing, not by the session). */
   diagrams?: number;
+  /** Replies and resolves in colleagues' threads: not posted, shown to you (set by the app when the run ends). */
+  held?: HeldWrite[];
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
-export function summarizePlan(steps: readonly PublishStep[]): PublishSummary {
+/**
+ * The plan as the Board shows it. `held` (a review's writes set aside when the
+ * run ended) leaves them out the way `postedSteps` does, and lists them apart,
+ * so what the card counts is what Publish sends.
+ */
+export function summarizePlan(steps: readonly PublishStep[], held: readonly HeldWrite[] = []): PublishSummary {
   const out: PublishSummary = { event: null, body: "", comments: [], replies: [], resolves: 0, escalations: [] };
   const escalated = escalatedTargets(steps);
+  const isHeld = heldTest(held);
   for (const s of steps) {
+    if (isHeld(s)) continue;
     if (s.kind === "review") {
       out.event = s.event;
       out.body = clip(s.body, 20_000);
@@ -361,6 +424,7 @@ export function summarizePlan(steps: readonly PublishStep[]): PublishSummary {
   }
   out.comments = out.comments.slice(0, 100);
   out.replies = out.replies.slice(0, 100);
+  if (held.length > 0) out.held = held.map((h) => (h.body !== undefined ? { ...h, body: clip(h.body, 4_000) } : h));
   return out;
 }
 
@@ -380,7 +444,9 @@ export function describePlan(p: PublishSummary): string {
   ]) {
     if (part) parts.push(part);
   }
-  return parts.length ? parts.join(", ") : "nothing";
+  // Held writes never go out: a clause of their own, so "Published: …" lists only what reached GitHub.
+  const held = p.held?.length ?? 0;
+  return `${parts.length ? parts.join(", ") : "nothing"}${held ? ` — ${held} held back for you` : ""}`;
 }
 
 /**

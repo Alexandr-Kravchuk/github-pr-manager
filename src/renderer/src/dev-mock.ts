@@ -601,7 +601,7 @@ function mockAgentState(): AgentState {
     item(118, { state: "error", headline: "No checkout of acme/clio-knowledge: set its folder in Settings > Claude", finishedAt: iso(30 * 60_000) }),
     item(929, {
       state: "needsYou",
-      headline: "Would post: request changes, 1 inline comment, 1 reply, 1 diagram",
+      headline: "Would post: request changes, 1 inline comment, 1 reply, 1 diagram — 1 held back for you",
       diagrams: {
         checked: true,
         list: [
@@ -640,6 +640,16 @@ function mockAgentState(): AgentState {
         resolves: 0,
         escalations: [],
         diagrams: 1,
+        // A follow-up the session wrote in a colleague's thread: set aside, not sent.
+        held: [
+          {
+            kind: "reply",
+            replyTo: 1003,
+            author: "a-colleague",
+            url: "https://github.com/acme/clio/pull/929#discussion_r1003",
+            body: "Follow-up: the Jira task still lists this as open. Who signed it off?",
+          },
+        ],
       },
     }),
     item(934, {
