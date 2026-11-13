@@ -352,7 +352,11 @@ function handleAgentNotice({ kind, item }: AgentNotice): void {
   try {
     const s = loadSettings();
     if (!s.agent.notifications[kind] || !Notification.isSupported()) return;
-    showOsNotification(agentNoticeTitle(kind, item), `${item.title}\n${item.headline}`, !s.notifications.sound, () => {
+    // The PR's head now: a result someone pushed past while it ran gets no toast, as the Board shows it as no move of yours.
+    const head = poller?.getSnapshot()?.pullRequests.find((p) => p.id === item.prId)?.headOid ?? null;
+    const title = agentNoticeTitle(kind, item, head);
+    if (title === null) return;
+    showOsNotification(title, `${item.title}\n${item.headline}`, !s.notifications.sound, () => {
       focusMainWindow();
       sendToRenderer("agent-show-board", item.runId);
     });

@@ -9,7 +9,7 @@ import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
-import { AGENT_CLOSED, approvalStands, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
+import { AGENT_CLOSED, approvalStands, keyHead, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -373,12 +373,6 @@ function promptForScenario(scenario: AgentScenario, claude: ClaudeSettings): str
   if (scenario === "rereview") return claude.agentPrompts.rereview || DEFAULT_AGENT_PROMPTS.rereview;
   if (scenario === "drive") return claude.prompts.drive || DEFAULT_CLAUDE_PROMPTS.drive;
   return claude.prompts.review || DEFAULT_CLAUDE_PROMPTS.review;
-}
-
-/** The head commit an item was keyed on ("<id>|<scenario>|<head>…"). */
-function keyHead(key: string): string | null {
-  const h = key.split("|")[2];
-  return h && h !== "-" ? h : null;
 }
 
 /** When a re-review's trigger happened — the time in its key's cursor (`reply@…`, `asked@…`) — or null when none is known. */
@@ -3002,6 +2996,7 @@ export function createAgent(deps: AgentDeps): Agent {
         items: store.data.items,
         running: [...running.entries()].map(([runId, r]) => ({ runId, progress: r.progress, recent: r.recent, paused: r.paused })),
         idle,
+        heads: Object.fromEntries((deps.getSnapshot()?.pullRequests ?? []).filter((p) => p.headOid).map((p) => [p.id, p.headOid!])),
         runsToday: store.data.runsToday,
         perDay: s?.limits.perDay ?? 0,
         parallel: s?.limits.parallel ?? 0,
