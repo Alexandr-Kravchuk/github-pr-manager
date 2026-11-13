@@ -51,6 +51,9 @@ jobs:
           cache: "npm"
       - run: npm ci
       - run: npm run build
+      - name: Test the certificate trust installer
+        shell: pwsh
+        run: ./tests/windows-trust-script.tests.ps1
       - name: Trust the public signing certificate on the build runner
         timeout-minutes: 2
         shell: pwsh

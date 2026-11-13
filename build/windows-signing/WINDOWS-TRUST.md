@@ -5,7 +5,24 @@ self-signed code-signing certificate. This is a project certificate, not a
 certificate issued by a public certificate authority. Trusting it is optional;
 SmartScreen reputation warnings may still appear.
 
-## Install trust once per Windows account
+## Install trust with the PowerShell script
+
+1. Download `Install-PR-Dashboard-Trust.ps1` and `PR-Dashboard.cer` from the same
+   official release and save both in the same folder.
+2. Right-click `Install-PR-Dashboard-Trust.ps1` and select **Run with PowerShell**
+   (on Windows 11, this may be under **Show more options**).
+3. The script checks the certificate's pinned SHA-256 fingerprint and validity
+   before changing trust. Check the displayed fingerprint against this document,
+   then accept the Windows certificate confirmation. Trust is installed only for
+   your current account; administrator rights are not needed.
+4. Run the PR Dashboard installer. Re-running the script skips trust already installed.
+
+The script does not download files or change your execution policy. If Windows or
+company policy blocks running downloaded scripts, use the manual steps below or ask
+IT. A failed or cancelled import may leave trust in one store; use the removal
+instructions below if you want to undo it. SmartScreen warnings may still appear.
+
+## Install trust manually once per Windows account
 
 1. Download `PR-Dashboard.cer` from the official release:
    https://github.com/Alexandr-Kravchuk/github-pr-manager/releases

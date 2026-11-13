@@ -27,4 +27,5 @@ foreach ($file in @($installer, "$installer.blockmap", 'dist/latest.yml')) {
 }
 Copy-Item build/windows-signing/PR-Dashboard.cer $destination
 Copy-Item build/windows-signing/WINDOWS-TRUST.md $destination
+Copy-Item build/windows-signing/Install-PR-Dashboard-Trust.ps1 $destination
 Write-Host 'App and installer signatures, signer, timestamps and updater publisher verified.'
