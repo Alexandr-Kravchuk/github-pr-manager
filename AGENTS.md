@@ -259,11 +259,12 @@ Three layers:
   result is stale (`staleRun`): its question or Push could only be
   refused, so it is not your move — and neither is a drive's result once
   the PR's head moved past the commit it started from (`headMoved`, by
-  `drive.base` or the key's head; its own push excepted). GitHub then
-  places the card (With reviewers, Merge, Open on GitHub…), the run is
-  the card's note, Discard is its obvious choice, and the chip, tray and
-  popover don't count it as ready (`AgentState.heads` gives them each
-  PR's head). A drive's worktree is never removed with work you
+  `drive.base` or the key's head; a head that is one of its own commits
+  is excepted, whether the app or a session continued in Claude pushed
+  it). GitHub then places the card (With reviewers, Merge, Open on
+  GitHub…), the run is the card's note, Discard is its obvious choice, the
+  chip, tray and popover don't count it as ready (`AgentState.heads` gives
+  them each PR's head), and it raises no toast (`agentNoticeTitle` is null). A drive's worktree is never removed with work you
   haven't seen (`keepForWork`: a HEAD that is not the one its card
   showed, changed tracked files, or a count git couldn't make) — Discard, a
   close and the sweep keep it and its run folder, write

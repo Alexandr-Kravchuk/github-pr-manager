@@ -384,9 +384,21 @@ export function keyHead(key: string): string | null {
   return h && h !== "-" ? h : null;
 }
 
-/** Two commit ids name the same commit — either may be abbreviated. */
+/** Two commit ids name the same commit — either may be abbreviated, as git does it (7 characters at least); an empty id names none. */
 function sameCommit(a: string, b: string): boolean {
-  return a.startsWith(b) || b.startsWith(a);
+  if (a.length === 0 || b.length === 0) return false;
+  if (a === b) return true;
+  return Math.min(a.length, b.length) >= 7 && (a.startsWith(b) || b.startsWith(a));
+}
+
+/**
+ * The PR's head is a commit of the run's own — its last one or one before it —
+ * whoever pushed it: the app's Push, or the session you continued in Claude
+ * (which never sets `pushed`), all of its commits or only some.
+ */
+function headIsRuns(item: AgentItem, headOid: string): boolean {
+  const d = item.drive;
+  return Boolean(d && (sameCommit(headOid, d.head) || d.commits.some((c) => sameCommit(headOid, c.oid))));
 }
 
 /**
@@ -404,9 +416,8 @@ export function staleRun(item: AgentItem, headOid: string | null | undefined): S
   if (item.scenario !== "drive" || item.state !== "needsYou") return null;
   if (item.localWork && !item.localWork.kept && item.localWork.ahead !== 0) return null;
   const from = item.drive?.base ?? keyHead(item.key);
-  // Its own push moved the head to its last commit: that's the run's, not someone else's.
-  const ownPush = item.pushed && item.drive && headOid ? sameCommit(headOid, item.drive.head) : false;
-  if (headOid && from && !sameCommit(headOid, from) && !ownPush) return "headMoved";
+  // The head moved to a commit of the run's own: its push, not someone else's.
+  if (headOid && from && !sameCommit(headOid, from) && !headIsRuns(item, headOid)) return "headMoved";
   const unpushed = !item.pushed && (item.drive?.commits.length ?? 0) > 0;
   if (item.needsRerun && ((item.result?.asks.length ?? 0) > 0 || unpushed)) return "restart";
   return null;
@@ -426,9 +437,10 @@ export function staleLine(why: StaleRun, item: AgentItem, headOid: string | null
  * What a result waiting on you asks you to do — or null when it asks nothing
  * (stopped, taken over in a terminal, timed out, nothing to post, cut short by
  * a restart, stale — `staleRun`): such a run is a line on its card, not a
- * decision. `headOid` is the PR's head now, when known.
+ * decision. `headOid` is the PR's head now — null only where it isn't known,
+ * so no caller can leave it out by accident.
  */
-export function resultAction(item: AgentItem, lane: BoardLane, headOid?: string | null): StageAction | null {
+export function resultAction(item: AgentItem, lane: BoardLane, headOid: string | null): StageAction | null {
   const fix = (): StageAction => ({ kind: "fix", label: lane === "mine" && item.sessionId ? "Open in Claude" : "Try again" });
   // The Jira run follows a merge: its PR is gone, there's nothing to try again.
   if (item.state === "error") return item.scenario === "afterMerge" ? null : fix();
@@ -486,7 +498,7 @@ export function readyItems(items: readonly AgentItem[], heads?: Readonly<Record<
   for (const list of byPr.values()) {
     const { live, result } = stageItems(list, "");
     if (live || !result) continue;
-    const action = resultAction(result, laneOfScenario(result.scenario), heads?.[result.prId]);
+    const action = resultAction(result, laneOfScenario(result.scenario), heads?.[result.prId] ?? null);
     if (action && action.kind !== "updateJira") out.push(result);
   }
   return out.sort((a, b) => (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
@@ -808,8 +820,11 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
  * A notification's title, in the Board's words: what is ready for you and on
  * which PR — "Review ready to send: #929", "2 fixes ready to push: #142",
  * "Ready to merge: #85", "Your call on #150" — or that a run couldn't finish.
+ * Null: no toast at all — a result the PR already moved past (`staleRun`,
+ * `headOid` the PR's head now) is nobody's move, as on the Board.
  */
-export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item: AgentItem): string {
+export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item: AgentItem, headOid: string | null): string | null {
+  if (kind === "needsYou" && staleRun(item, headOid)) return null;
   const pr = `#${item.prNumber}`;
   if (kind === "failed") {
     // A run the agent planned is tried once more on its own: the toast says so, rather than asking you to.
@@ -825,7 +840,7 @@ export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item:
     if (item.scenario === "merge") return `Merged: ${pr}`;
     return `The agent finished ${pr}`;
   }
-  const action = resultAction(item, laneOfScenario(item.scenario));
+  const action = resultAction(item, laneOfScenario(item.scenario), headOid);
   switch (action?.kind) {
     case "send":
       if (item.scenario === "drive") return `${action.label === "Send reply" ? "Reply" : "Replies"} to reviewers ready to send: ${pr}`;

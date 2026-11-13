@@ -11004,6 +11004,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(asked.ask, "Nothing to do on its result — discard it.");
       const commits = xOne(mine, [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2), needsRerun: true })]);
       assert.deepStrictEqual([commits.owner, commits.stage.action, commits.stage.stale], ["others", null, "restart"], "no Push that would be refused");
+      assert.deepStrictEqual(commits.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
+        ["Self-review again", "enqueue", false],
+        ["Discard", "skip", true],
+      ], "no Run again, no Push, no session to open");
+      assert.strictEqual(commits.now, "Waiting for reviewers. The agent's earlier run is out of date: stale — the app restarted after this run, so it can't push or take your answer.");
       // The PR still needs work: Your move is GitHub's say-so, with the stale run beside it.
       const broken = xOne(xPr({ ciState: "failure", failingChecks: [] }), [sIt({ scenario: "drive", reasons: ["ci"], state: "needsYou", drive: drive(2), needsRerun: true })]);
       assert.deepStrictEqual([broken.owner, broken.stage.action.kind, broken.stage.ready], ["you", "fixYourself", false]);
@@ -11036,6 +11041,18 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // Its own push moved the head: not someone else's commit.
       const pushed = xOne(xPr({ headOid: "f00d" }), [run({ result: undefined, pushed: true, plan: answers(1) })]);
       assert.strictEqual(pushed.stage.stale, null);
+      // Pushed from the session you continued in Claude — `pushed` is never set there — all of it or only its first commit.
+      const viaSession = { ...drive(3), base: from, head: head };
+      viaSession.commits[2].oid = head;
+      const continued = xOne(pr, [run({ drive: viaSession })]);
+      assert.deepStrictEqual([continued.stage.stale, continued.stage.action.kind], [null, "decide"], "its new question is still your call");
+      assert.strictEqual(xOne(xPr({ headOid: "c0" }), [run()]).stage.stale, null, "a partial push: the head is the run's first commit");
+      // An empty run head matches no PR head.
+      assert.strictEqual(xOne(pr, [run({ drive: { ...drive(0), base: from, head: "" } })]).stage.stale, "headMoved");
+      // The toast agrees with the Board: no "Your call" for a run the PR moved past.
+      assert.strictEqual(view.agentNoticeTitle("needsYou", run(), head), null);
+      assert.strictEqual(view.agentNoticeTitle("needsYou", run(), from), "Your call on #1");
+      assert.strictEqual(view.agentNoticeTitle("needsYou", run({ drive: viaSession }), head), "Your call on #1");
       // Unread commits in its worktree stay a move of yours whatever the head.
       const lw = { worktree: "/w", ahead: 3, dirty: false, reason: "the app restarted since the run" };
       assert.strictEqual(xOne(pr, [run({ needsRerun: true, localWork: lw })]).stage.action.label, "Unpushed work");
@@ -11052,6 +11069,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.agentSummary({ items: [restarted, moved, fresh], running: [], heads, paused: false, quietUntil: null, heldUntil: null, perDay: 0, runsToday: 0 }).readyForYou, 1);
       assert.strictEqual(view.resultAction(moved, "mine", "bbb222"), null);
       assert.strictEqual(view.resultAction(moved, "mine", "aaa111").kind, "decide");
+    });
+
+    await atest("agent state: heads carries each PR's head from the snapshot — what the chip, the tray and the popover tell a superseded run by", async () => {
+      const f = agentFixture({ enabled: false, script: () => {}, pr: { ...reviewPr(), headOid: "h1" } });
+      try {
+        f.snapshot.pullRequests.push({ ...reviewPr({ id: "PR_X" }), headOid: null });
+        const s = f.agent.getState();
+        assert.deepStrictEqual(s.heads, { PR_R: "h1" }, "a PR without a known head is left out");
+        const ask = { summary: "", asks: [{ question: "q", options: [] }], findings: [], authorQuestions: [], structured: true };
+        const moved = vItem({ prId: "PR_R", scenario: "drive", state: "needsYou", finishedAt: sAgo(5), key: "PR_R|drive|old1", drive: { ...drive(1), base: "old1" }, result: ask });
+        assert.strictEqual(view.agentSummary({ ...s, items: [moved] }).readyForYou, 0, "started from a commit the PR moved past");
+        assert.strictEqual(view.agentSummary({ ...s, items: [moved], heads: { PR_R: "old1" } }).readyForYou, 1, "the same run on its own head");
+      } finally {
+        f.agent.stop();
+      }
     });
 
     test("agent board words: commits your session left that the app couldn't read — named with their folder, never \"nothing to push\", no Send", () => {

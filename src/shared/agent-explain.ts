@@ -238,10 +238,11 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
     owner = "you";
     const plan = read.plan;
     /**
-     * A drive's result from before the app restarted (`needsRerun`): its push
-     * and its answer would only be refused, so the card offers what still
-     * works — running it again — and shows its question as what the new run
-     * will ask, not as buttons.
+     * A drive's result from before the app restarted (`needsRerun`) that is
+     * still a card of yours: commits in its worktree the app couldn't read
+     * (a push card), or replies with a worktree it couldn't read again (a
+     * send card). A restarted run with questions or plain commits is stale
+     * (`staleRun`) and never reaches here.
      */
     const rerunCard = (it: AgentItem) => {
       const lw = it.localWork && !it.localWork.kept && it.localWork.ahead !== 0 ? it.localWork : null;
@@ -367,7 +368,8 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         break;
       }
       case "push": {
-        if (item?.needsRerun) {
+        // After a restart only commits the app couldn't read keep a push card (a stale run is no move of yours).
+        if (item?.needsRerun && item.localWork) {
           rerunCard(item);
           break;
         }

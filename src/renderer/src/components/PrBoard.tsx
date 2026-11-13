@@ -342,7 +342,7 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
         )}
         {commits && item?.drive && (
           <div>
-            <div className="text-xs font-medium text-fg">{item.localWork && !item.localWork.kept ? "What the app read before — the session's later commits are only in the worktree" : item.needsRerun ? "What it committed — never pushed; the new run makes it again" : "What gets pushed"}</div>
+            <div className="text-xs font-medium text-fg">{item.localWork && !item.localWork.kept ? "What the app read before — the session's later commits are only in the worktree" : "What gets pushed"}</div>
             <DriveView drive={item.drive} />
             {item.plan && item.plan.replies.length > 0 && <PlanView plan={item.plan} />}
           </div>
