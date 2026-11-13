@@ -144,6 +144,14 @@ npm install
 npm run dev      # Vite dev server (HMR) + Electron
 ```
 
+Repository agent skills live in `.claude/skills/`. Codex discovers the same
+skills through the tracked `.agents/skills` symlink, so additions and edits
+need no separate sync or install step. Keep new skills in
+`.claude/skills/<name>/SKILL.md`. If a skill does not appear in an existing
+Codex session, start a new session in this repository. On Windows, enable Git
+symlink support (`core.symlinks=true`, with Developer Mode or permission to
+create symbolic links) so the link is checked out as a directory link.
+
 To work on the UI without `gh` or the network, use the fixture mode: set
 `PRD_MOCK=1` (canned PRs in Electron — cases live in `src/main/mock.ts`, switched
 live via a `.prd-mock` file), or run the renderer alone in a browser and let

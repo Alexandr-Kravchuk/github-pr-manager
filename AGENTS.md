@@ -498,6 +498,14 @@ Three layers:
   to it wins on stylesheet order and the titles run to any number of lines,
   which is what made the tiles in a row different heights.
 
+## Repository skills (Claude and Codex)
+
+Keep repository skills in `.claude/skills/<name>/SKILL.md`. The tracked relative
+symlink `.agents/skills` → `../.claude/skills` exposes that same directory to
+Codex's repository skill discovery, including newly added skills. Edit the
+canonical Claude directory; do not copy skills or replace the symlink with a
+separate directory. Skill resources and scripts stay beside their `SKILL.md`.
+
 ## Build / run
 
 - `npm run dev` — Vite dev server (HMR) + Electron pointed at it. The main
