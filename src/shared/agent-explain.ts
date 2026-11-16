@@ -75,6 +75,8 @@ export interface ExplainedBoard {
   earlier: number;
   /** Moves the agent prepared on PRs the dashboard's filters hide. */
   hiddenReady: number;
+  /** Your-turn cards set aside with "Not now": back in Your turn once their PR changes. */
+  aside: BoardEntry[];
 }
 
 const OWNER_ORDER: Record<BoardOwner, number> = { you: 0, agent: 1, others: 2, done: 3 };
@@ -97,7 +99,8 @@ export function explainBoard(prs: readonly PullRequest[], all: readonly PullRequ
     }
   }
   entries.sort((a, b) => OWNER_ORDER[a.owner] - OWNER_ORDER[b.owner] || rankOf(a) - rankOf(b) || (a.owner === "agent" ? agentOrder(a) - agentOrder(b) : 0) || order(a, b));
-  return { entries, earlier: board.mine.earlier + board.review.earlier, hiddenReady: board.hiddenReady };
+  const aside = board.aside.map((card) => explainCard(card, card.stage.lane, state, place));
+  return { entries, earlier: board.mine.earlier + board.review.earlier, hiddenReady: board.hiddenReady, aside };
 }
 
 function rankOf(e: BoardEntry): number {

@@ -257,7 +257,7 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
   const sum = agentSummary(state);
   const waiting = sum.readyForYou;
   // The moves ready for you, oldest first — each one click from its card.
-  const waitingItems = readyItems(state.items, state.heads);
+  const waitingItems = readyItems(state.items, state.heads, state.setAside);
   const go = (runId?: string) => {
     onClose();
     focusItem(runId);
