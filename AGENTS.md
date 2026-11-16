@@ -456,9 +456,11 @@ Three layers:
   head, `updatedAt`, CI and conflict state, and its latest run — in
   `state.json` (`setAside`), and while that still reads the same the card
   sits folded under "Set aside" and out of every "ready for you" count
-  (`readyItems`, `hiddenReady`). Anything new on the PR changes the key and
-  the card is back (`getState` filters at once; the plan prunes), or Bring
-  back (`bringBack`) now. The two lanes are a tag on each card, not rows
+  (`readyItems`, `hiddenReady`). Main sets aside only a card in Your turn,
+  and one rule (`stillAside`) says a card is still aside: its PR on the
+  dashboard, the same key, the card still in Your turn. Anything new on the
+  PR ends it — `getState` filters at once, and every snapshot prunes and
+  tells the window, the agent on or off — or Bring back (`bringBack`) now. The two lanes are a tag on each card, not rows
   of columns: a move was missed for days among eight equal columns. The
   three variants it was picked from are on the `prototype/board-redesign`
   branch. Like Cozy it turns off Group-by and Sort).

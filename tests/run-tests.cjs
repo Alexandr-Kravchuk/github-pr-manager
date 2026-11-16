@@ -11171,6 +11171,58 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: with the agent off, a snapshot where a set-aside PR changed tells the window and forgets the mark; an unchanged one does neither", async () => {
+      let pushes = 0;
+      const f = agentFixture({ enabled: false, script: () => {}, pr: { ...reviewPr(), headOid: "h1" }, onChange: () => pushes++ });
+      const stored = () => JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).setAside ?? {};
+      try {
+        await f.agent.act({ type: "notNow", prId: "PR_R" });
+        await until(() => Object.keys(stored()).length === 1);
+        pushes = 0;
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(pushes, 0, "nothing changed: no push");
+        assert.deepStrictEqual(Object.keys(stored()), ["PR_R"]);
+        f.snapshot.pullRequests[0] = { ...f.snapshot.pullRequests[0], updatedAt: new Date(Date.now() + 60_000).toISOString() };
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(pushes, 1, "the window hears the card is back");
+        await until(() => Object.keys(stored()).length === 0);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent plan: a set-aside mark stays while its PR shows the same, and goes once the PR moves or leaves the dashboard", async () => {
+      const f = agentFixture({ enabled: true, agent: { scenarios: { review: { mode: "off" } } }, script: () => {}, pr: { ...reviewPr(), headOid: "h1" } });
+      const stored = () => JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).setAside ?? {};
+      try {
+        f.snapshot.pullRequests.push({ ...reviewPr({ id: "PR_S", number: 8 }), headOid: "s1" });
+        await f.agent.act({ type: "notNow", prId: "PR_R" });
+        await f.agent.act({ type: "notNow", prId: "PR_S" });
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => Object.keys(stored()).length === 2);
+        // PR_R gets a push; PR_S leaves the dashboard.
+        f.snapshot.pullRequests[0] = { ...f.snapshot.pullRequests[0], headOid: "h2" };
+        f.snapshot.pullRequests.splice(1, 1);
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => Object.keys(stored()).length === 0);
+        assert.deepStrictEqual(f.agent.getState().setAside, {});
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: Not now sets aside only a card in Your turn — main refuses one waiting on others", async () => {
+      // A PR you reviewed, with no new review asked of you: the card is in Waiting, not Your turn.
+      const f = agentFixture({ enabled: false, script: () => {}, pr: { ...reviewPr({ role: "reviewed", requestedOfMe: false }), headOid: "h1" } });
+      try {
+        const res = await f.agent.act({ type: "notNow", prId: "PR_R" });
+        assert.deepStrictEqual(res, { ok: false, error: "Only a card in Your turn can be set aside." });
+        assert.deepStrictEqual(f.agent.getState().setAside, {});
+      } finally {
+        f.agent.stop();
+      }
+    });
+
     await atest("agent state: heads carries each PR's head from the snapshot — what the chip, the tray and the popover tell a superseded run by", async () => {
       const f = agentFixture({ enabled: false, script: () => {}, pr: { ...reviewPr(), headOid: "h1" } });
       try {
