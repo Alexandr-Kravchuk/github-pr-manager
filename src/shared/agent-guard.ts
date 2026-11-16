@@ -94,7 +94,11 @@ export interface GuardPreflight {
   helpers: string[];
   /** Claude Code's `plugins/installed_plugins.json`, which the skill reads to find its helper. */
   installedPlugins: string;
-  /** The temp folder the helper writes its payload folders into. */
+  /**
+   * The run's own temp folder (`TEMP`/`TMP`/`TMPDIR` of its session), where
+   * the helper writes its payload folders — never your shared one, which
+   * holds the payloads of every other review of the last day.
+   */
   tmpDir: string;
 }
 
@@ -386,20 +390,29 @@ export function checkRead(toolName: string, input: unknown, run: GuardRun | null
   return { allow: true };
 }
 
-/** A preflight file a read may open: `installed_plugins.json`, or a file in one of the helper's payload folders. */
+/** A preflight file a read may open: `installed_plugins.json`, or anything inside one of the helper's payload folders. */
 function preflightReadable(file: string, p: GuardPreflight, real: RealPath): boolean {
   const list = real(p.installedPlugins);
   if (list && samePath(file, list)) return true;
-  return payloadDir(file, p, real, true);
+  const rest = underTmp(file, p, real);
+  return rest !== null && isPayloadName(rest[0]);
 }
 
-/** Whether `p` is one of the helper's payload folders (`inside`: or a file within one) right under the temp folder. */
-function payloadDir(file: string, p: GuardPreflight, real: RealPath, inside: boolean): boolean {
+/** Whether `dir` is one of the helper's payload folders itself, right under the run's temp folder. */
+function isPayloadFolder(dir: string, p: GuardPreflight, real: RealPath): boolean {
+  const rest = underTmp(dir, p, real);
+  return rest !== null && rest.length === 1 && isPayloadName(rest[0]);
+}
+
+/** The path's segments below the run's temp folder, or null when it is not inside it. */
+function underTmp(file: string, p: GuardPreflight, real: RealPath): string[] | null {
   const tmp = real(p.tmpDir);
-  if (!tmp || !isInsideDir(file, tmp) || file.split(/[\\/]/).includes("..")) return false;
-  const rest = gitBashPath(file).slice(gitBashPath(tmp).replace(/\/+$/, "").length + 1).split("/");
-  if (!rest[0].startsWith(PREFLIGHT_PAYLOAD_PREFIX) || rest[0].length === PREFLIGHT_PAYLOAD_PREFIX.length) return false;
-  return inside ? rest.length >= 1 : rest.length === 1;
+  if (!tmp || !isInsideDir(file, tmp) || file.split(/[\\/]/).includes("..")) return null;
+  return gitBashPath(file).slice(gitBashPath(tmp).replace(/\/+$/, "").length + 1).split("/");
+}
+
+function isPayloadName(name: string): boolean {
+  return name.startsWith(PREFLIGHT_PAYLOAD_PREFIX) && name.length > PREFLIGHT_PAYLOAD_PREFIX.length;
 }
 
 /**
@@ -433,13 +446,56 @@ function splitStdin(command: string): { left: string; file: string } | null {
 
 const NODE_NAMES = new Set(["node", "node.exe"]);
 
+/** The keys the review skill's preflight request carries — nothing else is let through. */
+const PREFLIGHT_REQUEST_KEYS = new Set(["pr", "dryRun", "rereview", "guidanceDocs"]);
+
+/**
+ * Reads a request file the way the helper will, after making it read-only so
+ * nothing can change it between this check and `node` reading it. Null when it
+ * can't be read. Injected: the guard itself never touches the disk.
+ */
+export type LockedRead = (file: string) => string | null;
+
+/**
+ * Whether a preflight request is for this run's PR only. The helper runs `gh`
+ * with your login and fetches whatever PR `pr` names, so a request a PR's text
+ * steered toward another repository would carry that repository's threads,
+ * diff and files into this run's payload. `guidanceDocs` are paths in that same
+ * PR's repository, read at its base — already readable through `gh api`.
+ */
+function requestProblem(text: string | null, pr: GuardPr | null): string | null {
+  if (text === null) return "the request file can't be read";
+  if (!pr) return "this run has no PR to hold the request to";
+  let req: unknown;
+  try {
+    req = JSON.parse(text);
+  } catch {
+    return "the request is not JSON";
+  }
+  if (typeof req !== "object" || req === null || Array.isArray(req)) return "the request is not a JSON object";
+  const r = req as Record<string, unknown>;
+  const extra = Object.keys(r).filter((k) => !PREFLIGHT_REQUEST_KEYS.has(k));
+  if (extra.length) return `the request carries ${extra.join(", ")}, which the preflight doesn't take`;
+  const target = typeof r.pr === "string" ? guardPrFromUrl(r.pr.trim()) : null;
+  if (!target || target.host !== pr.host || target.repo !== pr.repo || target.number !== pr.number) return `the request must name this run's PR, ${pr.url}`;
+  if ("dryRun" in r && typeof r.dryRun !== "boolean") return "dryRun must be true or false";
+  if ("rereview" in r && (typeof r.rereview !== "string" || r.rereview.length > 20)) return "rereview must be a short word";
+  if ("guidanceDocs" in r) {
+    const docs = r.guidanceDocs;
+    const safe = (d: unknown) => typeof d === "string" && d.length > 0 && d.length <= 300 && !d.startsWith("/") && !d.includes("\\") && !d.split("/").includes("..");
+    if (!Array.isArray(docs) || docs.length > 50 || !docs.every(safe)) return "guidanceDocs must be up to 50 relative paths in the PR's repository";
+  }
+  return null;
+}
+
 /**
  * The review skill's preflight (`GuardPreflight`): `node <helper> < <request>`
- * with the request in the run's payload folder, or `node <helper> --digest
- * <payload folder>`. Null when the command doesn't start a helper of this run,
- * so the other rules judge it; any other use of a helper is refused.
+ * with the request in the run's payload folder and for the run's own PR, or
+ * `node <helper> --digest <payload folder>`. Null when the command doesn't
+ * start a helper, so the other rules judge it; any other use of a helper —
+ * one of another plugin version included — is refused with what is allowed.
  */
-function checkPreflight(command: string, run: GuardRun | null, real: RealPath): GuardDecision | null {
+function checkPreflight(command: string, pr: GuardPr | null, run: GuardRun | null, real: RealPath, lockedRead: LockedRead): GuardDecision | null {
   const p = run?.preflight;
   if (!p) return null;
   const stdin = splitStdin(command);
@@ -448,7 +504,12 @@ function checkPreflight(command: string, run: GuardRun | null, real: RealPath): 
   const w = split.words;
   if (w.length < 2 || !NODE_NAMES.has(w[0].toLowerCase())) return null;
   const helper = real(w[1]);
-  if (!helper || !p.helpers.some((h) => samePath(helper, h))) return null;
+  const listed = helper !== null && p.helpers.some((h) => samePath(helper, h));
+  if (!listed) {
+    const name = PREFLIGHT_HELPER[PREFLIGHT_HELPER.length - 1];
+    if (gitBashPath(w[1]).split("/").pop()?.toLowerCase() !== name) return null;
+    return deny(`This run's review preflight helper is ${p.helpers.join(" or ")}; ${w[1]} is not it (a plugin updated since the run started?).`);
+  }
   const shape = `The review preflight runs as node "<helper>" < "<request file under ${run?.outDir ?? "the run's payload folder"}>", or node "<helper>" --digest "<payload folder>" — nothing else.`;
   if (stdin) {
     const file = shellWords(stdin.file);
@@ -456,11 +517,12 @@ function checkPreflight(command: string, run: GuardRun | null, real: RealPath): 
     const outDir = run?.outDir ? real(run.outDir) : null;
     const req = real(file.words[0]);
     if (!outDir || !req || !isInsideDir(req, outDir)) return deny(shape);
-    return { allow: true };
+    const problem = requestProblem(lockedRead(req), pr);
+    return problem ? deny(`The review preflight request is refused: ${problem}.`) : { allow: true };
   }
   if (w.length === 4 && w[2] === "--digest") {
     const dir = real(w[3]);
-    if (dir && isAbsolutePath(w[3]) && payloadDir(dir, p, real, false)) return { allow: true };
+    if (dir && isAbsolutePath(w[3]) && isPayloadFolder(dir, p, real)) return { allow: true };
   }
   return deny(shape);
 }
@@ -1238,8 +1300,15 @@ function checkGit(kind: AgentRunKind, words: string[], run: GuardRun | null, rea
   return checkGitFiles(sub, words.slice(2), run, real);
 }
 
-export function checkBash(kind: AgentRunKind, rawCommand: string, pr: GuardPr | null = null, run: GuardRun | null = null, real: RealPath = asWritten): GuardDecision {
-  const preflight = kind === "review" || kind === "rereview" ? checkPreflight(rawCommand, run, real) : null;
+export function checkBash(
+  kind: AgentRunKind,
+  rawCommand: string,
+  pr: GuardPr | null = null,
+  run: GuardRun | null = null,
+  real: RealPath = asWritten,
+  lockedRead: LockedRead = () => null,
+): GuardDecision {
+  const preflight = kind === "review" || kind === "rereview" ? checkPreflight(rawCommand, pr, run, real, lockedRead) : null;
   if (preflight) return preflight;
   const split = shellWords(rawCommand);
   if ("error" in split) return deny(split.error);
@@ -1274,6 +1343,7 @@ export function checkToolUse(
   pr: GuardPr | null = null,
   run: GuardRun | null = null,
   real: RealPath = asWritten,
+  lockedRead: LockedRead = () => null,
 ): GuardDecision {
   if (run?.mode === "full" && kind === "drive") return checkFullToolUse(toolName, input, pr, run);
   if (NEVER.has(toolName)) return deny(`${toolName} is not available to agent runs.`);
@@ -1296,7 +1366,7 @@ export function checkToolUse(
   if (toolName === "Bash") {
     const command = typeof (input as { command?: unknown } | null)?.command === "string" ? (input as { command: string }).command : "";
     if (!command.trim()) return deny("An empty command.");
-    return checkBash(kind, command, pr, run, real);
+    return checkBash(kind, command, pr, run, real, lockedRead);
   }
   if (SESSION_TOOLS.has(toolName)) return { allow: true };
   return deny(`${toolName || "That tool"} is not one of the tools agent runs may use.`);

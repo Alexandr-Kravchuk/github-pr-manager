@@ -50,7 +50,7 @@ import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, redirectingKeys, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
-import { claudeSessionRoots, cutShort, preflightFor, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
+import { claudeSessionRoots, cutShort, preflightFor, runTempEnv, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
 import { approveAgainRequest, checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
 import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
@@ -1435,8 +1435,17 @@ export function createAgent(deps: AgentDeps): Agent {
     const fromPlugins = resolveSkillRefs(renderAgentPrompt(promptFor(item, all.claude), "", item.url), plugins());
     const mine = mountUserSkills(fromPlugins.prompt, plugins(), path.join(runDir, "user-skills"), deps.userSkillsDir);
     const pluginDirs = [...fromPlugins.pluginDirs, ...mine.pluginDirs];
-    // The review skill's preflight helper: only a review or re-review with a payload folder runs it.
-    const preflight = (kind === "review" || kind === "rereview") ? preflightFor(pluginDirs, launcherEnv(process.env)) : null;
+    // The review skill's preflight helper: only a review or re-review with a
+    // payload folder runs it, and in a temp folder of its own — the helper
+    // writes the PR's data there, and your shared one holds every other
+    // review's payloads of the last day. One gate for the guard file, the
+    // tools, the folders and the environment below.
+    // The folder exists before it is resolved: the guard compares real paths.
+    const runTmp = path.join(runDir, "tmp");
+    const mayPreflight = (kind === "review" || kind === "rereview") && folder !== null;
+    if (mayPreflight) fs.mkdirSync(runTmp, { recursive: true });
+    const preflight = mayPreflight ? preflightFor(pluginDirs, { ...launcherEnv(process.env), ...runTempEnv(runTmp) }) : null;
+    const tempEnv = preflight ? runTempEnv(runTmp) : {};
     const settingsFile = path.join(runDir, "settings.json");
     const guardFile = path.join(runDir, "guard.json");
     const hooksDir = freshHooksDir(runDir);
@@ -1459,10 +1468,10 @@ export function createAgent(deps: AgentDeps): Agent {
       // home folder, gh's or ssh's keys, this app's settings.
       readDirs: [dir, ...(folder ? [folder.outDir] : []), ...pluginDirs],
       sessionId,
-      sessionRoots: claudeSessionRoots(launcherEnv(process.env)),
+      sessionRoots: claudeSessionRoots({ ...launcherEnv(process.env), ...tempEnv }),
       // A skill's Workflow may run its script from the plugins this run mounted — never one from the PR.
       workflowDirs: pluginDirs,
-      ...(preflight && folder ? { preflight } : {}),
+      ...(preflight ? { preflight } : {}),
     });
     writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url, guardFile));
     item.sessionId = sessionId;
@@ -1485,14 +1494,13 @@ export function createAgent(deps: AgentDeps): Agent {
 
     // The wrapper's own rule, and Write — which the guard holds to the payload folder.
     // The preflight's node, which the guard holds to the helper's two calls.
-    const withPreflight = Boolean(preflight && folder);
-    const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(withPreflight ? ["Bash(node *)"] : [])])];
+    const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(preflight ? ["Bash(node *)"] : [])])];
     // Read-only runs may read the plugins' folders (a skill's Workflow reads its script from there); a run that edits never gets them.
     // The preflight's file and payload folders too — the guard narrows them to installed_plugins.json and the helper's own folders.
     const addDirs = [
       ...(folder ? [folder.outDir] : []),
       ...pluginDirs,
-      ...(withPreflight && preflight ? [path.dirname(preflight.installedPlugins), preflight.tmpDir] : []),
+      ...(preflight ? [path.dirname(preflight.installedPlugins), preflight.tmpDir] : []),
     ];
 
     const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false, byAgentPause: false, offStop: false };
@@ -1537,6 +1545,8 @@ export function createAgent(deps: AgentDeps): Agent {
           // git in a drive (every remote URL is rewritten there), and without
           // a host it would ask github.com — the wrong place for an Enterprise PR.
           ...ghTarget(item.url, item.repo),
+          // The run's own temp folder, where the preflight helper writes (`preflightFor`).
+          ...tempEnv,
         },
       },
       (progress) => {

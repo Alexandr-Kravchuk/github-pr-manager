@@ -717,13 +717,20 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   data to `<tmp>/creatio-rereview-payload-*`, which later agents read. When
   a mounted plugin carries the helper, a review or re-review with a payload
   folder gets `preflight` in its guard file (`preflightFor` in
-  `main/agent/runner.ts`) and `Bash(node *)`, and `checkPreflight` /
-  `preflightReadable` allow exactly: reading that one JSON file, reading
-  inside a payload folder right under the temp folder, `node <helper> <
-  <request file in the run's payload folder>` and `node <helper> --digest
-  <payload folder>` — paths followed through links, any other `node` call
-  refused. Without it every review aborted at the preflight
-  (`preflight-unverified`) and was reported as "Reviewed — nothing to post".
+  `main/agent/runner.ts`), `Bash(node *)` and a temp folder of its own
+  (`runTempEnv`: `<runDir>/tmp` as `TEMP`/`TMP`/`TMPDIR`), and
+  `checkPreflight` / `preflightReadable` allow exactly: reading that one
+  JSON file, reading inside a payload folder right under the run's temp
+  folder, `node <helper> < <request file in the run's payload folder>` and
+  `node <helper> --digest <payload folder>` — paths followed through links,
+  any other `node` call refused. The helper runs `gh` with your login on
+  whatever PR the request names, so the request is held to the run's own PR
+  and the four keys the skill sends (`requestProblem`), and the hook makes
+  the file read-only before reading it (`lockedRead`), so it can't be
+  swapped before `node` reads it. The temp folder is the run's own because
+  your shared one keeps the payloads of every other review of the last day.
+  Without this every review aborted at the preflight (`preflight-unverified`)
+  and was reported as "Reviewed — nothing to post".
 - **Except a drive on your own PR, with full context** (Settings › Agent ›
   "Your PRs: full context", `permissions.fullContextDrive`, on by default).
   Its diff and comments are yours and your reviewers', so it runs with your

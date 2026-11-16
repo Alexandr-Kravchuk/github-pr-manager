@@ -89,6 +89,23 @@ export function readGuardFile(file: string | undefined): GuardRun | null {
 }
 
 /**
+ * The review preflight's request, read for the guard: made read-only first,
+ * so the session can't rewrite it between this check and `node` reading it
+ * (a read-only run has no shell to undo that, and Write can't open it). A
+ * request over 64 KB, or anything but a file, is not read.
+ */
+export function lockedRead(file: string): string | null {
+  try {
+    fs.chmodSync(file, 0o444);
+    const st = fs.statSync(file);
+    if (!st.isFile() || st.size > 64 * 1024) return null;
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Where a write to `file` really lands: its nearest existing ancestor resolved
  * through every link and junction, the parts that don't exist yet appended.
  * Null when that can't be told — a link whose target is missing, which a
@@ -186,7 +203,7 @@ function main(): void {
     let decision: GuardDecision;
     try {
       const tool = typeof call.tool_name === "string" ? call.tool_name : "";
-      decision = checkToolUse(kind, tool, call.tool_input, pr, run, realRead);
+      decision = checkToolUse(kind, tool, call.tool_input, pr, run, realRead, lockedRead);
       if (decision.allow) decision = checkRealWrite(kind, tool, call.tool_input, run);
     } catch (e) {
       decision = { allow: false, reason: `the check failed (${(e as Error).message}) — refusing.` };

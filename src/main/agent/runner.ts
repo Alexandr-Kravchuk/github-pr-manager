@@ -178,8 +178,18 @@ export function hookCommand(execPath: string, hookScript: string, kind: AgentRun
 export function claudeSessionRoots(env: Record<string, string | undefined>, platform: string = process.platform): string[] {
   const config = env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), ".claude");
   const tmp = env.CLAUDE_CODE_TMPDIR?.trim();
-  const temps = tmp ? [tmp] : platform === "win32" ? [env.TEMP?.trim() || env.TMP?.trim() || os.tmpdir()] : [os.tmpdir(), "/tmp"];
+  const temps = tmp ? [tmp] : platform === "win32" ? [osTempDir(env, platform)] : [osTempDir(env, platform), "/tmp"];
   return [...new Set([path.join(config, "projects"), ...temps.map((t) => path.join(t, "claude"))])];
+}
+
+/** The temp folder a process started with `env` takes — `os.tmpdir()`'s own rule, for that environment rather than this one. */
+export function osTempDir(env: Record<string, string | undefined>, platform: string = process.platform): string {
+  return (platform === "win32" ? env.TEMP?.trim() || env.TMP?.trim() : env.TMPDIR?.trim()) || os.tmpdir();
+}
+
+/** A session's own temp folder: every name a program reads it from. */
+export function runTempEnv(dir: string): Record<string, string> {
+  return { TEMP: dir, TMP: dir, TMPDIR: dir };
 }
 
 /**
@@ -187,7 +197,8 @@ export function claudeSessionRoots(env: Record<string, string | undefined>, plat
  * plugin carries the helper: each helper and the temp folder as they really
  * are (links and 8.3 names resolved, the way the guard reads a command's
  * paths), and Claude Code's `installed_plugins.json`. The temp folder is the
- * one `node` takes for the session's environment, where the helper writes.
+ * one `node` takes in the session's environment (`env`): the run's own, which
+ * the app gives a session that may run the preflight (`runTempEnv`).
  */
 export function preflightFor(pluginDirs: readonly string[], env: Record<string, string | undefined>, platform: string = process.platform): GuardPreflight | null {
   const real = (p: string): string | null => {
@@ -200,7 +211,7 @@ export function preflightFor(pluginDirs: readonly string[], env: Record<string, 
   const helpers = pluginDirs.map((d) => real(path.join(d, ...PREFLIGHT_HELPER))).filter((h): h is string => h !== null);
   if (helpers.length === 0) return null;
   const config = env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), ".claude");
-  const tmp = platform === "win32" ? env.TEMP?.trim() || env.TMP?.trim() || os.tmpdir() : env.TMPDIR?.trim() || os.tmpdir();
+  const tmp = osTempDir(env, platform);
   return { helpers: [...new Set(helpers)], installedPlugins: path.join(config, "plugins", "installed_plugins.json"), tmpDir: real(tmp) ?? tmp };
 }
 
