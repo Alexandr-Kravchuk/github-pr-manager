@@ -710,6 +710,20 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   and `StructuredOutput`, which a Workflow's agents answer through); a test
   pins that every tool the default `--allowedTools` lists grant is one the
   guard knows, so extend the guard before adding a tool to the defaults.
+  One exception is narrow on purpose: the review skill's preflight. Its
+  Workflow first runs a deterministic helper of the installed plugin
+  (`skills/creatio-code-review/scripts/rereview-context.cjs`), found through
+  Claude Code's `plugins/installed_plugins.json`; the helper writes the PR's
+  data to `<tmp>/creatio-rereview-payload-*`, which later agents read. When
+  a mounted plugin carries the helper, a review or re-review with a payload
+  folder gets `preflight` in its guard file (`preflightFor` in
+  `main/agent/runner.ts`) and `Bash(node *)`, and `checkPreflight` /
+  `preflightReadable` allow exactly: reading that one JSON file, reading
+  inside a payload folder right under the temp folder, `node <helper> <
+  <request file in the run's payload folder>` and `node <helper> --digest
+  <payload folder>` — paths followed through links, any other `node` call
+  refused. Without it every review aborted at the preflight
+  (`preflight-unverified`) and was reported as "Reviewed — nothing to post".
 - **Except a drive on your own PR, with full context** (Settings › Agent ›
   "Your PRs: full context", `permissions.fullContextDrive`, on by default).
   Its diff and comments are yours and your reviewers', so it runs with your

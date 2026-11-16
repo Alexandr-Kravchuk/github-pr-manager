@@ -75,7 +75,33 @@ export interface GuardRun {
   sessionId?: string;
   /** Those roots: `projects` in Claude Code's config folder, its temp folder. */
   sessionRoots?: string[];
+  /** The review skill's preflight, when a mounted plugin carries its helper (`checkPreflight`). */
+  preflight?: GuardPreflight;
 }
+
+/**
+ * The creatio-code-review skill starts each review with a deterministic
+ * helper (`scripts/rereview-context.cjs`): an agent of its Workflow reads
+ * `installed_plugins.json` to find the helper of the installed plugin, writes
+ * the request to a file, runs `node <helper> < <file>`, and the helper writes
+ * the PR's data to `<tmp>/creatio-rereview-payload-*`, which the later agents
+ * read after `node <helper> --digest <dir>`. Each step is allowed here as
+ * exactly that and nothing wider: one file read, these two command shapes,
+ * reads of the helper's payload folders.
+ */
+export interface GuardPreflight {
+  /** The helpers the run may start: the mounted plugins' own copies, absolute. */
+  helpers: string[];
+  /** Claude Code's `plugins/installed_plugins.json`, which the skill reads to find its helper. */
+  installedPlugins: string;
+  /** The temp folder the helper writes its payload folders into. */
+  tmpDir: string;
+}
+
+/** What the helper names its payload folders. */
+export const PREFLIGHT_PAYLOAD_PREFIX = "creatio-rereview-payload-";
+/** Where a review skill keeps its preflight helper, inside its plugin. */
+export const PREFLIGHT_HELPER = ["skills", "creatio-code-review", "scripts", "rereview-context.cjs"] as const;
 
 /**
  * Inside a drive run's worktree, what it still may not change: git's own
@@ -349,6 +375,7 @@ export function checkRead(toolName: string, input: unknown, run: GuardRun | null
     const r = real(target);
     if (!r) return deny(`${target} is a link to nowhere; agent runs don't read through it.`);
     if (dirs.some((d) => withinDir(r, d)) || (run && inSessionFolder(r, run, real))) continue;
+    if (run?.preflight && preflightReadable(r, run.preflight, real)) continue;
     const really = samePath(r, target) ? "" : ` (it really is ${r})`;
     return deny(
       dirs.length
@@ -357,6 +384,85 @@ export function checkRead(toolName: string, input: unknown, run: GuardRun | null
     );
   }
   return { allow: true };
+}
+
+/** A preflight file a read may open: `installed_plugins.json`, or a file in one of the helper's payload folders. */
+function preflightReadable(file: string, p: GuardPreflight, real: RealPath): boolean {
+  const list = real(p.installedPlugins);
+  if (list && samePath(file, list)) return true;
+  return payloadDir(file, p, real, true);
+}
+
+/** Whether `p` is one of the helper's payload folders (`inside`: or a file within one) right under the temp folder. */
+function payloadDir(file: string, p: GuardPreflight, real: RealPath, inside: boolean): boolean {
+  const tmp = real(p.tmpDir);
+  if (!tmp || !isInsideDir(file, tmp) || file.split(/[\\/]/).includes("..")) return false;
+  const rest = gitBashPath(file).slice(gitBashPath(tmp).replace(/\/+$/, "").length + 1).split("/");
+  if (!rest[0].startsWith(PREFLIGHT_PAYLOAD_PREFIX) || rest[0].length === PREFLIGHT_PAYLOAD_PREFIX.length) return false;
+  return inside ? rest.length >= 1 : rest.length === 1;
+}
+
+/**
+ * Splits a command at its one unquoted `<`, read the way `shellWords` reads
+ * quotes; null when there is none or more than one (`<<` included).
+ */
+function splitStdin(command: string): { left: string; file: string } | null {
+  let quote: string | null = null;
+  let at = -1;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote === "'") {
+      if (c === "'") quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (c === '"') quote = null;
+      else if (c === "\\" && (command[i + 1] === '"' || command[i + 1] === "\\")) i++;
+      continue;
+    }
+    if (c === "'" || c === '"') quote = c;
+    else if (c === "\\") i++;
+    else if (c === "<") {
+      if (at >= 0) return null;
+      at = i;
+    }
+  }
+  if (at < 0 || quote) return null;
+  return { left: command.slice(0, at), file: command.slice(at + 1) };
+}
+
+const NODE_NAMES = new Set(["node", "node.exe"]);
+
+/**
+ * The review skill's preflight (`GuardPreflight`): `node <helper> < <request>`
+ * with the request in the run's payload folder, or `node <helper> --digest
+ * <payload folder>`. Null when the command doesn't start a helper of this run,
+ * so the other rules judge it; any other use of a helper is refused.
+ */
+function checkPreflight(command: string, run: GuardRun | null, real: RealPath): GuardDecision | null {
+  const p = run?.preflight;
+  if (!p) return null;
+  const stdin = splitStdin(command);
+  const split = shellWords(stdin ? stdin.left : command);
+  if ("error" in split) return null;
+  const w = split.words;
+  if (w.length < 2 || !NODE_NAMES.has(w[0].toLowerCase())) return null;
+  const helper = real(w[1]);
+  if (!helper || !p.helpers.some((h) => samePath(helper, h))) return null;
+  const shape = `The review preflight runs as node "<helper>" < "<request file under ${run?.outDir ?? "the run's payload folder"}>", or node "<helper>" --digest "<payload folder>" — nothing else.`;
+  if (stdin) {
+    const file = shellWords(stdin.file);
+    if ("error" in file || file.words.length !== 1 || w.length !== 2) return deny(shape);
+    const outDir = run?.outDir ? real(run.outDir) : null;
+    const req = real(file.words[0]);
+    if (!outDir || !req || !isInsideDir(req, outDir)) return deny(shape);
+    return { allow: true };
+  }
+  if (w.length === 4 && w[2] === "--digest") {
+    const dir = real(w[3]);
+    if (dir && isAbsolutePath(w[3]) && payloadDir(dir, p, real, false)) return { allow: true };
+  }
+  return deny(shape);
 }
 
 function deny(reason: string): GuardDecision {
@@ -1133,6 +1239,8 @@ function checkGit(kind: AgentRunKind, words: string[], run: GuardRun | null, rea
 }
 
 export function checkBash(kind: AgentRunKind, rawCommand: string, pr: GuardPr | null = null, run: GuardRun | null = null, real: RealPath = asWritten): GuardDecision {
+  const preflight = kind === "review" || kind === "rereview" ? checkPreflight(rawCommand, run, real) : null;
+  if (preflight) return preflight;
   const split = shellWords(rawCommand);
   if ("error" in split) return deny(split.error);
   const words = split.words;

@@ -9580,6 +9580,64 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: `C:/Users/me/.claude/projects/C--wt/${sessionId}/tool-results/b1.txt` }, gpr, noSession).allow, false, "no session id, no spill-over");
     });
 
+    test("agent guard: the review skill's preflight — installed_plugins.json, node on the helper with a request from the payload folder or --digest, the helper's payload folders", () => {
+      const HELPER = `${PLUGIN}/skills/creatio-code-review/scripts/rereview-context.cjs`;
+      const pfRun = { ...readRun, wrapperPath: "C:/T/prd-agent/r/bin/pr-review-publish.sh", preflight: { helpers: [HELPER], installedPlugins: "C:/Users/me/.claude/plugins/installed_plugins.json", tmpDir: "C:/Users/me/AppData/Local/Temp" } };
+      const bash = (kind, command, run = pfRun) => guard.checkToolUse(kind, "Bash", { command }, gpr, run);
+      const read = (file_path, run = pfRun) => guard.checkToolUse("rereview", "Read", { file_path }, gpr, run);
+      for (const kind of ["review", "rereview"]) {
+        for (const cmd of [
+          `node "${HELPER}" < "C:/T/prd-agent/r/out/preflight-request.json"`,
+          `node '${HELPER}' <'/c/T/prd-agent/r/out/req.json'`,
+          `node "C:\\Users\\me\\.claude\\plugins\\cache\\x\\creatio-development\\1.7.142\\skills\\creatio-code-review\\scripts\\rereview-context.cjs" < C:/T/prd-agent/r/out/q.json`,
+          `node "${HELPER}" --digest "C:/Users/me/AppData/Local/Temp/creatio-rereview-payload-AbC123"`,
+          `node.exe "${HELPER}" --digest /c/Users/me/AppData/Local/Temp/creatio-rereview-payload-x`,
+        ]) assert.deepStrictEqual(bash(kind, cmd), { allow: true }, `${kind}: ${cmd}`);
+      }
+      for (const cmd of [
+        // Another script, or the helper elsewhere: the usual rule — a read-only run runs no node.
+        `node "C:/wt/scripts/rereview-context.cjs" < "C:/T/prd-agent/r/out/q.json"`,
+        `node -e "require('${HELPER}')"`,
+        `node "${HELPER}"`,
+        // The helper with anything but its two shapes.
+        `node "${HELPER}" < "C:/Users/me/.ssh/id_rsa"`,
+        `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json" > "C:/T/prd-agent/r/out/x"`,
+        `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json" ; gh pr comment 7`,
+        `node "${HELPER}" << END`,
+        `node "${HELPER}" extra < "C:/T/prd-agent/r/out/q.json"`,
+        `node "${HELPER}" < "C:/T/prd-agent/r/out/../../../../Users/me/.ssh/id_rsa"`,
+        `node "${HELPER}" --digest "C:/Users/me/AppData/Local/Temp/other-dir"`,
+        `node "${HELPER}" --digest "C:/Users/me/AppData/Local/Temp/creatio-rereview-payload-"`,
+        `node "${HELPER}" --digest "C:/Users/me/AppData/Local/Temp/creatio-rereview-payload-x/sub"`,
+        `node "${HELPER}" --digest "C:/elsewhere/creatio-rereview-payload-x"`,
+        `node "${HELPER}" --digest "C:/Users/me/AppData/Local/Temp/creatio-rereview-payload-x" more`,
+        `node "${HELPER}" --digest relative/creatio-rereview-payload-x`,
+      ]) assert.strictEqual(bash("rereview", cmd).allow, false, cmd);
+      assert.match(bash("rereview", `node "${HELPER}" < "C:/Users/me/.ssh/id_rsa"`).reason, /review preflight runs as node "<helper>" < "<request file under C:\/T\/prd-agent\/r\/out>"/);
+      // Not a review, or no preflight in the guard file: no node for a read-only run.
+      assert.strictEqual(bash("brief", `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json"`).allow, false);
+      const { preflight, ...noPreflight } = pfRun;
+      assert.strictEqual(bash("rereview", `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json"`, noPreflight).allow, false);
+
+      // Reads: the one file, and the helper's payload folders right under the temp folder.
+      for (const f of [
+        "C:/Users/me/.claude/plugins/installed_plugins.json",
+        "C:\\Users\\me\\.claude\\plugins\\installed_plugins.json",
+        "C:/Users/me/AppData/Local/Temp/creatio-rereview-payload-AbC/threads.json",
+        "/c/Users/me/AppData/Local/Temp/creatio-rereview-payload-AbC/guidance/rules.md",
+      ]) assert.deepStrictEqual(read(f), { allow: true }, f);
+      for (const f of [
+        "C:/Users/me/.claude/plugins/known_marketplaces.json",
+        "C:/Users/me/.claude/plugins/installed_plugins.json.bak",
+        "C:/Users/me/.claude/.credentials.json",
+        "C:/Users/me/AppData/Local/Temp/other/threads.json",
+        "C:/Users/me/AppData/Local/Temp/creatio-rereview-payload-/x.json",
+        "C:/Users/me/AppData/Local/Temp/x/creatio-rereview-payload-AbC/threads.json",
+        "C:/Users/me/AppData/Local/Temp/creatio-rereview-payload-AbC/../secret.txt",
+      ]) assert.strictEqual(read(f).allow, false, f);
+      assert.strictEqual(read("C:/Users/me/.claude/plugins/installed_plugins.json", noPreflight).allow, false, "no preflight, no file");
+    });
+
     test("agent guard: a link is judged by where it leads, when the check is handed the disk's answer", () => {
       // What a link in the PR's branch would do: C:/wt/docs/k leads to ~/.ssh/id_rsa.
       const links = { "C:/wt/docs/k": "C:/Users/me/.ssh/id_rsa", "C:/wt/docs/dir": "C:/Users/me/.config/gh" };
@@ -11830,6 +11888,59 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       runner.writeGuardFile(guardFile, { ...written, readDirs: ["", "relative", 7, workDir], sessionRoots: ["."] });
       const kept = hookMod.readGuardFile(guardFile);
       assert.deepStrictEqual([kept.readDirs, kept.sessionRoots], [[workDir], []], "a folder list keeps absolute folders only — '' or '.' would be the hook's own folder");
+    });
+
+    test("agent guard hook: the review preflight on disk — preflightFor finds the mounted plugin's helper, the guard file carries it, a malformed one gives nothing", () => {
+      const pubG = require(path.join(__dirname, "../dist/main/shared/agent-publish.js"));
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-preflight-"));
+      const plugin = path.join(root, "cache", "creatio-development", "1.7.165");
+      const helper = path.join(plugin, "skills", "creatio-code-review", "scripts", "rereview-context.cjs");
+      const other = path.join(root, "cache", "other", "1.0.0");
+      const config = path.join(root, "claude");
+      const tmp = path.join(root, "tmp");
+      const outDir = path.join(root, "out");
+      const workDir = path.join(root, "wt");
+      for (const d of [path.dirname(helper), other, path.join(config, "plugins"), path.join(tmp, "creatio-rereview-payload-Q1"), outDir, workDir]) nfsA.mkdirSync(d, { recursive: true });
+      nfsA.writeFileSync(helper, "");
+      nfsA.writeFileSync(path.join(config, "plugins", "installed_plugins.json"), "{}");
+      nfsA.writeFileSync(path.join(tmp, "creatio-rereview-payload-Q1", "threads.json"), "[]");
+      nfsA.writeFileSync(path.join(outDir, "req.json"), "{}");
+
+      const env = { CLAUDE_CONFIG_DIR: config, TEMP: tmp, TMPDIR: tmp };
+      assert.strictEqual(runner.preflightFor([other], env), null, "no plugin with the helper: no preflight");
+      const pf = runner.preflightFor([other, plugin], env);
+      assert.deepStrictEqual(pf, { helpers: [nfsA.realpathSync.native(helper)], installedPlugins: path.join(config, "plugins", "installed_plugins.json"), tmpDir: nfsA.realpathSync.native(tmp) });
+
+      const guardFile = path.join(root, "guard.json");
+      const written = { wrapperPath: path.join(root, "bin", "pr-review-publish.sh"), outDir, workDir, workflowDirs: [plugin], readDirs: [workDir, outDir, plugin], sessionId: "6250ec40-5c65-407c-8b04-61b1dba8fae7", sessionRoots: [path.join(config, "projects")], preflight: pf };
+      runner.writeGuardFile(guardFile, written);
+      assert.deepStrictEqual(hookMod.readGuardFile(guardFile), written, "the preflight comes back as written");
+      const call = (tool_name, tool_input) =>
+        spawnSync(process.execPath, [hookJs, "rereview", "https://github.com/a/b/pull/7", guardFile], { input: JSON.stringify({ tool_name, tool_input }), encoding: "utf8" }).status;
+      const g = pubG.gitBashPath;
+      assert.strictEqual(call("Read", { file_path: path.join(config, "plugins", "installed_plugins.json") }), 0);
+      assert.strictEqual(call("Read", { file_path: path.join(tmp, "creatio-rereview-payload-Q1", "threads.json") }), 0);
+      assert.strictEqual(call("Bash", { command: `node "${g(helper)}" < "${g(path.join(outDir, "req.json"))}"` }), 0);
+      assert.strictEqual(call("Bash", { command: `node "${g(helper)}" --digest "${g(path.join(tmp, "creatio-rereview-payload-Q1"))}"` }), 0);
+      // A link in the payload folder that leads out is judged by where it leads.
+      nfsA.symlinkSync(config, path.join(tmp, "creatio-rereview-payload-Q1", "up"), "junction");
+      assert.strictEqual(call("Read", { file_path: path.join(tmp, "creatio-rereview-payload-Q1", "up", "plugins", "installed_plugins.json") }), 0, "lands on the one file allowed");
+      nfsA.writeFileSync(path.join(config, "secret.txt"), "x");
+      assert.strictEqual(call("Read", { file_path: path.join(tmp, "creatio-rereview-payload-Q1", "up", "secret.txt") }), 2, "out of the payload folder through a link");
+      // The request file must really be in the payload folder.
+      nfsA.symlinkSync(config, path.join(outDir, "lnk"), "junction");
+      assert.strictEqual(call("Bash", { command: `node "${g(helper)}" < "${g(path.join(outDir, "lnk", "secret.txt"))}"` }), 2);
+
+      for (const bad of [
+        { preflight: null },
+        { preflight: { ...pf, helpers: "x" } },
+        { preflight: { ...pf, helpers: ["relative/h.cjs"] } },
+        { preflight: { ...pf, installedPlugins: "" } },
+        { preflight: { ...pf, tmpDir: 7 } },
+      ]) {
+        runner.writeGuardFile(guardFile, { ...written, ...bad });
+        assert.strictEqual(hookMod.readGuardFile(guardFile), null, JSON.stringify(bad));
+      }
     });
 
     test("agent guard hook: reads follow links on disk — the run's folders and its session's spill-over, nothing else", () => {

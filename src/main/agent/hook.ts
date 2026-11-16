@@ -75,6 +75,13 @@ export function readGuardFile(file: string | undefined): GuardRun | null {
       if (!roots) return null;
       run.sessionRoots = roots;
     }
+    // The review preflight: every path absolute, or the whole guard file is refused.
+    if ("preflight" in raw) {
+      const p = raw.preflight as { helpers?: unknown; installedPlugins?: unknown; tmpDir?: unknown } | null;
+      const abs = (v: unknown): v is string => typeof v === "string" && v.length > 0 && path.isAbsolute(v);
+      if (!p || !Array.isArray(p.helpers) || !p.helpers.every(abs) || !abs(p.installedPlugins) || !abs(p.tmpDir)) return null;
+      run.preflight = { helpers: [...p.helpers], installedPlugins: p.installedPlugins, tmpDir: p.tmpDir };
+    }
     return run;
   } catch {
     return null;
