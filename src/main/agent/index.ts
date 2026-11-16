@@ -9,7 +9,7 @@ import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
-import { AGENT_CLOSED, approvalStands, keyHead, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
+import { AGENT_CLOSED, approvalStands, cardKey, keyHead, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -481,6 +481,15 @@ export function createAgent(deps: AgentDeps): Agent {
   const changed = () => deps.onChange?.();
   const stamp = () => now().toISOString();
   const findItem = (runId: string) => store.data.items.find((i) => i.runId === runId);
+  const itemsOf = (prId: string) => store.data.items.filter((i) => i.prId === prId);
+  /** The set-aside cards whose PR still shows what it showed then — a change counts at once, not only at the next plan. */
+  const liveSetAside = (): Record<string, string> => {
+    const prs = new Map((deps.getSnapshot()?.pullRequests ?? []).map((p) => [p.id, p]));
+    return Object.fromEntries(Object.entries(store.data.setAside ?? {}).filter(([prId, key]) => {
+      const pr = prs.get(prId);
+      return pr !== undefined && cardKey(pr, itemsOf(prId)) === key;
+    }));
+  };
   /** One of a run's own steps, in the log. */
   const logRun = (item: AgentItemRecord, event: string, extra: Partial<AgentLogEntry> = {}) => store.log({ at: stamp(), kind: "run", event, ...itemFields(item), ...extra });
 
@@ -1249,6 +1258,16 @@ export function createAgent(deps: AgentDeps): Agent {
         item.headline = AGENT_CLOSED.gone;
         item.finishedAt = stamp();
         dirty = true;
+      }
+    }
+    // A card set aside comes back once its PR changed, or is forgotten once the PR left.
+    if (store.data.setAside) {
+      for (const [prId, key] of Object.entries(store.data.setAside)) {
+        const pr = byId.get(prId);
+        if (!pr || cardKey(pr, itemsOf(prId)) !== key) {
+          delete store.data.setAside[prId];
+          dirty = true;
+        }
       }
     }
     if (store.data.reapprove) {
@@ -2768,6 +2787,19 @@ export function createAgent(deps: AgentDeps): Agent {
       return { ok: true };
     }
     if (action.type === "approveAgain") return approveAgain(action.prId, all);
+    if (action.type === "notNow" || action.type === "bringBack") {
+      const pr = snapshot?.pullRequests.find((p) => p.id === action.prId);
+      if (action.type === "notNow") {
+        if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+        // The key is the app's own reading of the PR now, never one the renderer sends.
+        store.data.setAside = { ...(store.data.setAside ?? {}), [pr.id]: cardKey(pr, itemsOf(pr.id)) };
+      } else if (store.data.setAside) {
+        delete store.data.setAside[action.prId];
+      }
+      changed();
+      void store.save();
+      return { ok: true };
+    }
     if (action.type === "enqueue") {
       const pr = snapshot?.pullRequests.find((p) => p.id === action.prId);
       if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
@@ -3007,6 +3039,7 @@ export function createAgent(deps: AgentDeps): Agent {
         acceptedUnchanged: store.data.acceptedUnchanged,
         suggestOn: s?.scenarios.review.mode === "shadow" && store.data.acceptedUnchanged >= s.limits.promoteAfter,
         orchestrated: sdlcBadges,
+        setAside: liveSetAside(),
       };
     },
     ownSessionIds: () => new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!)),

@@ -167,7 +167,7 @@ export function agentSummary(state: AgentState): AgentSummary {
     running: state.running.length,
     pausedRuns: state.running.filter((r) => r.paused).length,
     queued: state.items.filter((i) => i.state === "queued").length,
-    readyForYou: readyItems(state.items, state.heads).length,
+    readyForYou: readyItems(state.items, state.heads, state.setAside).length,
     block,
     blockText,
   };
@@ -487,7 +487,7 @@ export function resultAction(item: AgentItem, lane: BoardLane, headOid: string |
  * stale one (`heads`: each PR's head now, by PR id). What the header chip,
  * the tray and the popover count as "ready for you".
  */
-export function readyItems(items: readonly AgentItem[], heads?: Readonly<Record<string, string>>): AgentItem[] {
+export function readyItems(items: readonly AgentItem[], heads?: Readonly<Record<string, string>>, setAside?: Readonly<Record<string, string>>): AgentItem[] {
   const byPr = new Map<string, AgentItem[]>();
   for (const i of items) {
     const list = byPr.get(i.prId);
@@ -495,13 +495,26 @@ export function readyItems(items: readonly AgentItem[], heads?: Readonly<Record<
     else byPr.set(i.prId, [i]);
   }
   const out: AgentItem[] = [];
-  for (const list of byPr.values()) {
+  for (const [prId, list] of byPr) {
+    if (setAside?.[prId]) continue;
     const { live, result } = stageItems(list, "");
     if (live || !result) continue;
     const action = resultAction(result, laneOfScenario(result.scenario), heads?.[result.prId] ?? null);
     if (action && action.kind !== "updateJira") out.push(result);
   }
   return out.sort((a, b) => (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
+}
+
+/**
+ * What a PR's card is about right now, as one string: the PR's head, its last
+ * change on GitHub (a comment, a review, a push), its CI and conflict state,
+ * and the agent's latest run on it. "Not now" keeps a card aside only while
+ * this stays the same — anything new on the PR brings the card back.
+ */
+export function cardKey(pr: Pick<PullRequest, "headOid" | "updatedAt" | "ciState" | "hasConflicts">, items: readonly AgentItem[]): string {
+  const last = items.reduce<AgentItem | null>((a, i) => (a === null || i.queuedAt > a.queuedAt ? i : a), null);
+  const run = last ? `${last.runId}:${last.state}:${last.finishedAt ?? ""}` : "-";
+  return [pr.headOid ?? "-", pr.updatedAt, pr.ciState ?? "-", pr.hasConflicts ? "conflict" : "-", run].join("|");
 }
 
 /**
@@ -625,6 +638,8 @@ export interface StageBoard {
   review: LaneColumns;
   /** Moves the agent prepared on PRs the dashboard's filters hide. */
   hiddenReady: number;
+  /** Your-turn cards set aside with "Not now" (`AgentState.setAside`), oldest first. */
+  aside: StageCard[];
 }
 
 /** Your move, cheapest and readiest first; what is yours without the agent next; drafts last. */
@@ -655,8 +670,9 @@ function laneColumns(): LaneColumns {
  * Agent on it: running, then the queue in its order. Waiting: longest first —
  * the one to nudge. Done today: newest first.
  */
-export function stageColumns(shown: readonly PullRequest[], all: readonly PullRequest[], state: Pick<AgentState, "items">, ctx: StageContext): StageBoard {
-  const board: StageBoard = { mine: laneColumns(), review: laneColumns(), hiddenReady: 0 };
+export function stageColumns(shown: readonly PullRequest[], all: readonly PullRequest[], state: Pick<AgentState, "items" | "setAside">, ctx: StageContext): StageBoard {
+  const board: StageBoard = { mine: laneColumns(), review: laneColumns(), hiddenReady: 0, aside: [] };
+  const aside = state.setAside ?? {};
   const byPr = new Map<string, AgentItem[]>();
   for (const item of state.items) {
     const list = byPr.get(item.prId);
@@ -668,13 +684,14 @@ export function stageColumns(shown: readonly PullRequest[], all: readonly PullRe
     if (!stage) return;
     const lane = board[stage.lane];
     if (stage.earlier) lane.earlier++;
+    else if (stage.column === "you" && aside[prId]) board.aside.push({ prId, pr, stage });
     else lane[stage.column].push({ prId, pr, stage });
   };
   const shownIds = new Set(shown.map((p) => p.id));
   const allIds = new Set(all.map((p) => p.id));
   for (const pr of shown) place(pr.id, pr);
   for (const pr of all) {
-    if (!shownIds.has(pr.id) && boardStage(pr, byPr.get(pr.id) ?? [], ctx)?.ready) board.hiddenReady++;
+    if (!shownIds.has(pr.id) && !aside[pr.id] && boardStage(pr, byPr.get(pr.id) ?? [], ctx)?.ready) board.hiddenReady++;
   }
   for (const prId of byPr.keys()) if (!allIds.has(prId) && !shownIds.has(prId)) place(prId, null);
 
@@ -690,6 +707,7 @@ export function stageColumns(shown: readonly PullRequest[], all: readonly PullRe
     lane.waiting.sort((a, b) => a.stage.since.localeCompare(b.stage.since));
     lane.done.sort((a, b) => b.stage.since.localeCompare(a.stage.since));
   }
+  board.aside.sort((a, b) => a.stage.since.localeCompare(b.stage.since));
   return board;
 }
 

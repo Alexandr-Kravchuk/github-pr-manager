@@ -1173,6 +1173,12 @@ export interface AgentState {
    * stage it is at — the badge their cards wear instead of the agent's work.
    */
   orchestrated?: Record<string, { key: string; stage: string | null }>;
+  /**
+   * Your-turn cards you set aside with "Not now", by PR id, only while the
+   * card shows what it showed then (`cardKey`): any change on the PR or its
+   * run brings it back. Out of Your turn and out of every "ready for you" count.
+   */
+  setAside?: Record<string, string>;
 }
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
@@ -1192,6 +1198,9 @@ export type AgentAction =
   | { type: "enqueue"; prId: string; before?: string | null }
   /** Your approval again, on a PR it already stands on, to answer a review request made after it. */
   | { type: "approveAgain"; prId: string }
+  /** Sets a Your-turn card aside until something on its PR changes; `bringBack` puts it back now. */
+  | { type: "notNow"; prId: string }
+  | { type: "bringBack"; prId: string }
   | { type: "moveQueued"; runId: string; before: string | null };
 
 export type AgentActionResult = { ok: true } | { ok: false; error: string };

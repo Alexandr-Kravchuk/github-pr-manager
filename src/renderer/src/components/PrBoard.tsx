@@ -83,7 +83,7 @@ export function PrBoard({
   if (!state) {
     return <div className="rounded-lg border border-line bg-surface/40 p-8 text-center text-sm text-fg-subtle">The PR agent isn&apos;t available here.</div>;
   }
-  const { entries, earlier, hiddenReady } = explainBoard(prs, all, state, { today: todayKey(new Date()), idle: state.idle, orchestrated: state.orchestrated });
+  const { entries, earlier, hiddenReady, aside } = explainBoard(prs, all, state, { today: todayKey(new Date()), idle: state.idle, orchestrated: state.orchestrated });
   const first = queueOrder(state.items.filter((i) => i.state === "queued"))[0]?.runId ?? null;
   const run: Run = async (action) => {
     const res = await act(action);
@@ -135,7 +135,45 @@ export function PrBoard({
         onOpen={open}
         aside={earlier > 0 ? <span className="text-xs font-normal text-fg-subtle" title="Your approvals from earlier days: their PRs wait on others now">+{earlier} approved earlier</span> : null}
       />
+
+      <SetAside list={aside} run={run} onOpen={open} />
     </div>
+  );
+}
+
+/**
+ * Your-turn cards you set aside with "Not now", folded: each comes back to
+ * Your turn by itself once its PR changes (a push, a comment, CI, a run), or
+ * now with Bring back.
+ */
+function SetAside({ list, run, onOpen }: { list: BoardEntry[]; run: Run; onOpen: (e: BoardEntry) => void }) {
+  const [open, setOpen] = useState(false);
+  if (list.length === 0) return null;
+  return (
+    <section aria-label="Set aside">
+      <h2 className="flex flex-wrap items-baseline gap-x-2 px-1 text-sm font-semibold text-fg">
+        <button type="button" aria-expanded={open} onClick={() => setOpen((v) => !v)} className="hover:underline">
+          {open ? "▾" : "▸"} Set aside
+        </button>
+        <span className="text-xs font-normal text-fg-subtle">{list.length}</span>
+        <span className="text-xs font-normal text-fg-subtle">· back in Your turn as soon as something on the PR changes</span>
+      </h2>
+      {open && (
+        <ul className="mt-2 divide-y divide-line overflow-hidden rounded-xl border border-line bg-surface">
+          {list.map((e) => (
+            <li key={e.prId} data-pr-id={e.prId} className="flex items-center gap-3 px-4 py-2.5">
+              <button type="button" onClick={() => onOpen(e)} className="min-w-0 flex-1 truncate text-left text-sm text-fg-secondary hover:underline" title={e.title}>
+                <span className="text-fg-subtle">#{e.number}</span> {e.title}
+              </button>
+              <span className="hidden shrink-0 text-[11px] text-fg-subtle sm:inline">{e.laneLabel}</span>
+              <button type="button" className={BTN} onClick={() => void run({ type: "bringBack", prId: e.prId })} title="Puts the card back in Your turn now">
+                Bring back
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -251,6 +289,15 @@ function Decision({ e, n, run, onOpen, notice }: { e: BoardEntry; n: number; run
         <span className="shrink-0" title={`Here since ${new Date(e.since).toLocaleString()}`}>
           {relativeTime(e.since)}
         </span>
+        <button
+          type="button"
+          onClick={() => void run({ type: "notNow", prId: e.prId })}
+          title="Not now: moves this card to Set aside. It comes back by itself once something on the PR changes."
+          aria-label={`Not now: set ${shortRepo(e.repo)} #${e.number} aside`}
+          className="shrink-0 rounded px-1.5 py-px text-fg-subtle hover:bg-elevated hover:text-fg"
+        >
+          Not now ✕
+        </button>
       </div>
       <div className="space-y-4 px-4 py-3">
         <button type="button" onClick={onOpen} className="text-left text-base font-semibold text-fg hover:text-sky-700 hover:underline dark:hover:text-sky-300">

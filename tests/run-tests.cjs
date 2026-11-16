@@ -10876,6 +10876,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(v({ type: "enqueue", prId: "PR_kwDOA" }), { type: "enqueue", prId: "PR_kwDOA" });
       assert.deepStrictEqual(v({ type: "approveAgain", prId: "PR_kwDOA", body: "anything", commit: "x" }), { type: "approveAgain", prId: "PR_kwDOA" }, "only the PR is named — what goes out is main's");
       assert.throws(() => v({ type: "approveAgain", prId: 7 }));
+      assert.deepStrictEqual(v({ type: "notNow", prId: "PR_kwDOA", key: "forged" }), { type: "notNow", prId: "PR_kwDOA" }, "main reads what the card shows itself");
+      assert.deepStrictEqual(v({ type: "bringBack", prId: "PR_kwDOA" }), { type: "bringBack", prId: "PR_kwDOA" });
       for (const t of ["skip", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver"]) {
         assert.strictEqual(v({ type: t, runId: RID }).type, t);
       }
@@ -11111,6 +11113,62 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.agentSummary({ items: [restarted, moved, fresh], running: [], heads, paused: false, quietUntil: null, heldUntil: null, perDay: 0, runsToday: 0 }).readyForYou, 1);
       assert.strictEqual(view.resultAction(moved, "mine", "bbb222"), null);
       assert.strictEqual(view.resultAction(moved, "mine", "aaa111").kind, "decide");
+    });
+
+    test("agent board: Not now moves a Your-turn card to Set aside and out of every ready count; only Your turn is set aside", () => {
+      const ask = { summary: "", asks: [{ question: "q", options: [] }], findings: [], authorQuestions: [], structured: true };
+      const prs = [xPr({ id: "X", ciState: "failure", failingChecks: [] }), xPr({ id: "Y", ciState: "failure", failingChecks: [] }), xPr({ id: "W" })];
+      const items = [vItem({ prId: "Y", scenario: "drive", state: "needsYou", finishedAt: sAgo(5), drive: drive(0), result: ask })];
+      const setAside = { X: "k", Y: "k", W: "k" };
+      const b = xBoard(prs, items, { setAside });
+      assert.deepStrictEqual(b.entries.map((e) => [e.prId, e.owner]), [["W", "others"]], "a card that waits on others is not yours to set aside");
+      assert.deepStrictEqual(b.aside.map((e) => e.prId).sort(), ["X", "Y"]);
+      assert.deepStrictEqual(xBoard(prs, items).aside, [], "nothing set aside, nothing moves");
+      assert.strictEqual(view.readyItems(items).length, 1);
+      assert.strictEqual(view.readyItems(items, undefined, setAside).length, 0, "the chip, the tray and the popover don't count it");
+      // A filter hiding it doesn't count it as hidden ready either.
+      assert.strictEqual(ex.explainBoard([], prs, xState(items, { setAside }), { today: sToday }).hiddenReady, 0);
+      assert.strictEqual(ex.explainBoard([], prs, xState(items), { today: sToday }).hiddenReady, 1);
+    });
+
+    test("agent board: cardKey changes with anything new on the PR — a push, a comment, CI, a conflict, a run", () => {
+      const pr = xPr({ headOid: "h1" });
+      const it = vItem({ prId: "P", state: "done", finishedAt: sAgo(5) });
+      const key = view.cardKey(pr, [it]);
+      assert.strictEqual(view.cardKey({ ...pr }, [{ ...it }]), key, "the same PR reads the same");
+      for (const [what, other, otherItems] of [
+        ["a push", { ...pr, headOid: "h2" }, [it]],
+        ["a comment or review", { ...pr, updatedAt: sAgo(1) }, [it]],
+        ["CI", { ...pr, ciState: "failure" }, [it]],
+        ["a conflict", { ...pr, hasConflicts: true }, [it]],
+        ["a new run", pr, [it, vItem({ prId: "P", state: "queued", queuedAt: sAgo(0) })]],
+        ["the run moving on", pr, [{ ...it, state: "needsYou" }]],
+      ]) {
+        assert.notStrictEqual(view.cardKey(other, otherItems), key, what);
+      }
+    });
+
+    test("agent store: set-aside cards are read back after a restart; a malformed entry is dropped", () => {
+      const file = path.join(nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-aside-")), "state.json");
+      nfsA.writeFileSync(file, JSON.stringify({ ...agentStore.emptyStore("2026-11-16"), setAside: { A: "k1", B: 7 } }));
+      assert.deepStrictEqual(agentStore.readStore(file, "2026-11-16").setAside, { A: "k1" });
+    });
+
+    await atest("agent: Not now keeps a card aside while its PR shows the same; any change or Bring back ends it", async () => {
+      const f = agentFixture({ enabled: false, script: () => {}, pr: { ...reviewPr(), headOid: "h1" } });
+      try {
+        assert.deepStrictEqual(await f.agent.act({ type: "notNow", prId: "PR_R" }), { ok: true });
+        assert.deepStrictEqual(Object.keys(f.agent.getState().setAside), ["PR_R"]);
+        assert.deepStrictEqual(await f.agent.act({ type: "bringBack", prId: "PR_R" }), { ok: true });
+        assert.deepStrictEqual(f.agent.getState().setAside, {});
+        await f.agent.act({ type: "notNow", prId: "PR_R" });
+        // A new comment: the card is back at once, before any plan prunes the mark.
+        f.snapshot.pullRequests[0] = { ...f.snapshot.pullRequests[0], updatedAt: new Date(Date.now() + 60_000).toISOString() };
+        assert.deepStrictEqual(f.agent.getState().setAside, {});
+        assert.deepStrictEqual(await f.agent.act({ type: "notNow", prId: "PR_GONE" }), { ok: false, error: "That PR is not on the dashboard any more." });
+      } finally {
+        f.agent.stop();
+      }
     });
 
     await atest("agent state: heads carries each PR's head from the snapshot — what the chip, the tray and the popover tell a superseded run by", async () => {

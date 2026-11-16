@@ -864,6 +864,13 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
     pr.roles = pr.roles.filter((r) => r !== "reviewer");
     return { ok: true };
   }
+  // The mock keeps a card aside until you bring it back: nothing on its PRs changes by itself.
+  if (action.type === "notNow" || action.type === "bringBack") {
+    const { [action.prId]: _dropped, ...rest } = agentState.setAside ?? {};
+    agentState = { ...agentState, setAside: action.type === "notNow" ? { ...rest, [action.prId]: "mock" } : rest };
+    for (const l of agentListeners) l(agentState);
+    return { ok: true };
+  }
   if (action.type === "enqueue") {
     const pr = snapshot.pullRequests.find((p) => p.id === action.prId);
     if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };

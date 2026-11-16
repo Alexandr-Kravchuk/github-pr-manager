@@ -451,7 +451,14 @@ Three layers:
   `shared/agent-view.ts`, one pure function the chip and the tray read too,
   so a PR shows once; the words are `shared/agent-explain.ts`. A card nobody
   started (asked of you, red CI) offers "Let the agent …" first and GitHub
-  second, never only a link. The two lanes are a tag on each card, not rows
+  second, never only a link. Every Your-turn card has "Not now" (`notNow`,
+  only the PR id goes over IPC): main stores the card's `cardKey` — the PR's
+  head, `updatedAt`, CI and conflict state, and its latest run — in
+  `state.json` (`setAside`), and while that still reads the same the card
+  sits folded under "Set aside" and out of every "ready for you" count
+  (`readyItems`, `hiddenReady`). Anything new on the PR changes the key and
+  the card is back (`getState` filters at once; the plan prunes), or Bring
+  back (`bringBack`) now. The two lanes are a tag on each card, not rows
   of columns: a move was missed for days among eight equal columns. The
   three variants it was picked from are on the `prototype/board-redesign`
   branch. Like Cozy it turns off Group-by and Sort).
