@@ -9580,6 +9580,139 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: `C:/Users/me/.claude/projects/C--wt/${sessionId}/tool-results/b1.txt` }, gpr, noSession).allow, false, "no session id, no spill-over");
     });
 
+    test("agent guard: the review skill's preflight — installed_plugins.json, node on the helper with a request for this PR from the payload folder or --digest, the run's own payload folders", () => {
+      const pubG = require(path.join(__dirname, "../dist/main/shared/agent-publish.js"));
+      const HELPER = `${PLUGIN}/skills/creatio-code-review/scripts/rereview-context.cjs`;
+      const TMP = "C:/T/prd-agent/r/tmp";
+      const pfRun = { ...readRun, wrapperPath: "C:/T/prd-agent/r/bin/pr-review-publish.sh", preflight: { helpers: [HELPER], installedPlugins: "C:/Users/me/.claude/plugins/installed_plugins.json", tmpDir: TMP } };
+      const good = JSON.stringify({ pr: "https://github.com/Acme/Widgets/pull/12", dryRun: false, rereview: "auto", guidanceDocs: [] });
+      // The request files as the hook would read them, by Git Bash path, and the copies it keeps for node.
+      const files = new Map();
+      const kept = [];
+      const store = {
+        read: (p) => {
+          const key = pubG.gitBashPath(p).toLowerCase();
+          return files.has(key) ? files.get(key) : null;
+        },
+        keep: (text) => (kept.push(text), `C:\\T\\prd-agent\\r\\requests\\${kept.length}.json`),
+      };
+      const put = (p, text) => files.set(pubG.gitBashPath(p).toLowerCase(), text);
+      for (const f of ["preflight-request.json", "req.json", "q.json"]) put(`C:/T/prd-agent/r/out/${f}`, good);
+      const bash = (kind, command, run = pfRun) => guard.checkToolUse(kind, "Bash", { command }, gpr, run, undefined, store);
+      const read = (file_path, run = pfRun) => guard.checkToolUse("rereview", "Read", { file_path }, gpr, run);
+      // An allowed request: node reads the checked copy, never the file the session can still change.
+      const readsCopy = (d, helper = HELPER) => {
+        assert.strictEqual(d.allow, true, d.reason);
+        assert.strictEqual(d.command, `node '${helper}' < 'C:/T/prd-agent/r/requests/${kept.length}.json'`);
+      };
+      for (const kind of ["review", "rereview"]) {
+        const before = kept.length;
+        readsCopy(bash(kind, `node "${HELPER}" < "C:/T/prd-agent/r/out/preflight-request.json"`));
+        readsCopy(bash(kind, `node '${HELPER}' <'/c/T/prd-agent/r/out/req.json'`));
+        readsCopy(
+          bash(kind, `node "C:\\Users\\me\\.claude\\plugins\\cache\\x\\creatio-development\\1.7.142\\skills\\creatio-code-review\\scripts\\rereview-context.cjs" < C:/T/prd-agent/r/out/q.json`),
+          "C:/Users/me/.claude/plugins/cache/x/creatio-development/1.7.142/skills/creatio-code-review/scripts/rereview-context.cjs",
+        );
+        assert.deepStrictEqual(kept.slice(before), [good, good, good], "the checked text is what is kept");
+        // --digest reads no request: it runs as asked.
+        for (const cmd of [
+          `node "${HELPER}" --digest "${TMP}/creatio-rereview-payload-AbC123"`,
+          `node.exe "${HELPER}" --digest /c/T/prd-agent/r/tmp/creatio-rereview-payload-x`,
+        ]) assert.deepStrictEqual(bash(kind, cmd), { allow: true }, `${kind}: ${cmd}`);
+      }
+
+      // The request must be this run's PR, and carry only what the preflight takes.
+      const refused = (text) => {
+        put("C:/T/prd-agent/r/out/bad.json", text);
+        return bash("rereview", `node "${HELPER}" < "C:/T/prd-agent/r/out/bad.json"`);
+      };
+      for (const [text, why] of [
+        [JSON.stringify({ pr: "https://github.com/Other/Secret/pull/12" }), /must name this run's PR, https:\/\/github\.com\/Acme\/Widgets\/pull\/12/],
+        [JSON.stringify({ pr: "https://github.com/Acme/Widgets/pull/13" }), /this run's PR/],
+        [JSON.stringify({ pr: "https://ghe.example.com/Acme/Widgets/pull/12" }), /this run's PR/],
+        [JSON.stringify({ guidanceDocs: [] }), /this run's PR/],
+        [JSON.stringify({ pr: "https://github.com/Acme/Widgets/pull/12", repo: "Other/Secret" }), /carries repo, which the preflight doesn't take/],
+        [JSON.stringify({ pr: "https://github.com/Acme/Widgets/pull/12", guidanceDocs: ["../../etc/passwd"] }), /guidanceDocs/],
+        [JSON.stringify({ pr: "https://github.com/Acme/Widgets/pull/12", guidanceDocs: ["/abs.md"] }), /guidanceDocs/],
+        [JSON.stringify({ pr: "https://github.com/Acme/Widgets/pull/12", guidanceDocs: "AGENTS.md" }), /guidanceDocs/],
+        [JSON.stringify({ pr: "https://github.com/Acme/Widgets/pull/12", dryRun: "no" }), /dryRun/],
+        ["[]", /not a JSON object/],
+        ["not json", /not JSON/],
+      ]) {
+        const d = refused(text);
+        assert.strictEqual(d.allow, false, text);
+        assert.match(d.reason, why, text);
+      }
+      assert.match(bash("rereview", `node "${HELPER}" < "C:/T/prd-agent/r/out/missing.json"`).reason, /request file can't be read/);
+      assert.strictEqual(refused(JSON.stringify({ pr: "https://github.com/acme/widgets/pull/12/", guidanceDocs: ["AGENTS.md", ".ai/rules.md"] })).allow, true, "case and a trailing slash");
+      assert.match(refused(JSON.stringify({ pr: "https://github.com/Acme/Widgets/pull/12", rereview: "a".repeat(21) })).reason, /rereview/);
+      // Nothing is locked: a refused request, corrected in the same file, goes through — and its new text is what node reads.
+      assert.strictEqual(refused(JSON.stringify({ pr: "https://github.com/Other/Secret/pull/12" })).allow, false);
+      const fixed = JSON.stringify({ pr: "https://github.com/Acme/Widgets/pull/12", dryRun: true });
+      assert.strictEqual(refused(fixed).allow, true, "the corrected request");
+      assert.strictEqual(kept[kept.length - 1], fixed);
+      // No copy, no node: the session's own file is never handed to the helper.
+      const noCopy = { read: store.read, keep: () => null };
+      assert.match(guard.checkToolUse("rereview", "Bash", { command: `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json"` }, gpr, pfRun, undefined, noCopy).reason, /couldn't be set aside/);
+      assert.match(guard.checkToolUse("rereview", "Bash", { command: `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json"` }, null, pfRun, undefined, store).reason, /no PR to hold the request to/);
+      assert.strictEqual(guard.checkToolUse("rereview", "Bash", { command: `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json"` }, gpr, pfRun).allow, false, "nothing to read the request with");
+
+      for (const cmd of [
+        // Another script, or the helper elsewhere: the usual rule — a read-only run runs no node.
+        `node "C:/wt/scripts/run.cjs" < "C:/T/prd-agent/r/out/q.json"`,
+        `node -e "require('${HELPER}')"`,
+        `node "${HELPER}"`,
+        // The helper with anything but its two shapes.
+        `node "${HELPER}" < "C:/Users/me/.ssh/id_rsa"`,
+        `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json" > "C:/T/prd-agent/r/out/x"`,
+        `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json" ; gh pr comment 7`,
+        `node "${HELPER}" << END`,
+        `node "${HELPER}" extra < "C:/T/prd-agent/r/out/q.json"`,
+        `node "${HELPER}" < "C:/T/prd-agent/r/out/../../../../Users/me/.ssh/id_rsa"`,
+        `node "${HELPER}" --digest "${TMP}/other-dir"`,
+        `node "${HELPER}" --digest "${TMP}/creatio-rereview-payload-"`,
+        `node "${HELPER}" --digest "${TMP}/creatio-rereview-payload-x/sub"`,
+        `node "${HELPER}" --digest "C:/Users/me/AppData/Local/Temp/creatio-rereview-payload-x"`,
+        `node "${HELPER}" --digest "${TMP}/creatio-rereview-payload-x" more`,
+        `node "${HELPER}" --digest relative/creatio-rereview-payload-x`,
+        // Where the stdin split and shellWords could read a command differently.
+        `node "${HELPER}" \\< "C:/T/prd-agent/r/out/q.json"`,
+        `node "${HELPER}" "<" "C:/T/prd-agent/r/out/q.json"`,
+        `node "${HELPER}" '<' C:/T/prd-agent/r/out/q.json`,
+        `node "${HELPER}" < "$(echo C:/T/prd-agent/r/out/q.json)"`,
+        `node "${HELPER}" < \`echo q.json\``,
+        `node "${HELPER}" <`,
+        `X=1 node "${HELPER}" < "C:/T/prd-agent/r/out/q.json"`,
+        `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json" "C:/T/prd-agent/r/out/req.json"`,
+      ]) assert.strictEqual(bash("rereview", cmd).allow, false, cmd);
+      assert.match(bash("rereview", `node "${HELPER}" < "C:/Users/me/.ssh/id_rsa"`).reason, /review preflight runs as node "<helper>" < "<request file under C:\/T\/prd-agent\/r\/out>"/);
+      // Another version of the helper — a plugin updated since the run started — is named, not refused as "reads only".
+      assert.match(bash("rereview", `node "C:/Users/me/.claude/plugins/cache/x/creatio-development/1.7.999/skills/creatio-code-review/scripts/rereview-context.cjs" < "C:/T/prd-agent/r/out/q.json"`).reason, /preflight helper is .*1\.7\.142.*not it \(a plugin updated since the run started\?\)/);
+      // Not a review, or no preflight in the guard file: no node for a read-only run.
+      assert.strictEqual(bash("brief", `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json"`).allow, false);
+      const { preflight, ...noPreflight } = pfRun;
+      assert.strictEqual(bash("rereview", `node "${HELPER}" < "C:/T/prd-agent/r/out/q.json"`, noPreflight).allow, false);
+
+      // Reads: the one file, and the payload folders in the run's own temp folder — never the shared one.
+      for (const f of [
+        "C:/Users/me/.claude/plugins/installed_plugins.json",
+        "C:\\Users\\me\\.claude\\plugins\\installed_plugins.json",
+        `${TMP}/creatio-rereview-payload-AbC/threads.json`,
+        "/c/T/prd-agent/r/tmp/creatio-rereview-payload-AbC/guidance/rules.md",
+      ]) assert.deepStrictEqual(read(f), { allow: true }, f);
+      for (const f of [
+        "C:/Users/me/.claude/plugins/known_marketplaces.json",
+        "C:/Users/me/.claude/plugins/installed_plugins.json.bak",
+        "C:/Users/me/.claude/.credentials.json",
+        "C:/Users/me/AppData/Local/Temp/creatio-rereview-payload-AbC/threads.json",
+        `${TMP}/other/threads.json`,
+        `${TMP}/creatio-rereview-payload-/x.json`,
+        `${TMP}/x/creatio-rereview-payload-AbC/threads.json`,
+        `${TMP}/creatio-rereview-payload-AbC/../secret.txt`,
+      ]) assert.strictEqual(read(f).allow, false, f);
+      assert.strictEqual(read("C:/Users/me/.claude/plugins/installed_plugins.json", noPreflight).allow, false, "no preflight, no file");
+    });
+
     test("agent guard: a link is judged by where it leads, when the check is handed the disk's answer", () => {
       // What a link in the PR's branch would do: C:/wt/docs/k leads to ~/.ssh/id_rsa.
       const links = { "C:/wt/docs/k": "C:/Users/me/.ssh/id_rsa", "C:/wt/docs/dir": "C:/Users/me/.config/gh" };
@@ -10275,7 +10408,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script, pr = reviewPr(), enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid, now, claudeConfigDir } = {}) => {
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), plugins: mounted = [], enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid, now, claudeConfigDir } = {}) => {
       // `home`: the folder of an earlier fixture — the same app started again.
       const dir = home ?? nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
@@ -10309,7 +10442,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         findCheckout: () => ((typeof checkout === "function" ? checkout() : checkout) ? co : null),
         hookScript: hookJs,
         execPath: process.execPath,
-        plugins: () => [],
+        plugins: () => mounted,
         git: async (args, cwd) => (rawGitCalls.push(args), gitCalls.push(gitSub(args)), gitImpl ? gitImpl(args, cwd) : ""),
         spawner: (args, cwd, env) => {
           const c = fakeChild();
@@ -11832,6 +11965,104 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual([kept.readDirs, kept.sessionRoots], [[workDir], []], "a folder list keeps absolute folders only — '' or '.' would be the hook's own folder");
     });
 
+    test("agent guard hook: the review preflight on disk — preflightFor finds the mounted plugin's helper in the run's temp folder, node is handed a copy of the checked request, a refused one can be corrected, a malformed guard entry gives nothing", () => {
+      const pubG = require(path.join(__dirname, "../dist/main/shared/agent-publish.js"));
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-preflight-"));
+      const plugin = path.join(root, "cache", "creatio-development", "1.7.165");
+      const helper = path.join(plugin, "skills", "creatio-code-review", "scripts", "rereview-context.cjs");
+      const other = path.join(root, "cache", "other", "1.0.0");
+      const config = path.join(root, "claude");
+      const tmp = path.join(root, "run", "tmp");
+      const outDir = path.join(root, "out");
+      const workDir = path.join(root, "wt");
+      for (const d of [path.dirname(helper), other, path.join(config, "plugins"), path.join(tmp, "creatio-rereview-payload-Q1"), outDir, workDir]) nfsA.mkdirSync(d, { recursive: true });
+      nfsA.writeFileSync(helper, "");
+      nfsA.writeFileSync(path.join(config, "plugins", "installed_plugins.json"), "{}");
+      nfsA.writeFileSync(path.join(tmp, "creatio-rereview-payload-Q1", "threads.json"), "[]");
+      const req = path.join(outDir, "req.json");
+      nfsA.writeFileSync(req, JSON.stringify({ pr: "https://github.com/a/b/pull/7", dryRun: false, rereview: "auto", guidanceDocs: [] }));
+      nfsA.writeFileSync(path.join(outDir, "other.json"), JSON.stringify({ pr: "https://github.com/x/private/pull/1" }));
+
+      assert.strictEqual(runner.preflightFor([other], tmp, config), null, "no plugin with the helper: no preflight");
+      const pf = runner.preflightFor([other, plugin], tmp, config);
+      assert.deepStrictEqual(pf, { helpers: [nfsA.realpathSync.native(helper)], installedPlugins: path.join(config, "plugins", "installed_plugins.json"), tmpDir: nfsA.realpathSync.native(tmp) });
+
+      const guardFile = path.join(root, "guard.json");
+      const written = { wrapperPath: path.join(root, "bin", "pr-review-publish.sh"), outDir, workDir, workflowDirs: [plugin], readDirs: [workDir, outDir, plugin], sessionId: "6250ec40-5c65-407c-8b04-61b1dba8fae7", sessionRoots: [path.join(config, "projects")], preflight: pf };
+      runner.writeGuardFile(guardFile, written);
+      assert.deepStrictEqual(hookMod.readGuardFile(guardFile), written, "the preflight comes back as written");
+      const hook = (tool_name, tool_input) =>
+        spawnSync(process.execPath, [hookJs, "rereview", "https://github.com/a/b/pull/7", guardFile], { input: JSON.stringify({ tool_name, tool_input }), encoding: "utf8" });
+      const call = (tool_name, tool_input) => hook(tool_name, tool_input).status;
+      const g = pubG.gitBashPath;
+      assert.strictEqual(call("Read", { file_path: path.join(config, "plugins", "installed_plugins.json") }), 0);
+      assert.strictEqual(call("Read", { file_path: path.join(tmp, "creatio-rereview-payload-Q1", "threads.json") }), 0);
+
+      // An allowed request: the hook hands Claude Code the command rewritten to read a copy of the checked text,
+      // kept next to the guard file — out of the session's reach — so a later swap of req.json reaches nothing.
+      const checkedText = nfsA.readFileSync(req, "utf8");
+      const allowed = hook("Bash", { command: `node "${g(helper)}" < "${g(req)}"`, description: "preflight" });
+      assert.strictEqual(allowed.status, 0, allowed.stderr);
+      const out = JSON.parse(allowed.stdout).hookSpecificOutput;
+      assert.strictEqual(out.hookEventName, "PreToolUse");
+      // Allowed by the hook: the copy is outside the session's folders, and a headless run can't approve a prompt.
+      assert.strictEqual(out.permissionDecision, "allow");
+      assert.strictEqual(out.updatedInput.description, "preflight", "the rest of the call as it was");
+      const m = /^node '([^']+)' < '([^']+)'$/.exec(out.updatedInput.command);
+      assert.ok(m, out.updatedInput.command);
+      assert.strictEqual(path.resolve(m[1]), nfsA.realpathSync.native(helper));
+      const copy = path.resolve(m[2]);
+      assert.strictEqual(path.dirname(copy), path.join(root, "requests"));
+      assert.strictEqual(nfsA.readFileSync(copy, "utf8"), checkedText);
+      // Nothing locked: the session's file can still be rewritten (and a refused one corrected) — the copy stays as checked.
+      nfsA.writeFileSync(req, JSON.stringify({ pr: "https://github.com/x/private/pull/1" }));
+      assert.strictEqual(nfsA.readFileSync(copy, "utf8"), checkedText);
+      assert.strictEqual(call("Bash", { command: `node "${g(helper)}" < "${g(req)}"` }), 2, "the swapped request is checked again, and refused");
+      nfsA.writeFileSync(req, checkedText);
+      assert.strictEqual(call("Bash", { command: `node "${g(helper)}" < "${g(req)}"` }), 0, "corrected, it runs");
+      // The rewritten command runs as written: the helper gets the checked copy on stdin.
+      const bashExe = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "/bin/bash";
+      if (nfsA.existsSync(bashExe)) {
+        nfsA.writeFileSync(helper, "process.stdin.pipe(process.stdout);");
+        const ran = spawnSync(bashExe, ["-c", out.updatedInput.command], { encoding: "utf8" });
+        assert.strictEqual(ran.stdout, checkedText, ran.stderr);
+      }
+      assert.strictEqual(call("Bash", { command: `node "${g(helper)}" < "${g(path.join(outDir, "other.json"))}"` }), 2, "another repository's PR");
+      assert.strictEqual(hook("Bash", { command: `node "${g(helper)}" < "${g(path.join(outDir, "other.json"))}"` }).stdout, "", "a refusal rewrites nothing");
+      assert.strictEqual(call("Bash", { command: `node "${g(helper)}" --digest "${g(path.join(tmp, "creatio-rereview-payload-Q1"))}"` }), 0);
+      // A link in the payload folder that leads out is judged by where it leads.
+      nfsA.symlinkSync(config, path.join(tmp, "creatio-rereview-payload-Q1", "up"), "junction");
+      assert.strictEqual(call("Read", { file_path: path.join(tmp, "creatio-rereview-payload-Q1", "up", "plugins", "installed_plugins.json") }), 0, "lands on the one file allowed");
+      nfsA.writeFileSync(path.join(config, "secret.txt"), "x");
+      assert.strictEqual(call("Read", { file_path: path.join(tmp, "creatio-rereview-payload-Q1", "up", "secret.txt") }), 2, "out of the payload folder through a link");
+      // The request file must really be in the payload folder.
+      nfsA.symlinkSync(config, path.join(outDir, "lnk"), "junction");
+      assert.strictEqual(call("Bash", { command: `node "${g(helper)}" < "${g(path.join(outDir, "lnk", "secret.txt"))}"` }), 2);
+
+      for (const bad of [
+        { preflight: null },
+        { preflight: { ...pf, helpers: "x" } },
+        { preflight: { ...pf, helpers: ["relative/h.cjs"] } },
+        { preflight: { ...pf, installedPlugins: "" } },
+        { preflight: { ...pf, tmpDir: 7 } },
+      ]) {
+        runner.writeGuardFile(guardFile, { ...written, ...bad });
+        assert.strictEqual(hookMod.readGuardFile(guardFile), null, JSON.stringify(bad));
+      }
+    });
+
+    test("agent runner: osTempDir follows node's own rule for the environment it is given; claudeSessionRoots takes it from there", () => {
+      assert.strictEqual(runner.osTempDir({ TEMP: "C:\\a", TMP: "C:\\b", TMPDIR: "/c" }, "win32"), "C:\\a");
+      assert.strictEqual(runner.osTempDir({ TMP: "C:\\b", TMPDIR: "/c" }, "win32"), "C:\\b");
+      assert.strictEqual(runner.osTempDir({ TEMP: "C:\\a", TMPDIR: "/c" }, "darwin"), "/c");
+      assert.strictEqual(runner.osTempDir({ TEMP: "C:\\a" }, "linux"), os.tmpdir(), "TEMP means nothing off Windows");
+      assert.deepStrictEqual(runner.runTempEnv("/r/tmp"), { TEMP: "/r/tmp", TMP: "/r/tmp", TMPDIR: "/r/tmp" });
+      const cfg = { CLAUDE_CONFIG_DIR: "/cfg" };
+      assert.deepStrictEqual(runner.claudeSessionRoots({ ...cfg, TMPDIR: "/r/tmp" }, "darwin"), [path.join("/cfg", "projects"), path.join("/r/tmp", "claude"), path.join("/tmp", "claude")]);
+      assert.deepStrictEqual(runner.claudeSessionRoots({ ...cfg, TEMP: "C:\\r\\tmp" }, "win32"), [path.join("/cfg", "projects"), path.join("C:\\r\\tmp", "claude")]);
+      assert.deepStrictEqual(runner.claudeSessionRoots({ ...cfg, TEMP: "C:\\r\\tmp", CLAUDE_CODE_TMPDIR: "/own" }, "win32"), [path.join("/cfg", "projects"), path.join("/own", "claude")]);
+    });
+
     test("agent guard hook: reads follow links on disk — the run's folders and its session's spill-over, nothing else", () => {
       const base = nfsA.realpathSync.native(nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-hookr-")));
       const workDir = path.join(base, "wt");
@@ -12814,6 +13045,61 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       } finally {
         f.agent.stop();
       }
+    });
+
+    await atest("agent preflight wiring: a review with the plugin's helper gets the preflight in its guard file, node, the folders and a temp folder of its own; without the helper none of it", async () => {
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-pfwire-"));
+      const withHelper = path.join(root, "with", "creatio-development");
+      const without = path.join(root, "without", "creatio-development");
+      nfsA.mkdirSync(path.join(withHelper, "skills", "creatio-code-review", "scripts"), { recursive: true });
+      nfsA.writeFileSync(path.join(withHelper, "skills", "creatio-code-review", "scripts", "rereview-context.cjs"), "");
+      nfsA.mkdirSync(path.join(without, "skills", "creatio-code-review"), { recursive: true });
+      const runOnce = async (installPath, over = {}) => {
+        const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, plugins: [{ name: "creatio-development", installPath, skills: ["creatio-code-review"] }], ...over });
+        try {
+          f.agent.onSnapshot(f.snapshot);
+          await until(() => f.children.length > 0);
+          const c = f.children[0];
+          const sf = c.args[c.args.indexOf("--settings") + 1];
+          const runDir = path.dirname(sf);
+          const g = JSON.parse(nfsA.readFileSync(path.join(runDir, "guard.json"), "utf8"));
+          const addDirs = c.args.flatMap((a, i) => (c.args[i - 1] === "--add-dir" ? [a] : []));
+          return { args: c.args, env: c.env, g, runDir, addDirs, kind: only(f)[0]?.scenario };
+        } finally {
+          f.agent.stop();
+        }
+      };
+      const on = await runOnce(withHelper);
+      const tmp = path.join(on.runDir, "tmp");
+      assert.ok(on.g.workflowDirs.some((d) => d === withHelper), "the plugin is mounted");
+      assert.deepStrictEqual(on.g.preflight.helpers, [nfsA.realpathSync.native(path.join(withHelper, "skills", "creatio-code-review", "scripts", "rereview-context.cjs"))]);
+      assert.strictEqual(on.g.preflight.tmpDir, nfsA.realpathSync.native(tmp), "the run's own temp folder");
+      assert.ok(on.args.includes("Bash(node *)"), "node is granted");
+      assert.ok(on.addDirs.includes(on.g.preflight.tmpDir) && on.addDirs.includes(path.dirname(on.g.preflight.installedPlugins)), "and the two folders");
+      assert.deepStrictEqual([on.env.TEMP, on.env.TMP, on.env.TMPDIR], [tmp, tmp, tmp], "the session writes its temp files there");
+      assert.ok(on.g.sessionRoots.includes(path.join(tmp, "claude")), "and Claude Code's spill-over follows it");
+
+      const off = await runOnce(without);
+      assert.strictEqual(off.g.preflight, undefined, "no helper: no preflight");
+      assert.ok(!off.args.includes("Bash(node *)"));
+      assert.ok(!off.addDirs.some((d) => /[\/]tmp$/.test(d)), "and no temp folder granted");
+      assert.notStrictEqual(off.env.TEMP, path.join(off.runDir, "tmp"), "the session keeps the usual temp folder");
+
+      // The helper mounted, but not a run that may preflight: a brief (it reads, it doesn't review),
+      // or a review with no payload folder (it runs as a plain dry run). None of it, and no temp folder made.
+      const none = (r, what) => {
+        assert.strictEqual(r.g.preflight, undefined, what);
+        assert.ok(!r.args.includes("Bash(node *)"), what);
+        assert.ok(!r.addDirs.some((d) => /[\/]tmp$/.test(d) || /[\/]plugins$/.test(d)), what);
+        assert.ok(![r.env.TEMP, r.env.TMP, r.env.TMPDIR].includes(path.join(r.runDir, "tmp")), what);
+        assert.ok(!nfsA.existsSync(path.join(r.runDir, "tmp")), what);
+      };
+      const brief = await runOnce(withHelper, { pr: reviewPr({ additions: 900 }), script: () => {} });
+      assert.strictEqual(brief.kind, "brief", "a big PR gets a brief first");
+      none(brief, "a brief");
+      const noFolder = await runOnce(withHelper, { captureScript: undefined, script: () => {} });
+      assert.strictEqual(noFolder.kind, "review");
+      none(noFolder, "a review with no payload folder");
     });
 
     await atest("agent publish: in On the app posts right after the run, and holds an approve while someone else asks for changes", async () => {
