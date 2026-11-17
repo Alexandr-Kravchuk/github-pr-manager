@@ -48,7 +48,7 @@ export interface ClaudeMenuItem {
  * one, so the extra item would repeat it. "Review" with Codex is left out when the
  * `codex` CLI is not installed (`codex`), rather than failing in a terminal window.
  */
-export function claudeMenuItems(pr: Pick<PullRequest, "roles">, desktop: boolean, codex = true): ClaudeMenuItem[] {
+export function claudeMenuItems(pr: Pick<PullRequest, "roles">, desktop: boolean, codex = false): ClaudeMenuItem[] {
   return claudeKindsFor(pr)
     .filter((kind) => kind !== "codexReview" || codex)
     .flatMap((kind): ClaudeMenuItem[] =>

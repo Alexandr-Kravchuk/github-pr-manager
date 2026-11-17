@@ -1047,7 +1047,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               [
                 ["drive", "Your PR is blocked (CI, conflict, threads, changes requested)"],
                 ["review", "Your review is due"],
-                ["codexReview", "Review with Codex (from the button's menu only; starts the codex CLI)"],
+                ["codexReview", "Review with Codex (from the button's menu only; opens the Codex app or runs the codex CLI)"],
                 ["close", "Your PR is ready to merge"],
                 ["explain", "Explain (from the button's menu only)"],
                 ["open", "Anything else"],

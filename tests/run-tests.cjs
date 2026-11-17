@@ -8663,7 +8663,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     // chosen in Settings, "Review" already opens one.
     test("claude menu: Review in terminal follows Review only while Settings pick Claude Desktop", () => {
       const items = (roles, desktop) =>
-        cl.claudeMenuItems({ roles }, desktop).map((i) => (i.inTerminal ? `${i.kind}@terminal` : i.kind));
+        cl.claudeMenuItems({ roles }, desktop, true).map((i) => (i.inTerminal ? `${i.kind}@terminal` : i.kind));
       assert.deepStrictEqual(items(["author"], true), ["drive", "review", "review@terminal", "codexReview", "codexReview@terminal", "close", "explain", "open"]);
       assert.deepStrictEqual(items(["reviewer"], true), ["drive", "review", "review@terminal", "codexReview", "codexReview@terminal", "explain", "open"]);
       assert.deepStrictEqual(items(["author"], false), ["drive", "review", "codexReview", "close", "explain", "open"]);
@@ -8673,7 +8673,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     test("claude menu: Review with Codex is offered only when the codex CLI is installed", () => {
       const kinds = (codex) => cl.claudeMenuItems({ roles: ["reviewer"] }, true, codex).map((i) => i.kind);
       assert.ok(kinds(true).includes("codexReview"));
-      assert.ok(kinds().includes("codexReview"), "offered by default");
+      assert.ok(!kinds().includes("codexReview"), "not offered unless the codex CLI is known to be installed");
       assert.deepStrictEqual(kinds(false), ["drive", "review", "review", "explain", "open"]);
     });
 
@@ -8759,6 +8759,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(opened.length, 1, "the Codex app does not open again");
         assert.strictEqual(terminals.length, 1);
         assert.match(terminals[0].command.posix, /&& codex '/);
+        assert.ok(terminals[0].command.windows.includes("codex") && !terminals[0].command.windows.includes("claude"), "the Windows argv starts codex");
+        assert.match(terminals[0].opts.unsupported, /Codex/);
         const plain = { ...desktop, terminal: "auto" };
         const viaSetting = await launcher.launchClaude(pr, plain, { trackComments: true, openUrl, kind: "codexReview" });
         assert.strictEqual(viaSetting.ok, true);
