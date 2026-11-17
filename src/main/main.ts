@@ -1321,6 +1321,7 @@ const isPrimaryInstance = acquireSingleInstanceLock({
 // exclusion structural, independent of Electron's internal ready/quit timing.
 if (isPrimaryInstance) {
   void app.whenReady().then(startApp);
+  hasCommand("codex"); // warms the macOS login-shell lookup, so the first menu already knows
 
   // Closing the last window quits — unless close-to-tray is on, in which case
   // the window is hidden rather than closed and this never fires (see the

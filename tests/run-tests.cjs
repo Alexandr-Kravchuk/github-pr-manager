@@ -8736,6 +8736,45 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("claude menu: Review with Codex opens the Codex app, or runs codex in a terminal", async () => {
+      const fs = require("node:fs");
+      const terminal = require(path.join(__dirname, "../dist/main/main/terminal.js"));
+      const realOpen = terminal.openTerminalWith;
+      const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "prd-codex-"));
+      const terminals = [];
+      terminal.openTerminalWith = async (command, opts) => { terminals.push({ command, opts }); };
+      try {
+        const pr = { ...quiet, roles: ["reviewer"] };
+        const opened = [];
+        const openUrl = async (url) => { opened.push(url); };
+        const desktop = { enabled: true, projectsRoot: "", repoPaths: { [pr.repo]: dir }, prompts: {}, terminal: "desktop" };
+        const app = await launcher.launchClaude(pr, desktop, { trackComments: true, openUrl, kind: "codexReview" });
+        assert.strictEqual(app.ok && app.kind, "codexReview");
+        assert.strictEqual(opened.length, 1);
+        assert.ok(opened[0].startsWith("codex://threads/new?path="), opened[0]);
+        assert.ok(!opened[0].startsWith("claude://"), "the Claude Desktop link must not be used");
+        assert.strictEqual(terminals.length, 0);
+        const inTerminal = await launcher.launchClaude(pr, desktop, { trackComments: true, openUrl, kind: "codexReview", inTerminal: true });
+        assert.strictEqual(inTerminal.ok, true);
+        assert.strictEqual(opened.length, 1, "the Codex app does not open again");
+        assert.strictEqual(terminals.length, 1);
+        assert.match(terminals[0].command.posix, /&& codex '/);
+        const plain = { ...desktop, terminal: "auto" };
+        const viaSetting = await launcher.launchClaude(pr, plain, { trackComments: true, openUrl, kind: "codexReview" });
+        assert.strictEqual(viaSetting.ok, true);
+        assert.strictEqual(opened.length, 1);
+        assert.strictEqual(terminals.length, 2);
+      } finally {
+        terminal.openTerminalWith = realOpen;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("claude settings: the codexReview prompt defaults to the built-in text and a custom one round-trips", () => {
+      assert.strictEqual(cfg.validateClaude({}).prompts.codexReview, cl.DEFAULT_CLAUDE_PROMPTS.codexReview);
+      assert.strictEqual(cfg.validateClaude({ prompts: { codexReview: "Look at {url}" } }).prompts.codexReview, "Look at {url}");
+    });
+
     // The group heading's launches: "Explain all" (one session over the open
     // PRs) and "Review all" (a Desktop parent that nests one review session per
     // PR awaiting your review), each prompt behind a marker the scanner reads.

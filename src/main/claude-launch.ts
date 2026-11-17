@@ -119,7 +119,7 @@ async function openTerminal(
       posix: posixLaunchCommand(dir, prompt, program),
       windows: ["/D", `"${dir}"`, "cmd", "/k", program, `"${prompt}"`],
     },
-    { terminal, unsupported: "Starting a Claude session is supported on macOS and Windows only." },
+    { terminal, unsupported: `Starting a ${program === "codex" ? "Codex" : "Claude"} session is supported on macOS and Windows only.` },
   );
 }
 
