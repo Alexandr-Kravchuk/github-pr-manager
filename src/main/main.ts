@@ -37,6 +37,7 @@ import type {
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
 import { createAgent, type Agent, type AgentNotice } from "./agent";
+import { hasCommand } from "./command-path";
 import { findCheckout, launchClaude, launchGroup, resumeClaudeSession } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
@@ -777,7 +778,7 @@ function registerIpc(): void {
 
   ipcMain.handle("config:get", async (): Promise<ConfigResult> => {
     try {
-      return { ok: true, config: toPublicConfig(loadSettings()) };
+      return { ok: true, config: toPublicConfig(loadSettings(), hasCommand("codex")) };
     } catch (e) {
       if (e instanceof ConfigError) return { ok: false, error: e.message };
       throw e;

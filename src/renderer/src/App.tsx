@@ -40,7 +40,7 @@ import { AuthorFilterContext } from "./components/author-filter-context";
 import { StaleCloseDialog } from "./components/StaleCloseDialog";
 import { StaleCloseContext } from "./components/stale-close-context";
 import { BasePrContext } from "./components/base-pr-context";
-import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
+import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext, CodexAvailableContext } from "./components/claude-context";
 import { WeatherBadge } from "./components/WeatherBadge";
 import { applyUiStyle } from "./ui-style";
 import {
@@ -1540,6 +1540,7 @@ export function App() {
       <AgentContext.Provider value={agentContext}>
       <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
       <ClaudeDesktopContext.Provider value={config?.claudeDesktop ?? false}>
+      <CodexAvailableContext.Provider value={config?.codexAvailable ?? false}>
       <ClaudeSessionsContext.Provider value={claudeSessions}>
       <AuthorFilterContext.Provider value={authorFilter}>
       <StaleCloseContext.Provider value={setClosingPr}>
@@ -1645,6 +1646,7 @@ export function App() {
         />
       )}
       </ClaudeSessionsContext.Provider>
+      </CodexAvailableContext.Provider>
       </ClaudeDesktopContext.Provider>
       </ClaudeEnabledContext.Provider>
       </AgentContext.Provider>

@@ -282,6 +282,7 @@ export function validateClaude(raw: unknown): ClaudeSettings {
     prompts: {
       drive: prompt("drive"),
       review: prompt("review"),
+      codexReview: prompt("codexReview"),
       close: prompt("close"),
       explain: prompt("explain"),
       open: prompt("open"),
@@ -522,13 +523,14 @@ export function toHostConfigs(settings: Settings): HostConfig[] {
 }
 
 /** Builds the sanitized (token-free) config for the renderer's filter bar. */
-export function toPublicConfig(settings: Settings): PublicConfig {
+export function toPublicConfig(settings: Settings, codexAvailable = false): PublicConfig {
   return {
     pollIntervalSeconds: settings.pollIntervalSeconds,
     hosts: settings.hosts.map((h) => ({ label: h.label, repos: h.repos })),
     trackComments: settings.trackComments,
     claudeEnabled: settings.claude.enabled,
     claudeDesktop: settings.claude.terminal === "desktop",
+    codexAvailable,
     uiStyle: settings.uiStyle ?? "flat",
   };
 }

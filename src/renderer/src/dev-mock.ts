@@ -983,6 +983,7 @@ const api: PrManagerApi = {
       trackComments: true,
       claudeEnabled: true,
       claudeDesktop: true,
+      codexAvailable: true,
       uiStyle: settings.uiStyle,
     },
   }),

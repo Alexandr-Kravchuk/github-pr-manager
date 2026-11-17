@@ -8,6 +8,9 @@ import {
   CLAUDE_BUTTON_TEXT,
   CLAUDE_LAUNCH_LABEL,
   claudeMenuItems,
+  claudeMenuTarget,
+  isReviewKind,
+  type ClaudeMenuItem,
   groupLaunchPrs,
   MAX_GROUP_PRS,
   pickClaudeLaunch,
@@ -26,9 +29,9 @@ import {
 } from "../../../shared/claude-sessions";
 import { cn } from "../format";
 import { useAnchoredMenu } from "./anchored-menu";
-import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext } from "./claude-context";
+import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext, CodexAvailableContext } from "./claude-context";
 
-const MENU_WIDTH_PX = 240;
+const MENU_WIDTH_PX = 280;
 /** Wider once it lists sessions: their titles carry a task key and a summary. */
 const SESSIONS_MENU_WIDTH_PX = 320;
 
@@ -64,6 +67,7 @@ export function ClaudeButton({
 }) {
   const enabled = useContext(ClaudeEnabledContext);
   const desktop = useContext(ClaudeDesktopContext);
+  const codex = useContext(CodexAvailableContext);
   const allSessions = useContext(ClaudeSessionsContext);
   const sessions = useMemo(() => sessionsForPr(pr, allSessions), [pr, allSessions]);
   const [state, run] = useLaunchState();
@@ -152,27 +156,41 @@ export function ClaudeButton({
                 <div className={cn(MENU_HEADING, "mt-1 border-t border-line pt-2")}>Start a new session</div>
               </>
             )}
-            {claudeMenuItems(pr, desktop).map(({ kind: k, inTerminal }) => {
-              const suggested = k === kind && !inTerminal;
-              return (
-                <button
-                  key={inTerminal ? `${k}-terminal` : k}
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    menu.close();
-                    launch(k, inTerminal);
-                  }}
-                  title={`Start Claude${inTerminal ? " in a terminal" : ""} in the repo folder to ${CLAUDE_LAUNCH_LABEL[k]}`}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-elevated"
-                >
-                  <span className={cn("h-2 w-2 shrink-0 rounded-full", KIND_DOT[k])} aria-hidden />
-                  <span className={cn("flex-1", suggested ? "font-semibold text-fg" : "text-fg-secondary")}>
-                    {CLAUDE_BUTTON_TEXT[k]}
-                    {inTerminal && " in terminal"}
-                  </span>
-                  {suggested && <span className="text-xs text-fg-subtle">suggested</span>}
-                </button>
+            {groupReviewItems(claudeMenuItems(pr, desktop, codex)).map((group) => {
+              const rows = group.items.map((item) => {
+                const { kind: k, inTerminal } = item;
+                const target = claudeMenuTarget(item, desktop);
+                const tool = target?.name ?? "Claude";
+                return (
+                  <button
+                    key={inTerminal ? `${k}-terminal` : k}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      menu.close();
+                      launch(k, inTerminal);
+                    }}
+                    title={`Start ${tool}${inTerminal ? " in a terminal" : ""} in the repo folder to ${CLAUDE_LAUNCH_LABEL[k]}`}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-elevated"
+                  >
+                    {target ? (
+                      <span className="flex w-2 shrink-0 justify-center" aria-hidden>
+                        {target.tool === "codex" ? <CodexMark size={12} /> : <ClaudeMark size={12} />}
+                      </span>
+                    ) : (
+                      <span className={cn("h-2 w-2 shrink-0 rounded-full", KIND_DOT[k])} aria-hidden />
+                    )}
+                    <span className="flex-1 text-fg-secondary">{target ? `${CLAUDE_BUTTON_TEXT.review} with ${target.name}` : CLAUDE_BUTTON_TEXT[k]}</span>
+                    {target && <span className="text-xs text-fg-subtle">{target.place}</span>}
+                  </button>
+                );
+              });
+              return group.review ? (
+                <div key="review-group" role="group" aria-label="Review" className="my-1 border-y border-line py-1">
+                  {rows}
+                </div>
+              ) : (
+                rows
               );
             })}
           </div>,
@@ -297,10 +315,33 @@ const SESSION_CLASS: Record<ClaudeSessionInfo["status"], string> = {
   paused: "border-line-strong bg-elevated/60 text-fg-secondary hover:bg-elevated",
 };
 
+/** Consecutive review items form one group (rendered with dividers); every other item stands alone. */
+function groupReviewItems(items: ClaudeMenuItem[]): { review: boolean; items: ClaudeMenuItem[] }[] {
+  const out: { review: boolean; items: ClaudeMenuItem[] }[] = [];
+  for (const item of items) {
+    const review = isReviewKind(item.kind);
+    const last = out[out.length - 1];
+    if (last && last.review === review) last.items.push(item);
+    else out.push({ review, items: [item] });
+  }
+  return out;
+}
+
+/** A plain terminal prompt — the mark of the Codex CLI row, in the text colour (no vendor logo). */
+function CodexMark({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden className="shrink-0">
+      <path d="m5 7 6 5-6 5" />
+      <path d="M13 18h6" />
+    </svg>
+  );
+}
+
 /** The menu's colour key — the same colour each kind gives the button. */
 const KIND_DOT: Record<ClaudeLaunchKind, string> = {
   drive: "bg-red-500",
   review: "bg-violet-500",
+  codexReview: "bg-violet-500",
   close: "bg-emerald-500",
   explain: "bg-sky-500",
   open: "bg-line-strong",
@@ -322,6 +363,8 @@ const KIND_CLASS: Record<ClaudeLaunchKind | "done", string> = {
     "border-violet-500/50 bg-violet-500/10 text-violet-700 hover:bg-violet-500/20 dark:text-violet-300",
   close:
     "border-emerald-500/50 bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300",
+  codexReview:
+    "border-indigo-500/50 bg-indigo-500/10 text-indigo-700 hover:bg-indigo-500/20 dark:text-indigo-300",
   explain: "border-sky-500/50 bg-sky-500/10 text-sky-700 hover:bg-sky-500/20 dark:text-sky-300",
   open: "border-line-strong bg-elevated/60 text-fg-secondary hover:bg-elevated",
   done: "border-emerald-500/50 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",

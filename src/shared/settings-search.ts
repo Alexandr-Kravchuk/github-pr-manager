@@ -136,6 +136,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     title: "Claude",
     keywords: [
       "claude code",
+      "codex",
       "session",
       "terminal",
       "iterm",
