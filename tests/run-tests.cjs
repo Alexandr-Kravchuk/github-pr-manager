@@ -11132,7 +11132,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       ...o,
     });
     // --- boardStage: the column is whose move it is -------------------------------
-    const sNow = Date.now();
+    // Keep relative fixtures within one local day, including near midnight.
+    const sNow = new Date(2026, 10, 18, 12).getTime();
     const sAgo = (min) => new Date(sNow - min * 60_000).toISOString();
     const sToday = view.todayKey(new Date(sNow));
     const sPr = (o = {}) => ({
