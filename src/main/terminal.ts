@@ -44,6 +44,16 @@ export interface TerminalCommand {
 }
 
 /**
+ * The environment of a Windows terminal window. `cmd` looks for a bare command
+ * name in its current directory before PATH, and the window opens in the PR's
+ * checkout, so a `claude.cmd` or `codex.cmd` committed to the branch would run
+ * instead of the CLI; this variable switches that lookup off.
+ */
+export function windowsTerminalEnv(env: LauncherEnv): LauncherEnv {
+  return { ...env, NoDefaultCurrentDirectoryInExePath: "1" };
+}
+
+/**
  * Opens a new terminal window running `command`. On macOS `terminal` picks the
  * app (`auto`: iTerm2 when installed, else Terminal); Windows always uses a
  * `cmd` window.
@@ -64,7 +74,7 @@ export async function openTerminalWith(
     const child = spawn("cmd.exe", ["/c", "start", '""', ...command.windows], {
       detached: true,
       stdio: "ignore",
-      env,
+      env: windowsTerminalEnv(env),
       windowsVerbatimArguments: true,
     });
     child.unref();

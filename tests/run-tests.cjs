@@ -1571,6 +1571,7 @@ test("toPublicConfig: strips graphqlUrl, keeps label + repos", () => {
     trackComments: true,
     claudeEnabled: false,
     claudeDesktop: false,
+    codexAvailable: false,
     uiStyle: "flat",
   });
 });
@@ -8387,7 +8388,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
 
     test("claude button: every launch kind has button text; the table widens only while it shows", () => {
-      for (const k of ["drive", "review", "close", "explain", "open"]) assert.ok(cl.CLAUDE_BUTTON_TEXT[k], k);
+      for (const k of ["drive", "review", "codexReview", "close", "explain", "open"]) assert.ok(cl.CLAUDE_BUTTON_TEXT[k], k);
       const tbl = require(path.join(__dirname, "../dist/main/shared/pr-table.js"));
       assert.strictEqual(tbl.actionsColumnRem(false), 5);
       assert.strictEqual(tbl.actionsColumnRem(true), 5 + tbl.CLAUDE_ACTIONS_EXTRA_REM);
@@ -8402,6 +8403,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const cmd = cl.posixLaunchCommand("/a b/it's", "x");
       assert.ok(cmd.endsWith(`; cd '/a b/it'\\''s' && claude 'x'`), cmd);
       assert.ok(cmd.startsWith("unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION "), "session markers are dropped before claude starts");
+      assert.ok(cl.posixLaunchCommand("/d", "x", cl.launchProgram("codexReview")).endsWith("&& codex 'x'"), "a Codex review starts codex");
+      assert.strictEqual(cl.launchProgram("review"), "claude");
       assert.strictEqual(cl.appleScriptString(`say "hi" \\ there`), `"say \\"hi\\" \\\\ there"`);
     });
 
@@ -8438,6 +8441,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(
         cl.claudeDesktopUrl("/Users/me/my repo", "/drive-pr-green https://x/pull/1?a=b&c"),
         "claude://code/new?q=%2Fdrive-pr-green%20https%3A%2F%2Fx%2Fpull%2F1%3Fa%3Db%26c&folder=%2FUsers%2Fme%2Fmy%20repo",
+      );
+      assert.strictEqual(
+        cl.codexAppUrl(["C:", "Projects", "my repo"].join(String.fromCharCode(92)), "Review https://x/pull/1?a=b&c"),
+        "codex://threads/new?path=C%3A%5CProjects%5Cmy%20repo&prompt=Review%20https%3A%2F%2Fx%2Fpull%2F1%3Fa%3Db%26c",
       );
     });
 
@@ -8607,9 +8614,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
 
     test("claude menu: Close PR only on your own PRs; Explain on every PR, never picked from the state", () => {
-      assert.deepStrictEqual(cl.claudeKindsFor({ roles: ["author"] }), ["drive", "review", "close", "explain", "open"]);
+      assert.deepStrictEqual(cl.claudeKindsFor({ roles: ["author"] }), ["drive", "review", "codexReview", "close", "explain", "open"]);
       for (const roles of [["reviewer"], ["reviewed"], []]) {
-        assert.deepStrictEqual(cl.claudeKindsFor({ roles }), ["drive", "review", "explain", "open"], roles.join());
+        assert.deepStrictEqual(cl.claudeKindsFor({ roles }), ["drive", "review", "codexReview", "explain", "open"], roles.join());
       }
       for (const patch of [{}, { failingChecks: [{ name: "ci" }] }, { roles: ["reviewer"] }, { canBeMerged: true, hasHumanApproval: true }]) {
         assert.notStrictEqual(pick(patch), "explain");
@@ -8656,13 +8663,50 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     // chosen in Settings, "Review" already opens one.
     test("claude menu: Review in terminal follows Review only while Settings pick Claude Desktop", () => {
       const items = (roles, desktop) =>
-        cl.claudeMenuItems({ roles }, desktop).map((i) => (i.inTerminal ? `${i.kind}@terminal` : i.kind));
-      assert.deepStrictEqual(items(["author"], true), ["drive", "review", "review@terminal", "close", "explain", "open"]);
-      assert.deepStrictEqual(items(["reviewer"], true), ["drive", "review", "review@terminal", "explain", "open"]);
-      assert.deepStrictEqual(items(["author"], false), ["drive", "review", "close", "explain", "open"]);
-      assert.deepStrictEqual(items(["reviewer"], false), ["drive", "review", "explain", "open"]);
+        cl.claudeMenuItems({ roles }, desktop, true).map((i) => (i.inTerminal ? `${i.kind}@terminal` : i.kind));
+      assert.deepStrictEqual(items(["author"], true), ["drive", "review", "review@terminal", "codexReview", "codexReview@terminal", "close", "explain", "open"]);
+      assert.deepStrictEqual(items(["reviewer"], true), ["drive", "review", "review@terminal", "codexReview", "codexReview@terminal", "explain", "open"]);
+      assert.deepStrictEqual(items(["author"], false), ["drive", "review", "codexReview", "close", "explain", "open"]);
+      assert.deepStrictEqual(items(["reviewer"], false), ["drive", "review", "codexReview", "explain", "open"]);
     });
 
+    test("claude menu: Review with Codex is offered only when the codex CLI is installed", () => {
+      const kinds = (codex) => cl.claudeMenuItems({ roles: ["reviewer"] }, true, codex).map((i) => i.kind);
+      assert.ok(kinds(true).includes("codexReview"));
+      assert.ok(!kinds().includes("codexReview"), "not offered unless the codex CLI is known to be installed");
+      assert.deepStrictEqual(kinds(false), ["drive", "review", "review", "explain", "open"]);
+    });
+
+    test("claude menu: a review row says which tool it starts and where; other rows say nothing", () => {
+      const t = (kind, inTerminal, desktop) => cl.claudeMenuTarget({ kind, inTerminal }, desktop);
+      assert.deepStrictEqual(t("review", false, true), { tool: "claude", name: "Claude", place: "Desktop" });
+      assert.deepStrictEqual(t("review", true, true), { tool: "claude", name: "Claude", place: "terminal" });
+      assert.deepStrictEqual(t("review", false, false), { tool: "claude", name: "Claude", place: "terminal" });
+      assert.deepStrictEqual(t("codexReview", false, true), { tool: "codex", name: "Codex", place: "app" });
+      assert.deepStrictEqual(t("codexReview", true, true), { tool: "codex", name: "Codex", place: "terminal" });
+      assert.deepStrictEqual(t("codexReview", false, false), { tool: "codex", name: "Codex", place: "terminal" });
+      for (const desktop of [true, false]) {
+        for (const k of ["drive", "close", "explain", "open"]) assert.strictEqual(t(k, false, desktop), null, k);
+      }
+      assert.ok(cl.isReviewKind("review") && cl.isReviewKind("codexReview") && !cl.isReviewKind("explain"));
+    });
+
+    test("command path: a name is found on PATH, with PATHEXT on Windows, and not otherwise", () => {
+      const cp = require(path.join(__dirname, "../dist/main/main/command-path.js"));
+      const has = (set) => (f) => set.includes(f.split(String.fromCharCode(92)).join("/"));
+      assert.strictEqual(cp.findOnPath("codex", { pathVar: "/a:/b", windows: false, exists: has(["/b/codex"]) }), true);
+      assert.strictEqual(cp.findOnPath("codex", { pathVar: "/a:/b", windows: false, exists: has(["/b/codex.cmd"]) }), false);
+      assert.strictEqual(cp.findOnPath("codex", { pathVar: "C:/n;C:/m", windows: true, pathExt: ".EXE;.CMD", exists: has(["C:/m/codex.CMD"]) }), true);
+      assert.strictEqual(cp.findOnPath("codex", { pathVar: "", windows: false, exists: () => true }), false);
+      assert.strictEqual(cp.hasCommand("a b; rm"), false, "a name with shell characters is never looked up");
+    });
+    test("terminal: a Windows window does not look for the command in the checkout first", () => {
+      const terminal = require(path.join(__dirname, "../dist/main/main/terminal.js"));
+      const env = terminal.windowsTerminalEnv({ PATH: "C:/bin", KEEP: "1" });
+      assert.strictEqual(env.NoDefaultCurrentDirectoryInExePath, "1");
+      assert.strictEqual(env.PATH, "C:/bin");
+      assert.strictEqual(env.KEEP, "1");
+    });
     test("claude menu: the in-terminal flag crosses from the renderer only as a boolean", () => {
       const v = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
       assert.strictEqual(v.validateInTerminal(undefined), false);
@@ -8697,6 +8741,47 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         terminal.openTerminalWith = realOpen;
         fs.rmSync(dir, { recursive: true, force: true });
       }
+    });
+
+    await atest("claude menu: Review with Codex opens the Codex app, or runs codex in a terminal", async () => {
+      const fs = require("node:fs");
+      const terminal = require(path.join(__dirname, "../dist/main/main/terminal.js"));
+      const realOpen = terminal.openTerminalWith;
+      const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "prd-codex-"));
+      const terminals = [];
+      terminal.openTerminalWith = async (command, opts) => { terminals.push({ command, opts }); };
+      try {
+        const pr = { ...quiet, roles: ["reviewer"] };
+        const opened = [];
+        const openUrl = async (url) => { opened.push(url); };
+        const desktop = { enabled: true, projectsRoot: "", repoPaths: { [pr.repo]: dir }, prompts: {}, terminal: "desktop" };
+        const app = await launcher.launchClaude(pr, desktop, { trackComments: true, openUrl, kind: "codexReview" });
+        assert.strictEqual(app.ok && app.kind, "codexReview");
+        assert.strictEqual(opened.length, 1);
+        assert.ok(opened[0].startsWith("codex://threads/new?path="), opened[0]);
+        assert.ok(!opened[0].startsWith("claude://"), "the Claude Desktop link must not be used");
+        assert.strictEqual(terminals.length, 0);
+        const inTerminal = await launcher.launchClaude(pr, desktop, { trackComments: true, openUrl, kind: "codexReview", inTerminal: true });
+        assert.strictEqual(inTerminal.ok, true);
+        assert.strictEqual(opened.length, 1, "the Codex app does not open again");
+        assert.strictEqual(terminals.length, 1);
+        assert.match(terminals[0].command.posix, /&& codex '/);
+        assert.ok(terminals[0].command.windows.includes("codex") && !terminals[0].command.windows.includes("claude"), "the Windows argv starts codex");
+        assert.match(terminals[0].opts.unsupported, /Codex/);
+        const plain = { ...desktop, terminal: "auto" };
+        const viaSetting = await launcher.launchClaude(pr, plain, { trackComments: true, openUrl, kind: "codexReview" });
+        assert.strictEqual(viaSetting.ok, true);
+        assert.strictEqual(opened.length, 1);
+        assert.strictEqual(terminals.length, 2);
+      } finally {
+        terminal.openTerminalWith = realOpen;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("claude settings: the codexReview prompt defaults to the built-in text and a custom one round-trips", () => {
+      assert.strictEqual(cfg.validateClaude({}).prompts.codexReview, cl.DEFAULT_CLAUDE_PROMPTS.codexReview);
+      assert.strictEqual(cfg.validateClaude({ prompts: { codexReview: "Look at {url}" } }).prompts.codexReview, "Look at {url}");
     });
 
     // The group heading's launches: "Explain all" (one session over the open

@@ -5,8 +5,10 @@ import path from "node:path";
 
 import {
   claudeDesktopUrl,
+  codexAppUrl,
   normalizeRemote,
   claudeKindsFor,
+  launchProgram,
   pickClaudeLaunch,
   type ClaudeLaunchKind,
   posixLaunchCommand,
@@ -100,23 +102,24 @@ export function findCheckout(
   return null;
 }
 
-/** Opens a new terminal window in `dir` running `claude <prompt>`. */
+/** Opens a new terminal window in `dir` running `<program> <prompt>`. */
 async function openTerminal(
   dir: string,
   prompt: string,
   terminal: Exclude<ClaudeTerminal, "desktop">,
+  program: "claude" | "codex" = "claude",
 ): Promise<void> {
   // cmd.exe has no quoting that survives every character, so the prompt must
   // not carry one that would end the argument early.
   if (process.platform === "win32" && /["%^&|<>]/.test(prompt)) {
-    throw new Error(`The prompt contains a character Windows can't pass to claude: ${prompt}`);
+    throw new Error(`The prompt contains a character Windows can't pass to ${program}: ${prompt}`);
   }
   await openTerminalWith(
     {
-      posix: posixLaunchCommand(dir, prompt),
-      windows: ["/D", `"${dir}"`, "cmd", "/k", "claude", `"${prompt}"`],
+      posix: posixLaunchCommand(dir, prompt, program),
+      windows: ["/D", `"${dir}"`, "cmd", "/k", program, `"${prompt}"`],
     },
-    { terminal, unsupported: "Starting a Claude session is supported on macOS and Windows only." },
+    { terminal, unsupported: `Starting a ${program === "codex" ? "Codex" : "Claude"} session is supported on macOS and Windows only.` },
   );
 }
 
@@ -140,8 +143,8 @@ export async function resumeClaudeSession(dir: string, sessionId: string, termin
 }
 
 /**
- * Starts `claude <prompt>` in `dir` where Settings say: Claude Desktop through
- * `openUrl`, else a terminal. `inTerminal` overrides a Claude Desktop setting
+ * Starts `claude <prompt>` (or `codex`) in `dir` where Settings say: the desktop
+ * app (Claude Desktop, or the Codex app) through `openUrl`, else a terminal. `inTerminal` overrides a Claude Desktop setting
  * with the default terminal (iTerm2 when installed, else Terminal; cmd on
  * Windows). Returns the error to show, or null once started.
  */
@@ -151,17 +154,19 @@ async function startSession(
   settings: ClaudeSettings,
   openUrl: (url: string) => Promise<void>,
   inTerminal = false,
+  program: "claude" | "codex" = "claude",
 ): Promise<string | null> {
   if (settings.terminal === "desktop" && !inTerminal) {
+    const app = program === "codex" ? "the Codex app" : "Claude Desktop";
     try {
-      await openUrl(claudeDesktopUrl(dir, prompt));
+      await openUrl(program === "codex" ? codexAppUrl(dir, prompt) : claudeDesktopUrl(dir, prompt));
     } catch (e) {
-      return `Could not open Claude Desktop (is it installed?): ${(e as Error).message}`;
+      return `Could not open ${app} (is it installed?): ${(e as Error).message}`;
     }
     return null;
   }
   try {
-    await openTerminal(dir, prompt, settings.terminal === "desktop" ? "auto" : settings.terminal);
+    await openTerminal(dir, prompt, settings.terminal === "desktop" ? "auto" : settings.terminal, program);
   } catch (e) {
     return `Could not open a terminal: ${(e as Error).message}`;
   }
@@ -198,7 +203,7 @@ export async function launchClaude(
   }
   const kind = opts.kind ?? pickClaudeLaunch(pr, opts);
   const prompt = renderClaudePrompt(settings.prompts, kind, pr);
-  const error = await startSession(dir, prompt, settings, opts.openUrl, opts.inTerminal);
+  const error = await startSession(dir, prompt, settings, opts.openUrl, opts.inTerminal, launchProgram(kind));
   return error ? { ok: false, error } : { ok: true, kind, dir };
 }
 

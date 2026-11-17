@@ -177,7 +177,7 @@ export interface ClaudeSettings {
    * `reviewGroup` are the group heading's "Explain all" and "Review all":
    * `{key}`, `{count}`, `{urls}` and, for the review, `{prompts}`.
    */
-  prompts: Record<"drive" | "review" | "close" | "explain" | "open" | "explainGroup" | "reviewGroup", string>;
+  prompts: Record<"drive" | "review" | "codexReview" | "close" | "explain" | "open" | "explainGroup" | "reviewGroup", string>;
   /**
    * Prompts only the PR agent runs (see `AgentSettings`). Kept apart from
    * `prompts` on purpose: those keys are the Claude button's launch kinds, and a
@@ -494,6 +494,8 @@ export interface PublicConfig {
   claudeEnabled: boolean;
   /** Whether Claude sessions open in Claude Desktop — the only place "Review all" can nest its sessions. */
   claudeDesktop: boolean;
+  /** Whether the `codex` CLI is on the PATH — the menu offers "Review" with Codex only then. */
+  codexAvailable: boolean;
   /** Mirror of {@link Settings.uiStyle} — the renderer switches its look on it. */
   uiStyle?: UiStyle;
 }
@@ -903,7 +905,7 @@ export type SaveSettingsResult = { ok: true; warning?: string } | { ok: false; e
 
 /** Result of `launchClaude`: what was started and where, or why not. */
 export type ClaudeLaunchResult =
-  | { ok: true; kind: "drive" | "review" | "close" | "explain" | "open"; dir: string }
+  | { ok: true; kind: "drive" | "review" | "codexReview" | "close" | "explain" | "open"; dir: string }
   | { ok: false; error: string };
 
 /** Result of `launchClaudeGroup`: how many PRs went in and where it runs, or why not. */
@@ -1267,7 +1269,7 @@ export interface PrManagerApi {
    */
   launchClaude(
     prId: string,
-    kind?: "drive" | "review" | "close" | "explain" | "open",
+    kind?: "drive" | "review" | "codexReview" | "close" | "explain" | "open",
     inTerminal?: boolean,
   ): Promise<ClaudeLaunchResult>;
   /**
