@@ -725,9 +725,13 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   `node <helper> --digest <payload folder>` — paths followed through links,
   any other `node` call refused. The helper runs `gh` with your login on
   whatever PR the request names, so the request is held to the run's own PR
-  and the four keys the skill sends (`requestProblem`), and the hook makes
-  the file read-only before reading it (`lockedRead`), so it can't be
-  swapped before `node` reads it. The temp folder is the run's own because
+  and the four keys the skill sends (`requestProblem`). `node` never reads
+  the session's own file, which it could rewrite or rename over after the
+  check: the hook copies the checked text into `<runDir>/requests`, where
+  the session writes nothing (`requestStore`), and hands Claude Code the
+  command rewritten to read that copy (`updatedInput`, no permission
+  decision — the usual rules still judge it). Nothing is locked, so a
+  refused request can be corrected and run again. The temp folder is the run's own because
   your shared one keeps the payloads of every other review of the last day.
   Without this every review aborted at the preflight (`preflight-unverified`)
   and was reported as "Reviewed — nothing to post".

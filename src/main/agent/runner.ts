@@ -6,6 +6,7 @@ import path from "node:path";
 import { applyStreamEvent, initialProgress, parseStreamLine, type RunProgress } from "../../shared/agent-stream";
 import { launcherEnv } from "../../shared/claude-launch";
 import { PREFLIGHT_HELPER, type GuardPreflight, type GuardRun } from "../../shared/agent-guard";
+import { claudeConfigDir } from "../claude-sessions";
 import type { AgentRunKind } from "../../shared/types";
 
 // One agent session: `claude -p` with stream-json both ways, isolated from the
@@ -176,7 +177,7 @@ export function hookCommand(execPath: string, hookScript: string, kind: AgentRun
  * means nothing is read from it.
  */
 export function claudeSessionRoots(env: Record<string, string | undefined>, platform: string = process.platform): string[] {
-  const config = env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), ".claude");
+  const config = claudeConfigDir(env);
   const tmp = env.CLAUDE_CODE_TMPDIR?.trim();
   const temps = tmp ? [tmp] : platform === "win32" ? [osTempDir(env, platform)] : [osTempDir(env, platform), "/tmp"];
   return [...new Set([path.join(config, "projects"), ...temps.map((t) => path.join(t, "claude"))])];
@@ -196,11 +197,11 @@ export function runTempEnv(dir: string): Record<string, string> {
  * The review skill's preflight for a run (`GuardPreflight`), when a mounted
  * plugin carries the helper: each helper and the temp folder as they really
  * are (links and 8.3 names resolved, the way the guard reads a command's
- * paths), and Claude Code's `installed_plugins.json`. The temp folder is the
- * one `node` takes in the session's environment (`env`): the run's own, which
- * the app gives a session that may run the preflight (`runTempEnv`).
+ * paths), and Claude Code's `installed_plugins.json` in `configDir`. `tmpDir`
+ * is the run's own temp folder, which the app hands the session as its
+ * `TEMP`/`TMP`/`TMPDIR` (`runTempEnv`); it must exist.
  */
-export function preflightFor(pluginDirs: readonly string[], env: Record<string, string | undefined>, platform: string = process.platform): GuardPreflight | null {
+export function preflightFor(pluginDirs: readonly string[], tmpDir: string, configDir: string): GuardPreflight | null {
   const real = (p: string): string | null => {
     try {
       return fs.realpathSync.native(p);
@@ -210,9 +211,7 @@ export function preflightFor(pluginDirs: readonly string[], env: Record<string, 
   };
   const helpers = pluginDirs.map((d) => real(path.join(d, ...PREFLIGHT_HELPER))).filter((h): h is string => h !== null);
   if (helpers.length === 0) return null;
-  const config = env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), ".claude");
-  const tmp = osTempDir(env, platform);
-  return { helpers: [...new Set(helpers)], installedPlugins: path.join(config, "plugins", "installed_plugins.json"), tmpDir: real(tmp) ?? tmp };
+  return { helpers: [...new Set(helpers)], installedPlugins: path.join(configDir, "plugins", "installed_plugins.json"), tmpDir: real(tmpDir) ?? tmpDir };
 }
 
 /**

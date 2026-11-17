@@ -16,7 +16,8 @@ import type { AgentRunKind } from "./types";
 // alone let `-XDELETE`, `'-X' POST`, or a PR file named `-XDELETE` matched by
 // an unquoted `*` straight through.
 
-export type GuardDecision = { allow: true } | { allow: false; reason: string };
+/** An allow may carry the command to run in place of the one asked for (the review preflight's checked request). */
+export type GuardDecision = { allow: true; command?: string } | { allow: false; reason: string };
 
 /** The PR a run works on: its `gh` reads are held to it. */
 export interface GuardPr {
@@ -450,11 +451,28 @@ const NODE_NAMES = new Set(["node", "node.exe"]);
 const PREFLIGHT_REQUEST_KEYS = new Set(["pr", "dryRun", "rereview", "guidanceDocs"]);
 
 /**
- * Reads a request file the way the helper will, after making it read-only so
- * nothing can change it between this check and `node` reading it. Null when it
- * can't be read. Injected: the guard itself never touches the disk.
+ * Where the guard reads a preflight request and keeps the copy `node` reads.
+ * The session can rewrite or rename a file in its payload folder at any time —
+ * between this check and `node` opening it, too — so the helper never reads
+ * the file the session wrote: `keep` puts the checked text where the session
+ * can't write and the command is rewritten to read that. Nothing is locked, so
+ * a refused request can be corrected and run again. Injected: the guard itself
+ * never touches the disk.
  */
-export type LockedRead = (file: string) => string | null;
+export interface RequestStore {
+  /** The request's text; null when it can't be read (or isn't a small file). */
+  read(file: string): string | null;
+  /** A copy of `text` the session can't change; its path, or null when it can't be made. */
+  keep(text: string): string | null;
+}
+
+/** A store that has nothing: every request is refused. */
+const NO_REQUESTS: RequestStore = { read: () => null, keep: () => null };
+
+/** A path as one single-quoted shell word. */
+function shellQuote(p: string): string {
+  return `'${p.replace(/'/g, `'\\''`)}'`;
+}
 
 /**
  * Whether a preflight request is for this run's PR only. The helper runs `gh`
@@ -495,7 +513,7 @@ function requestProblem(text: string | null, pr: GuardPr | null): string | null 
  * start a helper, so the other rules judge it; any other use of a helper —
  * one of another plugin version included — is refused with what is allowed.
  */
-function checkPreflight(command: string, pr: GuardPr | null, run: GuardRun | null, real: RealPath, lockedRead: LockedRead): GuardDecision | null {
+function checkPreflight(command: string, pr: GuardPr | null, run: GuardRun | null, real: RealPath, requests: RequestStore): GuardDecision | null {
   const p = run?.preflight;
   if (!p) return null;
   const stdin = splitStdin(command);
@@ -517,8 +535,14 @@ function checkPreflight(command: string, pr: GuardPr | null, run: GuardRun | nul
     const outDir = run?.outDir ? real(run.outDir) : null;
     const req = real(file.words[0]);
     if (!outDir || !req || !isInsideDir(req, outDir)) return deny(shape);
-    const problem = requestProblem(lockedRead(req), pr);
-    return problem ? deny(`The review preflight request is refused: ${problem}.`) : { allow: true };
+    const text = requests.read(req);
+    const problem = requestProblem(text, pr);
+    if (problem) return deny(`The review preflight request is refused: ${problem}.`);
+    const copy = text === null ? null : requests.keep(text);
+    if (!copy) return deny("The review preflight request couldn't be set aside for node to read.");
+    // The helper reads the checked copy, never the file the session can still change.
+    const fwd = (s: string) => s.replace(/\\/g, "/");
+    return { allow: true, command: `node ${shellQuote(fwd(helper))} < ${shellQuote(fwd(copy))}` };
   }
   if (w.length === 4 && w[2] === "--digest") {
     const dir = real(w[3]);
@@ -1306,9 +1330,9 @@ export function checkBash(
   pr: GuardPr | null = null,
   run: GuardRun | null = null,
   real: RealPath = asWritten,
-  lockedRead: LockedRead = () => null,
+  requests: RequestStore = NO_REQUESTS,
 ): GuardDecision {
-  const preflight = kind === "review" || kind === "rereview" ? checkPreflight(rawCommand, pr, run, real, lockedRead) : null;
+  const preflight = kind === "review" || kind === "rereview" ? checkPreflight(rawCommand, pr, run, real, requests) : null;
   if (preflight) return preflight;
   const split = shellWords(rawCommand);
   if ("error" in split) return deny(split.error);
@@ -1343,7 +1367,7 @@ export function checkToolUse(
   pr: GuardPr | null = null,
   run: GuardRun | null = null,
   real: RealPath = asWritten,
-  lockedRead: LockedRead = () => null,
+  requests: RequestStore = NO_REQUESTS,
 ): GuardDecision {
   if (run?.mode === "full" && kind === "drive") return checkFullToolUse(toolName, input, pr, run);
   if (NEVER.has(toolName)) return deny(`${toolName} is not available to agent runs.`);
@@ -1366,7 +1390,7 @@ export function checkToolUse(
   if (toolName === "Bash") {
     const command = typeof (input as { command?: unknown } | null)?.command === "string" ? (input as { command: string }).command : "";
     if (!command.trim()) return deny("An empty command.");
-    return checkBash(kind, command, pr, run, real, lockedRead);
+    return checkBash(kind, command, pr, run, real, requests);
   }
   if (SESSION_TOOLS.has(toolName)) return { allow: true };
   return deny(`${toolName || "That tool"} is not one of the tools agent runs may use.`);

@@ -1444,7 +1444,7 @@ export function createAgent(deps: AgentDeps): Agent {
     const runTmp = path.join(runDir, "tmp");
     const mayPreflight = (kind === "review" || kind === "rereview") && folder !== null;
     if (mayPreflight) fs.mkdirSync(runTmp, { recursive: true });
-    const preflight = mayPreflight ? preflightFor(pluginDirs, { ...launcherEnv(process.env), ...runTempEnv(runTmp) }) : null;
+    const preflight = mayPreflight ? preflightFor(pluginDirs, runTmp, claudeConfigDir(launcherEnv(process.env))) : null;
     const tempEnv = preflight ? runTempEnv(runTmp) : {};
     const settingsFile = path.join(runDir, "settings.json");
     const guardFile = path.join(runDir, "guard.json");
