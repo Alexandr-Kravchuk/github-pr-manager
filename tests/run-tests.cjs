@@ -8700,6 +8700,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(cp.findOnPath("codex", { pathVar: "", windows: false, exists: () => true }), false);
       assert.strictEqual(cp.hasCommand("a b; rm"), false, "a name with shell characters is never looked up");
     });
+    test("terminal: a Windows window does not look for the command in the checkout first", () => {
+      const terminal = require(path.join(__dirname, "../dist/main/main/terminal.js"));
+      const env = terminal.windowsTerminalEnv({ PATH: "C:/bin", KEEP: "1" });
+      assert.strictEqual(env.NoDefaultCurrentDirectoryInExePath, "1");
+      assert.strictEqual(env.PATH, "C:/bin");
+      assert.strictEqual(env.KEEP, "1");
+    });
     test("claude menu: the in-terminal flag crosses from the renderer only as a boolean", () => {
       const v = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
       assert.strictEqual(v.validateInTerminal(undefined), false);
