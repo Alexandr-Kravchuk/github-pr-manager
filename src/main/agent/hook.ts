@@ -235,9 +235,12 @@ function main(): void {
       process.exit(2);
     }
     if (decision.command !== undefined) {
-      // Claude Code runs the command the hook hands back (`updatedInput`); the permission rules still judge it.
+      // Claude Code runs the command the hook hands back (`updatedInput`), allowed here: the guard
+      // built all of it — the listed helper and its own copy of the checked request — and the copy
+      // sits outside the session's folders, where Claude Code would ask for approval nobody can give.
       const updatedInput = { ...(call.tool_input as Record<string, unknown>), command: decision.command };
-      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput } }), () => process.exit(0));
+      const out = { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "PR agent guard: the review preflight on its checked request", updatedInput };
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: out }), () => process.exit(0));
       return;
     }
     process.exit(0);

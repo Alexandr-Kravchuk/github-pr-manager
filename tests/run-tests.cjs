@@ -12005,7 +12005,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(allowed.status, 0, allowed.stderr);
       const out = JSON.parse(allowed.stdout).hookSpecificOutput;
       assert.strictEqual(out.hookEventName, "PreToolUse");
-      assert.strictEqual(out.permissionDecision, undefined, "the permission rules still judge the command");
+      // Allowed by the hook: the copy is outside the session's folders, and a headless run can't approve a prompt.
+      assert.strictEqual(out.permissionDecision, "allow");
       assert.strictEqual(out.updatedInput.description, "preflight", "the rest of the call as it was");
       const m = /^node '([^']+)' < '([^']+)'$/.exec(out.updatedInput.command);
       assert.ok(m, out.updatedInput.command);

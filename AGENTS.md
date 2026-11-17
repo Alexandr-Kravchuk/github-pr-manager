@@ -729,8 +729,11 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   the session's own file, which it could rewrite or rename over after the
   check: the hook copies the checked text into `<runDir>/requests`, where
   the session writes nothing (`requestStore`), and hands Claude Code the
-  command rewritten to read that copy (`updatedInput`, no permission
-  decision — the usual rules still judge it). Nothing is locked, so a
+  command rewritten to read that copy (`updatedInput`), allowed by the hook
+  itself (`permissionDecision: "allow"`): the guard built all of that
+  command, and the copy is outside the session's folders, so Claude Code
+  would otherwise ask for an approval a headless run can't give — and the
+  review would abort. Nothing is locked, so a
   refused request can be corrected and run again. The temp folder is the run's own because
   your shared one keeps the payloads of every other review of the last day.
   Without this every review aborted at the preflight (`preflight-unverified`)
