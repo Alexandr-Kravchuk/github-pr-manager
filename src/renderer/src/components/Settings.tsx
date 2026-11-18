@@ -291,7 +291,12 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const removeUpsourceToken = async () => {
     setError(null);
     try {
-      await window.api.setUpsourceToken("");
+      // A failed removal is reported as { ok: false }, not thrown.
+      const result = await window.api.setUpsourceToken("");
+      if (!result.ok) {
+        setError(result.error ?? "Failed to remove the Upsource token.");
+        return;
+      }
       setUpsourceTokenDraft("");
       loadUpsource();
     } catch (e) {

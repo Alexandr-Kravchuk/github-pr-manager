@@ -56,6 +56,7 @@ import type { NotifState } from "../shared/notifications";
 import { isStalePr } from "../shared/stale";
 import { applyActivity } from "../shared/state";
 import { UPSOURCE_HOST_LABEL } from "../shared/upsource";
+import type { UpsourceSource } from "./upsource";
 import type {
   DashboardResponse,
   HostConfig,
@@ -109,13 +110,14 @@ export interface PollerOptions {
    */
   probeNotificationsFn?: typeof probeNotifications;
   /**
-   * Upsource reviews listed next to the PRs (`main/upsource.ts`). Called every
-   * tick that is not parked; it spaces its own reads and keeps its last list
-   * through a failure. `force` is a manual refresh. Omitted → no Upsource.
+   * Upsource reviews listed next to the PRs (`main/upsource.ts`). Every tick
+   * that is not parked kicks it (`force` on a manual refresh) and takes its
+   * `current()` result without waiting: the source reads in the background on
+   * its own schedule, and a finished read calls `rebuildSnapshot()`. Its next
+   * read counts toward the tick's wake-up, so it is read on time with no
+   * GitHub host due, or none configured. Omitted → no Upsource.
    */
-  fetchUpsource?: (
-    force: boolean,
-  ) => Promise<{ prs: PullRequest[]; error: HostError | null; fetchedAt: string | null }>;
+  upsource?: UpsourceSource;
 }
 
 const MIN_INTERVAL_MS = 10_000;
@@ -508,6 +510,8 @@ export class Poller {
   private readonly closedIds = new Map<string, number>();
   // Serializes ticks so a manual refresh can't interleave with a timer tick.
   private inFlight: Promise<void> | null = null;
+  /** A source finished a read during a tick: build the snapshot once more after it. */
+  private rebuildPending = false;
   private readonly firstReady: Promise<void>;
   private resolveFirst: () => void = () => {};
 
@@ -587,6 +591,24 @@ export class Poller {
     return this.firstReady;
   }
 
+  /**
+   * Builds the snapshot again from what is already here — for a source that
+   * finished a read on its own (Upsource). During a tick it runs once more
+   * right after it, so the result is never folded into a tick that started
+   * before it. Hosts that happen to be due are fetched as on a wake.
+   */
+  rebuildSnapshot(): void {
+    if (this.inFlight) {
+      this.rebuildPending = true;
+      return;
+    }
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    void this.runTickThenSchedule(false, true);
+  }
+
   private runTickThenSchedule(force = false, skipIdleGate = false): Promise<void> {
     if (this.inFlight) return this.inFlight;
     const run = this.tick(force, skipIdleGate)
@@ -599,6 +621,10 @@ export class Poller {
       })
       .finally(() => {
         this.inFlight = null;
+        if (this.rebuildPending) {
+          this.rebuildPending = false;
+          this.rebuildSnapshot();
+        }
       });
     this.inFlight = run;
     return run;
@@ -736,6 +762,10 @@ export class Poller {
       return !slot || isHostDue(slot, now, presenceFactor);
     });
 
+    // Upsource reads in the background on its own schedule: kick it on every
+    // tick that got this far, the recheck ticks below included.
+    this.options.upsource?.kick(force);
+
     // A recheck tick: nothing is due, so there is no network work and no new
     // data to assemble. Returning before the snapshot pass keeps these cheap
     // wake-ups from inflating `unchangedStreak` — 60 of them an hour would
@@ -744,19 +774,8 @@ export class Poller {
     // tick still emits its (empty) one.
     if (!force && !skipIdleGate && due.length === 0 && this.currentSnapshot !== null) {
       this.resolveFirst();
-      return computeNextWakeMs(this.hostSlots.values(), now, presenceFactor, this.intervalMs);
+      return this.nextWakeMs(now, presenceFactor);
     }
-
-    // Upsource is read alongside the hosts, never after them: a slow or
-    // unreachable server (off the VPN) must not hold back GitHub data that is
-    // already here. The source never rejects; the catch is belt and braces.
-    const upsourceRead: Promise<{ prs: PullRequest[]; error: HostError | null; fetchedAt: string | null }> =
-      this.options.fetchUpsource
-        ? this.options.fetchUpsource(force).catch((e) => {
-            console.error("[poller] fetchUpsource failed:", e);
-            return { prs: [], error: null, fetchedAt: null };
-          })
-        : Promise.resolve({ prs: [], error: null, fetchedAt: null });
 
     const results = await Promise.allSettled(
       due.map((h) => (this.options.fetchHostFn ?? fetchHost)(h)),
@@ -819,8 +838,9 @@ export class Poller {
       }
     });
 
-    // Upsource reviews join the list as items of their own host.
-    const upsource = await upsourceRead;
+    // Upsource reviews join the list as items of their own host — as last
+    // read, never waited for.
+    const upsource = this.options.upsource?.current() ?? { prs: [], error: null, fetchedAt: null };
 
     // Assemble the snapshot from every host's latest slot (fetched + carried).
     const allPrs: PullRequest[] = [...upsource.prs];
@@ -909,6 +929,11 @@ export class Poller {
   }
 
   private nextWakeMs(now: number, presenceFactor = 1): number {
-    return computeNextWakeMs(this.hostSlots.values(), now, presenceFactor, this.intervalMs);
+    const hosts = computeNextWakeMs(this.hostSlots.values(), now, presenceFactor, this.intervalMs);
+    const upsourceAt = this.options.upsource?.nextDueAt() ?? null;
+    if (upsourceAt === null) return hosts;
+    // With no GitHub host the host wake is the poll interval anyway; with
+    // idle hosts their stretched floor must not delay Upsource's own read.
+    return Math.min(hosts, Math.max(MIN_INTERVAL_MS, upsourceAt - now));
   }
 }

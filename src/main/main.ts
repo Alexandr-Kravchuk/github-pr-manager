@@ -46,7 +46,13 @@ import { clearJiraCaches, deleteTask, fetchTaskInfo, transitionTask } from "../s
 import { shouldNotifyJiraAuth } from "../shared/jira-health";
 import type { CloseStaleResult, JiraTaskInfo } from "../shared/stale";
 import { buildJiraEnricher, getJiraStatus, getJiraToken, setJiraToken } from "./jira-store";
-import { createUpsourceSource, getUpsourceStatus, getUpsourceToken, setUpsourceToken } from "./upsource";
+import {
+  createUpsourceSource,
+  getUpsourceStatus,
+  getUpsourceToken,
+  setUpsourceToken,
+  type UpsourceSource,
+} from "./upsource";
 import { githubOnly } from "../shared/upsource";
 import { closeStale, staleJiraTask, type StaleCloseDeps } from "./stale-close";
 import { getTwgStatus, openTwgLogin } from "./twg";
@@ -94,6 +100,8 @@ import { forgetLocation, readSavedLocation, saveLocation } from "./weather-locat
 
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
+/** Upsource reviews, read in the background (null in fixture mode). */
+let upsourceSource: UpsourceSource | null = null;
 /** The PR agent; null in fixture mode (PRD_MOCK), where it would act on fake PRs. */
 let agent: Agent | null = null;
 let agentPushTimer: NodeJS.Timeout | null = null;
@@ -1039,10 +1047,14 @@ function registerIpc(): void {
 
   ipcMain.handle("upsource:setToken", async (_event, raw: unknown) => {
     const result = setUpsourceToken(validateUpsourceToken(raw));
-    // Read the reviews with the new token now, not on the next interval — but
-    // without waiting for it: Settings closes only on this reply, and a full
-    // poll (every host, Jira, Upsource) can take many seconds.
-    if (result.ok) void poller?.refresh();
+    // Read the reviews with the new token now, in the background: Settings
+    // closes only on this reply. The source reads with the token on disk now,
+    // even when a poll that started before the save is still running, and the
+    // snapshot is built again at once so a removed token shows straight away.
+    if (result.ok) {
+      upsourceSource?.kick(true);
+      poller?.rebuildSnapshot();
+    }
     return result;
   });
 
@@ -1174,6 +1186,11 @@ function startApp(): void {
     acknowledgeVersion(app.getVersion());
   }
 
+  // Reads in the background; each finished read builds the snapshot again.
+  upsourceSource = isMockMode()
+    ? null
+    : createUpsourceSource({ loadSettings, getToken: getUpsourceToken, onUpdate: () => poller?.rebuildSnapshot() });
+
   poller = new Poller({
     loadSettings,
     toHostConfigs,
@@ -1182,7 +1199,7 @@ function startApp(): void {
     appVersion: app.getVersion(),
     // No real Jira calls in fixture mode; the mock overrides below win anyway.
     enrichJira: isMockMode() ? undefined : buildJiraEnricher(loadSettings),
-    fetchUpsource: isMockMode() ? undefined : createUpsourceSource({ loadSettings, getToken: getUpsourceToken }),
+    upsource: upsourceSource ?? undefined,
     onSnapshot: (snapshot) => {
       if (process.env.PRD_DEBUG) {
         console.log(

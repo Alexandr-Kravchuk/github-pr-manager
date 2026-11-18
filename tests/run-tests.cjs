@@ -17471,11 +17471,21 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           ? { body: { result: { reviews: [review()] } } }
           : { body: { result: { infos: [...users.values()] } } };
     const settingsWith = (upsource) => () => ({ pollIntervalSeconds: 60, upsource });
+    const readerParts = (deps) => upMain.createUpsourceSource(deps);
+    // One read as the old source did it: kick, wait for it, take the result.
+    const readerOf = (deps) => {
+      const src = readerParts(deps);
+      return async (force) => {
+        src.kick(force);
+        await src.idle();
+        return src.current();
+      };
+    };
 
     await atest("upsource source: reads reviews with the Bearer token, then waits for the interval", async () => {
       let t = 1_000_000;
       const s = server(ok);
-      const read = upMain.createUpsourceSource({
+      const read = readerOf({
         loadSettings: settingsWith({ baseUrl: "https://u.example" }),
         getToken: () => "perm:abc",
         fetchFn: s.fetchFn,
@@ -17500,7 +17510,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const s = server((m) =>
         mode === "down" ? new Error("ECONNREFUSED") : mode === "denied" ? { status: 401, body: {} } : ok(m),
       );
-      const read = upMain.createUpsourceSource({
+      const read = readerOf({
         loadSettings: settingsWith({ baseUrl: "https://u.example" }),
         getToken: () => "tok",
         fetchFn: s.fetchFn,
@@ -17521,7 +17531,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const s = server((m) =>
         m === "getCurrentUser" ? { body: { result: { userId: "guest", isGuestUser: true } } } : ok(m),
       );
-      const read = upMain.createUpsourceSource({
+      const read = readerOf({
         loadSettings: settingsWith({ baseUrl: "https://u.example" }),
         getToken: () => "tok",
         fetchFn: s.fetchFn,
@@ -17533,13 +17543,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     await atest("upsource source: nothing is read or reported while Upsource is off", async () => {
       const s = server(ok);
-      const read = upMain.createUpsourceSource({
+      const read = readerOf({
         loadSettings: settingsWith(undefined),
         getToken: () => "tok",
         fetchFn: s.fetchFn,
       });
       assert.deepStrictEqual(await read(true), { prs: [], error: null, fetchedAt: null });
-      const noToken = upMain.createUpsourceSource({
+      const noToken = readerOf({
         loadSettings: settingsWith({ baseUrl: "https://u.example" }),
         getToken: () => null,
         fetchFn: s.fetchFn,
@@ -17568,7 +17578,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await atest("upsource source: a new token or server re-reads at once with it and drops the old list", async () => {
       let token = "first";
       const s = server(ok);
-      const read = upMain.createUpsourceSource({
+      const read = readerOf({
         loadSettings: settingsWith({ baseUrl: "https://u.example" }),
         getToken: () => token,
         fetchFn: s.fetchFn,
@@ -17592,7 +17602,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
               ? { status: 502, body: "<html>" }
               : ok(m),
       );
-      const read = upMain.createUpsourceSource({
+      const read = readerOf({
         loadSettings: settingsWith({ baseUrl: "https://u.example" }),
         getToken: () => "tok",
         fetchFn: s.fetchFn,
@@ -17619,7 +17629,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         text: () =>
           new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")))),
       });
-      const read = upMain.createUpsourceSource({
+      const read = readerOf({
         loadSettings: settingsWith({ baseUrl: "https://u.example" }),
         getToken: () => "tok",
         fetchFn,
@@ -17631,7 +17641,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     await atest("upsource source: never sends the token over http, even from a hand-edited settings file", async () => {
       const s = server(ok);
-      const read = upMain.createUpsourceSource({
+      const read = readerOf({
         loadSettings: settingsWith({ baseUrl: "http://u.example" }),
         getToken: () => "tok",
         fetchFn: s.fetchFn,
@@ -17649,7 +17659,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           ? { body: { result: { reviews: [review()], hasMore: true } } }
           : { body: { result: { reviews: [second], hasMore: false } } };
       });
-      const read = upMain.createUpsourceSource({
+      const read = readerOf({
         loadSettings: settingsWith({ baseUrl: "https://u.example" }),
         getToken: () => "tok",
         fetchFn: s.fetchFn,
@@ -17665,7 +17675,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await atest("Poller: Upsource reviews and their error join the snapshot; the pill gets a no-budget reading", async () => {
       const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
       const snapshots = [];
-      let upsourceResult = { prs: map([review()]), error: null, fetchedAt: "2026-11-18T10:00:00.000Z" };
+      let result = { prs: map([review()]), error: null, fetchedAt: "2026-11-18T10:00:00.000Z" };
+      const kicks = [];
       const p = new poller.Poller({
         loadSettings: () => ({ pollIntervalSeconds: 60, hosts: [], trackComments: true }),
         toHostConfigs: () => [],
@@ -17674,27 +17685,256 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         appVersion: "test",
         onSnapshot: (s) => snapshots.push(s),
         onConfigError: () => {},
-        fetchUpsource: async () => upsourceResult,
+        upsource: { current: () => result, kick: (f) => kicks.push(f), nextDueAt: () => null, idle: async () => {} },
       });
       await p.refresh();
       const s = snapshots.at(-1);
+      assert.deepStrictEqual(kicks, [true], "a manual refresh kicks a forced read");
       assert.deepStrictEqual(s.pullRequests.map((x) => x.id), ["upsource:acme/CR-1"]);
       assert.deepStrictEqual(s.rateLimits, [
         { hostLabel: "Upsource", remaining: 0, cost: 0, resetAt: "", fetchedAt: "2026-11-18T10:00:00.000Z" },
       ]);
-      upsourceResult = { ...upsourceResult, error: { hostLabel: "Upsource", message: "Upsource is unreachable" } };
+      result = { ...result, error: { hostLabel: "Upsource", message: "Upsource is unreachable" } };
       await p.refresh();
       assert.deepStrictEqual(snapshots.at(-1).errors, [{ hostLabel: "Upsource", message: "Upsource is unreachable" }]);
       assert.strictEqual(snapshots.at(-1).pullRequests.length, 1, "the last list stays");
       p.stop();
     });
 
-    test("main.js wiring: closing a stale PR looks only at GitHub PRs; a token save does not wait for the poll", () => {
+    await atest("Poller: a hanging Upsource read never holds back the GitHub snapshot", async () => {
+      const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
+      const snapshots = [];
+      // The source behind it never finishes a read; the tick must not wait.
+      const source = readerParts({
+        loadSettings: () => ({ pollIntervalSeconds: 60, upsource: { baseUrl: "https://u.example" } }),
+        getToken: () => "tok",
+        fetchFn: () => new Promise(() => {}),
+      });
+      const gh = { id: "PR_gh", hostLabel: "GitHub", roles: ["author"], updatedAt: "2026-11-18T09:00:00Z", totalComments: 0, unresolvedThreads: 0, failingChecks: [], pendingChecks: [], checks: [], reviewers: [], createdAt: "2026-11-01T00:00:00Z", lastCommitPushedAt: null };
+      const p = new poller.Poller({
+        loadSettings: () => ({ pollIntervalSeconds: 60, hosts: [], trackComments: true }),
+        toHostConfigs: () => [{ label: "GitHub", graphqlUrl: "https://api.example/graphql", repos: [], token: "t" }],
+        fetchHostFn: async () => ({ pullRequests: [gh], rateLimit: null }),
+        probeNotificationsFn: async () => ({ status: "unavailable", changed: false, pollIntervalMs: 60000 }),
+        statePath: path.join(os.tmpdir(), "prd-upsource-state-missing.json"),
+        ignoredStatePath: path.join(os.tmpdir(), "prd-upsource-ignored-missing.json"),
+        appVersion: "test",
+        onSnapshot: (s) => snapshots.push(s),
+        onConfigError: () => {},
+        upsource: source,
+      });
+      const done = await Promise.race([p.refresh().then(() => "done"), new Promise((r) => setTimeout(() => r("stuck"), 2000))]);
+      assert.strictEqual(done, "done");
+      assert.deepStrictEqual(snapshots.at(-1).pullRequests.map((x) => x.id), ["PR_gh"]);
+      p.stop();
+    });
+
+    await atest("Poller: a finished Upsource read builds the snapshot again, also when it lands during a tick", async () => {
+      const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
+      const snapshots = [];
+      let release;
+      const gate = new Promise((r) => (release = r));
+      let reads = 0;
+      let p;
+      const source = readerParts({
+        loadSettings: () => ({ pollIntervalSeconds: 60, upsource: { baseUrl: "https://u.example" } }),
+        getToken: () => "tok",
+        onUpdate: () => p.rebuildSnapshot(),
+        fetchFn: async (url, init) => {
+          if (url.endsWith("getCurrentUser")) {
+            reads++;
+            await gate;
+          }
+          const method = url.split("/~rpc/")[1];
+          return { ok: true, status: 200, text: async () => JSON.stringify(ok(method).body) };
+        },
+      });
+      p = new poller.Poller({
+        loadSettings: () => ({ pollIntervalSeconds: 60, hosts: [], trackComments: true }),
+        toHostConfigs: () => [],
+        statePath: path.join(os.tmpdir(), "prd-upsource-state-missing.json"),
+        ignoredStatePath: path.join(os.tmpdir(), "prd-upsource-ignored-missing.json"),
+        appVersion: "test",
+        onSnapshot: (s) => snapshots.push(s),
+        onConfigError: () => {},
+        upsource: source,
+      });
+      await p.refresh();
+      assert.strictEqual(snapshots.at(-1).pullRequests.length, 0, "the first tick does not wait for the read");
+      release();
+      await source.idle();
+      for (let i = 0; i < 50 && snapshots.at(-1).pullRequests.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+      assert.deepStrictEqual(snapshots.at(-1).pullRequests.map((x) => x.id), ["upsource:acme/CR-1"]);
+      assert.strictEqual(reads, 1);
+      p.stop();
+    });
+
+    await atest("Poller: with no GitHub host, the next wake is Upsource's own read, not a skipped recheck", async () => {
+      const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
+      const kicks = [];
+      let dueAt = Date.now() + 15_000;
+      const p = new poller.Poller({
+        loadSettings: () => ({ pollIntervalSeconds: 600, hosts: [], trackComments: true }),
+        toHostConfigs: () => [],
+        statePath: path.join(os.tmpdir(), "prd-upsource-state-missing.json"),
+        ignoredStatePath: path.join(os.tmpdir(), "prd-upsource-ignored-missing.json"),
+        appVersion: "test",
+        onSnapshot: () => {},
+        onConfigError: () => {},
+        upsource: { current: () => ({ prs: [], error: null, fetchedAt: null }), kick: (f) => kicks.push(f), nextDueAt: () => dueAt, idle: async () => {} },
+      });
+      await p.refresh();
+      // A recheck tick with nothing due still kicks Upsource and wakes for it.
+      const wake = await p["tick"](false, false);
+      assert.deepStrictEqual(kicks, [true, false]);
+      assert.ok(wake <= 15_000 && wake >= 10_000, `woke in ${wake} ms, not after the 600 s interval`);
+      p.stop();
+    });
+
+    await atest("Poller: an Upsource review gets New comments, is cleared by Mark as seen, and can be ignored", async () => {
+      const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
+      const stateMod = require(path.join(__dirname, "../dist/main/shared/state.js"));
+      const ignoredMod = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
+      const dir = require("node:fs").mkdtempSync(path.join(os.tmpdir(), "prd-upsource-seen-"));
+      const statePath = path.join(dir, "state.json");
+      const ignoredStatePath = path.join(dir, "ignored.json");
+      let count = 1;
+      const snapshots = [];
+      const p = new poller.Poller({
+        loadSettings: () => ({ pollIntervalSeconds: 60, hosts: [], trackComments: true }),
+        toHostConfigs: () => [],
+        statePath,
+        ignoredStatePath,
+        appVersion: "test",
+        onSnapshot: (s) => snapshots.push(s),
+        onConfigError: () => {},
+        upsource: {
+          current: () => ({ prs: map([review({ discussionCounter: { count, unresolvedCount: 0 } })]), error: null, fetchedAt: null }),
+          kick: () => {},
+          nextDueAt: () => null,
+          idle: async () => {},
+        },
+      });
+      const id = "upsource:acme/CR-1";
+      const item = () => snapshots.at(-1).pullRequests.find((x) => x.id === id);
+      try {
+        await p.refresh();
+        assert.strictEqual(item().hasNewActivity, false, "the first sighting is the baseline");
+        count = 3;
+        await p.refresh();
+        assert.strictEqual(item().hasNewActivity, true, "two more discussions are new comments");
+        const seen = item();
+        await stateMod.markSeen([{ id, comments: seen.totalComments, updatedAt: seen.updatedAt, lastCommitPushedAt: null }], statePath, { trackComments: true });
+        await p.refresh();
+        assert.strictEqual(item().hasNewActivity, false, "Mark as seen clears it");
+        await ignoredMod.setIgnored(id, true, ignoredStatePath);
+        await p.refresh();
+        assert.strictEqual(item().isIgnored, true);
+      } finally {
+        p.stop();
+        require("node:fs").rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    await atest("upsource source: a token saved during a read is read with right after it; the old read is dropped", async () => {
+      let token = "old";
+      let releaseOld;
+      const oldGate = new Promise((r) => (releaseOld = r));
+      const seen = [];
+      const src = readerParts({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => token,
+        fetchFn: async (url, init) => {
+          const method = url.split("/~rpc/")[1];
+          if (method === "getCurrentUser") {
+            seen.push(init.headers.Authorization);
+            if (init.headers.Authorization === "Bearer old") await oldGate;
+          }
+          return { ok: true, status: 200, text: async () => JSON.stringify(ok(method).body) };
+        },
+      });
+      src.kick(false);
+      token = "new";
+      src.kick(true);
+      releaseOld();
+      await src.idle();
+      assert.deepStrictEqual(seen, ["Bearer old", "Bearer new"]);
+      assert.strictEqual(src.current().prs.length, 1);
+      assert.strictEqual(src.current().error, null);
+    });
+
+    await atest("upsource source: a removed token shows at once, with no read", async () => {
+      let token = "tok";
+      const s = server(ok);
+      const src = readerParts({ loadSettings: settingsWith({ baseUrl: "https://u.example" }), getToken: () => token, fetchFn: s.fetchFn });
+      src.kick(true);
+      await src.idle();
+      token = null;
+      assert.match(src.current().error.message, /No Upsource token/);
+      assert.strictEqual(src.nextDueAt(), src.nextDueAt());
+      src.kick(true);
+      assert.strictEqual(s.calls.length, 3, "nothing is read without a token");
+    });
+
+    await atest("upsource source: one read has one deadline for all its calls", async () => {
+      const s = server((m) => (m === "getReviews" ? { body: { result: { reviews: [review()], hasMore: true } } } : ok(m)));
+      const slow = async (url, init) => {
+        await new Promise((r) => setTimeout(r, 20));
+        return s.fetchFn(url, init);
+      };
+      const src = readerParts({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: slow,
+        timeoutMs: 1000,
+        deadlineMs: 50,
+      });
+      src.kick(true);
+      await src.idle();
+      assert.match(src.current().error.message, /timed out/);
+      assert.ok(s.calls.length < 7, `stopped after ${s.calls.length} calls`);
+    });
+
+    await atest("upsource source: an error before any answer never quotes the request", async () => {
+      const leaky = Object.assign(new TypeError("Headers.append: \"Bearer secret\\nX\" is an invalid header value."), {});
+      const src = readerParts({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: async () => {
+          throw leaky;
+        },
+      });
+      src.kick(true);
+      await src.idle();
+      assert.doesNotMatch(src.current().error.message, /secret/);
+      const coded = readerParts({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: async () => {
+          throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } });
+        },
+      });
+      coded.kick(true);
+      await coded.idle();
+      assert.match(coded.current().error.message, /ENOTFOUND/);
+    });
+
+    test("ipc: an Upsource token with spaces or line breaks is refused before it is stored", () => {
+      const v = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+      assert.strictEqual(v.validateUpsourceToken("  perm:abc.DEF-123  "), "perm:abc.DEF-123");
+      assert.strictEqual(v.validateUpsourceToken(""), "");
+      assert.throws(() => v.validateUpsourceToken("perm:abc\ndef"), /never has/);
+      assert.throws(() => v.validateUpsourceToken("perm abc"), /never has/);
+    });
+
+    test("main.js wiring: closing a stale PR looks only at GitHub PRs; a token save reads in the background", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
       assert.match(src, /const snapshotPr = \(id\) => githubSnapshot\(\)/);
       const handler = src.slice(src.indexOf('"upsource:setToken"'), src.indexOf("return result;", src.indexOf('"upsource:setToken"')));
-      assert.match(handler, /void poller\?\.refresh\(\)/);
-      assert.doesNotMatch(handler, /await poller/, "Settings closes only on this reply");
+      assert.match(handler, /upsourceSource\?\.kick\(true\)/);
+      assert.match(handler, /poller\?\.rebuildSnapshot\(\)/);
+      assert.doesNotMatch(handler, /await /, "Settings closes only on this reply");
+      assert.match(src, /onUpdate: \(\) => poller\?\.rebuildSnapshot\(\)/);
     });
   }
 

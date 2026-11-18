@@ -103,7 +103,13 @@ export function validateUpsourceToken(value: unknown): string {
   if (value.length > 5_000) {
     throw new Error("setUpsourceToken: token too long.");
   }
-  return value.trim();
+  const token = value.trim();
+  // A Hub token is printable ASCII with no spaces. Anything else could not go
+  // into an Authorization header, and the failure would quote it back.
+  if (token && !/^[!-~]+$/.test(token)) {
+    throw new Error("setUpsourceToken: the token has characters a Hub token never has (spaces, line breaks).");
+  }
+  return token;
 }
 
 /** Ensures a Jira status mode is one of the known ones; absent means `cached`. */

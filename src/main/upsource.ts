@@ -92,11 +92,23 @@ export class UpsourceAuthError extends Error {}
 
 export type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
 
-/** One call's deadline, the body included: a stalled body must not hold a poll. */
+/** One call's deadline, the body included: a stalled body must not hold a read. */
 const REQUEST_TIMEOUT_MS = 15_000;
+/** One whole read's deadline, every call of it together. */
+const READ_DEADLINE_MS = 45_000;
 /** `getReviews` page size, and how many pages one read takes at most. */
 const PAGE_SIZE = 100;
 const MAX_PAGES = 5;
+
+/**
+ * Why a call never got an answer, in words that carry no request data: a
+ * fetch error's own message can quote a header value, the token included.
+ */
+function failureReason(e: unknown, aborted: boolean): string {
+  if (aborted) return "timed out";
+  const code = (e as { cause?: { code?: unknown } } | null)?.cause?.code;
+  return typeof code === "string" && /^[A-Z0-9_]{2,40}$/.test(code) ? code : "network error";
+}
 
 /** One Upsource RPC call: `POST <base>/~rpc/<method>` with a JSON body. */
 async function rpc<T>(
@@ -132,8 +144,9 @@ async function rpc<T>(
       text = await res.text();
     } catch (e) {
       if (e instanceof UpsourceAuthError) throw e;
-      const reason = ctrl.signal.aborted ? "timed out" : (e as Error).message;
-      throw new Error(`Upsource is unreachable (${reason}). It is an internal server: check the VPN.`);
+      throw new Error(
+        `Upsource is unreachable (${failureReason(e, ctrl.signal.aborted)}). It is an internal server: check the VPN.`,
+      );
     }
   } finally {
     clearTimeout(timer);
@@ -149,14 +162,25 @@ async function rpc<T>(
   return json.result;
 }
 
-/** Reads your open reviews and maps them into dashboard items. */
+/**
+ * Reads your open reviews and maps them into dashboard items. Each call has
+ * its own deadline, and all of them together share `deadlineMs`, so a server
+ * that answers slowly cannot stretch one read over every page.
+ */
 export async function fetchUpsourceReviews(
   fetchFn: FetchFn,
   baseUrl: string,
   token: string,
   timeoutMs = REQUEST_TIMEOUT_MS,
+  deadlineMs = READ_DEADLINE_MS,
 ): Promise<PullRequest[]> {
-  const me = await rpc<{ userId: string; isGuestUser?: boolean }>(fetchFn, baseUrl, token, "getCurrentUser", {}, timeoutMs);
+  const end = Date.now() + deadlineMs;
+  const call = <T>(method: string, body: unknown): Promise<T> => {
+    const left = end - Date.now();
+    if (left <= 0) throw new Error("Upsource is unreachable (timed out). It is an internal server: check the VPN.");
+    return rpc<T>(fetchFn, baseUrl, token, method, body, Math.min(timeoutMs, left));
+  };
+  const me = await call<{ userId: string; isGuestUser?: boolean }>("getCurrentUser", {});
   // An unauthenticated call is answered as the guest, not refused: a guest
   // has no reviews of its own, so the list would silently come back empty.
   if (!me.userId || me.isGuestUser) {
@@ -166,18 +190,18 @@ export async function fetchUpsourceReviews(
   // more open reviews than one person has.
   const reviews: RawUpsourceReview[] = [];
   for (let page = 0; page < MAX_PAGES; page++) {
-    const got = await rpc<{ reviews?: RawUpsourceReview[]; hasMore?: boolean }>(fetchFn, baseUrl, token, "getReviews", {
+    const got = await call<{ reviews?: RawUpsourceReview[]; hasMore?: boolean }>("getReviews", {
       limit: PAGE_SIZE,
       skip: page * PAGE_SIZE,
       query: UPSOURCE_REVIEWS_QUERY,
-    }, timeoutMs);
+    });
     reviews.push(...(got.reviews ?? []));
     if (!got.hasMore || (got.reviews ?? []).length === 0) break;
   }
   const ids = upsourceUserIds(reviews);
   const users = new Map<string, RawUpsourceUser>();
   if (ids.length > 0) {
-    const info = await rpc<{ infos?: RawUpsourceUser[] }>(fetchFn, baseUrl, token, "getUserInfo", { ids }, timeoutMs);
+    const info = await call<{ infos?: RawUpsourceUser[] }>("getUserInfo", { ids });
     for (const u of info.infos ?? []) users.set(u.userId, u);
   }
   return toUpsourcePrs(reviews, users, me.userId, baseUrl);
@@ -190,73 +214,142 @@ export interface UpsourceResult {
   fetchedAt: string | null;
 }
 
+/** What the poller sees of Upsource: never a promise it would have to wait for. */
+export interface UpsourceSource {
+  /** The reviews as last read — or what the settings say right now when Upsource is off or has no token. */
+  current(): UpsourceResult;
+  /**
+   * Starts a read in the background when one is due, or at once with
+   * `force`. One read at a time: a forced kick during a read runs one more
+   * right after it, so a token saved mid-read is read with.
+   */
+  kick(force: boolean): void;
+  /** When the next read is due (epoch ms), or null while Upsource is off. */
+  nextDueAt(): number | null;
+  /** Resolves once no read is running — for tests. */
+  idle(): Promise<void>;
+}
+
 export interface UpsourceSourceDeps {
   loadSettings: () => Settings;
   getToken: () => string | null;
+  /** Called after every read that finished: the poller builds its snapshot again. */
+  onUpdate?: () => void;
   fetchFn?: FetchFn;
   now?: () => number;
-  /** One call's deadline; tests shorten it. */
+  /** One call's deadline and one read's; tests shorten them. */
   timeoutMs?: number;
+  deadlineMs?: number;
 }
 
+const EMPTY: UpsourceResult = { prs: [], error: null, fetchedAt: null };
+const NO_TOKEN: UpsourceResult = {
+  prs: [],
+  error: { hostLabel: UPSOURCE_HOST_LABEL, message: "No Upsource token: paste one in Settings › Integrations." },
+  fetchedAt: null,
+};
+
 /**
- * The poller's Upsource source. It reads at most once per poll interval
- * (a forced refresh reads at once), keeps the last good list through a failed
- * read, and reports nothing at all while Upsource is not set up.
+ * The poller's Upsource source. It reads in the background, at most once per
+ * poll interval (a forced kick reads at once), keeps the last good list
+ * through a failed read, and reports nothing while Upsource is not set up.
+ * The poller takes `current()` as it is and is told by `onUpdate` when a read
+ * finished, so a slow or hanging Upsource never holds a GitHub snapshot back.
  */
-export function createUpsourceSource(deps: UpsourceSourceDeps) {
+export function createUpsourceSource(deps: UpsourceSourceDeps): UpsourceSource {
   const now = deps.now ?? Date.now;
   const fetchFn: FetchFn = deps.fetchFn ?? ((url, init) => fetch(url, init));
-  let last: UpsourceResult = { prs: [], error: null, fetchedAt: null };
+  let last: UpsourceResult = EMPTY;
+  /** The server and token `last` was read with. */
   let lastKey = "";
   let nextAt = 0;
+  let running: Promise<void> | null = null;
+  let again = false;
 
-  return async function read(force: boolean): Promise<UpsourceResult> {
+  /** The settings' view right now: off, no token, or the server and token to read with. */
+  const config = (): { state: "off" } | { state: "no-token" } | { state: "on"; baseUrl: string; token: string; intervalMs: number } => {
     let settings: Settings;
     try {
       settings = deps.loadSettings();
     } catch {
-      return last;
+      return { state: "off" };
     }
     const baseUrl = settings.upsource?.baseUrl;
-    if (!baseUrl) {
-      last = { prs: [], error: null, fetchedAt: null };
-      lastKey = "";
-      return last;
-    }
+    if (!baseUrl) return { state: "off" };
     const token = deps.getToken();
-    if (!token) {
-      last = {
-        prs: [],
-        error: { hostLabel: UPSOURCE_HOST_LABEL, message: "No Upsource token: paste one in Settings › Integrations." },
-        fetchedAt: null,
-      };
-      lastKey = "";
-      return last;
-    }
-    // A new server or token reads at once and drops the old list.
+    if (!token) return { state: "no-token" };
+    return { state: "on", baseUrl, token, intervalMs: Math.max(10, settings.pollIntervalSeconds) * 1000 };
+  };
+
+  const readOnce = async (baseUrl: string, token: string, intervalMs: number): Promise<void> => {
     const key = `${baseUrl}\n${token}`;
-    if (key !== lastKey) {
-      lastKey = key;
-      last = { prs: [], error: null, fetchedAt: null };
-      nextAt = 0;
-    }
     const t = now();
-    if (!force && t < nextAt) return last;
-    nextAt = t + Math.max(10, settings.pollIntervalSeconds) * 1000;
+    nextAt = t + intervalMs;
+    let result: UpsourceResult;
     try {
-      const prs = await fetchUpsourceReviews(fetchFn, baseUrl, token, deps.timeoutMs);
-      last = { prs, error: null, fetchedAt: new Date(t).toISOString() };
+      const prs = await fetchUpsourceReviews(fetchFn, baseUrl, token, deps.timeoutMs, deps.deadlineMs);
+      result = { prs, error: null, fetchedAt: new Date(t).toISOString() };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       // A refused token leaves nothing worth showing; a network failure keeps
-      // the last list, which is better than a blank one off the VPN.
-      last = {
-        prs: e instanceof UpsourceAuthError ? [] : last.prs,
+      // the last list of the same server and token, which is better than a
+      // blank one off the VPN.
+      const kept = key === lastKey ? last : EMPTY;
+      result = {
+        prs: e instanceof UpsourceAuthError ? [] : kept.prs,
         error: { hostLabel: UPSOURCE_HOST_LABEL, message },
-        fetchedAt: last.fetchedAt,
+        fetchedAt: kept.fetchedAt,
       };
     }
-    return last;
+    // A read of a server or token the settings no longer name is dropped:
+    // the next one, with what they name now, is already queued.
+    const c = config();
+    if (c.state === "on" && `${c.baseUrl}\n${c.token}` === key) {
+      last = result;
+      lastKey = key;
+    } else {
+      again = true;
+    }
+  };
+
+  const start = (): void => {
+    const c = config();
+    if (c.state !== "on") return;
+    running = readOnce(c.baseUrl, c.token, c.intervalMs)
+      .catch((e) => console.error("[upsource] read failed:", e))
+      .finally(() => {
+        running = null;
+        deps.onUpdate?.();
+        if (again) {
+          again = false;
+          start();
+        }
+      });
+  };
+
+  return {
+    current() {
+      const c = config();
+      if (c.state === "off") return EMPTY;
+      if (c.state === "no-token") return NO_TOKEN;
+      // A new server or token shows nothing of the old one while it is read.
+      return `${c.baseUrl}\n${c.token}` === lastKey ? last : EMPTY;
+    },
+    kick(force) {
+      const c = config();
+      if (c.state !== "on") return;
+      const stale = `${c.baseUrl}\n${c.token}` !== lastKey;
+      if (running) {
+        if (force || stale) again = true;
+        return;
+      }
+      if (force || stale || now() >= nextAt) start();
+    },
+    nextDueAt() {
+      return config().state === "on" ? nextAt : null;
+    },
+    async idle() {
+      while (running) await running;
+    },
   };
 }

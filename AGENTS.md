@@ -668,16 +668,23 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   `pr.upsource` (`UpsourceCard.tsx`); the copy, ignore, Jira-key and avatar
   controls both kinds of card carry live once, in `components/card-controls.tsx`.
   `main/upsource.ts` keeps the Hub permanent token encrypted like Jira's
-  (`userData/upsource-token.enc`) and is the poller's `fetchUpsource`:
+  (`userData/upsource-token.enc`; a token with spaces or line breaks is refused
+  before it is stored) and is the poller's `upsource` source:
   `getCurrentUser` (a guest answer is a refused token), `getReviews` (paged),
   `getUserInfo` over `POST <base>/~rpc/<method>` with `Authorization: Bearer`
-  — https only, in settings and again before every call, and one deadline per
-  call that covers the body too. At most once per poll interval, the last list
-  kept through a failure (the server is internal: off the VPN it is
-  unreachable). The poller starts that read together with the host fetches and
-  awaits it only when it assembles the snapshot, so a hanging Upsource never
-  holds back GitHub data, and `upsource:setToken` does not wait for the poll it
-  starts (Settings closes only on its reply).
+  — https only, in settings and again before every call, one deadline per
+  call that covers the body and one for the whole read, and an error before
+  any answer names only its code, never the request. The source reads **in
+  the background**, one read at a time, at most once per poll interval, the
+  last list kept through a failure (the server is internal: off the VPN it is
+  unreachable). The poller never waits for it: every tick that is not parked
+  kicks it (forced on a manual refresh) and takes `current()` as it is, its
+  `nextDueAt()` counts toward the tick's wake-up (so it is read on time with
+  idle GitHub hosts or none at all), and a finished read calls
+  `rebuildSnapshot()`, which runs once more after a tick in flight rather
+  than joining it. `upsource:setToken` kicks a forced read itself — a read
+  started with the old token is dropped and the new one follows — and does
+  not wait for it (Settings closes only on its reply).
   The host pill "Upsource" comes from `toPublicConfig` and gets a no-budget
   reading (`resetAt` empty) for its green dot. Nothing GitHub-only may see a
   review: the agent and every GitHub action in `main.ts` read `githubSnapshot()`
