@@ -849,7 +849,11 @@ the untrusted root (`StatusMessage` compared with Windows' own text for
 CERT_E_UNTRUSTEDROOT, since it is localized), and the signer certificate's
 SHA-256 is `PINNED_SIGNER_SHA256`. HashMismatch, no signature, another signer
 and a Valid signature all go to electron-updater's verifier unchanged. The file
-path reaches PowerShell through the environment, never the command line. A
+path reaches PowerShell through the environment, never the command line, and
+is compared with the signed file's path inside PowerShell (`samePath`): stdout
+comes back in the OEM code page, so a profile folder with non-ASCII letters
+would garble a printed path. The probe runs without `PSModulePath`, which an
+inherited PowerShell 7 value would break, as electron-updater's own call does. A
 test pins the constant to `PR-Dashboard.cer` and to the trust script, so a
 rotation updates all three; a release signed with a new self-signed key is
 refused by every older release's pin, so its users install it by hand once.

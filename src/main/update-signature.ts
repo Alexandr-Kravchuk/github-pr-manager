@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { normalize } from "node:path";
 
 // electron-updater accepts a downloaded Windows installer only when Windows
 // itself calls its signature Valid. Our release certificate is self-signed, so
@@ -24,24 +23,29 @@ export const PINNED_SIGNER_SHA256 = "88318B490543030451A852253D414169BFEDC9288C0
 export type VerifyUpdateCodeSignature = (publisherNames: string[], file: string) => Promise<string | null>;
 
 // The file path arrives through the environment, never inside the command, so
-// no file name can break out of the script. StatusMessage is localized, so the
-// untrusted-root case is matched against the message Windows gives for
-// CERT_E_UNTRUSTEDROOT (0x800B0109) in the same language.
+// no file name can break out of the script. It is compared with the signed
+// file's path inside PowerShell, where both are UTF-16: stdout is written in
+// the console's OEM code page, so a path with letters outside ASCII would come
+// back garbled. StatusMessage is localized, so the untrusted-root case is
+// matched against the message Windows gives for CERT_E_UNTRUSTEDROOT
+// (0x800B0109) in the same language.
 export const SIGNATURE_PROBE = [
-  "$s = Get-AuthenticodeSignature -LiteralPath $env:PRD_UPDATE_FILE",
+  "$f = $env:PRD_UPDATE_FILE",
+  "$s = Get-AuthenticodeSignature -LiteralPath $f",
   "$sha = $null",
   "if ($s.SignerCertificate) {",
   "  $h = [Security.Cryptography.SHA256]::Create()",
   "  try { $sha = [BitConverter]::ToString($h.ComputeHash($s.SignerCertificate.RawData)).Replace('-', '') } finally { $h.Dispose() }",
   "}",
+  "$same = [bool]$s.Path -and ([IO.Path]::GetFullPath($s.Path) -eq [IO.Path]::GetFullPath($f))",
   "$untrusted = ([ComponentModel.Win32Exception]::new(-2146762487)).Message",
-  "[pscustomobject]@{ status = [int]$s.Status; untrustedRoot = ($s.StatusMessage -eq $untrusted); path = $s.Path; sha256 = $sha } | ConvertTo-Json -Compress",
+  "[pscustomobject]@{ status = [int]$s.Status; untrustedRoot = ($s.StatusMessage -eq $untrusted); samePath = $same; sha256 = $sha } | ConvertTo-Json -Compress",
 ].join("\n");
 
 const SIGNATURE_STATUS_UNKNOWN_ERROR = 1; // System.Management.Automation.SignatureStatus
 
 /** Whether the probe's answer is our untouched installer under an untrusted root. */
-export function isPinnedUntrustedRoot(stdout: string, file: string, pinned = PINNED_SIGNER_SHA256): boolean {
+export function isPinnedUntrustedRoot(stdout: string, pinned = PINNED_SIGNER_SHA256): boolean {
   let data: unknown;
   try {
     data = JSON.parse(stdout.trim());
@@ -49,11 +53,24 @@ export function isPinnedUntrustedRoot(stdout: string, file: string, pinned = PIN
     return false;
   }
   if (!data || typeof data !== "object") return false;
-  const { status, untrustedRoot, path, sha256 } = data as Record<string, unknown>;
+  const { status, untrustedRoot, samePath, sha256 } = data as Record<string, unknown>;
   if (status !== SIGNATURE_STATUS_UNKNOWN_ERROR || untrustedRoot !== true) return false;
-  if (typeof sha256 !== "string" || sha256.toUpperCase() !== pinned.toUpperCase()) return false;
   // The answer must be about the file we asked for (electron-updater checks the same).
-  return typeof path === "string" && normalize(path).toLowerCase() === normalize(file).toLowerCase();
+  if (samePath !== true) return false;
+  return typeof sha256 === "string" && sha256.toUpperCase() === pinned.toUpperCase();
+}
+
+/**
+ * The environment the probe runs in: ours without PSModulePath — one inherited
+ * from PowerShell 7 can keep Windows PowerShell from loading
+ * Get-AuthenticodeSignature (electron-updater drops it for the same reason) —
+ * plus the file to check.
+ */
+export function probeEnv(file: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) if (key.toUpperCase() !== "PSMODULEPATH") out[key] = value;
+  out.PRD_UPDATE_FILE = file;
+  return out;
 }
 
 /** Runs the probe on one file; resolves its stdout, or "" on any failure. */
@@ -64,7 +81,7 @@ export const runSignatureProbe: SignatureProbe = (file) =>
     execFile(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-InputFormat", "None", "-Command", SIGNATURE_PROBE],
-      { timeout: 20_000, windowsHide: true, env: { ...process.env, PRD_UPDATE_FILE: file } },
+      { timeout: 20_000, windowsHide: true, env: probeEnv(file) },
       (error, stdout) => resolve(error ? "" : String(stdout)),
     );
   });
@@ -79,7 +96,7 @@ export function createPinnedVerifier(
   pinned = PINNED_SIGNER_SHA256,
 ): VerifyUpdateCodeSignature {
   return async (publisherNames, file) => {
-    if (isPinnedUntrustedRoot(await probe(file), file, pinned)) return null;
+    if (isPinnedUntrustedRoot(await probe(file), pinned)) return null;
     return fallback(publisherNames, file);
   };
 }
