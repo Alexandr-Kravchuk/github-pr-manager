@@ -55,6 +55,7 @@ import { DEFAULT_POLL_INTERVAL_MS, probeNotifications } from "../shared/notifica
 import type { NotifState } from "../shared/notifications";
 import { isStalePr } from "../shared/stale";
 import { applyActivity } from "../shared/state";
+import { UPSOURCE_HOST_LABEL } from "../shared/upsource";
 import type {
   DashboardResponse,
   HostConfig,
@@ -107,6 +108,14 @@ export interface PollerOptions {
    * an expensive hydrate this tick.
    */
   probeNotificationsFn?: typeof probeNotifications;
+  /**
+   * Upsource reviews listed next to the PRs (`main/upsource.ts`). Called every
+   * tick that is not parked; it spaces its own reads and keeps its last list
+   * through a failure. `force` is a manual refresh. Omitted → no Upsource.
+   */
+  fetchUpsource?: (
+    force: boolean,
+  ) => Promise<{ prs: PullRequest[]; error: HostError | null; fetchedAt: string | null }>;
 }
 
 const MIN_INTERVAL_MS = 10_000;
@@ -257,6 +266,9 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
       ? `${p.stack.number}:${p.stack.position}/${p.stack.size}:` +
         p.stack.entries.map((e) => `${e.position}#${e.number}${e.state}${e.title}`).join(",")
       : "",
+    // An Upsource review's card reads these; a reviewer accepting moves no
+    // GitHub-shaped field above but `updatedAt`, which Upsource may not bump.
+    p.upsource ? JSON.stringify(p.upsource) : "",
   ]);
   return JSON.stringify({
     prs: lite,
@@ -796,10 +808,28 @@ export class Poller {
       }
     });
 
+    // Upsource reviews join the list as items of their own host.
+    let upsource: { prs: PullRequest[]; error: HostError | null; fetchedAt: string | null } = {
+      prs: [],
+      error: null,
+      fetchedAt: null,
+    };
+    if (this.options.fetchUpsource) {
+      try {
+        upsource = await this.options.fetchUpsource(force);
+      } catch (e) {
+        console.error("[poller] fetchUpsource failed:", e);
+      }
+    }
+
     // Assemble the snapshot from every host's latest slot (fetched + carried).
-    const allPrs: PullRequest[] = [];
-    const errors: HostError[] = [];
-    const rateLimits: RateLimitInfo[] = [];
+    const allPrs: PullRequest[] = [...upsource.prs];
+    const errors: HostError[] = upsource.error ? [upsource.error] : [];
+    // Upsource has no budget: a reading without one (`resetAt` empty) gives its
+    // host pill a green dot and the time of the last read.
+    const rateLimits: RateLimitInfo[] = upsource.fetchedAt
+      ? [{ hostLabel: UPSOURCE_HOST_LABEL, remaining: 0, cost: 0, resetAt: "", fetchedAt: upsource.fetchedAt }]
+      : [];
     const nowMs = Date.now();
     for (const [id, until] of this.closedIds) if (until <= nowMs) this.closedIds.delete(id);
     for (const slot of this.hostSlots.values()) {

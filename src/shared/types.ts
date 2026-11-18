@@ -128,6 +128,16 @@ export interface JiraSettings {
   email?: string;
 }
 
+/**
+ * Optional Upsource (JetBrains code review) connection. Its reviews are listed
+ * next to the PRs. Only the server's address lives here; the Hub permanent
+ * token is stored encrypted on its own (`main/upsource.ts`), like Jira's.
+ */
+export interface UpsourceSettings {
+  /** Server origin, e.g. "https://upsource.example.com". */
+  baseUrl: string;
+}
+
 /** Which PR events raise a desktop notification. Each maps to a group agreed
  *  with the user — see `shared/notify.ts` for the exact transitions. */
 export interface NotificationEventToggles {
@@ -268,6 +278,8 @@ export interface Settings {
   hosts: SettingsHost[];
   /** Optional Jira connection for parent-task grouping (token stored separately). */
   jira?: JiraSettings;
+  /** Optional Upsource connection: its reviews join the list (token stored separately). */
+  upsource?: UpsourceSettings;
   /** Claude session launcher (off by default). */
   claude: ClaudeSettings;
   /**
@@ -840,6 +852,67 @@ export interface PullRequest {
    * "Ignored" filter is on. Persisted across relaunches — see `ignored.ts`.
    */
   isIgnored: boolean;
+  /**
+   * Where the item comes from. Absent means GitHub. An Upsource review is
+   * listed, grouped, filtered and sorted like a PR, but GitHub-only parts — CI,
+   * merging, stacks, the Claude button and the PR agent — never apply to it:
+   * its GitHub fields hold neutral values (`shared/upsource.ts`), and what the
+   * card shows comes from {@link upsource}.
+   */
+  source?: PrSource;
+  /** The review as Upsource reports it; set only when {@link source} is "upsource". */
+  upsource?: UpsourceReviewInfo;
+}
+
+export type PrSource = "github" | "upsource";
+
+/** A review participant's progress, as Upsource names it. */
+export type UpsourceParticipantState = "unread" | "read" | "accepted" | "rejected";
+
+/** One participant of an Upsource review. */
+export interface UpsourceParticipant {
+  name: string;
+  login: string;
+  /** Hub avatar URL; empty when Upsource named none. */
+  avatarUrl: string;
+  role: "author" | "reviewer" | "watcher";
+  state: UpsourceParticipantState;
+}
+
+/** What the Upsource card shows beyond the shared PR fields. */
+export interface UpsourceReviewInfo {
+  projectId: string;
+  /** "CR-1795". */
+  reviewId: string;
+  /** Your role on the review; a watcher only is never listed. */
+  myRole: "author" | "reviewer";
+  /** Your own progress on it. */
+  myState: UpsourceParticipantState;
+  /** Reviewers who accepted, out of {@link reviewersCount}. */
+  accepted: number;
+  reviewersCount: number;
+  /** A reviewer raised a concern (rejected). */
+  hasConcern: boolean;
+  /** Discussions on the review, and how many are unresolved. */
+  discussions: number;
+  unresolved: number;
+  /** Due date (ISO), or null when the review has none. */
+  deadline: string | null;
+  /** Upsource marks the review unread for you. */
+  isUnread: boolean;
+  /** Every reviewer accepted: the author can close it. */
+  isReadyToClose: boolean;
+  /** Reviewers first, the author left out. */
+  participants: UpsourceParticipant[];
+}
+
+/** Upsource setup state for the Settings screen. */
+export interface UpsourceStatus {
+  /** A server address is saved. */
+  hasConfig: boolean;
+  baseUrl: string | null;
+  hasToken: boolean;
+  encryptionAvailable: boolean;
 }
 
 /** A fetch error for a specific host. */
@@ -1253,6 +1326,13 @@ export interface PrManagerApi {
    * via the OS keychain. Returns whether it was persisted.
    */
   setJiraToken(token: string): Promise<{ ok: boolean; error?: string }>;
+  /** Upsource setup state for Settings. */
+  getUpsourceStatus(): Promise<UpsourceStatus>;
+  /**
+   * Store (or clear, when given an empty string) the Upsource Hub token,
+   * encrypted via the OS keychain. Returns whether it was persisted.
+   */
+  setUpsourceToken(token: string): Promise<{ ok: boolean; error?: string }>;
   /**
    * Opens a terminal running `twg login --force`: the sign-in is interactive
    * (site choice, browser consent), so the app can only start it, not finish it.

@@ -459,6 +459,7 @@ function Row({
   }, [pr.url]);
 
   const signal = prSignal(pr, { trackComments });
+  const upsource = pr.upsource;
   const jiraUrl = jiraBrowseUrl(jiraBaseUrl, pr.issueKey);
   // Same rule as the card: the key is dropped from the title only when the
   // badge next to it actually carries it.
@@ -495,9 +496,20 @@ function Row({
               at the same x — a 3-digit number next to a 4-digit one otherwise
               shifts the title by a character. The number never truncates: it
               is the PR's identity. */}
-          <span className="w-[3.25rem] shrink-0 text-sm font-semibold tabular-nums text-fg-secondary">
-            #{pr.number}
-          </span>
+          {upsource ? (
+            // The review id is longer than a PR number; the "U" mark says where it lives.
+            <span
+              className="w-[3.25rem] shrink-0 truncate text-xs font-semibold tabular-nums text-fg-secondary"
+              title={`Upsource review ${upsource.reviewId}`}
+            >
+              <span className="text-fuchsia-600 dark:text-fuchsia-300">U</span>
+              {pr.number}
+            </span>
+          ) : (
+            <span className="w-[3.25rem] shrink-0 text-sm font-semibold tabular-nums text-fg-secondary">
+              #{pr.number}
+            </span>
+          )}
           <StackBadge pr={pr} />
           {pr.returnedToMe && (
             <span title="New changes since you last looked" className="shrink-0 text-violet-600 dark:text-violet-300">
@@ -540,7 +552,7 @@ function Row({
       </td>
 
       <td className={cn("py-1.5", COLUMN_CLASS.author)}>
-        {pr.author ? (
+        {pr.author?.avatarUrl ? (
           // Avatar only — the login is in the button's title.
           <AuthorButton login={pr.author.login} className="inline-block align-middle">
             <img
@@ -641,9 +653,10 @@ function Row({
           >
             <RowIcon kind={pr.isIgnored ? "eye" : "eye-off"} />
           </button>
-          <StaleCloseButton pr={pr} iconOnly />
+          {/* Closing and Claude work on GitHub PRs only. */}
+          {!upsource && <StaleCloseButton pr={pr} iconOnly />}
           {/* Last, so it sits on the row's right edge where the eye lands. */}
-          <ClaudeButton pr={pr} trackComments={trackComments} compact className="ml-1" />
+          {!upsource && <ClaudeButton pr={pr} trackComments={trackComments} compact className="ml-1" />}
         </span>
       </td>
     </tr>
@@ -664,16 +677,29 @@ function ReviewersCell({ pr }: { pr: PullRequest }) {
       className="flex items-center -space-x-1"
       title={pr.reviewers.map((r) => `${r.login}: ${r.reviewState.replace("_", " ")}`).join("\n")}
     >
-      {shown.map((r) => (
-        <img
-          key={r.login}
-          src={r.avatarUrl}
-          alt={r.login}
-          width={18}
-          height={18}
-          className={cn("shrink-0 rounded-full ring-2", REVIEWER_RING[r.reviewState])}
-        />
-      ))}
+      {shown.map((r) =>
+        r.avatarUrl ? (
+          <img
+            key={r.login}
+            src={r.avatarUrl}
+            alt={r.login}
+            width={18}
+            height={18}
+            className={cn("shrink-0 rounded-full ring-2", REVIEWER_RING[r.reviewState])}
+          />
+        ) : (
+          // Upsource may name no avatar: the initial in the same ring.
+          <span
+            key={r.login}
+            className={cn(
+              "inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full bg-elevated text-[9px] uppercase text-fg-muted ring-2",
+              REVIEWER_RING[r.reviewState],
+            )}
+          >
+            {r.login[0]}
+          </span>
+        ),
+      )}
       {rest > 0 && <span className="pl-2 text-xs text-fg-muted">+{rest}</span>}
     </span>
   );
@@ -685,6 +711,25 @@ function ReviewersCell({ pr }: { pr: PullRequest }) {
  * being ordered.
  */
 function ReviewCell({ pr }: { pr: PullRequest }) {
+  if (pr.upsource) {
+    const u = pr.upsource;
+    if (u.hasConcern) {
+      return (
+        <span className="text-red-700 dark:text-red-300" title="A reviewer raised a concern">
+          ✗ Concern
+        </span>
+      );
+    }
+    return (
+      <span
+        className={u.isReadyToClose ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}
+        title={`${u.accepted} of ${u.reviewersCount} reviewers accepted`}
+      >
+        {u.isReadyToClose ? "✓ " : ""}
+        {u.accepted}/{u.reviewersCount}
+      </span>
+    );
+  }
   const rank = reviewRank(pr);
   const tally = approvalTally(pr);
   if (rank === 0) {

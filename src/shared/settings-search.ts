@@ -21,6 +21,7 @@ export type SettingsSectionId =
   | "gh"
   | "hosts"
   | "jira"
+  | "upsource"
   | "claude"
   | "agent"
   | "agentScenarios"
@@ -129,6 +130,12 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     tab: "integrations",
     title: "Jira",
     keywords: ["atlassian", "twg", "sign in", "api token", "site url", "email", "parent task", "group by", "issue"],
+  },
+  {
+    id: "upsource",
+    tab: "integrations",
+    title: "Upsource",
+    keywords: ["jetbrains", "code review", "reviews", "hub", "permanent token", "token", "server url", "vpn"],
   },
   {
     id: "claude",

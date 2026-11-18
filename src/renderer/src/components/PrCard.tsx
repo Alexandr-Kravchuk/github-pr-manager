@@ -129,7 +129,7 @@ function UmbrellaIcon() {
   );
 }
 
-function CopyIcon() {
+export function CopyIcon() {
   return (
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <rect x="9" y="9" width="13" height="13" rx="2" />
@@ -138,7 +138,7 @@ function CopyIcon() {
   );
 }
 
-function CheckIcon() {
+export function CheckIcon() {
   return (
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <polyline points="20 6 9 17 4 12" />
@@ -147,7 +147,7 @@ function CheckIcon() {
 }
 
 /** Crossed-out eye — "ignore" (hide this PR from the dashboard). */
-function EyeOffIcon() {
+export function EyeOffIcon() {
   return (
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M9.88 9.88a3 3 0 0 0 4.24 4.24" />
@@ -159,7 +159,7 @@ function EyeOffIcon() {
 }
 
 /** Open eye — "un-ignore" (bring this PR back to the dashboard). */
-function EyeIcon() {
+export function EyeIcon() {
   return (
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />

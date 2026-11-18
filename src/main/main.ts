@@ -25,6 +25,7 @@ import type {
   ClaudeSessionInfo,
   ConfigResult,
   FocusClaudeSessionResult,
+  DashboardResponse,
   DashboardResult,
   GhStatus,
   JiraHealth,
@@ -45,6 +46,8 @@ import { clearJiraCaches, deleteTask, fetchTaskInfo, transitionTask } from "../s
 import { shouldNotifyJiraAuth } from "../shared/jira-health";
 import type { CloseStaleResult, JiraTaskInfo } from "../shared/stale";
 import { buildJiraEnricher, getJiraStatus, getJiraToken, setJiraToken } from "./jira-store";
+import { createUpsourceSource, getUpsourceStatus, getUpsourceToken, setUpsourceToken } from "./upsource";
+import { githubOnly } from "../shared/upsource";
 import { closeStale, staleJiraTask, type StaleCloseDeps } from "./stale-close";
 import { getTwgStatus, openTwgLogin } from "./twg";
 import { createTwgStatusCache } from "../shared/jira-twg";
@@ -55,6 +58,7 @@ import {
   validateIgnoredArgs,
   validateJiraStatusMode,
   validateJiraToken,
+  validateUpsourceToken,
   validateAgentAction,
   validateClaudeKind,
   validateDiagramsChecked,
@@ -747,6 +751,15 @@ function createWindow({ show = true }: { show?: boolean } = {}): void {
   }
 }
 
+/**
+ * The snapshot without Upsource reviews: what every GitHub action (the agent,
+ * Claude launches, closing a stale PR) looks PRs up in.
+ */
+function githubSnapshot(): DashboardResponse | null {
+  const snapshot = poller?.getSnapshot() ?? null;
+  return snapshot ? githubOnly(snapshot) : null;
+}
+
 /** Current cached dashboard state as an IPC result. */
 function dashboardResult(): DashboardResult {
   const configError = poller?.getConfigError() ?? null;
@@ -823,7 +836,7 @@ function registerIpc(): void {
       const id = validatePrId(raw);
       const kind = validateClaudeKind(rawKind);
       const inTerminal = validateInTerminal(rawInTerminal);
-      const pr = poller?.getSnapshot()?.pullRequests.find((p) => p.id === id);
+      const pr = githubSnapshot()?.pullRequests.find((p) => p.id === id);
       if (!pr) return { ok: false, error: "This PR is no longer on the dashboard." };
       let settings: Settings;
       try {
@@ -851,7 +864,8 @@ function registerIpc(): void {
     "claude:launchGroup",
     async (_event, rawKind: unknown, rawKey: unknown, rawIds: unknown): Promise<ClaudeGroupLaunchResult> => {
       const { kind, key, ids } = validateGroupLaunchArgs(rawKind, rawKey, rawIds);
-      const all = poller?.getSnapshot()?.pullRequests ?? [];
+      // A group can hold Upsource reviews; Claude works on GitHub PRs only.
+      const all = githubSnapshot()?.pullRequests ?? [];
       // In the order the renderer listed them, which is the order it shows.
       const prs = ids.flatMap((id) => all.filter((p) => p.id === id));
       let settings: Settings;
@@ -1021,6 +1035,15 @@ function registerIpc(): void {
     return result;
   });
 
+  ipcMain.handle("upsource:status", async () => getUpsourceStatus(loadSettings));
+
+  ipcMain.handle("upsource:setToken", async (_event, raw: unknown) => {
+    const result = setUpsourceToken(validateUpsourceToken(raw));
+    // Read the reviews with the new token now, not on the next interval.
+    if (result.ok) await poller?.refresh();
+    return result;
+  });
+
   ipcMain.handle("app:getVersion", async (): Promise<string> => app.getVersion());
 
   ipcMain.handle("app:getWhatsNew", async () => {
@@ -1056,7 +1079,7 @@ function registerIpc(): void {
     transitionTask,
     deleteTask,
   };
-  const snapshotPr = (id: string) => poller?.getSnapshot()?.pullRequests.find((p) => p.id === id);
+  const snapshotPr = (id: string) => githubSnapshot()?.pullRequests.find((p) => p.id === id);
 
   ipcMain.handle(
     "stale:jiraTask",
@@ -1157,6 +1180,7 @@ function startApp(): void {
     appVersion: app.getVersion(),
     // No real Jira calls in fixture mode; the mock overrides below win anyway.
     enrichJira: isMockMode() ? undefined : buildJiraEnricher(loadSettings),
+    fetchUpsource: isMockMode() ? undefined : createUpsourceSource({ loadSettings, getToken: getUpsourceToken }),
     onSnapshot: (snapshot) => {
       if (process.env.PRD_DEBUG) {
         console.log(
@@ -1174,7 +1198,7 @@ function startApp(): void {
       // The agent first: a regular toast for a trigger it just took in On is
       // left out (its own result is what you hear about), and it can only tell
       // once it has taken it.
-      agent?.onSnapshot(snapshot);
+      agent?.onSnapshot(githubOnly(snapshot));
       handleNotifications(snapshot.pullRequests);
       handleJiraAuthNotification(snapshot.jiraHealth);
     },
@@ -1192,7 +1216,7 @@ function startApp(): void {
     agent = createAgent({
       dir: path.join(app.getPath("userData"), "agent"),
       loadSettings,
-      getSnapshot: () => poller?.getSnapshot() ?? null,
+      getSnapshot: githubSnapshot,
       getSessions: () => claudeSessions,
       findCheckout,
       // Run by Claude Code before each tool call, as Node (ELECTRON_RUN_AS_NODE).

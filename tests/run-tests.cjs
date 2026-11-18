@@ -116,6 +116,7 @@ for (const mod of [
   "weather.js",
   "ui-style.js",
   "check-groups.js",
+  "upsource.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -8464,7 +8465,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(ids("   "), []);
       assert.deepStrictEqual(ids("iTerm"), ["claude"]);
       assert.deepStrictEqual(ids("close tray"), ["behavior"], "the Claude 'close' prompt has no 'tray'");
-      assert.deepStrictEqual(ids("token"), ["gh", "jira"]);
+      assert.deepStrictEqual(ids("token"), ["gh", "jira", "upsource"]);
       assert.deepStrictEqual(ids("DARK"), ["appearance"]);
       assert.deepStrictEqual(ids("xyzzy"), []);
     });
@@ -8655,7 +8656,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("main.js wiring: claude:launch looks the PR up by id in the poller snapshot", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
-      assert.match(src, /"claude:launch"[\s\S]{0,300}validatePrId[\s\S]{0,200}validateClaudeKind[\s\S]{0,200}getSnapshot\(\)/);
+      assert.match(src, /"claude:launch"[\s\S]{0,300}validatePrId[\s\S]{0,200}validateClaudeKind[\s\S]{0,200}githubSnapshot\(\)/);
       assert.match(src, /"claude:launch"[\s\S]{0,400}validateInTerminal\)?\(rawInTerminal\)[\s\S]{0,800}inTerminal,?\s*\}/);
     });
 
@@ -8984,7 +8985,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("main.js wiring: claude:launchGroup validates, then reads the PRs from the snapshot", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
-      assert.match(src, /"claude:launchGroup"[\s\S]{0,300}validateGroupLaunchArgs[\s\S]{0,200}getSnapshot\(\)/);
+      assert.match(src, /"claude:launchGroup"[\s\S]{0,300}validateGroupLaunchArgs[\s\S]{0,300}githubSnapshot\(\)/);
     });
   }
 
@@ -14908,7 +14909,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("main.js wiring: the agent hears every snapshot, keeps hidden polling alive and stops on quit", () => {
       const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
-      assert.match(src, /agent\?\.onSnapshot\(snapshot\);\s*handleNotifications\(snapshot\.pullRequests\)/, "the agent takes its triggers before the toasts are decided");
+      assert.match(src, /agent\?\.onSnapshot\(\(0, upsource_\d\.githubOnly\)\(snapshot\)\);\s*handleNotifications\(snapshot\.pullRequests\)/, "the agent takes its triggers before the toasts are decided, and never an Upsource review");
+      assert.match(src, /getSnapshot: githubSnapshot,/, "the agent reads the snapshot without Upsource reviews");
       assert.match(src, /agentActive: \(\) => agent\?\.isActive\(\)/);
       assert.match(src, /if \(!\(0, mock_1\.isMockMode\)\(\)\) \{\s*agent = \(0, agent_1\.createAgent\)/);
       assert.match(src, /hookScript: unpackedScript\("hook\.js"\)/);
@@ -17310,6 +17312,241 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         }));
     }
   }
+  }
+
+  // --- Upsource reviews -----------------------------------------------------
+  {
+    const up = require(path.join(__dirname, "../dist/main/shared/upsource.js"));
+    const cfg = require(path.join(__dirname, "../dist/main/shared/config.js"));
+    const { hashSnapshot } = require(path.join(__dirname, "../dist/main/main/poller.js"));
+    const users = new Map([
+      ["me", { userId: "me", name: "Me", login: "me", avatarUrl: "https://u/avatar/me" }],
+      ["a", { userId: "a", name: "Alex", login: "alex", avatarUrl: "https://u/avatar/a" }],
+      ["b", { userId: "b", name: "Bea", login: "bea" }],
+    ]);
+    const review = (over) => ({
+      reviewId: { projectId: "acme", reviewId: "CR-1" },
+      title: "ENG-42 Fix the widget",
+      participants: [
+        { userId: "a", role: 1, state: 2 },
+        { userId: "me", role: 2, state: 1 },
+        { userId: "b", role: 2, state: 3 },
+      ],
+      state: 1,
+      createdAt: Date.UTC(2026, 10, 1),
+      updatedAt: Date.UTC(2026, 10, 2),
+      completionRate: { completedCount: 1, reviewersCount: 2, hasConcern: false },
+      discussionCounter: { count: 4, unresolvedCount: 1 },
+      deadline: Date.UTC(2026, 10, 20),
+      ...over,
+    });
+    const map = (reviews) => up.toUpsourcePrs(reviews, users, "me", "https://upsource.example.com");
+
+    test("upsource: a review asked of you maps to a reviewer item with neutral GitHub fields", () => {
+      const [pr] = map([review()]);
+      assert.strictEqual(pr.id, "upsource:acme/CR-1");
+      assert.strictEqual(pr.source, "upsource");
+      assert.strictEqual(pr.hostLabel, "Upsource");
+      assert.strictEqual(pr.url, "https://upsource.example.com/acme/review/CR-1");
+      assert.deepStrictEqual(pr.roles, ["reviewer"]);
+      assert.strictEqual(pr.issueKey, "ENG-42");
+      assert.strictEqual(pr.author.login, "alex");
+      assert.strictEqual(pr.canBeMerged, false);
+      assert.strictEqual(pr.ciState, "neutral");
+      assert.deepStrictEqual(pr.checks, []);
+      assert.strictEqual(pr.totalComments, 4);
+      assert.strictEqual(pr.unresolvedThreads, 1);
+      assert.deepStrictEqual(
+        pr.reviewers.map((r) => [r.login, r.reviewState]),
+        [["me", "pending"], ["bea", "approved"]],
+      );
+      assert.strictEqual(pr.upsource.myRole, "reviewer");
+      assert.strictEqual(pr.upsource.accepted, 1);
+      assert.strictEqual(pr.upsource.reviewersCount, 2);
+      assert.strictEqual(pr.upsource.deadline, new Date(Date.UTC(2026, 10, 20)).toISOString());
+      assert.strictEqual(up.upsourceStage(pr.upsource), "your-review");
+    });
+
+    test("upsource: your verdict moves a review to Reviewed; your own review is Author", () => {
+      const accepted = map([
+        review({ participants: [{ userId: "a", role: 1, state: 2 }, { userId: "me", role: 2, state: 3 }] }),
+      ])[0];
+      assert.deepStrictEqual(accepted.roles, ["reviewed"]);
+      assert.strictEqual(accepted.viewerApproved, true);
+      assert.strictEqual(up.upsourceStage(accepted.upsource), "waiting");
+      const mine = map([
+        review({
+          participants: [{ userId: "me", role: 1, state: 2 }, { userId: "b", role: 2, state: 4 }],
+          completionRate: { completedCount: 0, reviewersCount: 1, hasConcern: true },
+        }),
+      ])[0];
+      assert.deepStrictEqual(mine.roles, ["author"]);
+      assert.strictEqual(mine.hasUnaddressedChangeRequest, true);
+      assert.strictEqual(up.upsourceStage(mine.upsource), "concern");
+      const ready = map([
+        review({
+          participants: [{ userId: "me", role: 1, state: 2 }, { userId: "b", role: 2, state: 3 }],
+          completionRate: { completedCount: 1, reviewersCount: 1, hasConcern: false },
+          discussionCounter: { count: 0, unresolvedCount: 0 },
+          isReadyToClose: true,
+        }),
+      ])[0];
+      assert.strictEqual(up.upsourceStage(ready.upsource), "ready");
+    });
+
+    test("upsource: closed, removed and watch-only reviews are left out", () => {
+      assert.strictEqual(map([review({ state: 2 })]).length, 0);
+      assert.strictEqual(map([review({ isRemoved: true })]).length, 0);
+      assert.strictEqual(map([review({ participants: [{ userId: "me", role: 3, state: 2 }] })]).length, 0);
+    });
+
+    test("upsource: the review's own id is never taken for a Jira key", () => {
+      assert.strictEqual(map([review({ title: "CR-1 cleanup" })])[0].issueKey, null);
+    });
+
+    test("upsource: githubOnly drops reviews, keeps a GitHub-only snapshot as is, and memoizes", () => {
+      const gh = { id: "PR_1" };
+      const plain = { pullRequests: [gh], errors: [] };
+      assert.strictEqual(up.githubOnly(plain), plain);
+      const mixed = { pullRequests: [gh, ...map([review()])], errors: [] };
+      const out = up.githubOnly(mixed);
+      assert.deepStrictEqual(out.pullRequests, [gh]);
+      assert.strictEqual(up.githubOnly(mixed), out);
+    });
+
+    test("upsource: a Jira group's Explain all / Review all never take an Upsource review", () => {
+      const cl = require(path.join(__dirname, "../dist/main/shared/claude-launch.js"));
+      const gh = (id) => ({ id, isDraft: false, roles: ["reviewer"], myReReviewDue: false });
+      const reviewAsked = map([review()])[0];
+      assert.strictEqual(cl.groupLaunchPrs("explain", "ENG-42", [gh("PR_1"), reviewAsked]), null, "one PR is not a group");
+      assert.deepStrictEqual(cl.groupLaunchPrs("review", "ENG-42", [gh("PR_1"), reviewAsked]).map((p) => p.id), ["PR_1"]);
+      assert.strictEqual(cl.groupLaunchPrs("review", "ENG-42", [reviewAsked]), null);
+    });
+
+    test("upsource: settings normalize the address and give Upsource a host pill", () => {
+      const s = cfg.validateSettings({ hosts: [], upsource: { baseUrl: "upsource.example.com/acme" } });
+      assert.deepStrictEqual(s.upsource, { baseUrl: "https://upsource.example.com" });
+      assert.strictEqual(cfg.validateSettings({ hosts: [], upsource: { baseUrl: " " } }).upsource, undefined);
+      assert.deepStrictEqual(cfg.toPublicConfig(s).hosts, [{ label: "Upsource", repos: [] }]);
+      assert.deepStrictEqual(cfg.toPublicConfig(cfg.validateSettings({ hosts: [] })).hosts, []);
+    });
+
+    test("upsource: a reviewer accepting re-emits the snapshot", () => {
+      const a = map([review()]);
+      const b = map([review({ completionRate: { completedCount: 2, reviewersCount: 2, hasConcern: false } })]);
+      const snap = (prs) => ({ pullRequests: prs, errors: [], rateLimits: [], fetchedAt: "", version: "t" });
+      assert.notStrictEqual(hashSnapshot(snap(a)), hashSnapshot(snap(b)));
+    });
+
+    // The source, against a fake Electron (no keychain) and a fake server.
+    const upJs = path.join(__dirname, "../dist/main/main/upsource.js");
+    const upElPath = require.resolve("electron", { paths: [path.dirname(upJs)] });
+    require.cache[upElPath] = {
+      id: upElPath,
+      filename: upElPath,
+      loaded: true,
+      exports: { app: { getPath: () => os.tmpdir() }, safeStorage: { isEncryptionAvailable: () => false } },
+    };
+    delete require.cache[upJs];
+    const upMain = require(upJs);
+    delete require.cache[upElPath];
+    delete require.cache[upJs];
+
+    const server = (behaviour) => {
+      const calls = [];
+      const fetchFn = async (url, init) => {
+        const method = url.split("/~rpc/")[1];
+        calls.push({ method, auth: init.headers.Authorization, body: JSON.parse(init.body) });
+        const r = behaviour(method);
+        if (r instanceof Error) throw r;
+        const status = r.status ?? 200;
+        return { ok: status < 400, status, text: async () => JSON.stringify(r.body) };
+      };
+      return { calls, fetchFn };
+    };
+    const ok = (method) =>
+      method === "getCurrentUser"
+        ? { body: { result: { userId: "me" } } }
+        : method === "getReviews"
+          ? { body: { result: { reviews: [review()] } } }
+          : { body: { result: { infos: [...users.values()] } } };
+    const settingsWith = (upsource) => () => ({ pollIntervalSeconds: 60, upsource });
+
+    await atest("upsource source: reads reviews with the Bearer token, then waits for the interval", async () => {
+      let t = 1_000_000;
+      const s = server(ok);
+      const read = upMain.createUpsourceSource({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "perm:abc",
+        fetchFn: s.fetchFn,
+        now: () => t,
+      });
+      const first = await read(false);
+      assert.strictEqual(first.error, null);
+      assert.strictEqual(first.fetchedAt, new Date(1_000_000).toISOString(), "the host pill shows when it was read");
+      assert.deepStrictEqual(first.prs.map((p) => p.id), ["upsource:acme/CR-1"]);
+      assert.deepStrictEqual(s.calls.map((c) => c.method), ["getCurrentUser", "getReviews", "getUserInfo"]);
+      assert.ok(s.calls.every((c) => c.auth === "Bearer perm:abc"));
+      assert.strictEqual(s.calls[1].body.query, up.UPSOURCE_REVIEWS_QUERY);
+      t += 30_000;
+      await read(false);
+      assert.strictEqual(s.calls.length, 3, "inside the interval nothing is read");
+      await read(true);
+      assert.strictEqual(s.calls.length, 6, "a forced refresh reads at once");
+    });
+
+    await atest("upsource source: off the VPN keeps the last list; a refused token clears it", async () => {
+      let mode = "ok";
+      const s = server((m) =>
+        mode === "down" ? new Error("ECONNREFUSED") : mode === "denied" ? { status: 401, body: {} } : ok(m),
+      );
+      const read = upMain.createUpsourceSource({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      await read(false);
+      mode = "down";
+      const down = await read(true);
+      assert.strictEqual(down.prs.length, 1);
+      assert.match(down.error.message, /VPN/);
+      assert.strictEqual(down.error.hostLabel, "Upsource");
+      mode = "denied";
+      const denied = await read(true);
+      assert.strictEqual(denied.prs.length, 0);
+      assert.match(denied.error.message, /rejected the token/);
+    });
+
+    await atest("upsource source: a guest answer is a refused token, not an empty list", async () => {
+      const s = server((m) =>
+        m === "getCurrentUser" ? { body: { result: { userId: "guest", isGuestUser: true } } } : ok(m),
+      );
+      const read = upMain.createUpsourceSource({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      const r = await read(true);
+      assert.match(r.error.message, /guest/);
+      assert.strictEqual(s.calls.length, 1);
+    });
+
+    await atest("upsource source: nothing is read or reported while Upsource is off", async () => {
+      const s = server(ok);
+      const read = upMain.createUpsourceSource({
+        loadSettings: settingsWith(undefined),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      assert.deepStrictEqual(await read(true), { prs: [], error: null, fetchedAt: null });
+      const noToken = upMain.createUpsourceSource({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => null,
+        fetchFn: s.fetchFn,
+      });
+      assert.match((await noToken(true)).error.message, /No Upsource token/);
+      assert.strictEqual(s.calls.length, 0);
+    });
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
