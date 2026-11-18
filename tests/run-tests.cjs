@@ -17090,10 +17090,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const { mod, handlers, restore } = loadUpdater(dir);
       const quiet = console.error;
       console.error = () => {};
+      // initAutoUpdater wires nothing while it is set, so a shell that sets it
+      // would turn every case below into a TypeError.
+      const disabled = process.env.PRD_DISABLE_UPDATER;
+      delete process.env.PRD_DISABLE_UPDATER;
       try {
         mod.initAutoUpdater((s) => statuses.push(s));
         fn({ mod, handlers, statuses, dir });
       } finally {
+        if (disabled !== undefined) process.env.PRD_DISABLE_UPDATER = disabled;
         console.error = quiet;
         restore();
         if (!userData) fsSync.rmSync(dir, { recursive: true, force: true });
@@ -17133,6 +17138,44 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         handlers.error(new Error("signature check failed"));
         mod.setAutoUpdateEnabled(false);
         assert.deepStrictEqual(statuses.at(-1), { state: "idle" });
+      }));
+
+    test("updater: an error in the restart window after a download keeps 'Restarting to install'", () => {
+      // update-downloaded schedules quitAndInstall in 3 s; keep that timer out.
+      const realSetTimeout = global.setTimeout;
+      global.setTimeout = () => 0;
+      try {
+        withUpdater(({ handlers, statuses }) => {
+          handlers["update-available"]({ version: "3.4.0" });
+          handlers["update-downloaded"]({ version: "3.4.0" });
+          handlers.error(new Error("offline"));
+          assert.deepStrictEqual(statuses.at(-1), { state: "downloaded", version: "3.4.0" });
+        });
+      } finally {
+        global.setTimeout = realSetTimeout;
+      }
+    });
+
+    test("updater: saving settings with auto-update off pushes nothing unless an error pill is up", () =>
+      withUpdater(({ mod, handlers, statuses }) => {
+        handlers["update-available"]({ version: "3.4.0" });
+        handlers["download-progress"]({ percent: 40 });
+        const before = statuses.length;
+        mod.setAutoUpdateEnabled(false);
+        mod.setAutoUpdateEnabled(false);
+        assert.strictEqual(statuses.length, before);
+      }));
+
+    test("updater: the log starts over once it passes 1 MB", () =>
+      withUpdater(({ handlers, dir }) => {
+        const log = path.join(dir, "updater.log");
+        fsSync.writeFileSync(log, "x".repeat(1024 * 1024 + 1));
+        handlers.error(new Error("fresh line"));
+        const text = fsSync.readFileSync(log, "utf8");
+        assert.ok(text.length < 10_000);
+        assert.match(text, /fresh line/);
+        handlers.error(new Error("second line"));
+        assert.match(fsSync.readFileSync(log, "utf8"), /fresh line[\s\S]*second line/);
       }));
 
     test("updater: an unwritable log still lets the error reach the window", () => {

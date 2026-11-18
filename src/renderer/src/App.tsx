@@ -1676,7 +1676,9 @@ export function App() {
           <span className={FLOATING_PILL}>Restarting to install v{updateStatus.version}…</span>
         )}
         {updateStatus?.state === "error" && (
-          <span className={FLOATING_PILL} title={updateStatus.message}>
+          // pointer-events-auto: the row is click-through, and a span that
+          // gets no hover never shows its title — the only place the reason is.
+          <span className={`${FLOATING_PILL} pointer-events-auto cursor-help`} title={updateStatus.message}>
             Update failed
           </span>
         )}
