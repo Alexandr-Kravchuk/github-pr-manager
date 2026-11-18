@@ -17055,17 +17055,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const fsSync = require("node:fs");
     const updaterJs = path.join(__dirname, "../dist/main/main/updater.js");
     const resolveFrom = (id) => require.resolve(id, { paths: [path.dirname(updaterJs)] });
-    const loadUpdater = (userData) => {
+    const loadUpdater = (userData, extra = {}) => {
       const handlers = {};
+      const autoUpdater = {
+        on: (event, fn) => (handlers[event] = fn),
+        checkForUpdates: () => Promise.resolve(),
+        quitAndInstall: () => {},
+        ...extra,
+      };
       const fakes = {
         electron: { app: { isPackaged: true, getPath: () => userData } },
-        "electron-updater": {
-          autoUpdater: {
-            on: (event, fn) => (handlers[event] = fn),
-            checkForUpdates: () => Promise.resolve(),
-            quitAndInstall: () => {},
-          },
-        },
+        "electron-updater": { autoUpdater },
       };
       const saved = {};
       for (const [id, exports] of Object.entries(fakes)) {
@@ -17082,7 +17082,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           else delete require.cache[p];
         }
       };
-      return { mod, handlers, restore };
+      return { mod, handlers, restore, autoUpdater };
     };
     const withUpdater = (fn, userData) => {
       const dir = userData ?? fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-updater-"));
@@ -17186,6 +17186,86 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual(statuses.at(-1), { state: "error", message: "boom" });
       }, missing);
     });
+
+  // --- auto-update signature: our pinned self-signed certificate is accepted --
+  // where Windows doesn't trust its root; every other answer still goes to
+  // electron-updater's own verifier.
+  {
+    const sig = require(path.join(__dirname, "../dist/main/main/update-signature.js"));
+    const file = "C:\Users\me\AppData\Local\pr-dashboard-updater\pending\PR-Dashboard-Setup-3.4.2.exe";
+    const answer = (over = {}) =>
+      JSON.stringify({ status: 1, untrustedRoot: true, path: file, sha256: sig.PINNED_SIGNER_SHA256, ...over });
+
+    test("update signature: the pin is the SHA-256 of the shipped public certificate", () => {
+      const der = require("node:fs").readFileSync(path.join(__dirname, "../build/windows-signing/PR-Dashboard.cer"));
+      const fp = new (require("node:crypto").X509Certificate)(der).fingerprint256.replace(/:/g, "");
+      assert.strictEqual(sig.PINNED_SIGNER_SHA256, fp);
+      const trust = require("node:fs").readFileSync(path.join(__dirname, "../build/windows-signing/Install-PR-Dashboard-Trust.ps1"), "utf8");
+      assert.ok(trust.includes(sig.PINNED_SIGNER_SHA256), "the trust script pins the same certificate");
+    });
+
+    test("update signature: our untouched installer under an untrusted root is accepted", () => {
+      assert.strictEqual(sig.isPinnedUntrustedRoot(answer(), file), true);
+      assert.strictEqual(sig.isPinnedUntrustedRoot(answer({ sha256: sig.PINNED_SIGNER_SHA256.toLowerCase() }), file), true);
+      assert.strictEqual(sig.isPinnedUntrustedRoot(answer({ path: file.toUpperCase() }), file), true);
+    });
+
+    test("update signature: a broken hash, another signer, another fault or another file is not", () => {
+      assert.strictEqual(sig.isPinnedUntrustedRoot(answer({ status: 3, untrustedRoot: false }), file), false, "HashMismatch");
+      assert.strictEqual(sig.isPinnedUntrustedRoot(answer({ status: 3 }), file), false, "HashMismatch, whatever the flag");
+      assert.strictEqual(sig.isPinnedUntrustedRoot(answer({ sha256: "00".repeat(32) }), file), false, "another signer");
+      assert.strictEqual(sig.isPinnedUntrustedRoot(answer({ sha256: null, untrustedRoot: false }), file), false, "not signed");
+      assert.strictEqual(sig.isPinnedUntrustedRoot(answer({ untrustedRoot: false }), file), false, "another UnknownError");
+      assert.strictEqual(sig.isPinnedUntrustedRoot(answer({ status: 0, untrustedRoot: false }), file), false, "Valid is the fallback's call");
+      assert.strictEqual(sig.isPinnedUntrustedRoot(answer({ path: "C:\other.exe" }), file), false, "another file");
+      assert.strictEqual(sig.isPinnedUntrustedRoot(answer({ untrustedRoot: "true" }), file), false, "a string is not true");
+      assert.strictEqual(sig.isPinnedUntrustedRoot("", file), false, "probe failed");
+      assert.strictEqual(sig.isPinnedUntrustedRoot("not json", file), false);
+      assert.strictEqual(sig.isPinnedUntrustedRoot("null", file), false);
+    });
+
+    test("update signature: the file path reaches the probe only through the environment", () => {
+      assert.ok(sig.SIGNATURE_PROBE.includes("$env:PRD_UPDATE_FILE"));
+      assert.ok(!/'[^']*\.exe'/.test(sig.SIGNATURE_PROBE));
+    });
+
+    await atest("update signature: the wrapper accepts the pin itself and asks the fallback for the rest", async () => {
+      const calls = [];
+      const fallback = async (names, f) => (calls.push([names, f]), "refused by electron-updater");
+      const accept = sig.createPinnedVerifier(fallback, async () => answer());
+      assert.strictEqual(await accept(["Alex Kravchuk"], file), null);
+      assert.deepStrictEqual(calls, []);
+      const other = sig.createPinnedVerifier(fallback, async () => answer({ status: 3 }));
+      assert.strictEqual(await other(["Alex Kravchuk"], file), "refused by electron-updater");
+      assert.deepStrictEqual(calls, [[["Alex Kravchuk"], file]]);
+      const failed = sig.createPinnedVerifier(async () => null, async () => "");
+      assert.strictEqual(await failed(["Alex Kravchuk"], file), null, "a Valid signature still passes through the fallback");
+    });
+
+    const withPlatform = (platform, fn) => {
+      const desc = Object.getOwnPropertyDescriptor(process, "platform");
+      Object.defineProperty(process, "platform", { value: platform });
+      try { return fn(); } finally { Object.defineProperty(process, "platform", desc); }
+    };
+    for (const [platform, wrapped] of [["win32", true], ["darwin", false]]) {
+      test(`update signature: initAutoUpdater ${wrapped ? "wraps" : "leaves"} the NSIS verifier on ${platform}`, () =>
+        withPlatform(platform, () => {
+          const original = async () => "original";
+          const dir = require("node:fs").mkdtempSync(path.join(os.tmpdir(), "prd-updater-"));
+          const { mod, restore, autoUpdater } = loadUpdater(dir, { verifyUpdateCodeSignature: original });
+          const disabled = process.env.PRD_DISABLE_UPDATER;
+          delete process.env.PRD_DISABLE_UPDATER;
+          try {
+            mod.initAutoUpdater(() => {});
+            assert.strictEqual(autoUpdater.verifyUpdateCodeSignature !== original, wrapped);
+          } finally {
+            if (disabled !== undefined) process.env.PRD_DISABLE_UPDATER = disabled;
+            restore();
+            require("node:fs").rmSync(dir, { recursive: true, force: true });
+          }
+        }));
+    }
+  }
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

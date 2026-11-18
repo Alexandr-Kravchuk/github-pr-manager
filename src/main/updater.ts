@@ -5,6 +5,7 @@ import { app } from "electron";
 import { autoUpdater } from "electron-updater";
 
 import type { UpdateStatus } from "../shared/types";
+import { createPinnedVerifier, type VerifyUpdateCodeSignature } from "./update-signature";
 
 // electron-updater reads the GitHub feed from app-update.yml (emitted by
 // electron-builder from the `publish` config). That file only exists in a
@@ -74,6 +75,12 @@ export function initAutoUpdater(onStatus: (status: UpdateStatus) => void): void 
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  // Windows (NsisUpdater): also accept our pinned self-signed certificate where
+  // its root isn't trusted — see update-signature.ts.
+  if (process.platform === "win32" && "verifyUpdateCodeSignature" in autoUpdater) {
+    const nsis = autoUpdater as unknown as { verifyUpdateCodeSignature: VerifyUpdateCodeSignature };
+    nsis.verifyUpdateCodeSignature = createPinnedVerifier(nsis.verifyUpdateCodeSignature);
+  }
 
   autoUpdater.on("error", (err) => {
     console.error("[updater] error:", err?.message ?? err);
