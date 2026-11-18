@@ -1675,6 +1675,11 @@ export function App() {
         {updateStatus?.state === "downloaded" && (
           <span className={FLOATING_PILL}>Restarting to install v{updateStatus.version}…</span>
         )}
+        {updateStatus?.state === "error" && (
+          <span className={FLOATING_PILL} title={updateStatus.message}>
+            Update failed — will retry
+          </span>
+        )}
         {/* The What's new button already names the version, so the bare one
             shows only without it. */}
         {data?.version && !whatsNew && <span className={FLOATING_PILL}>v{data.version}</span>}

@@ -1,3 +1,6 @@
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { app } from "electron";
 import { autoUpdater } from "electron-updater";
 
@@ -47,7 +50,15 @@ export function initAutoUpdater(onStatus: (status: UpdateStatus) => void): void 
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on("error", (err) => {
+    const message = String(err?.message ?? err).split("\n")[0].slice(0, 200);
     console.error("[updater] error:", err?.message ?? err);
+    try {
+      appendFileSync(join(app.getPath("userData"), "updater.log"), `${new Date().toISOString()} ${err?.stack ?? err}\n`);
+    } catch {
+      // the log is best-effort
+    }
+    // Only after a download began: a failed periodic check (offline) is not news.
+    if (downloadingVersion) onStatus({ state: "error", message });
   });
   autoUpdater.on("update-available", (info) => {
     console.log("[updater] update available:", info.version);
