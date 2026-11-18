@@ -1375,4 +1375,6 @@ export type UpdateStatus =
   | { state: "downloaded"; version: string }
   // The updater failed after it started (e.g. the download's signature check
   // failed): without this the pill stays on "Downloading… 100%" forever.
-  | { state: "error"; message: string };
+  | { state: "error"; message: string }
+  // Nothing to show: up to date, or auto-update turned off. Clears an error.
+  | { state: "idle" };

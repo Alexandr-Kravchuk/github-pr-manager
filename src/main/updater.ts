@@ -18,12 +18,26 @@ let initialized = false; // handlers wired (packaged builds only)
 let initialTimer: NodeJS.Timeout | null = null;
 let intervalTimer: NodeJS.Timeout | null = null;
 let autoUpdateEnabled = false; // mirrors the user's auto-update setting
-let downloadingVersion = ""; // set on update-available, read by download-progress
+// The version being downloaded right now: set on update-available, cleared when
+// that download ends either way. Only an error while it is set is shown — a
+// failed periodic check (offline) is not news.
+let downloadingVersion = "";
+let pushStatus: ((status: UpdateStatus) => void) | null = null;
 
 function check(): void {
   autoUpdater
     .checkForUpdates()
     .catch((e) => console.error("[updater] check failed:", e?.message ?? e));
+}
+
+/** Appends one updater error to userData/updater.log; best-effort. */
+function logError(err: unknown): void {
+  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  try {
+    appendFileSync(join(app.getPath("userData"), "updater.log"), `${new Date().toISOString()} ${detail}\n`);
+  } catch {
+    // the console line above is still there
+  }
 }
 
 /**
@@ -45,20 +59,18 @@ export function initAutoUpdater(onStatus: (status: UpdateStatus) => void): void 
   if (initialized) return;
   if (!app.isPackaged || process.env.PRD_DISABLE_UPDATER) return;
   initialized = true;
+  pushStatus = onStatus;
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on("error", (err) => {
-    const message = String(err?.message ?? err).split("\n")[0].slice(0, 200);
     console.error("[updater] error:", err?.message ?? err);
-    try {
-      appendFileSync(join(app.getPath("userData"), "updater.log"), `${new Date().toISOString()} ${err?.stack ?? err}\n`);
-    } catch {
-      // the log is best-effort
-    }
-    // Only after a download began: a failed periodic check (offline) is not news.
-    if (downloadingVersion) onStatus({ state: "error", message });
+    logError(err);
+    if (!downloadingVersion) return;
+    downloadingVersion = "";
+    const message = String(err?.message ?? err).split("\n")[0].slice(0, 200);
+    onStatus({ state: "error", message });
   });
   autoUpdater.on("update-available", (info) => {
     console.log("[updater] update available:", info.version);
@@ -70,9 +82,12 @@ export function initAutoUpdater(onStatus: (status: UpdateStatus) => void): void 
   });
   autoUpdater.on("update-not-available", () => {
     console.log("[updater] up to date");
+    // Clears an error pill left by an earlier attempt.
+    onStatus({ state: "idle" });
   });
   autoUpdater.on("update-downloaded", (info) => {
     console.log("[updater] v%s downloaded — restarting to apply", info.version);
+    downloadingVersion = "";
     onStatus({ state: "downloaded", version: info.version });
     setTimeout(() => autoUpdater.quitAndInstall(), 3_000);
   });
@@ -98,5 +113,7 @@ export function setAutoUpdateEnabled(enabled: boolean): void {
       clearInterval(intervalTimer);
       intervalTimer = null;
     }
+    // Nothing will check again, so an error pill would never go away.
+    pushStatus?.({ state: "idle" });
   }
 }

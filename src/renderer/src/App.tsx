@@ -1677,7 +1677,7 @@ export function App() {
         )}
         {updateStatus?.state === "error" && (
           <span className={FLOATING_PILL} title={updateStatus.message}>
-            Update failed — will retry
+            Update failed
           </span>
         )}
         {/* The What's new button already names the version, so the bare one
