@@ -539,9 +539,16 @@
 [data-ui="glassmorphism"] select option {
   background-color: var(--canvas);
 }
-[data-ui="glassmorphism"] :is(button, a).border[aria-pressed="true"] {
+/* A plain framed toggle that is on takes the lighter glass. One with a fill
+   of its own (a host pill, lit sky) keeps it — the grey glass made a chosen
+   host read like the others — and its frame takes its text colour, since the
+   frame rule above greys every button's border. */
+[data-ui="glassmorphism"] :is(button, a).border[aria-pressed="true"]:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])) {
   background-color: var(--elevated);
   border-color: var(--line-strong);
+}
+[data-ui="glassmorphism"] :is(button, a).border[aria-pressed="true"]:not(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])) {
+  border-color: color-mix(in oklab, currentColor 55%, transparent);
 }
 [data-ui="glassmorphism"] :is([role="radiogroup"], div:has(> button[aria-pressed])).border {
   border-color: var(--line);
