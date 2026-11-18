@@ -50,16 +50,30 @@ export function githubOnly(snapshot: DashboardResponse): DashboardResponse {
   return cached;
 }
 
-/** Normalizes the server address to its origin; null when it is not a URL. */
+/**
+ * Normalizes the server address: https only (the Hub token is a Bearer
+ * credential), a missing scheme taken as https, the path kept for a server
+ * behind a path prefix (trailing slashes, query and hash dropped). Null when it
+ * is not a URL or not https.
+ */
 export function normalizeUpsourceBaseUrl(input: string): string | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
-  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  let url: URL;
   try {
-    return new URL(withScheme).origin;
+    url = new URL(withScheme);
   } catch {
     return null;
   }
+  if (url.protocol !== "https:") return null;
+  return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+}
+
+/** Where a Hub permanent token is created, for the server at `baseUrl`. */
+export function upsourceTokenPageUrl(baseUrl: string): string | null {
+  const base = normalizeUpsourceBaseUrl(baseUrl);
+  return base ? `${base}/hub/users/me?tab=authentification` : null;
 }
 
 // --- Upsource RPC shapes (only the fields read here) ------------------------
@@ -112,12 +126,15 @@ const REVIEWER_STATE: Record<UpsourceParticipantState, ReviewerState> = {
   rejected: "changes_requested",
 };
 
-const ISSUE_KEY_RE = new RegExp(`\\b(${ISSUE_KEY_PATTERN})\\b`);
+const ISSUE_KEY_RE = new RegExp(`\\b(${ISSUE_KEY_PATTERN})\\b`, "g");
 
-/** The review's own id ("CR-1795") is shaped like a Jira key: never take it for one. */
+/**
+ * The first Jira-shaped key in the title that is not the review's own id
+ * ("CR-1795" is shaped like a key too), wherever the id stands.
+ */
 function issueKeyOf(title: string, reviewId: string): string | null {
-  const m = title.match(ISSUE_KEY_RE);
-  return m && m[1] !== reviewId ? m[1] : null;
+  for (const m of title.matchAll(ISSUE_KEY_RE)) if (m[1] !== reviewId) return m[1];
+  return null;
 }
 
 /** The review's page on the server. */

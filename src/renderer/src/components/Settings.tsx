@@ -26,6 +26,7 @@ import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "../../../shared
 import { DEFAULT_AGENT_PROMPTS, DEFAULT_AGENT_SETTINGS } from "../../../shared/agent-defaults";
 import { DEFAULT_STALE_AFTER_DAYS, MAX_STALE_AFTER_DAYS } from "../../../shared/stale";
 import { createJiraStatusLoader } from "../../../shared/jira-status";
+import { upsourceTokenPageUrl } from "../../../shared/upsource";
 import { describeWeather } from "../../../shared/weather";
 import {
   SETTINGS_TABS,
@@ -192,6 +193,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [upsourceBaseUrl, setUpsourceBaseUrl] = useState("");
   const [upsourceToken, setUpsourceTokenDraft] = useState("");
   const [upsource, setUpsource] = useState<UpsourceStatus | null>(null);
+  const upsourceTokenPage = upsourceTokenPageUrl(upsourceBaseUrl);
   const loadUpsource = useCallback(() => {
     window.api.getUpsourceStatus().then(setUpsource).catch(() => {});
   }, []);
@@ -1022,13 +1024,10 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
 
         <p className="mt-3 text-xs text-fg-subtle">
           The token is a Hub permanent token:{" "}
-          {upsourceBaseUrl.trim() ? (
+          {upsourceTokenPage ? (
             <button
               type="button"
-              onClick={() => {
-                const origin = upsourceBaseUrl.trim().replace(/\/+$/, "");
-                window.api.openExternal(`${origin}/hub/users/me?tab=authentification`).catch(() => {});
-              }}
+              onClick={() => window.api.openExternal(upsourceTokenPage).catch(() => {})}
               className="underline hover:text-fg-secondary"
             >
               your Hub profile › Authentication

@@ -1,4 +1,4 @@
-import { useCallback, useContext, useState } from "react";
+import { useContext } from "react";
 
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
 import { isPassiveReviewed, prSignal, type PrSignal } from "../../../shared/pr-filter";
@@ -15,6 +15,7 @@ import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StackBadge } from "./StackBadge";
 import { AgentStatusLine } from "./AgentStatus";
 import { StaleCloseButton } from "./StaleCloseDialog";
+import { CopyLinkButton, IgnoreButton, JiraKeyPill } from "./card-controls";
 
 interface Props {
   pr: PullRequest;
@@ -129,45 +130,6 @@ function UmbrellaIcon() {
   );
 }
 
-export function CopyIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <rect x="9" y="9" width="13" height="13" rx="2" />
-      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-    </svg>
-  );
-}
-
-export function CheckIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  );
-}
-
-/** Crossed-out eye — "ignore" (hide this PR from the dashboard). */
-export function EyeOffIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M9.88 9.88a3 3 0 0 0 4.24 4.24" />
-      <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
-      <path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
-      <line x1="2" y1="2" x2="22" y2="22" />
-    </svg>
-  );
-}
-
-/** Open eye — "un-ignore" (bring this PR back to the dashboard). */
-export function EyeIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
-      <circle cx="12" cy="12" r="3" />
-    </svg>
-  );
-}
-
 export function PrCard({
   pr,
   onOpen,
@@ -188,9 +150,6 @@ export function PrCard({
   // Null unless both a site and a parsed key exist — the badge is the link, so
   // there is nothing to show without one.
   const jiraUrl = jiraBrowseUrl(jiraBaseUrl, pr.issueKey);
-  const openJira = useCallback(() => {
-    if (jiraUrl) window.api.openExternal(jiraUrl).catch(() => {});
-  }, [jiraUrl]);
   // Most titles open with the key ("ENG-1: Fix the thing"), so once the badge
   // carries it the prefix is said twice. Dropped only when the badge is actually
   // there — without it the title is the sole place the key appears.
@@ -201,16 +160,6 @@ export function PrCard({
   const ageDays = daysSince(pr.createdAt);
   // A stale PR says its age in its own, louder pill — one age is enough.
   const showAge = !pr.isStale && !pr.isDraft && !pr.hasHumanApproval && ageDays >= 3;
-  const [copied, setCopied] = useState(false);
-  const copyUrl = useCallback(() => {
-    window.api
-      .copyText(pr.url)
-      .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      })
-      .catch(() => {});
-  }, [pr.url]);
 
   return (
     <div
@@ -276,51 +225,12 @@ export function PrCard({
               </span>
             )
           )}
-          <button
-            type="button"
-            onClick={copyUrl}
-            title={copied ? "Copied" : "Copy PR link"}
-            aria-label="Copy PR link"
-            className={cn(
-              "shrink-0 rounded p-0.5 hover:bg-elevated",
-              copied
-                ? "text-emerald-600 dark:text-emerald-400"
-                : "text-fg-faint hover:text-fg-secondary",
-            )}
-          >
-            {copied ? <CheckIcon /> : <CopyIcon />}
-          </button>
-          <button
-            type="button"
-            onClick={() => onToggleIgnore(pr)}
-            title={pr.isIgnored ? "Un-ignore (show on the dashboard)" : "Ignore (hide from the dashboard)"}
-            aria-label={pr.isIgnored ? "Un-ignore PR" : "Ignore PR"}
-            className={cn(
-              "shrink-0 rounded p-0.5 hover:bg-elevated",
-              pr.isIgnored
-                ? "text-sky-600 dark:text-sky-400"
-                : "text-fg-faint hover:text-fg-secondary",
-            )}
-          >
-            {pr.isIgnored ? <EyeIcon /> : <EyeOffIcon />}
-          </button>
+          <CopyLinkButton url={pr.url} noun="PR" size="card" />
+          <IgnoreButton pr={pr} noun="PR" size="card" onToggleIgnore={onToggleIgnore} />
           {/* The issue key, straight to Jira, on the top line with the PR's own
               number: both say which work this is. It opens in the system browser
               rather than navigating this window. */}
-          {jiraUrl && (
-            <button
-              type="button"
-              onClick={openJira}
-              title={`Open ${pr.issueKey} in Jira`}
-              className={cn(
-                pill,
-                "shrink-0",
-                "border-indigo-500/40 bg-indigo-500/15 text-indigo-700 hover:bg-indigo-500/25 hover:underline dark:text-indigo-300",
-              )}
-            >
-              {pr.issueKey} ↗
-            </button>
-          )}
+          {jiraUrl && pr.issueKey && <JiraKeyPill issueKey={pr.issueKey} url={jiraUrl} />}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <ClaudeButton pr={pr} trackComments={trackComments} />

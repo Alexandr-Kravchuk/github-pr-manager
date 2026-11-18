@@ -665,12 +665,19 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   Jira key, search, the role and author filters, sorting, seen-state and
   ignoring work on it unchanged. Its GitHub fields hold neutral values (no CI,
   `canBeMerged` false, no stack), and the card, tile and Cozy row read
-  `pr.upsource` (`UpsourceCard.tsx`). `main/upsource.ts` keeps the Hub
-  permanent token encrypted like Jira's (`userData/upsource-token.enc`) and is
-  the poller's `fetchUpsource`: `getCurrentUser` (a guest answer is a refused
-  token), `getReviews`, `getUserInfo` over `POST <base>/~rpc/<method>` with
-  `Authorization: Bearer`, at most once per poll interval, the last list kept
-  through a failure (the server is internal: off the VPN it is unreachable).
+  `pr.upsource` (`UpsourceCard.tsx`); the copy, ignore, Jira-key and avatar
+  controls both kinds of card carry live once, in `components/card-controls.tsx`.
+  `main/upsource.ts` keeps the Hub permanent token encrypted like Jira's
+  (`userData/upsource-token.enc`) and is the poller's `fetchUpsource`:
+  `getCurrentUser` (a guest answer is a refused token), `getReviews` (paged),
+  `getUserInfo` over `POST <base>/~rpc/<method>` with `Authorization: Bearer`
+  — https only, in settings and again before every call, and one deadline per
+  call that covers the body too. At most once per poll interval, the last list
+  kept through a failure (the server is internal: off the VPN it is
+  unreachable). The poller starts that read together with the host fetches and
+  awaits it only when it assembles the snapshot, so a hanging Upsource never
+  holds back GitHub data, and `upsource:setToken` does not wait for the poll it
+  starts (Settings closes only on its reply).
   The host pill "Upsource" comes from `toPublicConfig` and gets a no-budget
   reading (`resetAt` empty) for its green dot. Nothing GitHub-only may see a
   review: the agent and every GitHub action in `main.ts` read `githubSnapshot()`

@@ -17425,7 +17425,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("upsource: settings normalize the address and give Upsource a host pill", () => {
       const s = cfg.validateSettings({ hosts: [], upsource: { baseUrl: "upsource.example.com/acme" } });
-      assert.deepStrictEqual(s.upsource, { baseUrl: "https://upsource.example.com" });
+      assert.deepStrictEqual(s.upsource, { baseUrl: "https://upsource.example.com/acme" }, "a path prefix is kept");
       assert.strictEqual(cfg.validateSettings({ hosts: [], upsource: { baseUrl: " " } }).upsource, undefined);
       assert.deepStrictEqual(cfg.toPublicConfig(s).hosts, [{ label: "Upsource", repos: [] }]);
       assert.deepStrictEqual(cfg.toPublicConfig(cfg.validateSettings({ hosts: [] })).hosts, []);
@@ -17546,6 +17546,155 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       });
       assert.match((await noToken(true)).error.message, /No Upsource token/);
       assert.strictEqual(s.calls.length, 0);
+    });
+
+    test("upsource: the address must be https; a path prefix is kept, slashes, query and hash dropped", () => {
+      assert.strictEqual(up.normalizeUpsourceBaseUrl("upsource.example.com"), "https://upsource.example.com");
+      assert.strictEqual(up.normalizeUpsourceBaseUrl("https://tools.example.com/upsource/?x=1#y"), "https://tools.example.com/upsource");
+      assert.strictEqual(up.normalizeUpsourceBaseUrl("http://upsource.example.com"), null, "a Bearer token never goes over http");
+      assert.strictEqual(up.normalizeUpsourceBaseUrl("ftp://upsource.example.com"), null);
+      assert.throws(() => cfg.validateSettings({ hosts: [], upsource: { baseUrl: "http://upsource.example.com" } }), /https/);
+      assert.strictEqual(
+        up.upsourceTokenPageUrl("tools.example.com/upsource/"),
+        "https://tools.example.com/upsource/hub/users/me?tab=authentification",
+      );
+      assert.strictEqual(up.upsourceTokenPageUrl("http://x.example.com"), null);
+    });
+
+    test("upsource: a Jira key after the review's own id is still found", () => {
+      assert.strictEqual(map([review({ title: "TSCR-1 ENG-42 Fix", reviewId: { projectId: "acme", reviewId: "TSCR-1" } })])[0].issueKey, "ENG-42");
+    });
+
+    await atest("upsource source: a new token or server re-reads at once with it and drops the old list", async () => {
+      let token = "first";
+      const s = server(ok);
+      const read = upMain.createUpsourceSource({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => token,
+        fetchFn: s.fetchFn,
+        now: () => 5_000,
+      });
+      await read(false);
+      token = "second";
+      await read(false);
+      assert.strictEqual(s.calls.length, 6, "inside the interval, yet read again");
+      assert.ok(s.calls.slice(3).every((c) => c.auth === "Bearer second"));
+    });
+
+    await atest("upsource source: 403 clears the list; an error or non-JSON answer keeps it and says why", async () => {
+      let mode = "ok";
+      const s = server((m) =>
+        mode === "forbidden"
+          ? { status: 403, body: {} }
+          : mode === "rpc-error"
+            ? { body: { error: { message: "Bad query" } } }
+            : mode === "html"
+              ? { status: 502, body: "<html>" }
+              : ok(m),
+      );
+      const read = upMain.createUpsourceSource({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      await read(true);
+      mode = "rpc-error";
+      const err = await read(true);
+      assert.strictEqual(err.prs.length, 1);
+      assert.match(err.error.message, /Bad query/);
+      mode = "html";
+      const html = await read(true);
+      assert.strictEqual(html.prs.length, 1);
+      assert.match(html.error.message, /HTTP 502/);
+      mode = "forbidden";
+      const denied = await read(true);
+      assert.strictEqual(denied.prs.length, 0);
+      assert.match(denied.error.message, /rejected the token/);
+    });
+
+    await atest("upsource source: a body that stalls after the headers times out instead of holding the poll", async () => {
+      const fetchFn = async (url, init) => ({
+        ok: true,
+        status: 200,
+        text: () =>
+          new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")))),
+      });
+      const read = upMain.createUpsourceSource({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn,
+        timeoutMs: 30,
+      });
+      const r = await read(true);
+      assert.match(r.error.message, /timed out/);
+    });
+
+    await atest("upsource source: never sends the token over http, even from a hand-edited settings file", async () => {
+      const s = server(ok);
+      const read = upMain.createUpsourceSource({
+        loadSettings: settingsWith({ baseUrl: "http://u.example" }),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      assert.match((await read(true)).error.message, /https/);
+      assert.strictEqual(s.calls.length, 0);
+    });
+
+    await atest("upsource source: pages through getReviews while Upsource says there is more", async () => {
+      const second = review({ reviewId: { projectId: "acme", reviewId: "CR-2" } });
+      const s = server((m) => {
+        if (m !== "getReviews") return ok(m);
+        const n = s.calls.filter((c) => c.method === "getReviews").length;
+        return n === 1
+          ? { body: { result: { reviews: [review()], hasMore: true } } }
+          : { body: { result: { reviews: [second], hasMore: false } } };
+      });
+      const read = upMain.createUpsourceSource({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      const r = await read(true);
+      assert.deepStrictEqual(r.prs.map((p) => p.upsource.reviewId), ["CR-1", "CR-2"]);
+      assert.deepStrictEqual(
+        s.calls.filter((c) => c.method === "getReviews").map((c) => c.body.skip),
+        [0, 100],
+      );
+    });
+
+    await atest("Poller: Upsource reviews and their error join the snapshot; the pill gets a no-budget reading", async () => {
+      const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
+      const snapshots = [];
+      let upsourceResult = { prs: map([review()]), error: null, fetchedAt: "2026-11-18T10:00:00.000Z" };
+      const p = new poller.Poller({
+        loadSettings: () => ({ pollIntervalSeconds: 60, hosts: [], trackComments: true }),
+        toHostConfigs: () => [],
+        statePath: path.join(os.tmpdir(), "prd-upsource-state-missing.json"),
+        ignoredStatePath: path.join(os.tmpdir(), "prd-upsource-ignored-missing.json"),
+        appVersion: "test",
+        onSnapshot: (s) => snapshots.push(s),
+        onConfigError: () => {},
+        fetchUpsource: async () => upsourceResult,
+      });
+      await p.refresh();
+      const s = snapshots.at(-1);
+      assert.deepStrictEqual(s.pullRequests.map((x) => x.id), ["upsource:acme/CR-1"]);
+      assert.deepStrictEqual(s.rateLimits, [
+        { hostLabel: "Upsource", remaining: 0, cost: 0, resetAt: "", fetchedAt: "2026-11-18T10:00:00.000Z" },
+      ]);
+      upsourceResult = { ...upsourceResult, error: { hostLabel: "Upsource", message: "Upsource is unreachable" } };
+      await p.refresh();
+      assert.deepStrictEqual(snapshots.at(-1).errors, [{ hostLabel: "Upsource", message: "Upsource is unreachable" }]);
+      assert.strictEqual(snapshots.at(-1).pullRequests.length, 1, "the last list stays");
+      p.stop();
+    });
+
+    test("main.js wiring: closing a stale PR looks only at GitHub PRs; a token save does not wait for the poll", () => {
+      const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /const snapshotPr = \(id\) => githubSnapshot\(\)/);
+      const handler = src.slice(src.indexOf('"upsource:setToken"'), src.indexOf("return result;", src.indexOf('"upsource:setToken"')));
+      assert.match(handler, /void poller\?\.refresh\(\)/);
+      assert.doesNotMatch(handler, /await poller/, "Settings closes only on this reply");
     });
   }
 

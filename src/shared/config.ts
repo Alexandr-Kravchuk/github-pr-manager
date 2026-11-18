@@ -465,14 +465,18 @@ function validateJira(raw: unknown): JiraSettings | undefined {
 
 /**
  * Validates the optional Upsource connection: undefined when absent or without
- * an address (Upsource stays off), the address normalized to its origin.
+ * an address (Upsource stays off), the address normalized by
+ * `normalizeUpsourceBaseUrl` — https only, since the token is a Bearer credential.
  */
 function validateUpsource(raw: unknown): UpsourceSettings | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
-  const rawUrl = typeof (raw as Record<string, unknown>).baseUrl === "string" ? ((raw as Record<string, unknown>).baseUrl as string).trim() : "";
+  const value = (raw as Record<string, unknown>).baseUrl;
+  const rawUrl = typeof value === "string" ? value.trim() : "";
   if (!rawUrl) return undefined;
   const baseUrl = normalizeUpsourceBaseUrl(rawUrl);
-  if (!baseUrl) throw new ConfigError(`settings: upsource.baseUrl is not a valid URL: ${rawUrl}`);
+  if (!baseUrl) {
+    throw new ConfigError(`settings: upsource.baseUrl must be an https URL (the token is never sent over http): ${rawUrl}`);
+  }
   return { baseUrl };
 }
 

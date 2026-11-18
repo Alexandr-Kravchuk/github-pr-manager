@@ -1039,8 +1039,10 @@ function registerIpc(): void {
 
   ipcMain.handle("upsource:setToken", async (_event, raw: unknown) => {
     const result = setUpsourceToken(validateUpsourceToken(raw));
-    // Read the reviews with the new token now, not on the next interval.
-    if (result.ok) await poller?.refresh();
+    // Read the reviews with the new token now, not on the next interval — but
+    // without waiting for it: Settings closes only on this reply, and a full
+    // poll (every host, Jira, Upsource) can take many seconds.
+    if (result.ok) void poller?.refresh();
     return result;
   });
 

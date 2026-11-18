@@ -747,6 +747,17 @@ export class Poller {
       return computeNextWakeMs(this.hostSlots.values(), now, presenceFactor, this.intervalMs);
     }
 
+    // Upsource is read alongside the hosts, never after them: a slow or
+    // unreachable server (off the VPN) must not hold back GitHub data that is
+    // already here. The source never rejects; the catch is belt and braces.
+    const upsourceRead: Promise<{ prs: PullRequest[]; error: HostError | null; fetchedAt: string | null }> =
+      this.options.fetchUpsource
+        ? this.options.fetchUpsource(force).catch((e) => {
+            console.error("[poller] fetchUpsource failed:", e);
+            return { prs: [], error: null, fetchedAt: null };
+          })
+        : Promise.resolve({ prs: [], error: null, fetchedAt: null });
+
     const results = await Promise.allSettled(
       due.map((h) => (this.options.fetchHostFn ?? fetchHost)(h)),
     );
@@ -809,18 +820,7 @@ export class Poller {
     });
 
     // Upsource reviews join the list as items of their own host.
-    let upsource: { prs: PullRequest[]; error: HostError | null; fetchedAt: string | null } = {
-      prs: [],
-      error: null,
-      fetchedAt: null,
-    };
-    if (this.options.fetchUpsource) {
-      try {
-        upsource = await this.options.fetchUpsource(force);
-      } catch (e) {
-        console.error("[poller] fetchUpsource failed:", e);
-      }
-    }
+    const upsource = await upsourceRead;
 
     // Assemble the snapshot from every host's latest slot (fetched + carried).
     const allPrs: PullRequest[] = [...upsource.prs];

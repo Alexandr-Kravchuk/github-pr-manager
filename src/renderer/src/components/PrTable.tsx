@@ -18,6 +18,7 @@ import {
 import type { PullRequest, ReviewerState } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
 import { AuthorButton } from "./AuthorButton";
+import { Avatar } from "./card-controls";
 import { ClaudeButton } from "./ClaudeButton";
 import { StaleCloseButton } from "./StaleCloseDialog";
 import { StackBadge } from "./StackBadge";
@@ -552,16 +553,11 @@ function Row({
       </td>
 
       <td className={cn("py-1.5", COLUMN_CLASS.author)}>
-        {pr.author?.avatarUrl ? (
-          // Avatar only — the login is in the button's title.
+        {pr.author ? (
+          // Avatar only — the login is in the button's title. An Upsource
+          // author may come without one: the initial stands in.
           <AuthorButton login={pr.author.login} className="inline-block align-middle">
-            <img
-              src={pr.author.avatarUrl}
-              alt={pr.author.login}
-              width={18}
-              height={18}
-              className="block rounded-full"
-            />
+            <Avatar login={pr.author.login} avatarUrl={pr.author.avatarUrl} size={18} className="flex" />
           </AuthorButton>
         ) : (
           <span className="text-xs text-fg-faint">—</span>
@@ -677,29 +673,16 @@ function ReviewersCell({ pr }: { pr: PullRequest }) {
       className="flex items-center -space-x-1"
       title={pr.reviewers.map((r) => `${r.login}: ${r.reviewState.replace("_", " ")}`).join("\n")}
     >
-      {shown.map((r) =>
-        r.avatarUrl ? (
-          <img
-            key={r.login}
-            src={r.avatarUrl}
-            alt={r.login}
-            width={18}
-            height={18}
-            className={cn("shrink-0 rounded-full ring-2", REVIEWER_RING[r.reviewState])}
-          />
-        ) : (
-          // Upsource may name no avatar: the initial in the same ring.
-          <span
-            key={r.login}
-            className={cn(
-              "inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full bg-elevated text-[9px] uppercase text-fg-muted ring-2",
-              REVIEWER_RING[r.reviewState],
-            )}
-          >
-            {r.login[0]}
-          </span>
-        ),
-      )}
+      {shown.map((r) => (
+        // Upsource may name no avatar: the initial stands in, in the same ring.
+        <Avatar
+          key={r.login}
+          login={r.login}
+          avatarUrl={r.avatarUrl}
+          size={18}
+          className={cn("shrink-0 ring-2", REVIEWER_RING[r.reviewState])}
+        />
+      ))}
       {rest > 0 && <span className="pl-2 text-xs text-fg-muted">+{rest}</span>}
     </span>
   );

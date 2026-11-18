@@ -1,5 +1,3 @@
-import { useCallback, useState } from "react";
-
 import { jiraBrowseUrl, stripLeadingIssueKey } from "../../../shared/issue-key";
 import { hiddenParentOf } from "../../../shared/pr-group";
 import { ageDays } from "../../../shared/pr-table";
@@ -12,7 +10,7 @@ import {
 } from "../../../shared/upsource";
 import { cn, relativeTime } from "../format";
 import { AuthorButton } from "./AuthorButton";
-import { CheckIcon, CopyIcon, EyeIcon, EyeOffIcon } from "./PrCard";
+import { Avatar, CopyLinkButton, IgnoreButton, JiraKeyPill, TileHoverActions } from "./card-controls";
 
 /**
  * An Upsource review, in the frame of a PR card: same stripe, rows and
@@ -57,34 +55,16 @@ export function UpsourceMark({ short = false }: { short?: boolean }) {
   );
 }
 
-function Avatar({ p, size }: { p: UpsourceParticipant; size: number }) {
-  const title = `${p.name}: ${UPSOURCE_STATE_LABEL[p.state]}`;
-  const cls = cn("rounded-full ring-2", RING[p.state]);
-  return p.avatarUrl ? (
-    <img src={p.avatarUrl} alt="" width={size} height={size} title={title} className={cls} />
-  ) : (
-    <span
-      title={title}
-      style={{ width: size, height: size }}
-      className={cn(cls, "inline-flex items-center justify-center bg-elevated text-[9px] uppercase text-fg-muted")}
-    >
-      {p.name[0]}
-    </span>
+function ParticipantAvatar({ p, size }: { p: UpsourceParticipant; size: number }) {
+  return (
+    <Avatar
+      login={p.name}
+      avatarUrl={p.avatarUrl}
+      size={size}
+      title={`${p.name}: ${UPSOURCE_STATE_LABEL[p.state]}`}
+      className={cn("ring-2", RING[p.state])}
+    />
   );
-}
-
-function useCopy(url: string) {
-  const [copied, setCopied] = useState(false);
-  const copy = useCallback(() => {
-    window.api
-      .copyText(url)
-      .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      })
-      .catch(() => {});
-  }, [url]);
-  return { copied, copy };
 }
 
 interface CardProps {
@@ -107,7 +87,6 @@ export function UpsourceCard({
   parentGroupKey = null,
 }: CardProps) {
   const info = pr.upsource;
-  const { copied, copy } = useCopy(pr.url);
   if (!info) return null;
   const stage = upsourceStage(info);
   const due = upsourceDue(info.deadline, Date.now());
@@ -133,43 +112,9 @@ export function UpsourceCard({
           <span className="shrink-0 text-sm font-semibold tabular-nums text-fg-secondary">{info.reviewId}</span>
         </span>
         {pr.isIgnored && <span className="rounded bg-elevated px-1.5 py-0.5 text-fg-muted">Ignored</span>}
-        <button
-          type="button"
-          onClick={copy}
-          title={copied ? "Copied" : "Copy review link"}
-          aria-label="Copy review link"
-          className={cn(
-            "shrink-0 rounded p-0.5 hover:bg-elevated",
-            copied ? "text-emerald-600 dark:text-emerald-400" : "text-fg-faint hover:text-fg-secondary",
-          )}
-        >
-          {copied ? <CheckIcon /> : <CopyIcon />}
-        </button>
-        <button
-          type="button"
-          onClick={() => onToggleIgnore(pr)}
-          title={pr.isIgnored ? "Un-ignore (show on the dashboard)" : "Ignore (hide from the dashboard)"}
-          aria-label={pr.isIgnored ? "Un-ignore review" : "Ignore review"}
-          className={cn(
-            "shrink-0 rounded p-0.5 hover:bg-elevated",
-            pr.isIgnored ? "text-sky-600 dark:text-sky-400" : "text-fg-faint hover:text-fg-secondary",
-          )}
-        >
-          {pr.isIgnored ? <EyeIcon /> : <EyeOffIcon />}
-        </button>
-        {jiraUrl && (
-          <button
-            type="button"
-            onClick={() => window.api.openExternal(jiraUrl).catch(() => {})}
-            title={`Open ${pr.issueKey} in Jira`}
-            className={cn(
-              pill,
-              "shrink-0 border-indigo-500/40 bg-indigo-500/15 text-indigo-700 hover:bg-indigo-500/25 hover:underline dark:text-indigo-300",
-            )}
-          >
-            {pr.issueKey} ↗
-          </button>
-        )}
+        <CopyLinkButton url={pr.url} noun="review" size="card" />
+        <IgnoreButton pr={pr} noun="review" size="card" onToggleIgnore={onToggleIgnore} />
+        {jiraUrl && pr.issueKey && <JiraKeyPill issueKey={pr.issueKey} url={jiraUrl} />}
       </div>
 
       {task && (
@@ -190,9 +135,7 @@ export function UpsourceCard({
       <div className="mb-2 flex flex-wrap items-center gap-2" title={STAGE_TEXT[stage]}>
         {pr.author && info.myRole !== "author" && (
           <AuthorButton login={pr.author.login} className="inline-flex items-center gap-1.5 text-xs text-fg-muted">
-            {pr.author.avatarUrl && (
-              <img src={pr.author.avatarUrl} alt="" width={18} height={18} className="rounded-full" />
-            )}
+            <Avatar login={pr.author.login} avatarUrl={pr.author.avatarUrl} size={18} />
             {pr.author.login}
           </AuthorButton>
         )}
@@ -276,7 +219,7 @@ export function UpsourceCard({
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-xs text-fg-subtle">Reviewers:</span>
             {info.participants.map((p) => (
-              <Avatar key={p.login} p={p} size={18} />
+              <ParticipantAvatar key={p.login} p={p} size={18} />
             ))}
           </div>
         ) : (
@@ -322,7 +265,6 @@ export function UpsourceTile({
   hideRepo?: boolean;
 }) {
   const info = pr.upsource;
-  const { copied, copy } = useCopy(pr.url);
   if (!info) return null;
   const stage = upsourceStage(info);
   const due = upsourceDue(info.deadline, Date.now());
@@ -357,9 +299,9 @@ export function UpsourceTile({
       </button>
 
       <div className="mt-1.5 flex items-center gap-1 text-[11px] leading-none">
-        {pr.author?.avatarUrl && (
+        {pr.author && (
           <AuthorButton login={pr.author.login} className="shrink-0">
-            <img src={pr.author.avatarUrl} alt="" width={16} height={16} className="block rounded-full" />
+            <Avatar login={pr.author.login} avatarUrl={pr.author.avatarUrl} size={16} className="flex" />
           </AuthorButton>
         )}
         <span
@@ -416,32 +358,7 @@ export function UpsourceTile({
         )}
       </div>
 
-      <div className="absolute right-1 top-1 hidden items-center gap-0.5 rounded bg-surface/90 px-0.5 group-hover:flex">
-        <button
-          type="button"
-          onClick={copy}
-          title={copied ? "Copied" : "Copy review link"}
-          aria-label="Copy review link"
-          className={cn(
-            "rounded p-0.5 hover:bg-elevated",
-            copied ? "text-emerald-600 dark:text-emerald-400" : "text-fg-faint hover:text-fg-secondary",
-          )}
-        >
-          {copied ? <CheckIcon /> : <CopyIcon />}
-        </button>
-        <button
-          type="button"
-          onClick={() => onToggleIgnore(pr)}
-          title={pr.isIgnored ? "Un-ignore (show on the dashboard)" : "Ignore (hide from the dashboard)"}
-          aria-label={pr.isIgnored ? "Un-ignore review" : "Ignore review"}
-          className={cn(
-            "rounded p-0.5 hover:bg-elevated",
-            pr.isIgnored ? "text-sky-600 dark:text-sky-400" : "text-fg-faint hover:text-fg-secondary",
-          )}
-        >
-          {pr.isIgnored ? <EyeIcon /> : <EyeOffIcon />}
-        </button>
-      </div>
+      <TileHoverActions pr={pr} noun="review" onToggleIgnore={onToggleIgnore} />
     </div>
   );
 }

@@ -92,30 +92,52 @@ export class UpsourceAuthError extends Error {}
 
 export type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
 
-const REQUEST_TIMEOUT_MS = 20_000;
+/** One call's deadline, the body included: a stalled body must not hold a poll. */
+const REQUEST_TIMEOUT_MS = 15_000;
+/** `getReviews` page size, and how many pages one read takes at most. */
+const PAGE_SIZE = 100;
+const MAX_PAGES = 5;
 
 /** One Upsource RPC call: `POST <base>/~rpc/<method>` with a JSON body. */
-async function rpc<T>(fetchFn: FetchFn, baseUrl: string, token: string, method: string, body: unknown): Promise<T> {
+async function rpc<T>(
+  fetchFn: FetchFn,
+  baseUrl: string,
+  token: string,
+  method: string,
+  body: unknown,
+  timeoutMs: number,
+): Promise<T> {
+  // The token is a Bearer credential: never over plain http. Settings refuse
+  // such an address too; this guards a hand-edited settings file.
+  if (!baseUrl.startsWith("https://")) {
+    throw new Error("Upsource address must use https: the token is not sent over plain http.");
+  }
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res: Response;
+  let text: string;
   try {
-    res = await fetchFn(`${baseUrl}/~rpc/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-  } catch (e) {
-    const reason = ctrl.signal.aborted ? "timed out" : (e as Error).message;
-    throw new Error(`Upsource is unreachable (${reason}). It is an internal server: check the VPN.`);
+    try {
+      res = await fetchFn(`${baseUrl}/~rpc/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+      if (res.status === 401 || res.status === 403) {
+        throw new UpsourceAuthError(
+          "Upsource rejected the token. Create a new one in Hub and paste it in Settings › Integrations.",
+        );
+      }
+      text = await res.text();
+    } catch (e) {
+      if (e instanceof UpsourceAuthError) throw e;
+      const reason = ctrl.signal.aborted ? "timed out" : (e as Error).message;
+      throw new Error(`Upsource is unreachable (${reason}). It is an internal server: check the VPN.`);
+    }
   } finally {
     clearTimeout(timer);
   }
-  if (res.status === 401 || res.status === 403) {
-    throw new UpsourceAuthError("Upsource rejected the token. Create a new one in Hub and paste it in Settings › Integrations.");
-  }
-  const text = await res.text();
   let json: { result?: T; error?: { message?: string } };
   try {
     json = JSON.parse(text);
@@ -128,22 +150,34 @@ async function rpc<T>(fetchFn: FetchFn, baseUrl: string, token: string, method: 
 }
 
 /** Reads your open reviews and maps them into dashboard items. */
-export async function fetchUpsourceReviews(fetchFn: FetchFn, baseUrl: string, token: string): Promise<PullRequest[]> {
-  const me = await rpc<{ userId: string; isGuestUser?: boolean }>(fetchFn, baseUrl, token, "getCurrentUser", {});
+export async function fetchUpsourceReviews(
+  fetchFn: FetchFn,
+  baseUrl: string,
+  token: string,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<PullRequest[]> {
+  const me = await rpc<{ userId: string; isGuestUser?: boolean }>(fetchFn, baseUrl, token, "getCurrentUser", {}, timeoutMs);
   // An unauthenticated call is answered as the guest, not refused: a guest
   // has no reviews of its own, so the list would silently come back empty.
   if (!me.userId || me.isGuestUser) {
     throw new UpsourceAuthError("Upsource answered as a guest: the token was not accepted.");
   }
-  const page = await rpc<{ reviews?: RawUpsourceReview[] }>(fetchFn, baseUrl, token, "getReviews", {
-    limit: 100,
-    query: UPSOURCE_REVIEWS_QUERY,
-  });
-  const reviews = page.reviews ?? [];
+  // Paged, so a long list is read whole — up to MAX_PAGES pages, which is far
+  // more open reviews than one person has.
+  const reviews: RawUpsourceReview[] = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const got = await rpc<{ reviews?: RawUpsourceReview[]; hasMore?: boolean }>(fetchFn, baseUrl, token, "getReviews", {
+      limit: PAGE_SIZE,
+      skip: page * PAGE_SIZE,
+      query: UPSOURCE_REVIEWS_QUERY,
+    }, timeoutMs);
+    reviews.push(...(got.reviews ?? []));
+    if (!got.hasMore || (got.reviews ?? []).length === 0) break;
+  }
   const ids = upsourceUserIds(reviews);
   const users = new Map<string, RawUpsourceUser>();
   if (ids.length > 0) {
-    const info = await rpc<{ infos?: RawUpsourceUser[] }>(fetchFn, baseUrl, token, "getUserInfo", { ids });
+    const info = await rpc<{ infos?: RawUpsourceUser[] }>(fetchFn, baseUrl, token, "getUserInfo", { ids }, timeoutMs);
     for (const u of info.infos ?? []) users.set(u.userId, u);
   }
   return toUpsourcePrs(reviews, users, me.userId, baseUrl);
@@ -161,6 +195,8 @@ export interface UpsourceSourceDeps {
   getToken: () => string | null;
   fetchFn?: FetchFn;
   now?: () => number;
+  /** One call's deadline; tests shorten it. */
+  timeoutMs?: number;
 }
 
 /**
@@ -209,7 +245,7 @@ export function createUpsourceSource(deps: UpsourceSourceDeps) {
     if (!force && t < nextAt) return last;
     nextAt = t + Math.max(10, settings.pollIntervalSeconds) * 1000;
     try {
-      const prs = await fetchUpsourceReviews(fetchFn, baseUrl, token);
+      const prs = await fetchUpsourceReviews(fetchFn, baseUrl, token, deps.timeoutMs);
       last = { prs, error: null, fetchedAt: new Date(t).toISOString() };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
