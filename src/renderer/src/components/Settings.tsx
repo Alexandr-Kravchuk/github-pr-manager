@@ -6,6 +6,7 @@ import type {
   ClaudeSettings,
   GhStatus,
   JiraStatus,
+  UpsourceStatus,
   NotificationEventToggles,
   NotificationSettings,
   Settings,
@@ -25,6 +26,7 @@ import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "../../../shared
 import { DEFAULT_AGENT_PROMPTS, DEFAULT_AGENT_SETTINGS } from "../../../shared/agent-defaults";
 import { DEFAULT_STALE_AFTER_DAYS, MAX_STALE_AFTER_DAYS } from "../../../shared/stale";
 import { createJiraStatusLoader } from "../../../shared/jira-status";
+import { upsourceTokenPageUrl } from "../../../shared/upsource";
 import { describeWeather } from "../../../shared/weather";
 import {
   SETTINGS_TABS,
@@ -186,6 +188,16 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [jiraToken, setJiraToken] = useState("");
   const [jira, setJira] = useState<JiraStatus | null>(null);
 
+  // Upsource: the address persists in settings; the Hub token is write-only
+  // here, like Jira's — stored encrypted in the main process, never read back.
+  const [upsourceBaseUrl, setUpsourceBaseUrl] = useState("");
+  const [upsourceToken, setUpsourceTokenDraft] = useState("");
+  const [upsource, setUpsource] = useState<UpsourceStatus | null>(null);
+  const upsourceTokenPage = upsourceTokenPageUrl(upsourceBaseUrl);
+  const loadUpsource = useCallback(() => {
+    window.api.getUpsourceStatus().then(setUpsource).catch(() => {});
+  }, []);
+
   const loadGh = useCallback(() => {
     window.api.getGhStatus().then(setGh).catch(() => {});
   }, []);
@@ -223,13 +235,15 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         );
         setJiraBaseUrl(s.jira?.baseUrl ?? "");
         setJiraEmail(s.jira?.email ?? "");
+        setUpsourceBaseUrl(s.upsource?.baseUrl ?? "");
         setLoaded(true);
       })
       .catch((e) => setError((e as Error).message));
     loadGh();
     loadJira();
+    loadUpsource();
     window.api.getWeather().then(setWeather).catch(() => {});
-  }, [loadGh, loadJira]);
+  }, [loadGh, loadJira, loadUpsource]);
 
   const updateHost = (i: number, patch: Partial<DraftHost>) =>
     setHosts((prev) => prev.map((h, j) => (j === i ? { ...h, ...patch } : h)));
@@ -269,6 +283,22 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       await window.api.setJiraToken("");
       setJiraToken("");
       loadJira();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const removeUpsourceToken = async () => {
+    setError(null);
+    try {
+      // A failed removal is reported as { ok: false }, not thrown.
+      const result = await window.api.setUpsourceToken("");
+      if (!result.ok) {
+        setError(result.error ?? "Failed to remove the Upsource token.");
+        return;
+      }
+      setUpsourceTokenDraft("");
+      loadUpsource();
     } catch (e) {
       setError((e as Error).message);
     }
@@ -314,6 +344,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         })),
         // The site turns Jira on; the email only matters to the API-token fallback.
         jira: baseUrl ? { baseUrl, ...(email ? { email } : {}) } : undefined,
+        // The address turns Upsource on; an empty one turns it off.
+        upsource: upsourceBaseUrl.trim() ? { baseUrl: upsourceBaseUrl.trim() } : undefined,
         claude: { ...claude, repoPaths: folders },
         agent,
         staleAfterDays,
@@ -329,6 +361,13 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         const t = await window.api.setJiraToken(jiraToken.trim());
         if (!t.ok) {
           setError(t.error ?? "Failed to store the Jira token.");
+          return;
+        }
+      }
+      if (upsourceToken.trim()) {
+        const t = await window.api.setUpsourceToken(upsourceToken.trim());
+        if (!t.ok) {
+          setError(t.error ?? "Failed to store the Upsource token.");
           return;
         }
       }
@@ -949,6 +988,81 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               <button
                 type="button"
                 onClick={removeJiraToken}
+                className="mt-1 shrink-0 rounded-md border border-line-strong px-2 py-1.5 text-xs text-fg-muted hover:bg-elevated hover:text-red-600 dark:hover:text-red-300"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-fg-faint">Saved with the Save button, encrypted at rest.</p>
+        </div>
+      </section>
+    ),
+    upsource: (
+      <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-fg-secondary">Upsource (optional)</h2>
+          {upsource?.hasConfig && upsource.hasToken ? (
+            <span className="text-xs text-emerald-700 dark:text-emerald-400">connected ✓</span>
+          ) : upsource?.hasConfig ? (
+            <span className="text-xs text-amber-700 dark:text-amber-400">token needed</span>
+          ) : (
+            <span className="text-xs text-fg-faint">not set up</span>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-fg-subtle">
+          Lists your open Upsource reviews — the ones you wrote and the ones you review — next to
+          the pull requests, with a host pill of their own. They group by Jira key with the PRs;
+          the PR agent and the Claude button leave them alone. Upsource is an internal server, so
+          the reviews refresh only while the VPN is up.
+        </p>
+
+        <div className="mt-3">
+          <label className={labelCls}>Server URL</label>
+          <input
+            value={upsourceBaseUrl}
+            onChange={(e) => setUpsourceBaseUrl(e.target.value)}
+            placeholder="https://upsource.example.com"
+            className={inputCls}
+          />
+        </div>
+
+        <p className="mt-3 text-xs text-fg-subtle">
+          The token is a Hub permanent token:{" "}
+          {upsourceTokenPage ? (
+            <button
+              type="button"
+              onClick={() => window.api.openExternal(upsourceTokenPage).catch(() => {})}
+              className="underline hover:text-fg-secondary"
+            >
+              your Hub profile › Authentication
+            </button>
+          ) : (
+            <span className="text-fg-muted">your Hub profile › Authentication</span>
+          )}{" "}
+          › New token, with the Upsource scope. It is stored encrypted by your OS keychain — never
+          in settings.
+        </p>
+        {upsource && !upsource.encryptionAvailable && (
+          <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
+            Your OS keychain is unavailable, so the token can&apos;t be stored securely.
+          </p>
+        )}
+        <div className="mt-3">
+          <label className={labelCls}>Hub token</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="password"
+              value={upsourceToken}
+              onChange={(e) => setUpsourceTokenDraft(e.target.value)}
+              placeholder={upsource?.hasToken ? "•••••••• stored — paste to replace" : "Paste Hub token"}
+              autoComplete="off"
+              className={inputCls}
+            />
+            {upsource?.hasToken && (
+              <button
+                type="button"
+                onClick={removeUpsourceToken}
                 className="mt-1 shrink-0 rounded-md border border-line-strong px-2 py-1.5 text-xs text-fg-muted hover:bg-elevated hover:text-red-600 dark:hover:text-red-300"
               >
                 Remove

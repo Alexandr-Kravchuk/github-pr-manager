@@ -1,4 +1,4 @@
-import { useCallback, useContext, useState } from "react";
+import { useContext } from "react";
 
 import { prSignal, type PrSignal } from "../../../shared/pr-filter";
 import { ageDays, approvalTally, primaryRole, repoShortName, reviewRank } from "../../../shared/pr-table";
@@ -12,6 +12,7 @@ import { ClaudeButton, ClaudeGlow } from "./ClaudeButton";
 import { StaleCloseButton } from "./StaleCloseDialog";
 import { StackBadge } from "./StackBadge";
 import { AgentGlyph } from "./AgentStatus";
+import { TileHoverActions } from "./card-controls";
 
 /**
  * The Compact tile: the same information architecture as `PrCard` shrunk to
@@ -96,16 +97,6 @@ function tileTooltip(pr: PullRequest, now: number): string {
 
 export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComments }: Props) {
   const basePr = useContext(BasePrContext).get(pr.id);
-  const [copied, setCopied] = useState(false);
-  const copyUrl = useCallback(() => {
-    window.api
-      .copyText(pr.url)
-      .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      })
-      .catch(() => {});
-  }, [pr.url]);
 
   const age = ageDays(pr.createdAt, Date.now());
   const failing = pr.failingChecks.length;
@@ -270,32 +261,7 @@ export function PrTile({ pr, onOpen, onToggleIgnore, hideRepo = false, trackComm
       </div>
 
       {/* Hover-only actions, in the corner so they cost no layout width. */}
-      <div className="absolute right-1 top-1 hidden items-center gap-0.5 rounded bg-surface/90 px-0.5 group-hover:flex">
-        <button
-          type="button"
-          onClick={copyUrl}
-          title={copied ? "Copied" : "Copy PR link"}
-          aria-label="Copy PR link"
-          className={cn(
-            "rounded p-0.5 hover:bg-elevated",
-            copied ? "text-emerald-600 dark:text-emerald-400" : "text-fg-faint hover:text-fg-secondary",
-          )}
-        >
-          <MiniCopyIcon done={copied} />
-        </button>
-        <button
-          type="button"
-          onClick={() => onToggleIgnore(pr)}
-          title={pr.isIgnored ? "Un-ignore (show on the dashboard)" : "Ignore (hide from the dashboard)"}
-          aria-label={pr.isIgnored ? "Un-ignore PR" : "Ignore PR"}
-          className={cn(
-            "rounded p-0.5 hover:bg-elevated",
-            pr.isIgnored ? "text-sky-600 dark:text-sky-400" : "text-fg-faint hover:text-fg-secondary",
-          )}
-        >
-          <MiniEyeIcon off={!pr.isIgnored} />
-        </button>
-      </div>
+      <TileHoverActions pr={pr} noun="PR" onToggleIgnore={onToggleIgnore} />
     </div>
   );
 }
@@ -352,40 +318,5 @@ function ReviewGlyph({ pr }: { pr: PullRequest }) {
     >
       {tally.approved}/{tally.total}
     </span>
-  );
-}
-
-function MiniCopyIcon({ done }: { done: boolean }) {
-  return (
-    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      {done ? (
-        <polyline points="20 6 9 17 4 12" />
-      ) : (
-        <>
-          <rect x="9" y="9" width="13" height="13" rx="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </>
-      )}
-    </svg>
-  );
-}
-
-function MiniEyeIcon({ off }: { off: boolean }) {
-  return (
-    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      {off ? (
-        <>
-          <path d="M9.88 9.88a3 3 0 0 0 4.24 4.24" />
-          <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
-          <path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
-          <line x1="2" y1="2" x2="22" y2="22" />
-        </>
-      ) : (
-        <>
-          <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
-          <circle cx="12" cy="12" r="3" />
-        </>
-      )}
-    </svg>
   );
 }

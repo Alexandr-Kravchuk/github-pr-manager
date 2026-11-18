@@ -42,6 +42,8 @@ import { StaleCloseContext } from "./components/stale-close-context";
 import { BasePrContext } from "./components/base-pr-context";
 import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext, CodexAvailableContext } from "./components/claude-context";
 import { WeatherBadge } from "./components/WeatherBadge";
+import { UpsourceCard, UpsourceTile } from "./components/UpsourceCard";
+import { isUpsource } from "../../shared/upsource";
 import { applyUiStyle } from "./ui-style";
 import {
   DEFAULT_TABLE_SORT,
@@ -833,6 +835,8 @@ export function App() {
   const stats = useMemo(() => baselineStats(allPrs), [allPrs]);
 
   const filtered = useMemo(() => filterPrs(allPrs, filterState), [allPrs, filterState]);
+  const boardPrs = useMemo(() => filtered.filter((p) => !isUpsource(p)), [filtered]);
+  const boardAll = useMemo(() => allPrs.filter((p) => !isUpsource(p)), [allPrs]);
 
   // Chip badges are facet counts. A source chip reports how big that source is
   // under role / host / search and the reveal gate — blind to the other sources,
@@ -1546,7 +1550,8 @@ export function App() {
       <StaleCloseContext.Provider value={setClosingPr}>
       <BasePrContext.Provider value={basePrs}>
       {viewMode === "board" ? (
-        <PrBoard prs={filtered} all={allPrs} onOpen={openPr} focus={boardFocus} onClearFilters={clearFilters} />
+        // The Board is the PR agent's work: Upsource reviews are not on it.
+        <PrBoard prs={boardPrs} all={boardAll} onOpen={openPr} focus={boardFocus} onClearFilters={clearFilters} />
       ) : viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable
@@ -1743,7 +1748,10 @@ function PrList({
           className,
         )}
       >
-        {prs.map((pr) => (
+        {prs.map((pr) =>
+          isUpsource(pr) ? (
+            <UpsourceTile key={pr.id} pr={pr} hideRepo={hideRepo} onOpen={onOpen} onToggleIgnore={onToggleIgnore} />
+          ) : (
           <PrTile
             key={pr.id}
             pr={pr}
@@ -1752,7 +1760,8 @@ function PrList({
             onOpen={onOpen}
             onToggleIgnore={onToggleIgnore}
           />
-        ))}
+          ),
+        )}
       </div>
     );
   }
@@ -1764,7 +1773,19 @@ function PrList({
         className,
       )}
     >
-      {prs.map((pr) => (
+      {prs.map((pr) =>
+        isUpsource(pr) ? (
+          <UpsourceCard
+            key={pr.id}
+            pr={pr}
+            hideRepo={hideRepo}
+            parentGroupKey={parentGroupKey}
+            jiraBaseUrl={jiraBaseUrl}
+            onOpen={onOpen}
+            onMarkSeen={onMarkSeen}
+            onToggleIgnore={onToggleIgnore}
+          />
+        ) : (
         <PrCard
           key={pr.id}
           pr={pr}
@@ -1776,7 +1797,8 @@ function PrList({
           onMarkSeen={onMarkSeen}
           onToggleIgnore={onToggleIgnore}
         />
-      ))}
+        ),
+      )}
     </div>
   );
 }

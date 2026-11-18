@@ -323,12 +323,14 @@ export const JIRA_KEY_RE = new RegExp(`^${JIRA_KEY_PATTERN}$`);
  *    "Review" and the `To review` segment), so it never reviews your own PR,
  *    a draft or one nobody asked you about; at least one.
  */
-export function groupLaunchPrs<T extends Pick<PullRequest, "isDraft" | "roles" | "myReReviewDue">>(
+export function groupLaunchPrs<T extends Pick<PullRequest, "isDraft" | "roles" | "myReReviewDue" | "source">>(
   kind: GroupLaunchKind,
   key: string,
-  prs: readonly T[],
+  all: readonly T[],
 ): T[] | null {
   if (!JIRA_KEY_RE.test(key)) return null;
+  // A Jira group can hold Upsource reviews; Claude reads GitHub PRs only.
+  const prs = all.filter((p) => p.source !== "upsource");
   const picked = kind === "explain" ? prs.filter((p) => !p.isDraft) : prs.filter(isReviewDue);
   return picked.length >= (kind === "explain" ? 2 : 1) ? picked.slice(0, MAX_GROUP_PRS) : null;
 }

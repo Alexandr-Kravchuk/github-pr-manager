@@ -429,7 +429,7 @@ Three layers:
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `jira-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
   `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`,
-  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js`, `weather.js` and `ui-style.js` stay free of `node:` builtin references, so the
+  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js`, `weather.js`, `ui-style.js` and `upsource.js` stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
@@ -658,6 +658,38 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   rather than the filtered ones, and only while the agent is on — pruning runs
   only then; their marks persist in `state.json` (`board`), so a restart logs
   what moved while the app was closed rather than every card again.
+- **Upsource reviews** (Settings › Integrations › Upsource, `Settings.upsource`)
+  join the list as items of their own: `shared/upsource.ts` (Node-free) maps
+  each open review you wrote or review into a `PullRequest` with
+  `source: "upsource"` and the review itself in `pr.upsource`, so grouping by
+  Jira key, search, the role and author filters, sorting, seen-state and
+  ignoring work on it unchanged. Its GitHub fields hold neutral values (no CI,
+  `canBeMerged` false, no stack), and the card, tile and Cozy row read
+  `pr.upsource` (`UpsourceCard.tsx`); the copy, ignore, Jira-key and avatar
+  controls both kinds of card carry live once, in `components/card-controls.tsx`.
+  `main/upsource.ts` keeps the Hub permanent token encrypted like Jira's
+  (`userData/upsource-token.enc`; a token with spaces or line breaks is refused
+  before it is stored) and is the poller's `upsource` source:
+  `getCurrentUser` (a guest answer is a refused token), `getReviews` (paged),
+  `getUserInfo` over `POST <base>/~rpc/<method>` with `Authorization: Bearer`
+  — https only, in settings and again before every call, one deadline per
+  call that covers the body and one for the whole read, and an error before
+  any answer names only its code, never the request. The source reads **in
+  the background**, one read at a time, at most once per poll interval, the
+  last list kept through a failure (the server is internal: off the VPN it is
+  unreachable). The poller never waits for it: every tick that is not parked
+  kicks it (forced on a manual refresh) and takes `current()` as it is, its
+  `nextDueAt()` counts toward the tick's wake-up (so it is read on time with
+  idle GitHub hosts or none at all), and a finished read calls
+  `rebuildSnapshot()`, which runs once more after a tick in flight rather
+  than joining it. `upsource:setToken` kicks a forced read itself — a read
+  started with the old token is dropped and the new one follows — and does
+  not wait for it (Settings closes only on its reply).
+  The host pill "Upsource" comes from `toPublicConfig` and gets a no-budget
+  reading (`resetAt` empty) for its green dot. Nothing GitHub-only may see a
+  review: the agent and every GitHub action in `main.ts` read `githubSnapshot()`
+  (`githubOnly`), the Board drops reviews, and `groupLaunchPrs` skips them, so
+  "Explain all" / "Review all" never hand Claude an Upsource link.
 - **No hook of a PR's repository runs for the agent.** A relative
   `core.hooksPath` (husky v9's `.husky/_`) resolves inside the worktree, so a
   hook there is the PR's own script. Every git command the app runs in a clone

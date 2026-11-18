@@ -16,6 +16,7 @@ import {
 import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS, PREVIOUS_DEFAULT_PROMPTS } from "./claude-launch";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "./notify";
 import { DEFAULT_STALE_AFTER_DAYS, validateStaleAfterDays } from "./stale";
+import { UPSOURCE_HOST_LABEL, normalizeUpsourceBaseUrl } from "./upsource";
 import type {
   AgentMode,
   AgentPromptKey,
@@ -25,6 +26,7 @@ import type {
   GhStatus,
   HostConfig,
   JiraSettings,
+  UpsourceSettings,
   NotificationSettings,
   PublicConfig,
   Settings,
@@ -220,6 +222,7 @@ export function validateSettings(raw: unknown): Settings {
     notifications,
     hosts,
     jira: validateJira(obj.jira),
+    upsource: validateUpsource(obj.upsource),
     claude: validateClaude(obj.claude),
     agent: validateAgent(obj.agent),
     staleAfterDays: validateStaleAfterDays(obj.staleAfterDays),
@@ -461,6 +464,23 @@ function validateJira(raw: unknown): JiraSettings | undefined {
 }
 
 /**
+ * Validates the optional Upsource connection: undefined when absent or without
+ * an address (Upsource stays off), the address normalized by
+ * `normalizeUpsourceBaseUrl` — https only, since the token is a Bearer credential.
+ */
+function validateUpsource(raw: unknown): UpsourceSettings | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const value = (raw as Record<string, unknown>).baseUrl;
+  const rawUrl = typeof value === "string" ? value.trim() : "";
+  if (!rawUrl) return undefined;
+  const baseUrl = normalizeUpsourceBaseUrl(rawUrl);
+  if (!baseUrl) {
+    throw new ConfigError(`settings: upsource.baseUrl must be an https URL (the token is never sent over http): ${rawUrl}`);
+  }
+  return { baseUrl };
+}
+
+/**
  * What `persistSettings` writes: the settings with every Claude prompt that is
  * still its default stored empty. An empty prompt reads back as the default,
  * so a later release that changes a default reaches every user who never
@@ -526,7 +546,11 @@ export function toHostConfigs(settings: Settings): HostConfig[] {
 export function toPublicConfig(settings: Settings, codexAvailable = false): PublicConfig {
   return {
     pollIntervalSeconds: settings.pollIntervalSeconds,
-    hosts: settings.hosts.map((h) => ({ label: h.label, repos: h.repos })),
+    // Upsource gets a host pill of its own, which is also its filter.
+    hosts: [
+      ...settings.hosts.map((h) => ({ label: h.label, repos: h.repos })),
+      ...(settings.upsource ? [{ label: UPSOURCE_HOST_LABEL, repos: [] }] : []),
+    ],
     trackComments: settings.trackComments,
     claudeEnabled: settings.claude.enabled,
     claudeDesktop: settings.claude.terminal === "desktop",

@@ -95,6 +95,23 @@ export function validateJiraToken(value: unknown): string {
   return value.trim();
 }
 
+/** Validates the Upsource token from `setUpsourceToken` (empty clears it). */
+export function validateUpsourceToken(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new Error("setUpsourceToken: expected a string.");
+  }
+  if (value.length > 5_000) {
+    throw new Error("setUpsourceToken: token too long.");
+  }
+  const token = value.trim();
+  // A Hub token is printable ASCII with no spaces. Anything else could not go
+  // into an Authorization header, and the failure would quote it back.
+  if (token && !/^[!-~]+$/.test(token)) {
+    throw new Error("setUpsourceToken: the token has characters a Hub token never has (spaces, line breaks).");
+  }
+  return token;
+}
+
 /** Ensures a Jira status mode is one of the known ones; absent means `cached`. */
 export function validateJiraStatusMode(value: unknown): JiraStatusMode {
   if (value === undefined || value === "cached") return "cached";

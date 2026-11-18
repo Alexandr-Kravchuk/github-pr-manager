@@ -116,6 +116,7 @@ for (const mod of [
   "weather.js",
   "ui-style.js",
   "check-groups.js",
+  "upsource.js",
 ]) {
   test(`${mod} compiles free of node: builtin references`, () => {
     const src = require("node:fs").readFileSync(
@@ -8464,7 +8465,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(ids("   "), []);
       assert.deepStrictEqual(ids("iTerm"), ["claude"]);
       assert.deepStrictEqual(ids("close tray"), ["behavior"], "the Claude 'close' prompt has no 'tray'");
-      assert.deepStrictEqual(ids("token"), ["gh", "jira"]);
+      assert.deepStrictEqual(ids("token"), ["gh", "jira", "upsource"]);
       assert.deepStrictEqual(ids("DARK"), ["appearance"]);
       assert.deepStrictEqual(ids("xyzzy"), []);
     });
@@ -8655,7 +8656,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("main.js wiring: claude:launch looks the PR up by id in the poller snapshot", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
-      assert.match(src, /"claude:launch"[\s\S]{0,300}validatePrId[\s\S]{0,200}validateClaudeKind[\s\S]{0,200}getSnapshot\(\)/);
+      assert.match(src, /"claude:launch"[\s\S]{0,300}validatePrId[\s\S]{0,200}validateClaudeKind[\s\S]{0,200}githubSnapshot\(\)/);
       assert.match(src, /"claude:launch"[\s\S]{0,400}validateInTerminal\)?\(rawInTerminal\)[\s\S]{0,800}inTerminal,?\s*\}/);
     });
 
@@ -8984,7 +8985,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("main.js wiring: claude:launchGroup validates, then reads the PRs from the snapshot", () => {
       const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
-      assert.match(src, /"claude:launchGroup"[\s\S]{0,300}validateGroupLaunchArgs[\s\S]{0,200}getSnapshot\(\)/);
+      assert.match(src, /"claude:launchGroup"[\s\S]{0,300}validateGroupLaunchArgs[\s\S]{0,300}githubSnapshot\(\)/);
     });
   }
 
@@ -14908,7 +14909,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("main.js wiring: the agent hears every snapshot, keeps hidden polling alive and stops on quit", () => {
       const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
-      assert.match(src, /agent\?\.onSnapshot\(snapshot\);\s*handleNotifications\(snapshot\.pullRequests\)/, "the agent takes its triggers before the toasts are decided");
+      assert.match(src, /agent\?\.onSnapshot\(\(0, upsource_\d\.githubOnly\)\(snapshot\)\);\s*handleNotifications\(snapshot\.pullRequests\)/, "the agent takes its triggers before the toasts are decided, and never an Upsource review");
+      assert.match(src, /getSnapshot: githubSnapshot,/, "the agent reads the snapshot without Upsource reviews");
       assert.match(src, /agentActive: \(\) => agent\?\.isActive\(\)/);
       assert.match(src, /if \(!\(0, mock_1\.isMockMode\)\(\)\) \{\s*agent = \(0, agent_1\.createAgent\)/);
       assert.match(src, /hookScript: unpackedScript\("hook\.js"\)/);
@@ -17310,6 +17312,630 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         }));
     }
   }
+  }
+
+  // --- Upsource reviews -----------------------------------------------------
+  {
+    const up = require(path.join(__dirname, "../dist/main/shared/upsource.js"));
+    const cfg = require(path.join(__dirname, "../dist/main/shared/config.js"));
+    const { hashSnapshot } = require(path.join(__dirname, "../dist/main/main/poller.js"));
+    const users = new Map([
+      ["me", { userId: "me", name: "Me", login: "me", avatarUrl: "https://u/avatar/me" }],
+      ["a", { userId: "a", name: "Alex", login: "alex", avatarUrl: "https://u/avatar/a" }],
+      ["b", { userId: "b", name: "Bea", login: "bea" }],
+    ]);
+    const review = (over) => ({
+      reviewId: { projectId: "acme", reviewId: "CR-1" },
+      title: "ENG-42 Fix the widget",
+      participants: [
+        { userId: "a", role: 1, state: 2 },
+        { userId: "me", role: 2, state: 1 },
+        { userId: "b", role: 2, state: 3 },
+      ],
+      state: 1,
+      createdAt: Date.UTC(2026, 10, 1),
+      updatedAt: Date.UTC(2026, 10, 2),
+      completionRate: { completedCount: 1, reviewersCount: 2, hasConcern: false },
+      discussionCounter: { count: 4, unresolvedCount: 1 },
+      deadline: Date.UTC(2026, 10, 20),
+      ...over,
+    });
+    const map = (reviews) => up.toUpsourcePrs(reviews, users, "me", "https://upsource.example.com");
+
+    test("upsource: a review asked of you maps to a reviewer item with neutral GitHub fields", () => {
+      const [pr] = map([review()]);
+      assert.strictEqual(pr.id, "upsource:acme/CR-1");
+      assert.strictEqual(pr.source, "upsource");
+      assert.strictEqual(pr.hostLabel, "Upsource");
+      assert.strictEqual(pr.url, "https://upsource.example.com/acme/review/CR-1");
+      assert.deepStrictEqual(pr.roles, ["reviewer"]);
+      assert.strictEqual(pr.issueKey, "ENG-42");
+      assert.strictEqual(pr.author.login, "alex");
+      assert.strictEqual(pr.canBeMerged, false);
+      assert.strictEqual(pr.ciState, "neutral");
+      assert.deepStrictEqual(pr.checks, []);
+      assert.strictEqual(pr.totalComments, 4);
+      assert.strictEqual(pr.unresolvedThreads, 1);
+      assert.deepStrictEqual(
+        pr.reviewers.map((r) => [r.login, r.reviewState]),
+        [["me", "pending"], ["bea", "approved"]],
+      );
+      assert.strictEqual(pr.upsource.myRole, "reviewer");
+      assert.strictEqual(pr.upsource.accepted, 1);
+      assert.strictEqual(pr.upsource.reviewersCount, 2);
+      assert.strictEqual(pr.upsource.deadline, new Date(Date.UTC(2026, 10, 20)).toISOString());
+      assert.strictEqual(up.upsourceStage(pr.upsource), "your-review");
+    });
+
+    test("upsource: your verdict moves a review to Reviewed; your own review is Author", () => {
+      const accepted = map([
+        review({ participants: [{ userId: "a", role: 1, state: 2 }, { userId: "me", role: 2, state: 3 }] }),
+      ])[0];
+      assert.deepStrictEqual(accepted.roles, ["reviewed"]);
+      assert.strictEqual(accepted.viewerApproved, true);
+      assert.strictEqual(up.upsourceStage(accepted.upsource), "waiting");
+      const mine = map([
+        review({
+          participants: [{ userId: "me", role: 1, state: 2 }, { userId: "b", role: 2, state: 4 }],
+          completionRate: { completedCount: 0, reviewersCount: 1, hasConcern: true },
+        }),
+      ])[0];
+      assert.deepStrictEqual(mine.roles, ["author"]);
+      assert.strictEqual(mine.hasUnaddressedChangeRequest, true);
+      assert.strictEqual(up.upsourceStage(mine.upsource), "concern");
+      const ready = map([
+        review({
+          participants: [{ userId: "me", role: 1, state: 2 }, { userId: "b", role: 2, state: 3 }],
+          completionRate: { completedCount: 1, reviewersCount: 1, hasConcern: false },
+          discussionCounter: { count: 0, unresolvedCount: 0 },
+          isReadyToClose: true,
+        }),
+      ])[0];
+      assert.strictEqual(up.upsourceStage(ready.upsource), "ready");
+    });
+
+    test("upsource: closed, removed and watch-only reviews are left out", () => {
+      assert.strictEqual(map([review({ state: 2 })]).length, 0);
+      assert.strictEqual(map([review({ isRemoved: true })]).length, 0);
+      assert.strictEqual(map([review({ participants: [{ userId: "me", role: 3, state: 2 }] })]).length, 0);
+    });
+
+    test("upsource: the review's own id is never taken for a Jira key", () => {
+      assert.strictEqual(map([review({ title: "CR-1 cleanup" })])[0].issueKey, null);
+    });
+
+    test("upsource: githubOnly drops reviews, keeps a GitHub-only snapshot as is, and memoizes", () => {
+      const gh = { id: "PR_1" };
+      const plain = { pullRequests: [gh], errors: [] };
+      assert.strictEqual(up.githubOnly(plain), plain);
+      const mixed = { pullRequests: [gh, ...map([review()])], errors: [] };
+      const out = up.githubOnly(mixed);
+      assert.deepStrictEqual(out.pullRequests, [gh]);
+      assert.strictEqual(up.githubOnly(mixed), out);
+    });
+
+    test("upsource: a Jira group's Explain all / Review all never take an Upsource review", () => {
+      const cl = require(path.join(__dirname, "../dist/main/shared/claude-launch.js"));
+      const gh = (id) => ({ id, isDraft: false, roles: ["reviewer"], myReReviewDue: false });
+      const reviewAsked = map([review()])[0];
+      assert.strictEqual(cl.groupLaunchPrs("explain", "ENG-42", [gh("PR_1"), reviewAsked]), null, "one PR is not a group");
+      assert.deepStrictEqual(cl.groupLaunchPrs("review", "ENG-42", [gh("PR_1"), reviewAsked]).map((p) => p.id), ["PR_1"]);
+      assert.strictEqual(cl.groupLaunchPrs("review", "ENG-42", [reviewAsked]), null);
+    });
+
+    test("upsource: settings normalize the address and give Upsource a host pill", () => {
+      const s = cfg.validateSettings({ hosts: [], upsource: { baseUrl: "upsource.example.com/acme" } });
+      assert.deepStrictEqual(s.upsource, { baseUrl: "https://upsource.example.com/acme" }, "a path prefix is kept");
+      assert.strictEqual(cfg.validateSettings({ hosts: [], upsource: { baseUrl: " " } }).upsource, undefined);
+      assert.deepStrictEqual(cfg.toPublicConfig(s).hosts, [{ label: "Upsource", repos: [] }]);
+      assert.deepStrictEqual(cfg.toPublicConfig(cfg.validateSettings({ hosts: [] })).hosts, []);
+    });
+
+    test("upsource: a reviewer accepting re-emits the snapshot", () => {
+      const a = map([review()]);
+      const b = map([review({ completionRate: { completedCount: 2, reviewersCount: 2, hasConcern: false } })]);
+      const snap = (prs) => ({ pullRequests: prs, errors: [], rateLimits: [], fetchedAt: "", version: "t" });
+      assert.notStrictEqual(hashSnapshot(snap(a)), hashSnapshot(snap(b)));
+    });
+
+    // The source, against a fake Electron (no keychain) and a fake server.
+    const upJs = path.join(__dirname, "../dist/main/main/upsource.js");
+    const upElPath = require.resolve("electron", { paths: [path.dirname(upJs)] });
+    require.cache[upElPath] = {
+      id: upElPath,
+      filename: upElPath,
+      loaded: true,
+      exports: { app: { getPath: () => os.tmpdir() }, safeStorage: { isEncryptionAvailable: () => false } },
+    };
+    delete require.cache[upJs];
+    const upMain = require(upJs);
+    delete require.cache[upElPath];
+    delete require.cache[upJs];
+
+    const server = (behaviour) => {
+      const calls = [];
+      const fetchFn = async (url, init) => {
+        const method = url.split("/~rpc/")[1];
+        calls.push({ method, auth: init.headers.Authorization, body: JSON.parse(init.body) });
+        const r = behaviour(method);
+        if (r instanceof Error) throw r;
+        const status = r.status ?? 200;
+        return { ok: status < 400, status, text: async () => JSON.stringify(r.body) };
+      };
+      return { calls, fetchFn };
+    };
+    const ok = (method) =>
+      method === "getCurrentUser"
+        ? { body: { result: { userId: "me" } } }
+        : method === "getReviews"
+          ? { body: { result: { reviews: [review()] } } }
+          : { body: { result: { infos: [...users.values()] } } };
+    const settingsWith = (upsource) => () => ({ pollIntervalSeconds: 60, upsource });
+    const readerParts = (deps) => upMain.createUpsourceSource(deps);
+    // One read as the old source did it: kick, wait for it, take the result.
+    const readerOf = (deps) => {
+      const src = readerParts(deps);
+      return async (force) => {
+        src.kick(force);
+        await src.idle();
+        return src.current();
+      };
+    };
+
+    await atest("upsource source: reads reviews with the Bearer token, then waits for the interval", async () => {
+      let t = 1_000_000;
+      const s = server(ok);
+      const read = readerOf({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "perm:abc",
+        fetchFn: s.fetchFn,
+        now: () => t,
+      });
+      const first = await read(false);
+      assert.strictEqual(first.error, null);
+      assert.strictEqual(first.fetchedAt, new Date(1_000_000).toISOString(), "the host pill shows when it was read");
+      assert.deepStrictEqual(first.prs.map((p) => p.id), ["upsource:acme/CR-1"]);
+      assert.deepStrictEqual(s.calls.map((c) => c.method), ["getCurrentUser", "getReviews", "getUserInfo"]);
+      assert.ok(s.calls.every((c) => c.auth === "Bearer perm:abc"));
+      assert.strictEqual(s.calls[1].body.query, up.UPSOURCE_REVIEWS_QUERY);
+      t += 30_000;
+      await read(false);
+      assert.strictEqual(s.calls.length, 3, "inside the interval nothing is read");
+      await read(true);
+      assert.strictEqual(s.calls.length, 6, "a forced refresh reads at once");
+    });
+
+    await atest("upsource source: off the VPN keeps the last list; a refused token clears it", async () => {
+      let mode = "ok";
+      const s = server((m) =>
+        mode === "down" ? new Error("ECONNREFUSED") : mode === "denied" ? { status: 401, body: {} } : ok(m),
+      );
+      const read = readerOf({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      await read(false);
+      mode = "down";
+      const down = await read(true);
+      assert.strictEqual(down.prs.length, 1);
+      assert.match(down.error.message, /VPN/);
+      assert.strictEqual(down.error.hostLabel, "Upsource");
+      mode = "denied";
+      const denied = await read(true);
+      assert.strictEqual(denied.prs.length, 0);
+      assert.match(denied.error.message, /rejected the token/);
+    });
+
+    await atest("upsource source: a guest answer is a refused token, not an empty list", async () => {
+      const s = server((m) =>
+        m === "getCurrentUser" ? { body: { result: { userId: "guest", isGuestUser: true } } } : ok(m),
+      );
+      const read = readerOf({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      const r = await read(true);
+      assert.match(r.error.message, /guest/);
+      assert.strictEqual(s.calls.length, 1);
+    });
+
+    await atest("upsource source: nothing is read or reported while Upsource is off", async () => {
+      const s = server(ok);
+      const read = readerOf({
+        loadSettings: settingsWith(undefined),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      assert.deepStrictEqual(await read(true), { prs: [], error: null, fetchedAt: null });
+      const noToken = readerOf({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => null,
+        fetchFn: s.fetchFn,
+      });
+      assert.match((await noToken(true)).error.message, /No Upsource token/);
+      assert.strictEqual(s.calls.length, 0);
+    });
+
+    test("upsource: the address must be https; a path prefix is kept, slashes, query and hash dropped", () => {
+      assert.strictEqual(up.normalizeUpsourceBaseUrl("upsource.example.com"), "https://upsource.example.com");
+      assert.strictEqual(up.normalizeUpsourceBaseUrl("https://tools.example.com/upsource/?x=1#y"), "https://tools.example.com/upsource");
+      assert.strictEqual(up.normalizeUpsourceBaseUrl("http://upsource.example.com"), null, "a Bearer token never goes over http");
+      assert.strictEqual(up.normalizeUpsourceBaseUrl("ftp://upsource.example.com"), null);
+      assert.throws(() => cfg.validateSettings({ hosts: [], upsource: { baseUrl: "http://upsource.example.com" } }), /https/);
+      assert.strictEqual(
+        up.upsourceTokenPageUrl("tools.example.com/upsource/"),
+        "https://tools.example.com/upsource/hub/users/me?tab=authentification",
+      );
+      assert.strictEqual(up.upsourceTokenPageUrl("http://x.example.com"), null);
+    });
+
+    test("upsource: a Jira key after the review's own id is still found", () => {
+      assert.strictEqual(map([review({ title: "TSCR-1 ENG-42 Fix", reviewId: { projectId: "acme", reviewId: "TSCR-1" } })])[0].issueKey, "ENG-42");
+    });
+
+    await atest("upsource source: a new token or server re-reads at once with it and drops the old list", async () => {
+      let token = "first";
+      const s = server(ok);
+      const read = readerOf({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => token,
+        fetchFn: s.fetchFn,
+        now: () => 5_000,
+      });
+      await read(false);
+      token = "second";
+      await read(false);
+      assert.strictEqual(s.calls.length, 6, "inside the interval, yet read again");
+      assert.ok(s.calls.slice(3).every((c) => c.auth === "Bearer second"));
+    });
+
+    await atest("upsource source: 403 clears the list; an error or non-JSON answer keeps it and says why", async () => {
+      let mode = "ok";
+      const s = server((m) =>
+        mode === "forbidden"
+          ? { status: 403, body: {} }
+          : mode === "rpc-error"
+            ? { body: { error: { message: "Bad query" } } }
+            : mode === "html"
+              ? { status: 502, body: "<html>" }
+              : ok(m),
+      );
+      const read = readerOf({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      await read(true);
+      mode = "rpc-error";
+      const err = await read(true);
+      assert.strictEqual(err.prs.length, 1);
+      assert.match(err.error.message, /Bad query/);
+      mode = "html";
+      const html = await read(true);
+      assert.strictEqual(html.prs.length, 1);
+      assert.match(html.error.message, /HTTP 502/);
+      mode = "forbidden";
+      const denied = await read(true);
+      assert.strictEqual(denied.prs.length, 0);
+      assert.match(denied.error.message, /rejected the token/);
+    });
+
+    await atest("upsource source: a body that stalls after the headers times out instead of holding the poll", async () => {
+      const fetchFn = async (url, init) => ({
+        ok: true,
+        status: 200,
+        text: () =>
+          new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")))),
+      });
+      const read = readerOf({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn,
+        timeoutMs: 30,
+      });
+      const r = await read(true);
+      assert.match(r.error.message, /timed out/);
+    });
+
+    await atest("upsource source: never sends the token over http, even from a hand-edited settings file", async () => {
+      const s = server(ok);
+      const read = readerOf({
+        loadSettings: settingsWith({ baseUrl: "http://u.example" }),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      assert.match((await read(true)).error.message, /https/);
+      assert.strictEqual(s.calls.length, 0);
+    });
+
+    await atest("upsource source: pages through getReviews while Upsource says there is more", async () => {
+      const second = review({ reviewId: { projectId: "acme", reviewId: "CR-2" } });
+      const s = server((m) => {
+        if (m !== "getReviews") return ok(m);
+        const n = s.calls.filter((c) => c.method === "getReviews").length;
+        return n === 1
+          ? { body: { result: { reviews: [review()], hasMore: true } } }
+          : { body: { result: { reviews: [second], hasMore: false } } };
+      });
+      const read = readerOf({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: s.fetchFn,
+      });
+      const r = await read(true);
+      assert.deepStrictEqual(r.prs.map((p) => p.upsource.reviewId), ["CR-1", "CR-2"]);
+      assert.deepStrictEqual(
+        s.calls.filter((c) => c.method === "getReviews").map((c) => c.body.skip),
+        [0, 100],
+      );
+    });
+
+    await atest("Poller: Upsource reviews and their error join the snapshot; the pill gets a no-budget reading", async () => {
+      const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
+      const snapshots = [];
+      let result = { prs: map([review()]), error: null, fetchedAt: "2026-11-18T10:00:00.000Z" };
+      const kicks = [];
+      const p = new poller.Poller({
+        loadSettings: () => ({ pollIntervalSeconds: 60, hosts: [], trackComments: true }),
+        toHostConfigs: () => [],
+        statePath: path.join(os.tmpdir(), "prd-upsource-state-missing.json"),
+        ignoredStatePath: path.join(os.tmpdir(), "prd-upsource-ignored-missing.json"),
+        appVersion: "test",
+        onSnapshot: (s) => snapshots.push(s),
+        onConfigError: () => {},
+        upsource: { current: () => result, kick: (f) => kicks.push(f), nextDueAt: () => null, idle: async () => {} },
+      });
+      await p.refresh();
+      const s = snapshots.at(-1);
+      assert.deepStrictEqual(kicks, [true], "a manual refresh kicks a forced read");
+      assert.deepStrictEqual(s.pullRequests.map((x) => x.id), ["upsource:acme/CR-1"]);
+      assert.deepStrictEqual(s.rateLimits, [
+        { hostLabel: "Upsource", remaining: 0, cost: 0, resetAt: "", fetchedAt: "2026-11-18T10:00:00.000Z" },
+      ]);
+      result = { ...result, error: { hostLabel: "Upsource", message: "Upsource is unreachable" } };
+      await p.refresh();
+      assert.deepStrictEqual(snapshots.at(-1).errors, [{ hostLabel: "Upsource", message: "Upsource is unreachable" }]);
+      assert.strictEqual(snapshots.at(-1).pullRequests.length, 1, "the last list stays");
+      p.stop();
+    });
+
+    await atest("Poller: a hanging Upsource read never holds back the GitHub snapshot", async () => {
+      const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
+      const snapshots = [];
+      // The source behind it never finishes a read; the tick must not wait.
+      const source = readerParts({
+        loadSettings: () => ({ pollIntervalSeconds: 60, upsource: { baseUrl: "https://u.example" } }),
+        getToken: () => "tok",
+        fetchFn: () => new Promise(() => {}),
+      });
+      const gh = { id: "PR_gh", hostLabel: "GitHub", roles: ["author"], updatedAt: "2026-11-18T09:00:00Z", totalComments: 0, unresolvedThreads: 0, failingChecks: [], pendingChecks: [], checks: [], reviewers: [], createdAt: "2026-11-01T00:00:00Z", lastCommitPushedAt: null };
+      const p = new poller.Poller({
+        loadSettings: () => ({ pollIntervalSeconds: 60, hosts: [], trackComments: true }),
+        toHostConfigs: () => [{ label: "GitHub", graphqlUrl: "https://api.example/graphql", repos: [], token: "t" }],
+        fetchHostFn: async () => ({ pullRequests: [gh], rateLimit: null }),
+        probeNotificationsFn: async () => ({ status: "unavailable", changed: false, pollIntervalMs: 60000 }),
+        statePath: path.join(os.tmpdir(), "prd-upsource-state-missing.json"),
+        ignoredStatePath: path.join(os.tmpdir(), "prd-upsource-ignored-missing.json"),
+        appVersion: "test",
+        onSnapshot: (s) => snapshots.push(s),
+        onConfigError: () => {},
+        upsource: source,
+      });
+      const done = await Promise.race([p.refresh().then(() => "done"), new Promise((r) => setTimeout(() => r("stuck"), 2000))]);
+      assert.strictEqual(done, "done");
+      assert.deepStrictEqual(snapshots.at(-1).pullRequests.map((x) => x.id), ["PR_gh"]);
+      p.stop();
+    });
+
+    await atest("Poller: a finished Upsource read builds the snapshot again, also when it lands during a tick", async () => {
+      const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
+      const snapshots = [];
+      let release;
+      const gate = new Promise((r) => (release = r));
+      let reads = 0;
+      let p;
+      const source = readerParts({
+        loadSettings: () => ({ pollIntervalSeconds: 60, upsource: { baseUrl: "https://u.example" } }),
+        getToken: () => "tok",
+        onUpdate: () => p.rebuildSnapshot(),
+        fetchFn: async (url, init) => {
+          if (url.endsWith("getCurrentUser")) {
+            reads++;
+            await gate;
+          }
+          const method = url.split("/~rpc/")[1];
+          return { ok: true, status: 200, text: async () => JSON.stringify(ok(method).body) };
+        },
+      });
+      p = new poller.Poller({
+        loadSettings: () => ({ pollIntervalSeconds: 60, hosts: [], trackComments: true }),
+        toHostConfigs: () => [],
+        statePath: path.join(os.tmpdir(), "prd-upsource-state-missing.json"),
+        ignoredStatePath: path.join(os.tmpdir(), "prd-upsource-ignored-missing.json"),
+        appVersion: "test",
+        onSnapshot: (s) => snapshots.push(s),
+        onConfigError: () => {},
+        upsource: source,
+      });
+      await p.refresh();
+      assert.strictEqual(snapshots.at(-1).pullRequests.length, 0, "the first tick does not wait for the read");
+      release();
+      await source.idle();
+      for (let i = 0; i < 50 && snapshots.at(-1).pullRequests.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+      assert.deepStrictEqual(snapshots.at(-1).pullRequests.map((x) => x.id), ["upsource:acme/CR-1"]);
+      assert.strictEqual(reads, 1);
+      p.stop();
+    });
+
+    await atest("Poller: with no GitHub host, the next wake is Upsource's own read, not a skipped recheck", async () => {
+      const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
+      const kicks = [];
+      let dueAt = Date.now() + 15_000;
+      const p = new poller.Poller({
+        loadSettings: () => ({ pollIntervalSeconds: 600, hosts: [], trackComments: true }),
+        toHostConfigs: () => [],
+        statePath: path.join(os.tmpdir(), "prd-upsource-state-missing.json"),
+        ignoredStatePath: path.join(os.tmpdir(), "prd-upsource-ignored-missing.json"),
+        appVersion: "test",
+        onSnapshot: () => {},
+        onConfigError: () => {},
+        upsource: { current: () => ({ prs: [], error: null, fetchedAt: null }), kick: (f) => kicks.push(f), nextDueAt: () => dueAt, idle: async () => {} },
+      });
+      await p.refresh();
+      // A recheck tick with nothing due still kicks Upsource and wakes for it.
+      const wake = await p["tick"](false, false);
+      assert.deepStrictEqual(kicks, [true, false]);
+      assert.ok(wake <= 15_000 && wake >= 10_000, `woke in ${wake} ms, not after the 600 s interval`);
+      p.stop();
+    });
+
+    await atest("Poller: an Upsource review gets New comments, is cleared by Mark as seen, and can be ignored", async () => {
+      const poller = require(path.join(__dirname, "../dist/main/main/poller.js"));
+      const stateMod = require(path.join(__dirname, "../dist/main/shared/state.js"));
+      const ignoredMod = require(path.join(__dirname, "../dist/main/shared/ignored.js"));
+      const dir = require("node:fs").mkdtempSync(path.join(os.tmpdir(), "prd-upsource-seen-"));
+      const statePath = path.join(dir, "state.json");
+      const ignoredStatePath = path.join(dir, "ignored.json");
+      let count = 1;
+      const snapshots = [];
+      const p = new poller.Poller({
+        loadSettings: () => ({ pollIntervalSeconds: 60, hosts: [], trackComments: true }),
+        toHostConfigs: () => [],
+        statePath,
+        ignoredStatePath,
+        appVersion: "test",
+        onSnapshot: (s) => snapshots.push(s),
+        onConfigError: () => {},
+        upsource: {
+          current: () => ({ prs: map([review({ discussionCounter: { count, unresolvedCount: 0 } })]), error: null, fetchedAt: null }),
+          kick: () => {},
+          nextDueAt: () => null,
+          idle: async () => {},
+        },
+      });
+      const id = "upsource:acme/CR-1";
+      const item = () => snapshots.at(-1).pullRequests.find((x) => x.id === id);
+      try {
+        await p.refresh();
+        assert.strictEqual(item().hasNewActivity, false, "the first sighting is the baseline");
+        count = 3;
+        await p.refresh();
+        assert.strictEqual(item().hasNewActivity, true, "two more discussions are new comments");
+        const seen = item();
+        await stateMod.markSeen([{ id, comments: seen.totalComments, updatedAt: seen.updatedAt, lastCommitPushedAt: null }], statePath, { trackComments: true });
+        await p.refresh();
+        assert.strictEqual(item().hasNewActivity, false, "Mark as seen clears it");
+        await ignoredMod.setIgnored(id, true, ignoredStatePath);
+        await p.refresh();
+        assert.strictEqual(item().isIgnored, true);
+      } finally {
+        p.stop();
+        require("node:fs").rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    await atest("upsource source: a token saved during a read is read with right after it; the old read is dropped", async () => {
+      let token = "old";
+      let releaseOld;
+      const oldGate = new Promise((r) => (releaseOld = r));
+      const seen = [];
+      const src = readerParts({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => token,
+        fetchFn: async (url, init) => {
+          const method = url.split("/~rpc/")[1];
+          if (method === "getCurrentUser") {
+            seen.push(init.headers.Authorization);
+            if (init.headers.Authorization === "Bearer old") await oldGate;
+          }
+          return { ok: true, status: 200, text: async () => JSON.stringify(ok(method).body) };
+        },
+      });
+      src.kick(false);
+      token = "new";
+      src.kick(true);
+      releaseOld();
+      await src.idle();
+      assert.deepStrictEqual(seen, ["Bearer old", "Bearer new"]);
+      assert.strictEqual(src.current().prs.length, 1);
+      assert.strictEqual(src.current().error, null);
+    });
+
+    await atest("upsource source: a removed token shows at once, with no read", async () => {
+      let token = "tok";
+      const s = server(ok);
+      const src = readerParts({ loadSettings: settingsWith({ baseUrl: "https://u.example" }), getToken: () => token, fetchFn: s.fetchFn });
+      src.kick(true);
+      await src.idle();
+      token = null;
+      assert.match(src.current().error.message, /No Upsource token/);
+      assert.strictEqual(src.nextDueAt(), src.nextDueAt());
+      src.kick(true);
+      assert.strictEqual(s.calls.length, 3, "nothing is read without a token");
+    });
+
+    await atest("upsource source: one read has one deadline for all its calls", async () => {
+      const s = server((m) => (m === "getReviews" ? { body: { result: { reviews: [review()], hasMore: true } } } : ok(m)));
+      const slow = async (url, init) => {
+        await new Promise((r) => setTimeout(r, 20));
+        return s.fetchFn(url, init);
+      };
+      const src = readerParts({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: slow,
+        timeoutMs: 1000,
+        deadlineMs: 50,
+      });
+      src.kick(true);
+      await src.idle();
+      assert.match(src.current().error.message, /timed out/);
+      assert.ok(s.calls.length < 7, `stopped after ${s.calls.length} calls`);
+    });
+
+    await atest("upsource source: an error before any answer never quotes the request", async () => {
+      const leaky = Object.assign(new TypeError("Headers.append: \"Bearer secret\\nX\" is an invalid header value."), {});
+      const src = readerParts({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: async () => {
+          throw leaky;
+        },
+      });
+      src.kick(true);
+      await src.idle();
+      assert.doesNotMatch(src.current().error.message, /secret/);
+      const coded = readerParts({
+        loadSettings: settingsWith({ baseUrl: "https://u.example" }),
+        getToken: () => "tok",
+        fetchFn: async () => {
+          throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } });
+        },
+      });
+      coded.kick(true);
+      await coded.idle();
+      assert.match(coded.current().error.message, /ENOTFOUND/);
+    });
+
+    test("ipc: an Upsource token with spaces or line breaks is refused before it is stored", () => {
+      const v = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
+      assert.strictEqual(v.validateUpsourceToken("  perm:abc.DEF-123  "), "perm:abc.DEF-123");
+      assert.strictEqual(v.validateUpsourceToken(""), "");
+      assert.throws(() => v.validateUpsourceToken("perm:abc\ndef"), /never has/);
+      assert.throws(() => v.validateUpsourceToken("perm abc"), /never has/);
+    });
+
+    test("main.js wiring: closing a stale PR looks only at GitHub PRs; a token save reads in the background", () => {
+      const src = require("node:fs").readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+      assert.match(src, /const snapshotPr = \(id\) => githubSnapshot\(\)/);
+      const handler = src.slice(src.indexOf('"upsource:setToken"'), src.indexOf("return result;", src.indexOf('"upsource:setToken"')));
+      assert.match(handler, /upsourceSource\?\.kick\(true\)/);
+      assert.match(handler, /poller\?\.rebuildSnapshot\(\)/);
+      assert.doesNotMatch(handler, /await /, "Settings closes only on this reply");
+      assert.match(src, /onUpdate: \(\) => poller\?\.rebuildSnapshot\(\)/);
+    });
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
