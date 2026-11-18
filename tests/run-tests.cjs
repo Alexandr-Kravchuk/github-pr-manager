@@ -17047,6 +17047,147 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
   }
 
+  // --- auto-update status: an error after a download began reaches the window --
+  // updater.ts imports electron and electron-updater, so the compiled module is
+  // loaded fresh per case with both faked in the require cache; the fake
+  // autoUpdater keeps the handlers so each case fires the events itself.
+  {
+    const fsSync = require("node:fs");
+    const updaterJs = path.join(__dirname, "../dist/main/main/updater.js");
+    const resolveFrom = (id) => require.resolve(id, { paths: [path.dirname(updaterJs)] });
+    const loadUpdater = (userData) => {
+      const handlers = {};
+      const fakes = {
+        electron: { app: { isPackaged: true, getPath: () => userData } },
+        "electron-updater": {
+          autoUpdater: {
+            on: (event, fn) => (handlers[event] = fn),
+            checkForUpdates: () => Promise.resolve(),
+            quitAndInstall: () => {},
+          },
+        },
+      };
+      const saved = {};
+      for (const [id, exports] of Object.entries(fakes)) {
+        const p = resolveFrom(id);
+        saved[p] = require.cache[p];
+        require.cache[p] = { id: p, filename: p, loaded: true, exports };
+      }
+      delete require.cache[require.resolve(updaterJs)];
+      const mod = require(updaterJs);
+      const restore = () => {
+        delete require.cache[require.resolve(updaterJs)];
+        for (const [p, had] of Object.entries(saved)) {
+          if (had) require.cache[p] = had;
+          else delete require.cache[p];
+        }
+      };
+      return { mod, handlers, restore };
+    };
+    const withUpdater = (fn, userData) => {
+      const dir = userData ?? fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-updater-"));
+      const statuses = [];
+      const { mod, handlers, restore } = loadUpdater(dir);
+      const quiet = console.error;
+      console.error = () => {};
+      // initAutoUpdater wires nothing while it is set, so a shell that sets it
+      // would turn every case below into a TypeError.
+      const disabled = process.env.PRD_DISABLE_UPDATER;
+      delete process.env.PRD_DISABLE_UPDATER;
+      try {
+        mod.initAutoUpdater((s) => statuses.push(s));
+        fn({ mod, handlers, statuses, dir });
+      } finally {
+        if (disabled !== undefined) process.env.PRD_DISABLE_UPDATER = disabled;
+        console.error = quiet;
+        restore();
+        if (!userData) fsSync.rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    test("updater: a failed check with no download in flight shows nothing but is logged", () =>
+      withUpdater(({ handlers, statuses, dir }) => {
+        handlers.error(new Error("net::ERR_INTERNET_DISCONNECTED"));
+        assert.deepStrictEqual(statuses, []);
+        const log = fsSync.readFileSync(path.join(dir, "updater.log"), "utf8");
+        assert.match(log, /ERR_INTERNET_DISCONNECTED/);
+      }));
+
+    test("updater: an error after a download began replaces 'Downloading… 100%' with one short line", () =>
+      withUpdater(({ handlers, statuses }) => {
+        handlers["update-available"]({ version: "3.4.0" });
+        handlers["download-progress"]({ percent: 100 });
+        handlers.error(new Error(`${"x".repeat(250)}\nsecond line`));
+        assert.deepStrictEqual(statuses.at(-1), { state: "error", message: "x".repeat(200) });
+      }));
+
+    test("updater: the error pill does not come back on a later failed check, and up-to-date clears it", () =>
+      withUpdater(({ handlers, statuses }) => {
+        handlers["update-available"]({ version: "3.4.0" });
+        handlers.error(new Error("signature check failed"));
+        const shown = statuses.length;
+        handlers.error(new Error("offline"));
+        assert.strictEqual(statuses.length, shown);
+        handlers["update-not-available"]();
+        assert.deepStrictEqual(statuses.at(-1), { state: "idle" });
+      }));
+
+    test("updater: turning auto-update off clears the status, since nothing will check again", () =>
+      withUpdater(({ mod, handlers, statuses }) => {
+        handlers["update-available"]({ version: "3.4.0" });
+        handlers.error(new Error("signature check failed"));
+        mod.setAutoUpdateEnabled(false);
+        assert.deepStrictEqual(statuses.at(-1), { state: "idle" });
+      }));
+
+    test("updater: an error in the restart window after a download keeps 'Restarting to install'", () => {
+      // update-downloaded schedules quitAndInstall in 3 s; keep that timer out.
+      const realSetTimeout = global.setTimeout;
+      global.setTimeout = () => 0;
+      try {
+        withUpdater(({ handlers, statuses }) => {
+          handlers["update-available"]({ version: "3.4.0" });
+          handlers["update-downloaded"]({ version: "3.4.0" });
+          handlers.error(new Error("offline"));
+          assert.deepStrictEqual(statuses.at(-1), { state: "downloaded", version: "3.4.0" });
+        });
+      } finally {
+        global.setTimeout = realSetTimeout;
+      }
+    });
+
+    test("updater: saving settings with auto-update off pushes nothing unless an error pill is up", () =>
+      withUpdater(({ mod, handlers, statuses }) => {
+        handlers["update-available"]({ version: "3.4.0" });
+        handlers["download-progress"]({ percent: 40 });
+        const before = statuses.length;
+        mod.setAutoUpdateEnabled(false);
+        mod.setAutoUpdateEnabled(false);
+        assert.strictEqual(statuses.length, before);
+      }));
+
+    test("updater: the log starts over once it passes 1 MB", () =>
+      withUpdater(({ handlers, dir }) => {
+        const log = path.join(dir, "updater.log");
+        fsSync.writeFileSync(log, "x".repeat(1024 * 1024 + 1));
+        handlers.error(new Error("fresh line"));
+        const text = fsSync.readFileSync(log, "utf8");
+        assert.ok(text.length < 10_000);
+        assert.match(text, /fresh line/);
+        handlers.error(new Error("second line"));
+        assert.match(fsSync.readFileSync(log, "utf8"), /fresh line[\s\S]*second line/);
+      }));
+
+    test("updater: an unwritable log still lets the error reach the window", () => {
+      const missing = path.join(os.tmpdir(), `prd-updater-missing-${process.pid}`, "nested");
+      withUpdater(({ handlers, statuses }) => {
+        handlers["update-available"]({ version: "3.4.0" });
+        handlers.error(new Error("boom"));
+        assert.deepStrictEqual(statuses.at(-1), { state: "error", message: "boom" });
+      }, missing);
+    });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();

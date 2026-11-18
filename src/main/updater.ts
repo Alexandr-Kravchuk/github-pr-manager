@@ -1,3 +1,6 @@
+import { appendFileSync, existsSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { app } from "electron";
 import { autoUpdater } from "electron-updater";
 
@@ -15,12 +18,33 @@ let initialized = false; // handlers wired (packaged builds only)
 let initialTimer: NodeJS.Timeout | null = null;
 let intervalTimer: NodeJS.Timeout | null = null;
 let autoUpdateEnabled = false; // mirrors the user's auto-update setting
-let downloadingVersion = ""; // set on update-available, read by download-progress
+// The version being downloaded right now: set on update-available, cleared when
+// that download ends either way. Only an error while it is set is shown — a
+// failed periodic check (offline) is not news.
+let downloadingVersion = "";
+let pushStatus: ((status: UpdateStatus) => void) | null = null;
+let errorShown = false; // an "Update failed" pill is on screen
+
+const LOG_MAX_BYTES = 1024 * 1024;
 
 function check(): void {
   autoUpdater
     .checkForUpdates()
     .catch((e) => console.error("[updater] check failed:", e?.message ?? e));
+}
+
+/** Appends one updater error to userData/updater.log; best-effort. */
+function logError(err: unknown): void {
+  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  try {
+    const file = join(app.getPath("userData"), "updater.log");
+    // A machine that is offline for weeks fails every check: start over past
+    // 1 MB rather than grow without end.
+    const tooBig = existsSync(file) && statSync(file).size > LOG_MAX_BYTES;
+    (tooBig ? writeFileSync : appendFileSync)(file, `${new Date().toISOString()} ${detail}\n`);
+  } catch {
+    // the console line above is still there
+  }
 }
 
 /**
@@ -42,27 +66,40 @@ export function initAutoUpdater(onStatus: (status: UpdateStatus) => void): void 
   if (initialized) return;
   if (!app.isPackaged || process.env.PRD_DISABLE_UPDATER) return;
   initialized = true;
+  const push = (status: UpdateStatus): void => {
+    errorShown = status.state === "error";
+    onStatus(status);
+  };
+  pushStatus = push;
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on("error", (err) => {
     console.error("[updater] error:", err?.message ?? err);
+    logError(err);
+    if (!downloadingVersion) return;
+    downloadingVersion = "";
+    const message = String(err?.message ?? err).split("\n")[0].slice(0, 200);
+    push({ state: "error", message });
   });
   autoUpdater.on("update-available", (info) => {
     console.log("[updater] update available:", info.version);
     downloadingVersion = info.version;
-    onStatus({ state: "downloading", version: info.version, percent: 0 });
+    push({ state: "downloading", version: info.version, percent: 0 });
   });
   autoUpdater.on("download-progress", (progress) => {
-    onStatus({ state: "downloading", version: downloadingVersion, percent: Math.round(progress.percent) });
+    push({ state: "downloading", version: downloadingVersion, percent: Math.round(progress.percent) });
   });
   autoUpdater.on("update-not-available", () => {
     console.log("[updater] up to date");
+    // Clears an error pill left by an earlier attempt.
+    push({ state: "idle" });
   });
   autoUpdater.on("update-downloaded", (info) => {
     console.log("[updater] v%s downloaded — restarting to apply", info.version);
-    onStatus({ state: "downloaded", version: info.version });
+    downloadingVersion = "";
+    push({ state: "downloaded", version: info.version });
     setTimeout(() => autoUpdater.quitAndInstall(), 3_000);
   });
 }
@@ -87,5 +124,9 @@ export function setAutoUpdateEnabled(enabled: boolean): void {
       clearInterval(intervalTimer);
       intervalTimer = null;
     }
+    // Nothing will check again, so an error pill would never go away. Only
+    // then: this runs on every settings save, and an idle mid-download would
+    // blink the progress pill until the next progress event.
+    if (errorShown) pushStatus?.({ state: "idle" });
   }
 }

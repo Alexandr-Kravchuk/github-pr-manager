@@ -1675,6 +1675,13 @@ export function App() {
         {updateStatus?.state === "downloaded" && (
           <span className={FLOATING_PILL}>Restarting to install v{updateStatus.version}…</span>
         )}
+        {updateStatus?.state === "error" && (
+          // pointer-events-auto: the row is click-through, and a span that
+          // gets no hover never shows its title — the only place the reason is.
+          <span className={`${FLOATING_PILL} pointer-events-auto cursor-help`} title={updateStatus.message}>
+            Update failed
+          </span>
+        )}
         {/* The What's new button already names the version, so the bare one
             shows only without it. */}
         {data?.version && !whatsNew && <span className={FLOATING_PILL}>v{data.version}</span>}

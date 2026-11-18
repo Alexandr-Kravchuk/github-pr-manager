@@ -1372,4 +1372,9 @@ export interface PrManagerApi {
 /** Auto-update lifecycle, pushed from main as electron-updater progresses. */
 export type UpdateStatus =
   | { state: "downloading"; version: string; percent: number }
-  | { state: "downloaded"; version: string };
+  | { state: "downloaded"; version: string }
+  // The updater failed after it started (e.g. the download's signature check
+  // failed): without this the pill stays on "Downloading… 100%" forever.
+  | { state: "error"; message: string }
+  // Nothing to show: up to date, or auto-update turned off. Clears an error.
+  | { state: "idle" };
