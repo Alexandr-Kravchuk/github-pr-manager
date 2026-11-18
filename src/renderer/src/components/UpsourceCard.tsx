@@ -36,7 +36,7 @@ const STAGE_TEXT: Record<UpsourceStage, string> = {
 const RING: Record<UpsourceParticipantState, string> = {
   accepted: "ring-emerald-500",
   rejected: "ring-red-500",
-  read: "ring-sky-500",
+  read: "ring-amber-500",
   unread: "ring-line-strong",
 };
 
