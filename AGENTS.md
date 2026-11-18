@@ -839,3 +839,23 @@ public certificate, trust script and instructions in `windows-signing/`. The fin
 action uses `StdUtils.ExecShellAsUser`; `-FromInstaller` refuses an elevated token
 so a shell fallback cannot change the administrator's trust. Separate release
 assets remain the alternative. Uninstall does not remove user-managed trust.
+
+Auto-update does not need that trust. electron-updater accepts a downloaded
+installer only when Windows calls its signature Valid, so on a machine without
+the trust every update was downloaded and thrown away. `main/update-signature.ts`
+wraps the NSIS verifier (`verifyUpdateCodeSignature`, set in `updater.ts` on
+win32): it accepts one more case — the signature is intact, the only fault is
+the untrusted root (`StatusMessage` compared with Windows' own text for
+CERT_E_UNTRUSTEDROOT, since it is localized), and the signer certificate's
+SHA-256 is `PINNED_SIGNER_SHA256`. HashMismatch, no signature, another signer
+and a Valid signature all go to electron-updater's verifier unchanged. The file
+path reaches PowerShell through the environment, never the command line, and
+is compared with the signed file's path inside PowerShell (`samePath`): stdout
+comes back in the OEM code page, so a profile folder with non-ASCII letters
+would garble a printed path. The probe runs without `PSModulePath`, which an
+inherited PowerShell 7 value would break, as electron-updater's own call does. A
+test pins the constant to `PR-Dashboard.cer` and to the trust script, so a
+rotation updates all three; a release signed with a new self-signed key is
+refused by every older release's pin, so its users install it by hand once.
+Releases 3.4.1 and older have only electron-updater's check: they need the
+trust script or a manual install once.
