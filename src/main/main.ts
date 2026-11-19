@@ -24,6 +24,7 @@ import type {
   ClaudeLaunchResult,
   ClaudeSessionInfo,
   ConfigResult,
+  DataCopy,
   FocusClaudeSessionResult,
   DashboardResponse,
   DashboardResult,
@@ -43,6 +44,7 @@ import { findCheckout, launchClaude, launchGroup, resumeClaudeSession } from "./
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
 import { devUserDataDir, isInstalledBuild, seedDevUserData } from "./dev-user-data";
+import { findDataCopies } from "./data-copy";
 import { diag, initDiagLog } from "./diag-log";
 import { clearJiraCaches, deleteTask, fetchTaskInfo, transitionTask } from "../shared/jira";
 import { shouldNotifyJiraAuth } from "../shared/jira-health";
@@ -135,6 +137,8 @@ let upsourceSource: UpsourceSource | null = null;
 /** The PR agent; null in fixture mode (PRD_MOCK), where it would act on fake PRs. */
 let agent: Agent | null = null;
 let agentPushTimer: NodeJS.Timeout | null = null;
+/** A packaged app's copy of the data folder, looked up once at start (data-copy.ts). */
+let dataCopy: DataCopy | null = null;
 
 /**
  * Pushes the agent's state at most every 250 ms — a run reports a step per
@@ -1108,6 +1112,13 @@ function registerIpc(): void {
     acknowledgeVersion(app.getVersion());
   });
 
+  ipcMain.handle("app:dataCopy", async (): Promise<DataCopy | null> => dataCopy);
+
+  // No argument: only the folder main found is ever shown.
+  ipcMain.handle("app:showDataCopy", async (): Promise<void> => {
+    if (dataCopy) await shell.openPath(dataCopy.dir);
+  });
+
   ipcMain.handle("app:copyText", async (_event, text: unknown): Promise<void> => {
     clipboard.writeText(validateClipboardText(text));
   });
@@ -1197,6 +1208,17 @@ function startApp(): void {
     `start v${app.getVersion()} pid=${process.pid} installed=${installedApp} ` +
       `userData=${app.getPath("userData")} argv=${JSON.stringify(process.argv.slice(1))}`,
   );
+  // Before anything reads settings: a copy here explains settings that look reset.
+  const copies = findDataCopies({
+    platform: process.platform,
+    appData: app.getPath("appData"),
+    userData: app.getPath("userData"),
+    localAppData: process.env.LOCALAPPDATA,
+  });
+  for (const c of copies) {
+    diag(`data copy (${c.where}) of ${c.appName}: ${c.dir}, settings changed ${new Date(c.changedAt).toISOString()}`);
+  }
+  dataCopy = copies[0] ?? null;
   // Must run before any `gh` invocation: a Finder/.app launch inherits a minimal
   // PATH without Homebrew, so without this `gh` is not found and token
   // resolution fails with a misleading "not signed in".

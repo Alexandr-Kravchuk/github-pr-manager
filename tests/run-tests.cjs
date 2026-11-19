@@ -849,6 +849,70 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     assert.ok(effect, "the stale empty config is read again once hosts were polled");
   });
 
+  // --- A packaged app's copy of the data folder (Claude Desktop's MSIX view) ---
+  const dataCopy = require(path.join(__dirname, "../dist/main/main/data-copy.js"));
+  const withAppData = (fn) => {
+    const root = fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-data-copy-"));
+    const appData = path.join(root, "Roaming");
+    const localAppData = path.join(root, "Local");
+    const copyOf = (pkg) => path.join(localAppData, "Packages", pkg, "LocalCache", "Roaming", "PR Dashboard");
+    fsSync.mkdirSync(appData, { recursive: true });
+    try {
+      fn({ appData, localAppData, userData: path.join(appData, "PR Dashboard"), copyOf });
+    } finally {
+      fsSync.rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  test("findDataCopies: a package's copy with settings is found, named, and seen as outside", () =>
+    withAppData(({ appData, localAppData, userData, copyOf }) => {
+      fsSync.mkdirSync(userData);
+      writeJson(path.join(userData, "settings.json"), { hosts: [] });
+      fsSync.mkdirSync(copyOf("Claude_pzs8sxrjxfjjc"), { recursive: true });
+      writeJson(path.join(copyOf("Claude_pzs8sxrjxfjjc"), "settings.json"), { hosts: [{ label: "GitHub" }] });
+      fsSync.mkdirSync(copyOf("Other_abc"), { recursive: true }); // caches only: no settings, not a copy that matters
+      fsSync.mkdirSync(path.join(localAppData, "Packages", "Empty_x"), { recursive: true });
+      const input = { platform: "win32", appData, userData, localAppData };
+      const found = dataCopy.findDataCopies(input);
+      assert.strictEqual(found.length, 1);
+      assert.strictEqual(found[0].appName, "Claude");
+      assert.strictEqual(found[0].dir, copyOf("Claude_pzs8sxrjxfjjc"));
+      assert.strictEqual(found[0].where, "outside");
+      assert.ok(found[0].changedAt > 0);
+      assert.deepStrictEqual(dataCopy.findDataCopies({ ...input, platform: "darwin" }), [], "Windows only");
+      assert.deepStrictEqual(dataCopy.findDataCopies({ ...input, localAppData: undefined }), []);
+      assert.deepStrictEqual(
+        dataCopy.findDataCopies({ ...input, userData: path.join(localAppData, "elsewhere") }),
+        [],
+        "a data folder outside %APPDATA% has no such copy",
+      );
+    }));
+
+  test("findDataCopies: reading the data folder through the copy is inside, listed first", () =>
+    withAppData(({ appData, localAppData, userData, copyOf }) => {
+      fsSync.mkdirSync(copyOf("Claude_x"), { recursive: true });
+      writeJson(path.join(copyOf("Claude_x"), "settings.json"), { hosts: [] });
+      fsSync.mkdirSync(copyOf("Another_y"), { recursive: true });
+      writeJson(path.join(copyOf("Another_y"), "settings.json"), { hosts: [] });
+      // The package's view: the data folder's path opens the copy's files.
+      fsSync.symlinkSync(copyOf("Claude_x"), userData, "junction");
+      const found = dataCopy.findDataCopies({ platform: "win32", appData, userData, localAppData });
+      assert.deepStrictEqual(found.map((c) => [c.appName, c.where]), [["Claude", "inside"], ["Another", "outside"]]);
+    }));
+
+  test("main.js wiring: the data copy is looked up at start, logged, and shown only from main's own path", () => {
+    const src = fsSync.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+    const lookup = src.indexOf("findDataCopies)({");
+    assert.ok(lookup > 0, "looked up at start");
+    assert.ok(lookup < src.indexOf("registerIpc();", lookup), "before the IPC that answers for it");
+    assert.match(src, /diag\)\(`data copy \(\$\{c\.where\}\)/, "each copy goes to main.log");
+    assert.match(src, /ipcMain\.handle\("app:dataCopy", async \(\) =>/);
+    assert.match(src, /ipcMain\.handle\("app:showDataCopy", async \(\) =>/, "takes no path from the renderer");
+    const app = fsSync.readFileSync(path.join(__dirname, "../src/renderer/src/App.tsx"), "utf8");
+    assert.match(app, /window\.api\.getDataCopy\(\)\.then\(setDataCopy\)/);
+    assert.match(app, /\{dataCopy && <DataCopyBanner copy=\{dataCopy\}/);
+  });
+
   test("main.js wiring: a packaged build keeps the installed app's userData", () => {
     let moved = 0;
     const r = bootCompiledMain(true, { setPath: () => moved++ });

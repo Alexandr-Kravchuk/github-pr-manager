@@ -67,6 +67,7 @@ import type {
   AgentState,
   ClaudeSessionInfo,
   DashboardResponse,
+  DataCopy,
   HostError,
   JiraSource,
   JiraStatus,
@@ -289,6 +290,8 @@ export function App() {
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraStatus | null>(null);
+  // A packaged app's copy of the data folder (Windows): why settings can look reset.
+  const [dataCopy, setDataCopy] = useState<DataCopy | null>(null);
   const loadJiraStatus = useMemo(() => createJiraStatusLoader((mode) => window.api.getJiraStatus(mode), setJiraStatus), []);
   const [claudeSessions, setClaudeSessions] = useState<ClaudeSessionInfo[]>([]);
   // The PR agent — null in fixture mode and until the first pull.
@@ -431,6 +434,7 @@ export function App() {
       })
       .catch(() => {});
     window.api.getWhatsNew().then(setWhatsNew).catch(() => {});
+    window.api.getDataCopy().then(setDataCopy).catch(() => {});
     void loadJiraStatus();
   }, [loadJiraStatus]);
 
@@ -1467,6 +1471,10 @@ export function App() {
         </div>
       )}
 
+      {/* A packaged app's copy of the data folder — shown above everything that
+          reads settings, since it is the reason they can look reset. */}
+      {dataCopy && <DataCopyBanner copy={dataCopy} onHide={() => setDataCopy(null)} />}
+
       {/* Fetch error */}
       {error && (
         <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/40 dark:text-red-200">
@@ -1819,6 +1827,41 @@ function PrList({
 
 /** Where a new Atlassian API token is created. */
 const ATLASSIAN_API_TOKENS_URL = "https://id.atlassian.com/manage-profile/security/api-tokens";
+
+/**
+ * Windows keeps a packaged app's writes under %APPDATA% in that package's own
+ * copy, so PR Dashboard started from Claude Desktop saves its settings where
+ * the Start menu's PR Dashboard never looks (`main/data-copy.ts`). Inside that
+ * copy, the way out is starting the app from the Start menu; outside it, the
+ * copy is where settings that look reset went. Hidden for this run only.
+ */
+function DataCopyBanner({ copy, onHide }: { copy: DataCopy; onHide: () => void }) {
+  const btn =
+    "ml-2 rounded-md border border-amber-300 bg-white/60 px-2 py-0.5 text-xs font-medium hover:bg-white dark:border-amber-600/50 dark:bg-transparent dark:hover:bg-amber-900/40";
+  return (
+    <div className="mb-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-600/40 dark:bg-amber-950/30 dark:text-amber-200">
+      {copy.where === "inside" ? (
+        <>
+          <span className="font-semibold">Started from {copy.appName}.</span> Windows keeps a separate copy of PR
+          Dashboard&apos;s data for apps started from {copy.appName}, so these settings are not the ones the Start
+          menu, the desktop shortcut, sign-in or an update open. Quit and start PR Dashboard from the Start menu.
+        </>
+      ) : (
+        <>
+          <span className="font-semibold">{copy.appName} keeps another copy of your settings.</span> PR Dashboard
+          was once started from {copy.appName}, and Windows kept what it saved there apart (last changed{" "}
+          {new Date(copy.changedAt).toLocaleString()}). If your settings look reset, they are in that copy.
+        </>
+      )}
+      <button type="button" className={btn} onClick={() => window.api.showDataCopy().catch(() => {})}>
+        Show folder
+      </button>
+      <button type="button" className={btn} onClick={onHide}>
+        Hide
+      </button>
+    </div>
+  );
+}
 
 /**
  * Says that Jira or twg rejected the credentials and offers the one action that

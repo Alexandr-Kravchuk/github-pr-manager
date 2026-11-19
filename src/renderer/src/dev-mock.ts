@@ -19,6 +19,7 @@ import type {
   WeatherStatus,
   ClaudeSessionInfo,
   DashboardResponse,
+  DataCopy,
   JiraSource,
   PrManagerApi,
   PullRequest,
@@ -494,6 +495,18 @@ const weatherParam = new URLSearchParams(window.location.search).get("weather");
 let WEATHER: WeatherStatus = weatherParam
   ? { state: "ok", kind: weatherParam as WeatherKind, place: "Kyiv, Ukraine", temperatureC: 4, fetchedAt: Date.now() }
   : { state: "off" };
+
+// `?dataCopy=inside|outside` previews the banner about a packaged app's copy of the data folder.
+const dataCopyParam = new URLSearchParams(window.location.search).get("dataCopy");
+const DATA_COPY: DataCopy | null =
+  dataCopyParam === "inside" || dataCopyParam === "outside"
+    ? {
+        appName: "Claude",
+        dir: "C:\\Users\\you\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\PR Dashboard",
+        where: dataCopyParam,
+        changedAt: Date.now() - 3 * 86_400_000,
+      }
+    : null;
 
 const jiraAuthParam = new URLSearchParams(window.location.search).get("jiraAuth");
 const jiraAuth: JiraSource | null = jiraAuthParam === "token" || jiraAuthParam === "twg" ? jiraAuthParam : null;
@@ -1156,6 +1169,8 @@ const api: PrManagerApi = {
     return WEATHER;
   },  getWhatsNew: async () => null,
   dismissWhatsNew: async () => {},
+  getDataCopy: async () => DATA_COPY,
+  showDataCopy: async () => {},
   onSnapshot: (listener) => {
     snapshotListeners.add(listener);
     return () => snapshotListeners.delete(listener);

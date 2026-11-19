@@ -606,11 +606,10 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   (`main/settings.ts`) returns empty settings for ENOENT alone; a read that
   fails otherwise is tried again a few times (EBUSY/EPERM/EACCES — a scan or
   an installer holding it), then throws `ConfigError`, which the poller and
-  the UI show as an error. It used to read as "no file": the app an installer
-  started after an update (3.2.0 → 3.3.0, Windows) came up with "No
-  repositories configured" and the agent off while the file was intact and
-  every other start read it — why that one read failed was never seen. So
-  `persistSettings` refuses to write over a file it could not read, writes
+  the UI show as an error. It used to read as "no file", so a file that was
+  there but unreadable looked like a first run, and the next save wrote
+  defaults over it. So `persistSettings` refuses to write over a file it could
+  not read, writes
   through a temporary file renamed over the old one, and `App.tsx` reads the
   config again once a snapshot polled hosts the config doesn't list (it was
   read once on mount and never again). `userData/main.log`
@@ -619,6 +618,32 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   failed settings read and the updater's downloads and errors (one line each;
   an error's stack is in `userData/updater.log`): read it first when settings
   "reset" again.
+- **A packaged app's copy of the data folder** (Windows, `main/data-copy.ts`).
+  A process started from an MSIX app keeps that app's view of `%APPDATA%`.
+  Claude Desktop's terminal and sessions are such processes: their writes land
+  in `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\PR Dashboard`,
+  and their reads show that copy over the real folder.
+  `GetCurrentPackageFullName` still says "not packaged", so nothing in the
+  process tells it apart.
+  - **The story behind "settings reset after every update".** The settings
+    one user had saved since a start from Claude lived in Claude's copy. The
+    app started from the Start menu, the desktop, the login entry or an
+    update's relaunch (`ExecShellAsUser`, through Explorer) read the real,
+    nearly empty folder. The same exe and file read fine from the shell,
+    because the shell itself sits inside Claude's view.
+  - **What the app does.** At start, `findDataCopies` looks for
+    `Packages\*\LocalCache\Roaming\<userData's name>` holding a
+    `settings.json`. It logs each copy to `main.log` and calls a copy
+    `inside` when the data folder's `settings.json` opens the same file, or
+    `outside` when it opens another one. The banner (`DataCopyBanner`, over
+    `app:dataCopy`) says why settings look reset: inside, start the app from
+    the Start menu; outside, the copy holds what was saved there.
+    `app:showDataCopy` opens only the folder main found and takes no
+    argument. In the plain-browser mock, `?dataCopy=inside|outside` previews
+    the banner.
+  - **How to see the real folder from a Claude session.** Run the command
+    through `explorer.exe <script>.cmd`. A test of the installed app with the
+    real profile must not start it from a session.
 - Jira is read through the Atlassian `twg` CLI first, the API token second —
   the `gh` model again: twg signs in with OAuth and refreshes itself, so there
   is nothing to expire. `shared/jira-pass.ts` picks the source per pass (twg
