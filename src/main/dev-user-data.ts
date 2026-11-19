@@ -1,19 +1,44 @@
-// A build run from source (`npm run dev`, `npm start`) keeps its data in a
-// folder of its own, `<userData> (dev)`, never in the installed app's. Both
-// builds are named "PR Dashboard", so without this every worktree's dev build
-// read and wrote the release's `settings.json` and agent state: a branch whose
+// A build that isn't the installed app — run from source (`npm run dev`,
+// `npm start`) or from a packaging folder (`dist/win-unpacked`) — keeps its data
+// in a folder of its own, `<userData> (dev)`, never in the installed app's. All
+// builds are named "PR Dashboard", so without this every worktree's build read
+// and wrote the release's `settings.json` and agent state: a branch whose
 // settings had a different shape saved it in its own, and the release that the
 // next auto-update restarted read the fields it did not know as their defaults.
 //
-// The first dev launch starts from a copy of the installed app's files so it
-// opens configured — with the agent switched off, since dev and release no
-// longer share the single-instance lock and two agents would act on the same
-// PRs. Electron-free on purpose (main.ts passes the paths in), so the seeding is
+// The first such launch starts from a copy of the installed app's files so it
+// opens configured — with the agent switched off, since it no longer shares
+// the release's single-instance lock and two agents would act on the same PRs.
+// Electron-free on purpose (main.ts passes the paths in), so the rules are
 // unit-tested on real folders.
 import fs from "node:fs";
 import path from "node:path";
 
-/** What a dev build copies from the installed app's folder, besides `settings.json`. */
+export interface BuildIdentity {
+  isPackaged: boolean;
+  platform: NodeJS.Platform;
+  /** `process.execPath`. */
+  execPath: string;
+  /** `app.getName()` — the uninstaller is named after it. */
+  productName: string;
+  exists?: (file: string) => boolean;
+}
+
+/**
+ * Whether this process is the installed app. A packaged build counts unless it
+ * runs on Windows without the uninstaller the NSIS install puts next to the
+ * exe: that is a `win-unpacked` folder, which must not take the installed app's
+ * data, its launch-at-login entry (written with this exe's path) or its
+ * updates (an update would run the real installer).
+ */
+export function isInstalledBuild(build: BuildIdentity): boolean {
+  if (!build.isPackaged) return false;
+  if (build.platform !== "win32") return true;
+  const exists = build.exists ?? fs.existsSync;
+  return exists(path.win32.join(path.win32.dirname(build.execPath), `Uninstall ${build.productName}.exe`));
+}
+
+/** What a build that isn't the installed app copies from its folder, besides `settings.json`. */
 export const DEV_SEED_FILES = [
   "seen-state.json",
   "ignored-state.json",

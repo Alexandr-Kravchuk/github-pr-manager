@@ -2,6 +2,7 @@ import { app } from "electron";
 import { autoUpdater } from "electron-updater";
 
 import type { UpdateStatus } from "../shared/types";
+import { diag } from "./diag-log";
 
 // electron-updater reads the GitHub feed from app-update.yml (emitted by
 // electron-builder from the `publish` config). That file only exists in a
@@ -48,6 +49,7 @@ export function initAutoUpdater(onStatus: (status: UpdateStatus) => void): void 
 
   autoUpdater.on("error", (err) => {
     console.error("[updater] error:", err?.message ?? err);
+    diag(`updater: error ${err?.message ?? String(err)}`);
   });
   autoUpdater.on("update-available", (info) => {
     console.log("[updater] update available:", info.version);
@@ -62,8 +64,15 @@ export function initAutoUpdater(onStatus: (status: UpdateStatus) => void): void 
   });
   autoUpdater.on("update-downloaded", (info) => {
     console.log("[updater] v%s downloaded — restarting to apply", info.version);
+    diag(`updater: v${info.version} downloaded — installing silently, the installer starts the app again`);
     onStatus({ state: "downloaded", version: info.version });
-    setTimeout(() => autoUpdater.quitAndInstall(), 3_000);
+    // Silent, and the app started again afterwards. The Windows installer is
+    // the assisted (wizard) one, and its templates start the app after an
+    // update only when silent: a plain quitAndInstall() quit the app and left
+    // the wizard waiting for clicks — at 01:19 for an update that landed in
+    // the night — with the app closed until someone clicked through it.
+    // macOS ignores both flags: Squirrel always restarts the app.
+    setTimeout(() => autoUpdater.quitAndInstall(true, true), 3_000);
   });
 }
 

@@ -498,20 +498,27 @@ Three layers:
   process compiles in `tsc --watch` and Electron restarts after each clean
   build: it reads `dist/main` only at startup, so a one-off compile kept a dev
   app on stale main code while the renderer hot-reloaded and looked current.
-- **A build run from source has its own data folder**, `<userData> (dev)`
-  (`main/dev-user-data.ts`, set at the top of `main.ts` while
-  `!app.isPackaged`, before the single-instance lock). Both builds are named
-  "PR Dashboard", so every worktree's dev build used to read and write the
-  installed app's `settings.json` and agent state: a branch with a reshaped
-  setting saved it in its shape, and the release the next auto-update
-  restarted read it as defaults — "settings reset on every update". The first
-  dev launch copies `settings.json` (agent switched **off**), seen, ignored,
+- **A build that isn't the installed app has its own data folder**,
+  `<userData> (dev)` (`main/dev-user-data.ts`, set at the top of `main.ts`
+  before the single-instance lock): one run from source (`!app.isPackaged`) or
+  from a packaging folder — on Windows a packaged exe with no
+  `Uninstall PR Dashboard.exe` next to it is a `dist/win-unpacked` build
+  (`isInstalledBuild`). All of them are named "PR Dashboard", so every
+  worktree's build used to read and write the installed app's `settings.json`
+  and agent state: a branch with a reshaped setting saved it in its shape, and
+  the release the next auto-update restarted read it as defaults — "settings
+  reset on every update". Such a build also leaves the launch-at-login entry
+  alone (Windows writes it with the running exe's path, so the next sign-in
+  started a worktree's old build) and takes no updates (`win-unpacked` ships
+  `app-update.yml`, and its update would run the real installer). The first
+  launch copies `settings.json` (agent switched **off**), seen, ignored,
   window and weather-location state from the installed app, once — never the
   Jira token, whose key on Windows lives in the folder's own Chromium state.
-  Dev and release no longer share the single-instance lock, so both can run at
-  once: two pollers, two sets of toasts, and two agents on the same PRs if you
-  switch the dev one on. Delete the `(dev)` folder's `settings.json` to seed it
-  again.
+  It no longer shares the installed app's single-instance lock, so both can
+  run at once: two pollers, two sets of toasts, and two agents on the same PRs
+  if you switch its agent on. Delete the `(dev)` folder's `settings.json` to
+  seed it again. macOS has no such check: a `dist/mac*` app counts as
+  installed.
 - `npm run build` — `tsc` (main) + `vite` (renderer) → `dist/`.
 - `npm run typecheck` and `npm test` — the gate before any push.
 - `npm run package` / `npm run package:dir` — electron-builder (dmg / nsis).
@@ -569,6 +576,22 @@ Three layers:
   directions: read the old key, and expect an older build to keep writing it.
   A field removed on purpose — a moved secret — goes in
   `RETIRED_SETTINGS_FIELDS`, or the merge keeps it alive.
+- **Only a missing `settings.json` is the first run.** `readSettingsText`
+  (`main/settings.ts`) returns empty settings for ENOENT alone; a read that
+  fails otherwise is tried again a few times (EBUSY/EPERM/EACCES — a scan or
+  an installer holding it), then throws `ConfigError`, which the poller and
+  the UI show as an error. It used to read as "no file": the app an installer
+  started after an update (3.2.0 → 3.3.0, Windows) came up with "No
+  repositories configured" and the agent off while the file was intact and
+  every other start read it — why that one read failed was never seen. So
+  `persistSettings` refuses to write over a file it could not read, writes
+  through a temporary file renamed over the old one, and `App.tsx` reads the
+  config again once a snapshot polled hosts the config doesn't list (it was
+  read once on mount and never again). `userData/main.log`
+  (`main/diag-log.ts`, capped, `.old` kept) records each start — version,
+  argv, data folder, how many hosts and whether the agent loaded — every
+  failed settings read and the updater's downloads and errors: read it first
+  when settings "reset" again.
 - Jira is read through the Atlassian `twg` CLI first, the API token second —
   the `gh` model again: twg signs in with OAuth and refreshes itself, so there
   is nothing to expire. `shared/jira-pass.ts` picks the source per pass (twg
@@ -621,10 +644,14 @@ Three layers:
   move/resize and **flushed on `close` before `trayController.handleClose`**:
   close-to-tray may hide the window, and a hidden window's bounds are not
   reliable.
-- Launch at login starts the app **in the tray** when close-to-tray is on
-  (`main/login-launch.ts`): the Windows Run-key entry carries `--hidden`
-  (macOS relies on `wasOpenedAtLogin`, best-effort — login items there take no
-  arguments). The first window is then created with `show: false`, and it is
+- Launch at login starts the app **in the tray** when close-to-tray is on —
+  **on macOS only** (`startsInTray` in `main/login-launch.ts`; macOS relies on
+  `wasOpenedAtLogin`, best-effort — login items there take no arguments). On
+  Windows the window opens at sign-in: Windows 11 puts a new tray icon behind
+  `^`, so a tray start looked like the app had not started, and the Run-key
+  entry is now the plain exe (an older build's `--hidden` entry is rewritten
+  on the next start and ignored until then). A tray start creates the first
+  window with `show: false`, and it is
   shown anyway if the tray icon failed to appear, since a hidden window with no
   icon is unreachable. The saved maximized/full-screen state waits for the
   first `show`, because `maximize()` would itself show the hidden window.
@@ -632,6 +659,16 @@ Three layers:
   before `setAppUserModelId` left an `electron.app.PR Dashboard` value behind
   and the app started twice at sign-in, once without `--hidden`;
   `staleLoginItemsFor` deletes it on every apply, whatever the preference is.
+- **An update installs silently and starts the app again**
+  (`quitAndInstall(true, true)` in `main/updater.ts`, 3 s after the download).
+  The Windows installer is the assisted one (`oneClick: false`), and its NSIS
+  templates start the app after an update only when silent (`isForceRun` *and*
+  `Silent` in `installSection.nsh`); a plain `quitAndInstall()` quit the app
+  and left the wizard waiting for clicks — an update downloaded at night kept
+  the app closed until morning, its Finish page the only way back. Silent, the
+  installer takes the install mode and folder from the previous install's
+  registry entry (`initMultiUser` in `assistedInstaller.nsh`) and starts the
+  app through the Start menu shortcut, with its window shown.
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes
   `electron .` self-quit after the renderer loads (a non-interactive boot check).
 - **The PR agent's log** is `userData/agent/log.jsonl` — one JSON line per

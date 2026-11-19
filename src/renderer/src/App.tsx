@@ -1042,6 +1042,20 @@ export function App() {
 
   const noHosts = config !== null && config.hosts.length === 0;
 
+  // The config is read once, on mount. When that one read came back empty while
+  // the settings could not be loaded, "No repositories configured" stayed up for
+  // the whole run although the poller — which reads them every tick — went on
+  // polling. A snapshot of hosts the config doesn't list reads it again.
+  const polledHosts = (data?.rateLimits?.length ?? 0) + (data?.errors?.length ?? 0);
+  useEffect(() => {
+    if (!noHosts || polledHosts === 0) return;
+    window.api
+      .getConfig()
+      .then((r) => {
+        if (r.ok) setConfig(r.config);
+      })
+      .catch(() => {});
+  }, [noHosts, polledHosts]);
 
   if (view === "settings") {
     return (

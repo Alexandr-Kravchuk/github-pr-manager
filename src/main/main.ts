@@ -40,7 +40,8 @@ import { createAgent, type Agent, type AgentNotice } from "./agent";
 import { findCheckout, launchClaude, launchGroup, resumeClaudeSession } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
-import { devUserDataDir, seedDevUserData } from "./dev-user-data";
+import { devUserDataDir, isInstalledBuild, seedDevUserData } from "./dev-user-data";
+import { diag, initDiagLog } from "./diag-log";
 import { clearJiraCaches, deleteTask, fetchTaskInfo, transitionTask } from "../shared/jira";
 import { shouldNotifyJiraAuth } from "../shared/jira-health";
 import type { CloseStaleResult, JiraTaskInfo } from "../shared/stale";
@@ -66,7 +67,7 @@ import {
   validateUiStyle,
   validateThemePreference,
 } from "./ipc-validation";
-import { loginItemSettingsFor, staleLoginItemsFor, wasLaunchedAtLogin } from "./login-launch";
+import { loginItemSettingsFor, staleLoginItemsFor, startsInTray, wasLaunchedAtLogin } from "./login-launch";
 import { createMenuActions, installAppMenu } from "./menu";
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
@@ -88,11 +89,22 @@ import { createWeatherService } from "./weather";
 import { locate } from "./locate";
 import { forgetLocation, readSavedLocation, saveLocation } from "./weather-location";
 
-// A build run from source keeps its data apart from the installed app's (see
-// dev-user-data.ts). First thing at load: the single-instance lock below and
-// every file under userData follow the folder set here, and Electron takes a
-// new userData only before `ready`.
-if (!app.isPackaged) {
+/**
+ * False for a build run from source or from a packaging folder's
+ * `win-unpacked` (see dev-user-data.ts). Such a build keeps its data apart and
+ * leaves the installed app's launch-at-login entry and updates alone.
+ */
+const installedApp = isInstalledBuild({
+  isPackaged: app.isPackaged,
+  platform: process.platform,
+  execPath: process.execPath,
+  productName: app.getName(),
+});
+
+// First thing at load: the single-instance lock below and every file under
+// userData follow the folder set here, and Electron takes a new userData only
+// before `ready`.
+if (!installedApp) {
   const releaseDir = app.getPath("userData");
   const devDir = devUserDataDir(releaseDir);
   try {
@@ -103,6 +115,7 @@ if (!app.isPackaged) {
   }
   app.setPath("userData", devDir);
 }
+initDiagLog(app.getPath("userData"));
 
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
@@ -492,10 +505,11 @@ function handleNotifications(prs: PullRequest[]): void {
   });
 }
 
-/** Registers/unregisters the OS "open at login" item. Packaged app only — in dev
- *  the item would point at the dev Electron binary. Not supported on Linux. */
+/** Registers/unregisters the OS "open at login" item. The installed app only —
+ *  the item is written with this exe's path, so a dev or `win-unpacked` build
+ *  would make the next sign-in start that build. Not supported on Linux. */
 function applyLaunchAtLogin(enabled: boolean): void {
-  if (!app.isPackaged || process.platform === "linux") return;
+  if (!installedApp || process.platform === "linux") return;
   for (const stale of staleLoginItemsFor(process.platform)) app.setLoginItemSettings(stale);
   const options = loginItemSettingsFor(enabled, process.platform);
   app.setLoginItemSettings(options);
@@ -1137,6 +1151,10 @@ function registerIpc(): void {
 // readable, and (b) so the single-instance decision logic lives in the
 // unit-tested single-instance.ts rather than an inline closure.
 function startApp(): void {
+  diag(
+    `start v${app.getVersion()} pid=${process.pid} installed=${installedApp} ` +
+      `userData=${app.getPath("userData")} argv=${JSON.stringify(process.argv.slice(1))}`,
+  );
   // Must run before any `gh` invocation: a Finder/.app launch inherits a minimal
   // PATH without Homebrew, so without this `gh` is not found and token
   // resolution fails with a misleading "not signed in".
@@ -1241,7 +1259,9 @@ function startApp(): void {
   let prefs: Settings;
   try {
     prefs = loadSettings();
-  } catch {
+    diag(`settings: ${prefs.hosts.length} host(s), agent ${prefs.agent.enabled ? "on" : "off"}`);
+  } catch (e) {
+    diag(`settings: not loaded at start — ${(e as Error).message}`);
     prefs = defaultSettings();
   }
   applyThemeSource(prefs.theme);
@@ -1255,12 +1275,13 @@ function startApp(): void {
   });
 
   // Started by the OS login item with close-to-tray on: come up in the tray
-  // rather than putting a window in front of the user on every sign-in.
+  // rather than putting a window in front of the user on every sign-in — on
+  // macOS only, where the menu bar icon stays in sight (`startsInTray`).
   const launchedAtLogin = wasLaunchedAtLogin(
     process.argv,
     process.platform === "darwin" ? app.getLoginItemSettings().wasOpenedAtLogin : undefined,
   );
-  const startInTray = launchedAtLogin && prefs.closeToTray;
+  const startInTray = startsInTray(process.platform, launchedAtLogin, prefs.closeToTray);
   createWindow({ show: !startInTray });
 
   // The application menu owns the keyboard shortcuts (Settings on CmdOrCtrl+,
@@ -1277,7 +1298,9 @@ function startApp(): void {
     { devItems: !app.isPackaged },
   );
 
-  initAutoUpdater((status) => sendToRenderer("update-status", status));
+  // A `win-unpacked` build ships app-update.yml too, and its update would run
+  // the real installer over the installed app.
+  if (installedApp) initAutoUpdater((status) => sendToRenderer("update-status", status));
 
   // Apply the remaining prefs (launch-at-login + auto-update; theme re-applied
   // harmlessly). Runs after the updater is initialized.

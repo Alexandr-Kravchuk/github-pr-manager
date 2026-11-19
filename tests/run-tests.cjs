@@ -524,20 +524,26 @@ test("main gates startup + window-all-closed on the acquired single-instance loc
 // newer than this snapshot before requiring).
 const bootBaseline = new Set(Object.keys(require.cache));
 
-// `appOverrides` replaces members of the fake `app`; by default it is a packaged
-// build, so a boot never moves userData (an unpackaged one seeds a dev folder).
-const bootCompiledMain = (lockGranted, appOverrides = {}) => {
+// `appOverrides` replaces members of the fake `app`. By default the boot is the
+// installed app — packaged, and run from a folder with the NSIS uninstaller next
+// to the exe (`process.execPath` points there while main.js loads) — so it never
+// moves userData; `installed: false` drops the uninstaller, a `win-unpacked` build.
+const bootCompiledMain = (lockGranted, appOverrides = {}, { installed = true } = {}) => {
   const mainJs = path.join(__dirname, "../dist/main/main/main.js");
   const elPath = require.resolve("electron", { paths: [path.dirname(mainJs)] });
   for (const k of Object.keys(require.cache)) {
     if (!bootBaseline.has(k)) delete require.cache[k]; // fresh main.js graph each boot
   }
+  const fsSync = require("node:fs");
+  const installRoot = fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-boot-"));
+  if (installed) fsSync.writeFileSync(path.join(installRoot, "Uninstall PR Dashboard.exe"), "");
   const events = [];
   const handlers = new Map();
   const updaterEvents = [];
   let quits = 0;
   const fakeApp = {
     isPackaged: true,
+    getName: () => "PR Dashboard",
     requestSingleInstanceLock: () => lockGranted,
     quit: () => quits++,
     on: (event, cb) => {
@@ -590,7 +596,13 @@ const bootCompiledMain = (lockGranted, appOverrides = {}) => {
     nativeImage: { createFromPath: () => ({ isEmpty: () => false, resize: () => ({}) }) },
   };
   require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: fakeElectron };
-  require(mainJs);
+  const realExecPath = process.execPath;
+  process.execPath = path.join(installRoot, "PR Dashboard.exe");
+  try {
+    require(mainJs);
+  } finally {
+    process.execPath = realExecPath;
+  }
   return {
     events,
     handlers,
@@ -604,6 +616,7 @@ const bootCompiledMain = (lockGranted, appOverrides = {}) => {
         if (!bootBaseline.has(k)) delete require.cache[k];
       }
       delete require.cache[elPath];
+      fsSync.rmSync(installRoot, { recursive: true, force: true });
     },
   };
 };
@@ -776,6 +789,65 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
       }
     }));
 
+  // The app the installer started after an update read "no settings" while the
+  // file was there: a failed read must not look like a first run, and no write
+  // may land over a file that couldn't be read.
+  test("settings: an unreadable file is an error, not the first run, and is never written over", () =>
+    withFolders((userData) => {
+      const settingsJs = path.join(__dirname, "../dist/main/main/settings.js");
+      const elPath = require.resolve("electron", { paths: [path.dirname(settingsJs)] });
+      const hadElectron = require.cache[elPath];
+      const settingsPath = require.resolve(settingsJs);
+      require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: { app: { getPath: () => userData } } };
+      delete require.cache[settingsPath];
+      try {
+        const settings = require(settingsJs);
+        const file = path.join(userData, "settings.json");
+        // Missing: the first run, empty settings.
+        assert.strictEqual(settings.readSettingsText(file), null);
+        assert.deepStrictEqual(settings.loadSettings().hosts, []);
+        // Unreadable (a folder where the file should be: EISDIR, not transient).
+        fsSync.mkdirSync(file);
+        assert.throws(() => settings.loadSettings(), (e) => e instanceof cfg.ConfigError && /could not be read/.test(e.message));
+        assert.throws(() => settings.persistSettings({ hosts: [] }), cfg.ConfigError);
+        assert.ok(fsSync.statSync(file).isDirectory(), "nothing was written over it");
+        fsSync.rmSync(file, { recursive: true });
+        // A save goes through a temporary file renamed over the old one.
+        settings.persistSettings({ hosts: [], theme: "dark" });
+        assert.strictEqual(readJson(file).theme, "dark");
+        assert.deepStrictEqual(fsSync.readdirSync(userData).filter((f) => f.endsWith(".tmp")), []);
+      } finally {
+        delete require.cache[settingsPath];
+        if (hadElectron) require.cache[elPath] = hadElectron;
+        else delete require.cache[elPath];
+      }
+    }));
+
+  test("diag log: appends a timestamped line, keeps the old half, never throws", () =>
+    withFolders((dir) => {
+      const diagLog = require(path.join(__dirname, "../dist/main/main/diag-log.js"));
+      const file = path.join(dir, "main.log");
+      diagLog.diag("before init"); // nowhere to write yet: nothing happens
+      assert.ok(!fsSync.existsSync(file));
+      diagLog.initDiagLog(dir);
+      diagLog.diag("start v1");
+      assert.match(fsSync.readFileSync(file, "utf8"), /^\d{4}-\d\d-\d\dT[\d:.]+Z start v1\n$/);
+      fsSync.writeFileSync(file, "x".repeat(300 * 1024));
+      diagLog.diag("after rotation");
+      assert.strictEqual(fsSync.readFileSync(file, "utf8").trim().split(" ").slice(1).join(" "), "after rotation");
+      assert.ok(fsSync.existsSync(`${file}.old`));
+      diagLog.initDiagLog(path.join(dir, "settings.json", "nope")); // unwritable once a file blocks the path
+      fsSync.writeFileSync(path.join(dir, "settings.json"), "{}");
+      assert.doesNotThrow(() => diagLog.diag("ignored"));
+    }));
+
+  test("renderer: a snapshot of hosts the config doesn't list reads the config again", () => {
+    // The config was read once; an empty first read kept "No repositories configured" up all run.
+    const src = fsSync.readFileSync(path.join(__dirname, "../src/renderer/src/App.tsx"), "utf8");
+    const effect = /const polledHosts = [^\n]+\n\s*useEffect\(\(\) => \{\s*if \(!noHosts \|\| polledHosts === 0\) return;\s*window\.api\s*\.getConfig\(\)/.exec(src);
+    assert.ok(effect, "the stale empty config is read again once hosts were polled");
+  });
+
   test("main.js wiring: a packaged build keeps the installed app's userData", () => {
     let moved = 0;
     const r = bootCompiledMain(true, { setPath: () => moved++ });
@@ -784,6 +856,52 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     } finally {
       r.cleanup();
     }
+  });
+
+  test("isInstalledBuild: the installed app, not a build from source or a win-unpacked folder", () => {
+    const win = { platform: "win32", execPath: "C:\\Apps\\PR Dashboard\\PR Dashboard.exe", productName: "PR Dashboard" };
+    const uninstaller = "C:\\Apps\\PR Dashboard\\Uninstall PR Dashboard.exe";
+    const has = (file) => file === uninstaller;
+    assert.strictEqual(devUserData.isInstalledBuild({ ...win, isPackaged: true, exists: has }), true);
+    assert.strictEqual(devUserData.isInstalledBuild({ ...win, isPackaged: true, exists: () => false }), false, "win-unpacked");
+    assert.strictEqual(devUserData.isInstalledBuild({ ...win, isPackaged: false, exists: has }), false, "electron .");
+    assert.strictEqual(
+      devUserData.isInstalledBuild({ isPackaged: true, platform: "darwin", execPath: "/x", productName: "PR Dashboard", exists: () => false }),
+      true,
+      "macOS has no uninstaller to look for",
+    );
+  });
+
+  if (process.platform === "win32") {
+    test("main.js wiring: a win-unpacked build takes its own data folder too", () =>
+      withFolders((release, dev) => {
+        writeJson(path.join(release, "settings.json"), { hosts: [], agent: { enabled: true } });
+        const moved = [];
+        const r = bootCompiledMain(
+          true,
+          { getPath: (name) => (name === "userData" ? release : os.tmpdir()), setPath: (name, value) => moved.push([name, value]) },
+          { installed: false },
+        );
+        try {
+          assert.deepStrictEqual(moved, [["userData", dev]]);
+        } finally {
+          r.cleanup();
+        }
+      }));
+  }
+
+  test("main.js wiring: only the installed app writes launch-at-login and takes updates", () => {
+    const src = fsSync.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+    assert.match(src, /if \(!installedApp \|\| process\.platform === "linux"\)\s*return;/, "the login item carries this exe's path");
+    assert.match(src, /if \(installedApp\)\s*\(0, updater_1\.initAutoUpdater\)/, "a win-unpacked update would run the real installer");
+  });
+
+  test("updater: an update installs silently and starts the app again", () => {
+    // The assisted (wizard) installer starts the app after an update only when
+    // silent; a plain quitAndInstall() left the app closed behind a wizard.
+    const src = fsSync.readFileSync(path.join(__dirname, "../dist/main/main/updater.js"), "utf8");
+    assert.match(src, /autoUpdater\.quitAndInstall\(true, true\)/);
+    assert.doesNotMatch(src, /autoUpdater\.quitAndInstall\(\)/);
   });
 }
 
@@ -8471,13 +8589,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
   // --- launch at login, starting in the tray -----------------------------------
 
-  test("loginItemSettingsFor: Windows passes the hidden-launch marker as an argument", () => {
-    assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(true, "win32"), {
-      openAtLogin: true,
-      args: [loginLaunch.HIDDEN_LAUNCH_ARG],
-    });
-    // Disabling must name the same args, or Windows reports/keeps a different entry.
-    assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(false, "win32").args, [loginLaunch.HIDDEN_LAUNCH_ARG]);
+  test("loginItemSettingsFor: Windows registers the plain exe — no hidden-launch marker", () => {
+    // Windows 11 tucks a new tray icon behind `^`: a tray start looked like no start.
+    assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(true, "win32"), { openAtLogin: true });
+    assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(false, "win32"), { openAtLogin: false });
+  });
+
+  test("startsInTray: a login launch with close-to-tray, off Windows only", () => {
+    assert.strictEqual(loginLaunch.startsInTray("darwin", true, true), true);
+    assert.strictEqual(loginLaunch.startsInTray("darwin", true, false), false);
+    assert.strictEqual(loginLaunch.startsInTray("darwin", false, true), false);
+    assert.strictEqual(loginLaunch.startsInTray("win32", true, true), false, "an old Run entry's --hidden opens the window too");
   });
 
   test("loginItemSettingsFor: macOS asks for a hidden open, no arguments", () => {
@@ -8517,7 +8639,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const staleIdx = src.indexOf("staleLoginItemsFor)(process.platform)");
     assert.ok(staleIdx !== -1, "the legacy login item must be removed on every apply, enabled or not");
     assert.ok(staleIdx < src.indexOf("loginItemSettingsFor)(enabled, process.platform)"), "removal runs before registering");
-    assert.match(src, /startInTray = launchedAtLogin && prefs\.closeToTray/, "only close-to-tray may start hidden");
+    assert.match(
+      src,
+      /startInTray = \(0, login_launch_1\.startsInTray\)\(process\.platform, launchedAtLogin, prefs\.closeToTray\)/,
+      "only close-to-tray may start hidden, and not on Windows",
+    );
     assert.match(src, /createWindow\(\{ show: !startInTray \}\)/, "the first window must honor the tray start");
     const applyIdx = src.indexOf("applyPreferences(prefs);");
     const fallback = /if \(startInTray && !trayController\.hidesToTray\(\)\)\s*focusMainWindow\(\);/.exec(src);
