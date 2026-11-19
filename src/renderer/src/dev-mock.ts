@@ -10,7 +10,7 @@
  */
 import { isUiStyle } from "../../shared/ui-style";
 import { toUpsourcePrs } from "../../shared/upsource";
-import { rankBefore } from "../../shared/agent-view";
+import { OWN_SESSION_WHY, rankBefore } from "../../shared/agent-view";
 import type {
   AgentAction,
   AgentItem,
@@ -483,7 +483,34 @@ const UPSOURCE_REVIEWS = toUpsourcePrs(
 FIXTURES.review.push(...UPSOURCE_REVIEWS);
 
 // The PR agent's Board, chip and statuses: PRs in every state it shows. `?buddy=agent`.
-FIXTURES.agent = [...FIXTURES.showcase, ...FIXTURES.review];
+FIXTURES.agent = [
+  ...FIXTURES.showcase,
+  ...FIXTURES.review,
+  // Two of yours the agent can't start on: one from a fork (it never pushes
+  // there), one a Claude session of yours already works on.
+  pr({
+    id: "mock-fork-pr",
+    repo: "acme/widgets",
+    number: 47,
+    url: "https://github.com/acme/widgets/pull/47",
+    title: "feat: agent defaults that keep up",
+    headRefName: "agent-defaults",
+    isCrossRepository: true,
+    hasConflicts: true,
+    hasNoReviews: false,
+    reviewDecision: "CHANGES_REQUESTED",
+  }),
+  pr({
+    id: "mock-session-pr",
+    repo: "acme/clio",
+    number: 64,
+    url: "https://github.com/acme/clio/pull/64",
+    title: "fix: why settings reset on Windows",
+    headRefName: "fix/settings-reset",
+    ciState: "failure",
+    failingChecks: [{ name: "build", kind: "check", state: "failure", url: "https://github.com/acme/clio/actions/runs/1" }],
+  }),
+];
 
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
 // `?jiraAuth=token` / `?jiraAuth=twg` shows the rejected-credentials banner and
@@ -590,6 +617,16 @@ const CLAUDE_SESSIONS: ClaudeSessionInfo[] = [
     groups: [{ kind: "explain", key: "ENG-93367" }],
     repoKeys: ["github.com/acme/clio"],
     branch: "main",
+  },
+  {
+    // On the `?buddy=agent` PR #64: its Board card switches here.
+    id: "00000000-0000-4000-8000-000000000007",
+    name: "Settings reset on Windows",
+    status: "idle",
+    where: "desktop",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "fix/settings-reset",
   },
   {
     id: "00000000-0000-4000-8000-000000000004",
@@ -899,7 +936,18 @@ function mockAgentState(): AgentState {
       run(44, [["Read the PR", "in_progress"], ["Review the dependency bumps", "pending"]], "$ gh pr diff 44"),
     ].filter((r) => items.some((i) => i.runId === r.runId)),
     idle: Object.fromEntries(
-      prs.map((p) => [p.id, p.roles.includes("author") ? "Yours: nothing for the agent yet" : p.isDraft ? "Draft: picked up once ready for review" : "Nothing for the agent"]),
+      prs.map((p) => [
+        p.id,
+        p.id === "mock-fork-pr"
+          ? "Yours, from a fork — the agent pushes only to branches of the repository itself"
+          : p.id === "mock-session-pr"
+            ? OWN_SESSION_WHY
+            : p.roles.includes("author")
+              ? "Yours: nothing for the agent yet"
+              : p.isDraft
+                ? "Draft: picked up once ready for review"
+                : "Nothing for the agent",
+      ]),
     ),
     runsToday: 6,
     perDay: 30,

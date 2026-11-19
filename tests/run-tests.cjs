@@ -11486,8 +11486,30 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const review = board(xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true }));
       assert.ok(!review.choices.some((c) => c.act), "nothing that starts the agent");
       assert.strictEqual(review.ask, "Carry on in your Claude session — the agent stays off this PR while it is open.");
+      // "Carry on there" comes with the way there: the session first, GitHub second.
+      const shape = (e) => e.choices.map((c) => [c.label, c.control ?? null, Boolean(c.primary)]);
+      assert.deepStrictEqual(shape(review), [["Open your Claude session", "session", true], ["Review on GitHub myself", null, false]]);
+      assert.match(review.next, /Once you archive the session, the agent can take this PR again\.$/);
       const red = board(xPr({ id: "R", ciState: "failure", failingChecks: [{ name: "build" }] }));
       assert.ok(!red.choices.some((c) => c.act?.type === "enqueue"), "your PR with red CI: no Let the agent fix it");
+      assert.deepStrictEqual(shape(red), [["Open your Claude session", "session", true], ["Open on GitHub", null, false]]);
+      assert.strictEqual(red.next, "CI runs again on your push. Once you archive the session, the agent can take this PR again.");
+    });
+
+    test("agent board words: your PR from a fork — no button that starts the agent, which never pushes there", () => {
+      // The case of #47: conflicts, the branch in a fork; "Let the agent fix it" was offered and always refused.
+      const conflict = xOne(xPr({ isCrossRepository: true, hasConflicts: true }));
+      assert.deepStrictEqual([conflict.owner, conflict.stage.action.kind], ["you", "fixYourself"]);
+      assert.ok(!conflict.choices.some((c) => c.act), "nothing that starts the agent");
+      assert.deepStrictEqual(conflict.choices.map((c) => [c.label, Boolean(c.primary)]), [["Open on GitHub", true]]);
+      assert.strictEqual(conflict.ask, "Fix it in your clone and push to your fork — or reopen the PR from a branch of this repository, and the agent can take it.");
+      assert.strictEqual(conflict.next, "CI runs again on your push.");
+      // Waiting on reviewers: no "Self-review again" either — it ends in a push too.
+      assert.ok(xOne(xPr()).choices.some((c) => c.label === "Self-review again"), "the same PR in the repository itself offers it");
+      assert.deepStrictEqual(xOne(xPr({ isCrossRepository: true })).choices, []);
+      // Someone else's PR from a fork stays the agent's to review: a review posts, it never pushes.
+      const theirs = xOne(xPr({ id: "F", isCrossRepository: true, roles: ["reviewer"], requestedOfMe: true }));
+      assert.deepStrictEqual([theirs.choices[0].label, theirs.choices[0].act], ["Let the agent review", { type: "enqueue", prId: "F" }]);
     });
 
     test("agent board words: a review nobody started is the agent's to start — unless the agent is off", () => {

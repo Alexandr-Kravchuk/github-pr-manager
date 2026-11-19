@@ -451,7 +451,11 @@ Three layers:
   `shared/agent-view.ts`, one pure function the chip and the tray read too,
   so a PR shows once; the words are `shared/agent-explain.ts`. A card nobody
   started (asked of you, red CI) offers "Let the agent …" first and GitHub
-  second, never only a link. Every Your-turn card has "Not now" (`notNow`,
+  second, never only a link — but never a button main would refuse: your PR
+  from a fork (the agent never pushes to one) says how to fix it yourself, and
+  a PR your own Claude session holds offers "Open your Claude session" first
+  (`control: "session"`; the Board finds the session the way the card's Claude
+  button does and switches to it). Every Your-turn card has "Not now" (`notNow`,
   only the PR id goes over IPC): main stores the card's `cardKey` — the PR's
   head, `updatedAt`, CI and conflict state, and its latest run — in
   `state.json` (`setAside`), and while that still reads the same the card

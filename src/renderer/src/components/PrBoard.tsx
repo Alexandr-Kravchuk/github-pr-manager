@@ -8,8 +8,10 @@ import { heldLabel, type HeldWrite, type PublishSummary } from "../../../shared/
 import type { FindingSeverity, RunAsk, RunFinding } from "../../../shared/agent-result";
 import type { AgentAction, AgentItem, AgentState, MergeMethod, PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
+import { describeSession, sessionsForPr, shownSession } from "../../../shared/claude-sessions";
 import { AgentContext } from "./agent-context";
 import { AgentDiagrams } from "./AgentDiagrams";
+import { ClaudeSessionsContext } from "./claude-context";
 
 // The Board: what needs you first, then what doesn't. One sentence says how
 // much is yours; then every decision as an open card — what happened, what to
@@ -313,9 +315,9 @@ function Decision({ e, n, run, onOpen, notice }: { e: BoardEntry; n: number; run
             <YourCall item={item} asks={e.read.asks} canAnswer={Boolean(item.sessionId) && !item.needsRerun} run={run} />
           )}
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            {primary && <ChoiceButton choice={primary} item={item} run={run} big />}
+            {primary && <ChoiceButton choice={primary} item={item} pr={e.pr} run={run} big />}
             {rest.map((c) => (
-              <ChoiceButton key={c.label} choice={c} item={item} run={run} big />
+              <ChoiceButton key={c.label} choice={c} item={item} pr={e.pr} run={run} big />
             ))}
           </div>
           {notice && (
@@ -420,9 +422,10 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
 }
 
 /** A button that does what its card says it does: the merge with its method, the rest with their action or link. */
-function ChoiceButton({ choice, item, run, big = false }: { choice: BoardChoice; item: AgentItem | null; run: Run; big?: boolean }) {
+function ChoiceButton({ choice, item, pr, run, big = false }: { choice: BoardChoice; item: AgentItem | null; pr: PullRequest | null; run: Run; big?: boolean }) {
   const [busy, setBusy] = useState(false);
   if (choice.control === "merge" && item) return <MergeButton item={item} run={run} big={big} />;
+  if (choice.control === "session" && pr) return <SessionButton choice={choice} pr={pr} big={big} />;
   const press = async () => {
     if (choice.url && !choice.act) return openUrl(choice.url);
     if (!choice.act) return;
@@ -439,6 +442,38 @@ function ChoiceButton({ choice, item, run, big = false }: { choice: BoardChoice;
       className={big ? cn(BTN_BIG, choice.primary ? "border-sky-600 bg-sky-600 text-white hover:bg-sky-700" : "border-line-strong bg-surface text-fg-secondary hover:bg-elevated") : choice.primary ? BTN_PRIMARY : BTN}
     >
       {busy ? "…" : choice.label}
+    </button>
+  );
+}
+
+/**
+ * The way back to the Claude session of yours that holds the PR — the same
+ * session the card's Claude button switches to. One running in the background
+ * has no window to bring up, so the button says so instead of failing.
+ */
+function SessionButton({ choice, pr, big }: { choice: BoardChoice; pr: PullRequest; big: boolean }) {
+  const all = useContext(ClaudeSessionsContext);
+  const session = shownSession(sessionsForPr(pr, all));
+  const reachable = session !== undefined && session.where !== "background";
+  const title = session ? (reachable ? `Switch to ${describeSession(session)}` : `${describeSession(session)} — it has no window to switch to.`) : "The session isn't listed right now — it may have just ended.";
+  const press = () => {
+    if (!session || !reachable) return;
+    window.api
+      .focusClaudeSession(session.id)
+      .then((res) => {
+        if (!res.ok) window.alert(res.error);
+      })
+      .catch((e: unknown) => window.alert((e as Error).message));
+  };
+  return (
+    <button
+      type="button"
+      title={title}
+      disabled={!reachable}
+      onClick={press}
+      className={big ? cn(BTN_BIG, choice.primary ? "border-sky-600 bg-sky-600 text-white hover:bg-sky-700" : "border-line-strong bg-surface text-fg-secondary hover:bg-elevated") : choice.primary ? BTN_PRIMARY : BTN}
+    >
+      {choice.label}
     </button>
   );
 }
@@ -552,7 +587,7 @@ function StatusRow({ e, state, first, run, onOpen }: { e: BoardEntry; state: Age
                       Watch
                     </button>
                   ) : (
-                    <ChoiceButton choice={c} item={item} run={run} />
+                    <ChoiceButton choice={c} item={item} pr={e.pr} run={run} />
                   )}
                   <span className="text-[11px] text-fg-subtle">{c.does}</span>
                 </li>
