@@ -95,6 +95,23 @@ export function validateJiraToken(value: unknown): string {
   return value.trim();
 }
 
+/** Validates the Upsource token from `setUpsourceToken` (empty clears it). */
+export function validateUpsourceToken(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new Error("setUpsourceToken: expected a string.");
+  }
+  if (value.length > 5_000) {
+    throw new Error("setUpsourceToken: token too long.");
+  }
+  const token = value.trim();
+  // A Hub token is printable ASCII with no spaces. Anything else could not go
+  // into an Authorization header, and the failure would quote it back.
+  if (token && !/^[!-~]+$/.test(token)) {
+    throw new Error("setUpsourceToken: the token has characters a Hub token never has (spaces, line breaks).");
+  }
+  return token;
+}
+
 /** Ensures a Jira status mode is one of the known ones; absent means `cached`. */
 export function validateJiraStatusMode(value: unknown): JiraStatusMode {
   if (value === undefined || value === "cached") return "cached";
@@ -214,6 +231,8 @@ export function validateAgentAction(value: unknown): AgentAction {
   }
   // What goes out is main's own line on the PR's head: only the PR is named.
   if (v.type === "approveAgain") return { type: "approveAgain", prId: validatePrId(v.prId) };
+  // Main reads what the card shows itself: only the PR is named.
+  if (v.type === "notNow" || v.type === "bringBack") return { type: v.type, prId: validatePrId(v.prId) };
   // The whole agent: nothing else rides along.
   if (v.type === "pauseAgent" || v.type === "resumeAgent") return { type: v.type };
   if (typeof v.runId !== "string" || !RUN_ID.test(v.runId)) throw new Error("agentAction: expected a run id.");

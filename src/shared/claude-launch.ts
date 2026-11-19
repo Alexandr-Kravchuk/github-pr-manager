@@ -15,13 +15,15 @@ import type { ClaudeSettings, PullRequest } from "./types";
  *  - `review` — your review is due (requested, returned to you, re-review);
  *  - `close` — your PR is ready to merge (`canBeMerged`);
  *  - `open` — anything else: the session gets only the link.
+ * `codexReview` starts the Codex CLI (not Claude) on the PR for a second-opinion review; like
+ * `explain` it is only in the button's menu.
  * `explain` is never picked from the state — it is only in the button's menu:
  * a plain-language explanation of the PR, shown in the session, no letter.
  */
-export type ClaudeLaunchKind = "drive" | "review" | "close" | "explain" | "open";
+export type ClaudeLaunchKind = "drive" | "review" | "codexReview" | "close" | "explain" | "open";
 
 /** Every kind, in the order the button's menu lists them. */
-export const CLAUDE_LAUNCH_KINDS: readonly ClaudeLaunchKind[] = ["drive", "review", "close", "explain", "open"];
+export const CLAUDE_LAUNCH_KINDS: readonly ClaudeLaunchKind[] = ["drive", "review", "codexReview", "close", "explain", "open"];
 
 /**
  * The kinds the menu offers for this PR. Closing means merging, which is the
@@ -39,20 +41,44 @@ export interface ClaudeMenuItem {
 }
 
 /**
- * The button's menu for this PR: every kind `claudeKindsFor` offers, plus
- * "Review in terminal" right after "Review" while Settings open sessions in
- * Claude Desktop (`desktop`). With a terminal chosen, "Review" already opens
- * one, so the extra item would repeat it.
+ * The button's menu for this PR: every kind `claudeKindsFor` offers, plus a
+ * second review row "in terminal" right after each review row while Settings
+ * open sessions in the desktop app (`desktop`): Claude Desktop for Claude, the
+ * Codex app for Codex. With a terminal chosen, the review row already opens
+ * one, so the extra item would repeat it. "Review" with Codex is left out when the
+ * `codex` CLI is not installed (`codex`), rather than failing in a terminal window.
  */
-export function claudeMenuItems(pr: Pick<PullRequest, "roles">, desktop: boolean): ClaudeMenuItem[] {
-  return claudeKindsFor(pr).flatMap((kind): ClaudeMenuItem[] =>
-    kind === "review" && desktop
+export function claudeMenuItems(pr: Pick<PullRequest, "roles">, desktop: boolean, codex = false): ClaudeMenuItem[] {
+  return claudeKindsFor(pr)
+    .filter((kind) => kind !== "codexReview" || codex)
+    .flatMap((kind): ClaudeMenuItem[] =>
+    isReviewKind(kind) && desktop
       ? [
           { kind, inTerminal: false },
           { kind, inTerminal: true },
         ]
       : [{ kind, inTerminal: false }],
   );
+}
+
+/** The review items of the menu share one visual group: one colour, one divider, a target on each row. */
+export function isReviewKind(kind: ClaudeLaunchKind): boolean {
+  return kind === "review" || kind === "codexReview";
+}
+
+/**
+ * Which tool a menu item starts and where. The row reads "Review with <name>" and
+ * `place` is a muted hint beside it, so the review rows differ in their main text. Only the review items have one: null for the others.
+ * `desktop` is Settings' choice of Claude Desktop.
+ */
+export function claudeMenuTarget(
+  item: ClaudeMenuItem,
+  desktop: boolean,
+): { tool: "claude" | "codex"; name: "Claude" | "Codex"; place: "Desktop" | "app" | "terminal" } | null {
+  if (!isReviewKind(item.kind)) return null;
+  const terminal = item.inTerminal || !desktop;
+  if (item.kind === "codexReview") return { tool: "codex", name: "Codex", place: terminal ? "terminal" : "app" };
+  return { tool: "claude", name: "Claude", place: terminal ? "terminal" : "Desktop" };
 }
 
 /**
@@ -119,6 +145,7 @@ export const REVIEW_GROUP_PERMISSIONS: Record<"hold" | "approve", string> = {
 export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
   drive: "/drive-pr-green {url}",
   review: "/creatio-code-review {url}",
+  codexReview: "Use the creatio-code-review skill to review the pull request {url}. Report the findings here; do not post anything to the PR.",
   close: "/drive-pr-close {url}",
   explain: "/usercustom-dev:pr-first-look {url} — show the explanation here in the session; do not send a letter",
   open: "{url}",
@@ -296,12 +323,14 @@ export const JIRA_KEY_RE = new RegExp(`^${JIRA_KEY_PATTERN}$`);
  *    "Review" and the `To review` segment), so it never reviews your own PR,
  *    a draft or one nobody asked you about; at least one.
  */
-export function groupLaunchPrs<T extends Pick<PullRequest, "isDraft" | "roles" | "myReReviewDue">>(
+export function groupLaunchPrs<T extends Pick<PullRequest, "isDraft" | "roles" | "myReReviewDue" | "source">>(
   kind: GroupLaunchKind,
   key: string,
-  prs: readonly T[],
+  all: readonly T[],
 ): T[] | null {
   if (!JIRA_KEY_RE.test(key)) return null;
+  // A Jira group can hold Upsource reviews; Claude reads GitHub PRs only.
+  const prs = all.filter((p) => p.source !== "upsource");
   const picked = kind === "explain" ? prs.filter((p) => !p.isDraft) : prs.filter(isReviewDue);
   return picked.length >= (kind === "explain" ? 2 : 1) ? picked.slice(0, MAX_GROUP_PRS) : null;
 }
@@ -320,6 +349,7 @@ export const DEFAULT_CLAUDE_SETTINGS: ClaudeSettings = {
 export const CLAUDE_LAUNCH_LABEL: Record<ClaudeLaunchKind, string> = {
   drive: "drive it to green",
   review: "review it",
+  codexReview: "review it with Codex",
   close: "close it",
   explain: "explain what it does",
   open: "open it",
@@ -329,6 +359,7 @@ export const CLAUDE_LAUNCH_LABEL: Record<ClaudeLaunchKind, string> = {
 export const CLAUDE_BUTTON_TEXT: Record<ClaudeLaunchKind, string> = {
   drive: "Drive to green",
   review: "Review",
+  codexReview: "Review with Codex",
   close: "Close PR",
   explain: "Explain",
   open: "Open session",
@@ -394,9 +425,14 @@ export function launcherEnv(env: Record<string, string | undefined>): Record<str
   return out;
 }
 
-/** The command a POSIX terminal runs: go to the checkout, start claude with the prompt. */
-export function posixLaunchCommand(dir: string, prompt: string): string {
-  return `unset ${CLAUDE_SESSION_ENV_MARKERS.join(" ")}; cd ${shellQuote(dir)} && claude ${shellQuote(prompt)}`;
+/** The CLI a kind starts: Codex for `codexReview`, Claude for everything else. */
+export function launchProgram(kind: ClaudeLaunchKind): "claude" | "codex" {
+  return kind === "codexReview" ? "codex" : "claude";
+}
+
+/** The command a POSIX terminal runs: go to the checkout, start the CLI with the prompt. */
+export function posixLaunchCommand(dir: string, prompt: string, program: "claude" | "codex" = "claude"): string {
+  return `unset ${CLAUDE_SESSION_ENV_MARKERS.join(" ")}; cd ${shellQuote(dir)} && ${program} ${shellQuote(prompt)}`;
 }
 
 /** iTerm2's bundle id — addressed by id so the app's display name ("iTerm" vs "iTerm2") doesn't matter. */
@@ -449,6 +485,15 @@ export function terminalScript(app: "iterm" | "terminal", command: string): stri
  */
 export function claudeDesktopUrl(dir: string, prompt: string): string {
   return `claude://code/new?q=${encodeURIComponent(prompt)}&folder=${encodeURIComponent(dir)}`;
+}
+
+/**
+ * The Codex app's link for a new thread: opens it in `dir` with `prompt`
+ * prefilled in the composer (not sent). The `path` and `prompt` parameters are
+ * read from the app's own link handler, not from published documentation.
+ */
+export function codexAppUrl(dir: string, prompt: string): string {
+  return `codex://threads/new?path=${encodeURIComponent(dir)}&prompt=${encodeURIComponent(prompt)}`;
 }
 
 /** An AppleScript string literal for `text`. */

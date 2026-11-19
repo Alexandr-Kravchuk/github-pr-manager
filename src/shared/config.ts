@@ -16,6 +16,7 @@ import {
 import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS, PREVIOUS_DEFAULT_PROMPTS } from "./claude-launch";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "./notify";
 import { DEFAULT_STALE_AFTER_DAYS, validateStaleAfterDays } from "./stale";
+import { UPSOURCE_HOST_LABEL, normalizeUpsourceBaseUrl } from "./upsource";
 import type {
   AgentMode,
   AgentPromptKey,
@@ -25,6 +26,7 @@ import type {
   GhStatus,
   HostConfig,
   JiraSettings,
+  UpsourceSettings,
   NotificationSettings,
   PublicConfig,
   Settings,
@@ -220,6 +222,7 @@ export function validateSettings(raw: unknown): Settings {
     notifications,
     hosts,
     jira: validateJira(obj.jira),
+    upsource: validateUpsource(obj.upsource),
     claude: validateClaude(obj.claude),
     agent: validateAgent(obj.agent),
     staleAfterDays: validateStaleAfterDays(obj.staleAfterDays),
@@ -282,6 +285,7 @@ export function validateClaude(raw: unknown): ClaudeSettings {
     prompts: {
       drive: prompt("drive"),
       review: prompt("review"),
+      codexReview: prompt("codexReview"),
       close: prompt("close"),
       explain: prompt("explain"),
       open: prompt("open"),
@@ -460,6 +464,23 @@ function validateJira(raw: unknown): JiraSettings | undefined {
 }
 
 /**
+ * Validates the optional Upsource connection: undefined when absent or without
+ * an address (Upsource stays off), the address normalized by
+ * `normalizeUpsourceBaseUrl` — https only, since the token is a Bearer credential.
+ */
+function validateUpsource(raw: unknown): UpsourceSettings | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const value = (raw as Record<string, unknown>).baseUrl;
+  const rawUrl = typeof value === "string" ? value.trim() : "";
+  if (!rawUrl) return undefined;
+  const baseUrl = normalizeUpsourceBaseUrl(rawUrl);
+  if (!baseUrl) {
+    throw new ConfigError(`settings: upsource.baseUrl must be an https URL (the token is never sent over http): ${rawUrl}`);
+  }
+  return { baseUrl };
+}
+
+/**
  * What `persistSettings` writes: the settings with every Claude prompt that is
  * still its default stored empty. An empty prompt reads back as the default,
  * so a later release that changes a default reaches every user who never
@@ -480,9 +501,18 @@ export function toStoredSettings(settings: Settings): Settings {
  */
 export const RETIRED_SETTINGS_FIELDS: readonly string[] = [];
 
-/** Every field this build knows. An empty object stands for a map (`claude.repoPaths`): its keys are data, owned whole. */
+/**
+ * Every field this build knows. An empty object stands for a map
+ * (`claude.repoPaths`): its keys are data, owned whole. The optional sections
+ * the defaults leave out (`jira`, `upsource`) are listed by hand: a save that
+ * clears one leaves it out, and as an unknown field it would come back from disk.
+ */
 function knownSettingsShape(): Record<string, unknown> {
-  return { ...toStoredSettings(defaultSettings()), jira: { baseUrl: "", email: "" } };
+  return {
+    ...toStoredSettings(defaultSettings()),
+    jira: { baseUrl: "", email: "" },
+    upsource: { baseUrl: "" },
+  };
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -569,13 +599,18 @@ export function toHostConfigs(settings: Settings): HostConfig[] {
 }
 
 /** Builds the sanitized (token-free) config for the renderer's filter bar. */
-export function toPublicConfig(settings: Settings): PublicConfig {
+export function toPublicConfig(settings: Settings, codexAvailable = false): PublicConfig {
   return {
     pollIntervalSeconds: settings.pollIntervalSeconds,
-    hosts: settings.hosts.map((h) => ({ label: h.label, repos: h.repos })),
+    // Upsource gets a host pill of its own, which is also its filter.
+    hosts: [
+      ...settings.hosts.map((h) => ({ label: h.label, repos: h.repos })),
+      ...(settings.upsource ? [{ label: UPSOURCE_HOST_LABEL, repos: [] }] : []),
+    ],
     trackComments: settings.trackComments,
     claudeEnabled: settings.claude.enabled,
     claudeDesktop: settings.claude.terminal === "desktop",
+    codexAvailable,
     uiStyle: settings.uiStyle ?? "flat",
   };
 }

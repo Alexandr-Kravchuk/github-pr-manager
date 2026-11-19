@@ -167,7 +167,7 @@ export function agentSummary(state: AgentState): AgentSummary {
     running: state.running.length,
     pausedRuns: state.running.filter((r) => r.paused).length,
     queued: state.items.filter((i) => i.state === "queued").length,
-    readyForYou: readyItems(state.items).length,
+    readyForYou: readyItems(state.items, state.heads, state.setAside).length,
     block,
     blockText,
   };
@@ -345,6 +345,8 @@ export interface BoardStage {
   earlier: boolean;
   /** Your approval stands on this head, yet GitHub lists a request for your review made after it (`approvalStands`). */
   askedAgain: boolean;
+  /** The result on the card can't be acted on any more (`staleRun`): GitHub places the card, the run is a note with Discard. */
+  stale: StaleRun | null;
   /** When the PR came to this column, as near as is known: the age a card shows and the order in a column. */
   since: string;
 }
@@ -376,12 +378,69 @@ function stageItems(items: readonly AgentItem[], today: string): { live: AgentIt
   return { live, result, last };
 }
 
+/** The head commit an item was keyed on ("<id>|<scenario>|<head>…"); null when its key names none. */
+export function keyHead(key: string): string | null {
+  const h = key.split("|")[2];
+  return h && h !== "-" ? h : null;
+}
+
+/** Two commit ids name the same commit — either may be abbreviated, as git does it (7 characters at least); an empty id names none. */
+function sameCommit(a: string, b: string): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  if (a === b) return true;
+  return Math.min(a.length, b.length) >= 7 && (a.startsWith(b) || b.startsWith(a));
+}
+
+/**
+ * The PR's head is a commit of the run's own — its last one or one before it —
+ * whoever pushed it: the app's Push, or the session you continued in Claude
+ * (which never sets `pushed`), all of its commits or only some.
+ */
+function headIsRuns(item: AgentItem, headOid: string): boolean {
+  const d = item.drive;
+  return Boolean(d && (sameCommit(headOid, d.head) || d.commits.some((c) => sameCommit(headOid, c.oid))));
+}
+
+/**
+ * Why a drive's result waiting on you can't be acted on any more:
+ * - `restart`: the app restarted after it (`needsRerun`), so its commits can't
+ *   be pushed and its session can't go on with your answer;
+ * - `headMoved`: the PR's head is past the commit it started from — someone
+ *   pushed since, so its commits and questions are about a PR that moved on.
+ * Null while it still is a move of yours. Commits in its worktree the app
+ * couldn't read (`localWork`) are never stale: that work is on no branch.
+ */
+export type StaleRun = "restart" | "headMoved";
+
+export function staleRun(item: AgentItem, headOid: string | null | undefined): StaleRun | null {
+  if (item.scenario !== "drive" || item.state !== "needsYou") return null;
+  if (item.localWork && !item.localWork.kept && item.localWork.ahead !== 0) return null;
+  const from = item.drive?.base ?? keyHead(item.key);
+  // The head moved to a commit of the run's own: its push, not someone else's.
+  if (headOid && from && !sameCommit(headOid, from) && !headIsRuns(item, headOid)) return "headMoved";
+  const unpushed = !item.pushed && (item.drive?.commits.length ?? 0) > 0;
+  if (item.needsRerun && ((item.result?.asks.length ?? 0) > 0 || unpushed)) return "restart";
+  return null;
+}
+
+/** A stale run in a line, for its card's note: what happened and that it needs nothing from you. */
+export function staleLine(why: StaleRun, item: AgentItem, headOid: string | null | undefined): string {
+  if (why === "headMoved") {
+    const from = (item.drive?.base ?? keyHead(item.key) ?? "").slice(0, 7);
+    const to = headOid ? ` (now ${headOid.slice(0, 7)})` : "";
+    return `Superseded — the PR moved past ${from || "the commit this run started from"}${to}; this run's result is out of date`;
+  }
+  return "Stale — the app restarted after this run, so it can't push or take your answer";
+}
+
 /**
  * What a result waiting on you asks you to do — or null when it asks nothing
  * (stopped, taken over in a terminal, timed out, nothing to post, cut short by
- * a restart): such a run is a line on its card, not a decision.
+ * a restart, stale — `staleRun`): such a run is a line on its card, not a
+ * decision. `headOid` is the PR's head now — null only where it isn't known,
+ * so no caller can leave it out by accident.
  */
-export function resultAction(item: AgentItem, lane: BoardLane): StageAction | null {
+export function resultAction(item: AgentItem, lane: BoardLane, headOid: string | null): StageAction | null {
   const fix = (): StageAction => ({ kind: "fix", label: lane === "mine" && item.sessionId ? "Open in Claude" : "Try again" });
   // The Jira run follows a merge: its PR is gone, there's nothing to try again.
   if (item.state === "error") return item.scenario === "afterMerge" ? null : fix();
@@ -406,6 +465,7 @@ export function resultAction(item: AgentItem, lane: BoardLane): StageAction | nu
     case "drive": {
       // Commits in its worktree the app couldn't read: never "nothing to push", never a Send on its own.
       if (item.localWork && !item.localWork.kept && item.localWork.ahead !== 0) return { kind: "push", label: "Unpushed work" };
+      if (staleRun(item, headOid)) return null;
       if ((item.result?.asks.length ?? 0) > 0) return { kind: "decide", label: "Your call" };
       const n = item.drive?.commits.length ?? 0;
       const replies = item.plan && !item.published ? item.plan.replies.length : 0;
@@ -423,10 +483,11 @@ export function resultAction(item: AgentItem, lane: BoardLane): StageAction | nu
 /**
  * The moves the agent prepared for you, one per PR, oldest first: the result
  * a PR's card asks you to act on in Your move (`boardStage` rule 2) — not
- * while the agent is on the PR again, never a run that asks nothing. What the
- * header chip, the tray and the popover count as "ready for you".
+ * while the agent is on the PR again, never a run that asks nothing or a
+ * stale one (`heads`: each PR's head now, by PR id). What the header chip,
+ * the tray and the popover count as "ready for you".
  */
-export function readyItems(items: readonly AgentItem[]): AgentItem[] {
+export function readyItems(items: readonly AgentItem[], heads?: Readonly<Record<string, string>>, setAside?: Readonly<Record<string, string>>): AgentItem[] {
   const byPr = new Map<string, AgentItem[]>();
   for (const i of items) {
     const list = byPr.get(i.prId);
@@ -434,13 +495,26 @@ export function readyItems(items: readonly AgentItem[]): AgentItem[] {
     else byPr.set(i.prId, [i]);
   }
   const out: AgentItem[] = [];
-  for (const list of byPr.values()) {
+  for (const [prId, list] of byPr) {
+    if (setAside?.[prId]) continue;
     const { live, result } = stageItems(list, "");
     if (live || !result) continue;
-    const action = resultAction(result, laneOfScenario(result.scenario));
+    const action = resultAction(result, laneOfScenario(result.scenario), heads?.[result.prId] ?? null);
     if (action && action.kind !== "updateJira") out.push(result);
   }
   return out.sort((a, b) => (a.finishedAt ?? "").localeCompare(b.finishedAt ?? ""));
+}
+
+/**
+ * What a PR's card is about right now, as one string: the PR's head, its last
+ * change on GitHub (a comment, a review, a push), its CI and conflict state,
+ * and the agent's latest run on it. "Not now" keeps a card aside only while
+ * this stays the same — anything new on the PR brings the card back.
+ */
+export function cardKey(pr: Pick<PullRequest, "headOid" | "updatedAt" | "ciState" | "hasConflicts">, items: readonly AgentItem[]): string {
+  const last = items.reduce<AgentItem | null>((a, i) => (a === null || i.queuedAt > a.queuedAt ? i : a), null);
+  const run = last ? `${last.runId}:${last.state}:${last.finishedAt ?? ""}` : "-";
+  return [pr.headOid ?? "-", pr.updatedAt, pr.ciState ?? "-", pr.hasConflicts ? "conflict" : "-", run].join("|");
 }
 
 /**
@@ -484,20 +558,22 @@ export function boardStage(pr: PullRequest | null, items: readonly AgentItem[], 
   const lane: BoardLane | null = pr ? laneOfPr(pr) : first ? laneOfScenario(first.scenario) : null;
   if (!lane) return null;
   const sdlc = pr ? (ctx.orchestrated?.[pr.id] ?? null) : null;
-  const base = { lane, action: null, ready: false, note: null, why: null, sdlc, earlier: false, askedAgain: false };
+  const headOid = pr?.headOid ?? null;
+  const stale = result ? staleRun(result, headOid) : null;
+  const base = { lane, action: null, ready: false, note: null, why: null, sdlc, earlier: false, askedAgain: false, stale };
   const at = (i: AgentItem) => i.finishedAt ?? i.startedAt ?? i.queuedAt;
 
   // 1. The agent is on it.
-  if (live) return { ...base, column: "agent", item: live, since: live.startedAt ?? live.queuedAt };
+  if (live) return { ...base, stale: null, column: "agent", item: live, since: live.startedAt ?? live.queuedAt };
 
-  // 2. The agent prepared your move.
+  // 2. The agent prepared your move — unless the PR moved past it or a restart left it unusable.
   if (result) {
-    const action = resultAction(result, lane);
+    const action = resultAction(result, lane, headOid);
     if (action?.kind === "updateJira") return { ...base, column: "done", action, item: result, note: result.headline, since: at(result) };
     if (action) return { ...base, column: "you", action, ready: true, item: result, since: at(result) };
   }
   const item = result ?? last;
-  const note = item?.headline ?? null;
+  const note = stale && result ? staleLine(stale, result, headOid) : (item?.headline ?? null);
 
   // 4. Gone from the dashboard: merged or closed, as far as the agent knows.
   if (!pr) return item ? { ...base, column: "done", item, note, since: at(item) } : null;
@@ -562,6 +638,8 @@ export interface StageBoard {
   review: LaneColumns;
   /** Moves the agent prepared on PRs the dashboard's filters hide. */
   hiddenReady: number;
+  /** Your-turn cards set aside with "Not now" (`AgentState.setAside`), oldest first. */
+  aside: StageCard[];
 }
 
 /** Your move, cheapest and readiest first; what is yours without the agent next; drafts last. */
@@ -592,8 +670,9 @@ function laneColumns(): LaneColumns {
  * Agent on it: running, then the queue in its order. Waiting: longest first —
  * the one to nudge. Done today: newest first.
  */
-export function stageColumns(shown: readonly PullRequest[], all: readonly PullRequest[], state: Pick<AgentState, "items">, ctx: StageContext): StageBoard {
-  const board: StageBoard = { mine: laneColumns(), review: laneColumns(), hiddenReady: 0 };
+export function stageColumns(shown: readonly PullRequest[], all: readonly PullRequest[], state: Pick<AgentState, "items" | "setAside">, ctx: StageContext): StageBoard {
+  const board: StageBoard = { mine: laneColumns(), review: laneColumns(), hiddenReady: 0, aside: [] };
+  const aside = state.setAside ?? {};
   const byPr = new Map<string, AgentItem[]>();
   for (const item of state.items) {
     const list = byPr.get(item.prId);
@@ -605,13 +684,14 @@ export function stageColumns(shown: readonly PullRequest[], all: readonly PullRe
     if (!stage) return;
     const lane = board[stage.lane];
     if (stage.earlier) lane.earlier++;
+    else if (stage.column === "you" && aside[prId]) board.aside.push({ prId, pr, stage });
     else lane[stage.column].push({ prId, pr, stage });
   };
   const shownIds = new Set(shown.map((p) => p.id));
   const allIds = new Set(all.map((p) => p.id));
   for (const pr of shown) place(pr.id, pr);
   for (const pr of all) {
-    if (!shownIds.has(pr.id) && boardStage(pr, byPr.get(pr.id) ?? [], ctx)?.ready) board.hiddenReady++;
+    if (!shownIds.has(pr.id) && !aside[pr.id] && boardStage(pr, byPr.get(pr.id) ?? [], ctx)?.ready) board.hiddenReady++;
   }
   for (const prId of byPr.keys()) if (!allIds.has(prId) && !shownIds.has(prId)) place(prId, null);
 
@@ -627,6 +707,7 @@ export function stageColumns(shown: readonly PullRequest[], all: readonly PullRe
     lane.waiting.sort((a, b) => a.stage.since.localeCompare(b.stage.since));
     lane.done.sort((a, b) => b.stage.since.localeCompare(a.stage.since));
   }
+  board.aside.sort((a, b) => a.stage.since.localeCompare(b.stage.since));
   return board;
 }
 
@@ -687,6 +768,7 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
         p.comments.length > 0 ? count(p.comments.length, "comment") : null,
         p.replies.length > 0 ? count(p.replies.length, "reply", "replies") : null,
         p.escalations.length > 0 ? `${p.escalations.length} pushed back` : null,
+        (p.held?.length ?? 0) > 0 ? `${p.held!.length} held back` : null,
       ]
         .filter(Boolean)
         .join(" · ");
@@ -739,7 +821,9 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
   if (stage.column === "waiting" && pr) {
     if (stage.lane === "mine") {
       if (pr.blockedByStack) return "Waits for the PR below it in the stack";
-      const parts = pr.reviewers.map((r) => (r.reviewState === "approved" ? `${r.login} ✓` : r.reviewState === "changes_requested" ? `${r.login} asked for changes` : `${r.login} pending`));
+      const parts = pr.reviewers
+        .filter((r) => r.reviewState !== "commented")
+        .map((r) => (r.reviewState === "approved" ? `${r.login} ✓` : r.reviewState === "changes_requested" ? `${r.login} asked for changes` : r.reviewState === "dismissed" ? `${r.login}'s review dismissed` : `${r.login} pending`));
       return parts.length > 0 ? parts.join(" · ") : "Waiting for reviewers";
     }
     const verdict = pr.viewerHasReviewed ? (pr.viewerApproved ? "You approved" : "You asked for changes") : pr.roles.includes("reviewed") ? "You commented" : "Waiting for the author";
@@ -757,8 +841,11 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
  * A notification's title, in the Board's words: what is ready for you and on
  * which PR — "Review ready to send: #929", "2 fixes ready to push: #142",
  * "Ready to merge: #85", "Your call on #150" — or that a run couldn't finish.
+ * Null: no toast at all — a result the PR already moved past (`staleRun`,
+ * `headOid` the PR's head now) is nobody's move, as on the Board.
  */
-export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item: AgentItem): string {
+export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item: AgentItem, headOid: string | null): string | null {
+  if (kind === "needsYou" && staleRun(item, headOid)) return null;
   const pr = `#${item.prNumber}`;
   if (kind === "failed") {
     // A run the agent planned is tried once more on its own: the toast says so, rather than asking you to.
@@ -774,7 +861,7 @@ export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item:
     if (item.scenario === "merge") return `Merged: ${pr}`;
     return `The agent finished ${pr}`;
   }
-  const action = resultAction(item, laneOfScenario(item.scenario));
+  const action = resultAction(item, laneOfScenario(item.scenario), headOid);
   switch (action?.kind) {
     case "send":
       if (item.scenario === "drive") return `${action.label === "Send reply" ? "Reply" : "Replies"} to reviewers ready to send: ${pr}`;

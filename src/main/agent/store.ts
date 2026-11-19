@@ -61,6 +61,11 @@ export interface AgentStoreData {
    * read once per head. Dropped once its PR leaves the dashboard.
    */
   baseOnly?: Record<string, BaseOnlyMark>;
+  /**
+   * Your-turn cards set aside with "Not now": PR id → the `cardKey` the card
+   * had then. Kept across a restart; dropped once the PR changes or leaves.
+   */
+  setAside?: Record<string, string>;
 }
 
 export interface BaseOnlyMark {
@@ -107,6 +112,9 @@ export function readStore(file: string, day: string): AgentStoreData {
       ...(typeof raw.board === "object" && raw.board !== null && !Array.isArray(raw.board) ? { board: raw.board } : {}),
       ...(typeof raw.reapprove === "object" && raw.reapprove !== null && !Array.isArray(raw.reapprove) ? { reapprove: raw.reapprove } : {}),
       ...(typeof raw.baseOnly === "object" && raw.baseOnly !== null && !Array.isArray(raw.baseOnly) ? { baseOnly: raw.baseOnly } : {}),
+      ...(typeof raw.setAside === "object" && raw.setAside !== null && !Array.isArray(raw.setAside)
+        ? { setAside: Object.fromEntries(Object.entries(raw.setAside).filter(([, v]) => typeof v === "string")) }
+        : {}),
     };
   } catch {
     return emptyStore(day);

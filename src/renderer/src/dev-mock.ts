@@ -9,6 +9,7 @@
  * rejected-credentials banner for that Jira source.
  */
 import { isUiStyle } from "../../shared/ui-style";
+import { toUpsourcePrs } from "../../shared/upsource";
 import { rankBefore } from "../../shared/agent-view";
 import type {
   AgentAction,
@@ -407,6 +408,80 @@ const FIXTURES: Record<string, PullRequest[]> = {
   ],
 };
 
+// Upsource reviews next to the PRs of `?buddy=review`, mapped by the real
+// `toUpsourcePrs`: one asked of you (sharing ENG-90463 with a PR above), one of
+// yours with a concern, one of yours every reviewer accepted.
+const UPSOURCE_USERS = new Map(
+  [
+    { userId: "me", name: "You", login: "me" },
+    { userId: "ak", name: "Avery Kim", login: "a.kim" },
+    { userId: "md", name: "Morgan Diaz", login: "m.diaz" },
+    { userId: "kb", name: "Kai Brooks", login: "k.brooks" },
+  ].map((u) => [u.userId, u]),
+);
+const upsourceAt = (hoursAgo: number) => Date.now() - hoursAgo * 3_600_000;
+const UPSOURCE_REVIEWS = toUpsourcePrs(
+  [
+    {
+      reviewId: { projectId: "acme", reviewId: "CR-1795" },
+      title: "ENG-90463 Panel page object: wait for the collapse animation",
+      participants: [
+        { userId: "ak", role: 1, state: 2 },
+        { userId: "md", role: 2, state: 3 },
+        { userId: "me", role: 2, state: 1 },
+        { userId: "kb", role: 2, state: 2 },
+      ],
+      state: 1,
+      isUnread: true,
+      createdAt: upsourceAt(30),
+      updatedAt: upsourceAt(2),
+      completionRate: { completedCount: 1, reviewersCount: 3, hasConcern: false },
+      discussionCounter: { count: 0, unresolvedCount: 0 },
+      deadline: upsourceAt(-48),
+    },
+    {
+      reviewId: { projectId: "acme", reviewId: "CR-1759" },
+      title: "ENG-90512 Distance unit lookup and its default setting",
+      participants: [
+        { userId: "me", role: 1, state: 2 },
+        { userId: "ak", role: 2, state: 3 },
+        { userId: "md", role: 2, state: 3 },
+        { userId: "kb", role: 2, state: 4 },
+      ],
+      state: 1,
+      createdAt: upsourceAt(70),
+      updatedAt: upsourceAt(20),
+      completionRate: { completedCount: 2, reviewersCount: 3, hasConcern: true },
+      discussionCounter: { count: 3, unresolvedCount: 2 },
+      deadline: upsourceAt(30),
+    },
+    {
+      reviewId: { projectId: "acme", reviewId: "CR-1792" },
+      title: "ENG-90530 Expression editor keeps focus on apply",
+      participants: [
+        { userId: "me", role: 1, state: 2 },
+        { userId: "ak", role: 2, state: 3 },
+        { userId: "md", role: 2, state: 3 },
+        { userId: "kb", role: 2, state: 3 },
+      ],
+      state: 1,
+      isReadyToClose: true,
+      createdAt: upsourceAt(50),
+      updatedAt: upsourceAt(40),
+      completionRate: { completedCount: 3, reviewersCount: 3, hasConcern: false },
+      discussionCounter: { count: 1, unresolvedCount: 0 },
+    },
+  ],
+  UPSOURCE_USERS,
+  "me",
+  "https://upsource.example.com",
+).map((p) => ({
+  ...p,
+  // `applyActivity` sets this in the app; the mock skips it.
+  needsAttention: p.roles.includes("reviewer") || p.hasUnaddressedChangeRequest || p.unresolvedThreads > 0,
+}));
+FIXTURES.review.push(...UPSOURCE_REVIEWS);
+
 // The PR agent's Board, chip and statuses: PRs in every state it shows. `?buddy=agent`.
 FIXTURES.agent = [...FIXTURES.showcase, ...FIXTURES.review];
 
@@ -432,6 +507,8 @@ const snapshot: DashboardResponse = {
   rateLimits: [
     { hostLabel: "GitHub", remaining: 4980, limit: 5000, cost: 20, resetAt: new Date().toISOString(), fetchedAt: new Date().toISOString() },
     { hostLabel: "GHE", remaining: 320, limit: 5000, cost: 20, resetAt: new Date().toISOString(), fetchedAt: new Date().toISOString() },
+    // Upsource reports no budget: an empty `resetAt` reads as "no budget", a green dot.
+    { hostLabel: "Upsource", remaining: 0, cost: 0, resetAt: "", fetchedAt: new Date().toISOString() },
   ],
   fetchedAt: new Date().toISOString(),
   version: "dev",
@@ -456,6 +533,7 @@ const settings: Settings = {
     events: { yourTurn: true, ciFailed: true, goodNews: true },
   },
   hosts: [{ label: "GitHub", graphqlUrl: "https://api.github.com/graphql", repos: ["acme/widgets"] }],
+  upsource: { baseUrl: "https://upsource.example.com" },
   claude: { ...DEFAULT_CLAUDE_SETTINGS, enabled: true },
   agent: structuredClone(DEFAULT_AGENT_SETTINGS),
   staleAfterDays: 30,
@@ -601,7 +679,7 @@ function mockAgentState(): AgentState {
     item(118, { state: "error", headline: "No checkout of acme/clio-knowledge: set its folder in Settings > Claude", finishedAt: iso(30 * 60_000) }),
     item(929, {
       state: "needsYou",
-      headline: "Would post: request changes, 1 inline comment, 1 reply, 1 diagram",
+      headline: "Would post: request changes, 1 inline comment, 1 reply, 1 diagram — 1 held back for you",
       diagrams: {
         checked: true,
         list: [
@@ -640,6 +718,16 @@ function mockAgentState(): AgentState {
         resolves: 0,
         escalations: [],
         diagrams: 1,
+        // A follow-up the session wrote in a colleague's thread: set aside, not sent.
+        held: [
+          {
+            kind: "reply",
+            replyTo: 1003,
+            author: "a-colleague",
+            url: "https://github.com/acme/clio/pull/929#discussion_r1003",
+            body: "Follow-up: the Jira task still lists this as open. Who signed it off?",
+          },
+        ],
       },
     }),
     item(934, {
@@ -854,6 +942,13 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
     pr.roles = pr.roles.filter((r) => r !== "reviewer");
     return { ok: true };
   }
+  // The mock keeps a card aside until you bring it back: nothing on its PRs changes by itself.
+  if (action.type === "notNow" || action.type === "bringBack") {
+    const { [action.prId]: _dropped, ...rest } = agentState.setAside ?? {};
+    agentState = { ...agentState, setAside: action.type === "notNow" ? { ...rest, [action.prId]: "mock" } : rest };
+    for (const l of agentListeners) l(agentState);
+    return { ok: true };
+  }
   if (action.type === "enqueue") {
     const pr = snapshot.pullRequests.find((p) => p.id === action.prId);
     if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
@@ -962,10 +1057,12 @@ const api: PrManagerApi = {
       hosts: [
         { label: "GitHub", repos: ["acme/widgets"] },
         { label: "GHE", repos: ["corp/widgets"] },
+        { label: "Upsource", repos: [] },
       ],
       trackComments: true,
       claudeEnabled: true,
       claudeDesktop: true,
+      codexAvailable: true,
       uiStyle: settings.uiStyle,
     },
   }),
@@ -999,6 +1096,13 @@ const api: PrManagerApi = {
     encryptionAvailable: true,
   }),
   setJiraToken: async () => ({ ok: true }),
+  getUpsourceStatus: async () => ({
+    hasConfig: true,
+    baseUrl: "https://upsource.example.com",
+    hasToken: true,
+    encryptionAvailable: true,
+  }),
+  setUpsourceToken: async () => ({ ok: true }),
   twgLogin: async () => ({ ok: false, error: "Not available in mock mode." }),
   getAppVersion: async () => "dev",
   launchClaude: async () => ({ ok: false, error: "Not available in mock mode." }),

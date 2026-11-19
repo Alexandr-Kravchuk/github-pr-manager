@@ -128,6 +128,16 @@ export interface JiraSettings {
   email?: string;
 }
 
+/**
+ * Optional Upsource (JetBrains code review) connection. Its reviews are listed
+ * next to the PRs. Only the server's address lives here; the Hub permanent
+ * token is stored encrypted on its own (`main/upsource.ts`), like Jira's.
+ */
+export interface UpsourceSettings {
+  /** Server origin, e.g. "https://upsource.example.com". */
+  baseUrl: string;
+}
+
 /** Which PR events raise a desktop notification. Each maps to a group agreed
  *  with the user — see `shared/notify.ts` for the exact transitions. */
 export interface NotificationEventToggles {
@@ -177,7 +187,7 @@ export interface ClaudeSettings {
    * `reviewGroup` are the group heading's "Explain all" and "Review all":
    * `{key}`, `{count}`, `{urls}` and, for the review, `{prompts}`.
    */
-  prompts: Record<"drive" | "review" | "close" | "explain" | "open" | "explainGroup" | "reviewGroup", string>;
+  prompts: Record<"drive" | "review" | "codexReview" | "close" | "explain" | "open" | "explainGroup" | "reviewGroup", string>;
   /**
    * Prompts only the PR agent runs (see `AgentSettings`). Kept apart from
    * `prompts` on purpose: those keys are the Claude button's launch kinds, and a
@@ -268,6 +278,8 @@ export interface Settings {
   hosts: SettingsHost[];
   /** Optional Jira connection for parent-task grouping (token stored separately). */
   jira?: JiraSettings;
+  /** Optional Upsource connection: its reviews join the list (token stored separately). */
+  upsource?: UpsourceSettings;
   /** Claude session launcher (off by default). */
   claude: ClaudeSettings;
   /**
@@ -494,12 +506,18 @@ export interface PublicConfig {
   claudeEnabled: boolean;
   /** Whether Claude sessions open in Claude Desktop — the only place "Review all" can nest its sessions. */
   claudeDesktop: boolean;
+  /** Whether the `codex` CLI is on the PATH — the menu offers "Review" with Codex only then. */
+  codexAvailable: boolean;
   /** Mirror of {@link Settings.uiStyle} — the renderer switches its look on it. */
   uiStyle?: UiStyle;
 }
 
-/** State of an individual reviewer on a PR. */
-export type ReviewerState = "approved" | "changes_requested" | "pending";
+/**
+ * State of an individual reviewer on a PR. `dismissed`: their review (usually an
+ * approval) was dismissed, typically by a push; `commented`: they only left
+ * comments. Neither is a verdict — only `approved` / `changes_requested` are.
+ */
+export type ReviewerState = "approved" | "changes_requested" | "pending" | "dismissed" | "commented";
 
 /** An individual reviewer and their current review state. */
 export interface Reviewer {
@@ -834,6 +852,67 @@ export interface PullRequest {
    * "Ignored" filter is on. Persisted across relaunches — see `ignored.ts`.
    */
   isIgnored: boolean;
+  /**
+   * Where the item comes from. Absent means GitHub. An Upsource review is
+   * listed, grouped, filtered and sorted like a PR, but GitHub-only parts — CI,
+   * merging, stacks, the Claude button and the PR agent — never apply to it:
+   * its GitHub fields hold neutral values (`shared/upsource.ts`), and what the
+   * card shows comes from {@link upsource}.
+   */
+  source?: PrSource;
+  /** The review as Upsource reports it; set only when {@link source} is "upsource". */
+  upsource?: UpsourceReviewInfo;
+}
+
+export type PrSource = "github" | "upsource";
+
+/** A review participant's progress, as Upsource names it. */
+export type UpsourceParticipantState = "unread" | "read" | "accepted" | "rejected";
+
+/** One participant of an Upsource review. */
+export interface UpsourceParticipant {
+  name: string;
+  login: string;
+  /** Hub avatar URL; empty when Upsource named none. */
+  avatarUrl: string;
+  role: "author" | "reviewer" | "watcher";
+  state: UpsourceParticipantState;
+}
+
+/** What the Upsource card shows beyond the shared PR fields. */
+export interface UpsourceReviewInfo {
+  projectId: string;
+  /** "CR-1795". */
+  reviewId: string;
+  /** Your role on the review; a watcher only is never listed. */
+  myRole: "author" | "reviewer";
+  /** Your own progress on it. */
+  myState: UpsourceParticipantState;
+  /** Reviewers who accepted, out of {@link reviewersCount}. */
+  accepted: number;
+  reviewersCount: number;
+  /** A reviewer raised a concern (rejected). */
+  hasConcern: boolean;
+  /** Discussions on the review, and how many are unresolved. */
+  discussions: number;
+  unresolved: number;
+  /** Due date (ISO), or null when the review has none. */
+  deadline: string | null;
+  /** Upsource marks the review unread for you. */
+  isUnread: boolean;
+  /** Every reviewer accepted: the author can close it. */
+  isReadyToClose: boolean;
+  /** Reviewers first, the author left out. */
+  participants: UpsourceParticipant[];
+}
+
+/** Upsource setup state for the Settings screen. */
+export interface UpsourceStatus {
+  /** A server address is saved. */
+  hasConfig: boolean;
+  baseUrl: string | null;
+  hasToken: boolean;
+  encryptionAvailable: boolean;
 }
 
 /** A fetch error for a specific host. */
@@ -899,7 +978,7 @@ export type SaveSettingsResult = { ok: true; warning?: string } | { ok: false; e
 
 /** Result of `launchClaude`: what was started and where, or why not. */
 export type ClaudeLaunchResult =
-  | { ok: true; kind: "drive" | "review" | "close" | "explain" | "open"; dir: string }
+  | { ok: true; kind: "drive" | "review" | "codexReview" | "close" | "explain" | "open"; dir: string }
   | { ok: false; error: string };
 
 /** Result of `launchClaudeGroup`: how many PRs went in and where it runs, or why not. */
@@ -1139,6 +1218,11 @@ export interface AgentState {
   running: AgentRunState[];
   /** Why each PR on the dashboard is idle, by PR id. */
   idle: Record<string, string>;
+  /**
+   * Each PR's head commit now, by PR id — what tells a result the PR moved
+   * past (`staleRun`) where no PR is at hand: the chip, the tray, the popover.
+   */
+  heads?: Record<string, string>;
   runsToday: number;
   perDay: number;
   parallel: number;
@@ -1164,6 +1248,12 @@ export interface AgentState {
    * stage it is at — the badge their cards wear instead of the agent's work.
    */
   orchestrated?: Record<string, { key: string; stage: string | null }>;
+  /**
+   * Your-turn cards you set aside with "Not now", by PR id, only while the
+   * card shows what it showed then (`cardKey`): any change on the PR or its
+   * run brings it back. Out of Your turn and out of every "ready for you" count.
+   */
+  setAside?: Record<string, string>;
 }
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
@@ -1183,6 +1273,9 @@ export type AgentAction =
   | { type: "enqueue"; prId: string; before?: string | null }
   /** Your approval again, on a PR it already stands on, to answer a review request made after it. */
   | { type: "approveAgain"; prId: string }
+  /** Sets a Your-turn card aside until something on its PR changes; `bringBack` puts it back now. */
+  | { type: "notNow"; prId: string }
+  | { type: "bringBack"; prId: string }
   | { type: "moveQueued"; runId: string; before: string | null };
 
 export type AgentActionResult = { ok: true } | { ok: false; error: string };
@@ -1233,6 +1326,13 @@ export interface PrManagerApi {
    * via the OS keychain. Returns whether it was persisted.
    */
   setJiraToken(token: string): Promise<{ ok: boolean; error?: string }>;
+  /** Upsource setup state for Settings. */
+  getUpsourceStatus(): Promise<UpsourceStatus>;
+  /**
+   * Store (or clear, when given an empty string) the Upsource Hub token,
+   * encrypted via the OS keychain. Returns whether it was persisted.
+   */
+  setUpsourceToken(token: string): Promise<{ ok: boolean; error?: string }>;
   /**
    * Opens a terminal running `twg login --force`: the sign-in is interactive
    * (site choice, browser consent), so the app can only start it, not finish it.
@@ -1249,7 +1349,7 @@ export interface PrManagerApi {
    */
   launchClaude(
     prId: string,
-    kind?: "drive" | "review" | "close" | "explain" | "open",
+    kind?: "drive" | "review" | "codexReview" | "close" | "explain" | "open",
     inTerminal?: boolean,
   ): Promise<ClaudeLaunchResult>;
   /**
@@ -1352,4 +1452,9 @@ export interface PrManagerApi {
 /** Auto-update lifecycle, pushed from main as electron-updater progresses. */
 export type UpdateStatus =
   | { state: "downloading"; version: string; percent: number }
-  | { state: "downloaded"; version: string };
+  | { state: "downloaded"; version: string }
+  // The updater failed after it started (e.g. the download's signature check
+  // failed): without this the pill stays on "Downloading… 100%" forever.
+  | { state: "error"; message: string }
+  // Nothing to show: up to date, or auto-update turned off. Clears an error.
+  | { state: "idle" };

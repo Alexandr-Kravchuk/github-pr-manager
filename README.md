@@ -144,6 +144,14 @@ npm install
 npm run dev      # Vite dev server (HMR) + Electron
 ```
 
+Repository agent skills live in `.claude/skills/`. Codex discovers the same
+skills through the tracked `.agents/skills` symlink, so additions and edits
+need no separate sync or install step. Keep new skills in
+`.claude/skills/<name>/SKILL.md`. If a skill does not appear in an existing
+Codex session, start a new session in this repository. On Windows, enable Git
+symlink support (`core.symlinks=true`, with Developer Mode or permission to
+create symbolic links) so the link is checked out as a directory link.
+
 To work on the UI without `gh` or the network, use the fixture mode: set
 `PRD_MOCK=1` (canned PRs in Electron — cases live in `src/main/mock.ts`, switched
 live via a `.prd-mock` file), or run the renderer alone in a browser and let
@@ -230,7 +238,32 @@ To cut a release:
 
 > First-time setup the maintainer does once: create the App Store Connect API key
 > (Issuer ID + Key ID + `.p8`) and export the Developer ID Application `.p12`.
-> Windows builds are **unsigned** for now (SmartScreen will warn on first run).
+> New Windows builds are signed by **Alex Kravchuk** with a project self-signed
+> certificate. Each release includes `PR-Dashboard.cer`,
+> `Install-PR-Dashboard-Trust.ps1` and `WINDOWS-TRUST.md`. Download the script and
+> certificate into the same folder, then right-click the script → Run with PowerShell.
+> Follow the [Windows trust instructions](build/windows-signing/WINDOWS-TRUST.md)
+> once per account to trust the certificate. The interactive installer also offers
+> an unchecked **Trust this certificate for my Windows account** option on Finish;
+> silent installs and app updates never install trust. SmartScreen warnings may still appear;
+> older unsigned releases remain unsigned.
+
+### Windows signing maintenance
+
+The Release workflow uses repository secrets `WIN_CSC_LINK` (base64 PKCS#12/PFX)
+and `WIN_CSC_KEY_PASSWORD`. The public certificate is committed at
+`build/windows-signing/PR-Dashboard.cer`; never commit its private key or password.
+Keep an encrypted backup of the PFX and its password in your secrets manager.
+The workflow requires signing and verifies both the app and installer against the
+committed certificate, including timestamps, before uploading any Windows assets.
+It also checks that the updater retains publisher verification.
+
+The certificate expires on 12 November 2031. To rotate it, replace both GitHub
+secrets and the public certificate, update the fingerprint in `WINDOWS-TRUST.md` and `Install-PR-Dashboard-Trust.ps1`,
+and test a Windows build. Keep the publisher name `Alex Kravchuk` consistent for
+updater verification; users must trust the replacement certificate before updating.
+The corporate-host `release-win.ps1` route does not configure these CI secrets and
+is not the signed GitHub Actions release path.
 
 ## Structure
 

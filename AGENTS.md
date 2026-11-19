@@ -255,10 +255,16 @@ Three layers:
   read the commits again, those your session made since included. What
   still can't be read becomes `localWork` (the folder and `rev-list`'s
   count on top of the PR): the card names it, never says "nothing to
-  push", and Send is refused while it holds commits. Otherwise its card
-  offers Run again (and Open in Claude) instead of a question's buttons or
-  a Push that would only be refused, and shows the question as what the
-  new run will ask. A drive's worktree is never removed with work you
+  push", and Send is refused while it holds commits. Otherwise such a
+  result is stale (`staleRun`): its question or Push could only be
+  refused, so it is not your move — and neither is a drive's result once
+  the PR's head moved past the commit it started from (`headMoved`, by
+  `drive.base` or the key's head; a head that is one of its own commits
+  is excepted, whether the app or a session continued in Claude pushed
+  it). GitHub then places the card (With reviewers, Merge, Open on
+  GitHub…), the run is the card's note, Discard is its obvious choice, the
+  chip, tray and popover don't count it as ready (`AgentState.heads` gives
+  them each PR's head), and it raises no toast (`agentNoticeTitle` is null). A drive's worktree is never removed with work you
   haven't seen (`keepForWork`: a HEAD that is not the one its card
   showed, changed tracked files, or a count git couldn't make) — Discard, a
   close and the sweep keep it and its run folder, write
@@ -423,7 +429,7 @@ Three layers:
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `jira-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
   `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`,
-  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js`, `weather.js` and `ui-style.js` stay free of `node:` builtin references, so the
+  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js`, `weather.js`, `ui-style.js` and `upsource.js` stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
@@ -445,7 +451,16 @@ Three layers:
   `shared/agent-view.ts`, one pure function the chip and the tray read too,
   so a PR shows once; the words are `shared/agent-explain.ts`. A card nobody
   started (asked of you, red CI) offers "Let the agent …" first and GitHub
-  second, never only a link. The two lanes are a tag on each card, not rows
+  second, never only a link. Every Your-turn card has "Not now" (`notNow`,
+  only the PR id goes over IPC): main stores the card's `cardKey` — the PR's
+  head, `updatedAt`, CI and conflict state, and its latest run — in
+  `state.json` (`setAside`), and while that still reads the same the card
+  sits folded under "Set aside" and out of every "ready for you" count
+  (`readyItems`, `hiddenReady`). Main sets aside only a card in Your turn,
+  and one rule (`stillAside`) says a card is still aside: its PR on the
+  dashboard, the same key, the card still in Your turn. Anything new on the
+  PR ends it — `getState` filters at once, and every snapshot prunes and
+  tells the window, the agent on or off — or Bring back (`bringBack`) now. The two lanes are a tag on each card, not rows
   of columns: a move was missed for days among eight equal columns. The
   three variants it was picked from are on the `prototype/board-redesign`
   branch. Like Cozy it turns off Group-by and Sort).
@@ -491,6 +506,14 @@ Three layers:
   carry `block` — the clamp works by `display: -webkit-box`, so a `block` next
   to it wins on stylesheet order and the titles run to any number of lines,
   which is what made the tiles in a row different heights.
+
+## Repository skills (Claude and Codex)
+
+Keep repository skills in `.claude/skills/<name>/SKILL.md`. The tracked relative
+symlink `.agents/skills` → `../.claude/skills` exposes that same directory to
+Codex's repository skill discovery, including newly added skills. Edit the
+canonical Claude directory; do not copy skills or replace the symlink with a
+separate directory. Skill resources and scripts stay beside their `SKILL.md`.
 
 ## Build / run
 
@@ -569,13 +592,16 @@ Three layers:
   this build doesn't know (or a value it doesn't accept) as its default, so
   `persistSettings` merges the file on disk back in (`keepUnknownSettings` in
   `shared/config.ts`): every field outside this build's known shape — the
-  defaults plus the optional `jira` — is kept at any depth, while a known one
-  always comes from the save, so a cleared Jira site or removed repo path stays
-  gone (an empty object in the shape, like `claude.repoPaths`, is a map owned
-  whole; arrays too). Renaming or reshaping a field therefore needs both
-  directions: read the old key, and expect an older build to keep writing it.
-  A field removed on purpose — a moved secret — goes in
-  `RETIRED_SETTINGS_FIELDS`, or the merge keeps it alive.
+  defaults plus the optional `jira` and `upsource` — is kept at any depth,
+  while a known one always comes from the save, so a cleared Jira site,
+  Upsource address or removed repo path stays gone (an empty object in the
+  shape, like `claude.repoPaths`, is a map owned whole; arrays too). A new
+  optional section the defaults leave out goes in `knownSettingsShape` by
+  hand, or clearing it in Settings brings it back from disk. Renaming or
+  reshaping a field therefore needs both directions: read the old key, and
+  expect an older build to keep writing it. A field removed on purpose — a
+  moved secret — goes in `RETIRED_SETTINGS_FIELDS`, or the merge keeps it
+  alive.
 - **Only a missing `settings.json` is the first run.** `readSettingsText`
   (`main/settings.ts`) returns empty settings for ENOENT alone; a read that
   fails otherwise is tried again a few times (EBUSY/EPERM/EACCES — a scan or
@@ -590,8 +616,9 @@ Three layers:
   read once on mount and never again). `userData/main.log`
   (`main/diag-log.ts`, capped, `.old` kept) records each start — version,
   argv, data folder, how many hosts and whether the agent loaded — every
-  failed settings read and the updater's downloads and errors: read it first
-  when settings "reset" again.
+  failed settings read and the updater's downloads and errors (one line each;
+  an error's stack is in `userData/updater.log`): read it first when settings
+  "reset" again.
 - Jira is read through the Atlassian `twg` CLI first, the API token second —
   the `gh` model again: twg signs in with OAuth and refreshes itself, so there
   is nothing to expire. `shared/jira-pass.ts` picks the source per pass (twg
@@ -697,6 +724,38 @@ Three layers:
   rather than the filtered ones, and only while the agent is on — pruning runs
   only then; their marks persist in `state.json` (`board`), so a restart logs
   what moved while the app was closed rather than every card again.
+- **Upsource reviews** (Settings › Integrations › Upsource, `Settings.upsource`)
+  join the list as items of their own: `shared/upsource.ts` (Node-free) maps
+  each open review you wrote or review into a `PullRequest` with
+  `source: "upsource"` and the review itself in `pr.upsource`, so grouping by
+  Jira key, search, the role and author filters, sorting, seen-state and
+  ignoring work on it unchanged. Its GitHub fields hold neutral values (no CI,
+  `canBeMerged` false, no stack), and the card, tile and Cozy row read
+  `pr.upsource` (`UpsourceCard.tsx`); the copy, ignore, Jira-key and avatar
+  controls both kinds of card carry live once, in `components/card-controls.tsx`.
+  `main/upsource.ts` keeps the Hub permanent token encrypted like Jira's
+  (`userData/upsource-token.enc`; a token with spaces or line breaks is refused
+  before it is stored) and is the poller's `upsource` source:
+  `getCurrentUser` (a guest answer is a refused token), `getReviews` (paged),
+  `getUserInfo` over `POST <base>/~rpc/<method>` with `Authorization: Bearer`
+  — https only, in settings and again before every call, one deadline per
+  call that covers the body and one for the whole read, and an error before
+  any answer names only its code, never the request. The source reads **in
+  the background**, one read at a time, at most once per poll interval, the
+  last list kept through a failure (the server is internal: off the VPN it is
+  unreachable). The poller never waits for it: every tick that is not parked
+  kicks it (forced on a manual refresh) and takes `current()` as it is, its
+  `nextDueAt()` counts toward the tick's wake-up (so it is read on time with
+  idle GitHub hosts or none at all), and a finished read calls
+  `rebuildSnapshot()`, which runs once more after a tick in flight rather
+  than joining it. `upsource:setToken` kicks a forced read itself — a read
+  started with the old token is dropped and the new one follows — and does
+  not wait for it (Settings closes only on its reply).
+  The host pill "Upsource" comes from `toPublicConfig` and gets a no-budget
+  reading (`resetAt` empty) for its green dot. Nothing GitHub-only may see a
+  review: the agent and every GitHub action in `main.ts` read `githubSnapshot()`
+  (`githubOnly`), the Board drops reviews, and `groupLaunchPrs` skips them, so
+  "Explain all" / "Review all" never hand Claude an Upsource link.
 - **No hook of a PR's repository runs for the agent.** A relative
   `core.hooksPath` (husky v9's `.husky/_`) resolves inside the worktree, so a
   hook there is the PR's own script. Every git command the app runs in a clone
@@ -749,6 +808,34 @@ Three layers:
   and `StructuredOutput`, which a Workflow's agents answer through); a test
   pins that every tool the default `--allowedTools` lists grant is one the
   guard knows, so extend the guard before adding a tool to the defaults.
+  One exception is narrow on purpose: the review skill's preflight. Its
+  Workflow first runs a deterministic helper of the installed plugin
+  (`skills/creatio-code-review/scripts/rereview-context.cjs`), found through
+  Claude Code's `plugins/installed_plugins.json`; the helper writes the PR's
+  data to `<tmp>/creatio-rereview-payload-*`, which later agents read. When
+  a mounted plugin carries the helper, a review or re-review with a payload
+  folder gets `preflight` in its guard file (`preflightFor` in
+  `main/agent/runner.ts`), `Bash(node *)` and a temp folder of its own
+  (`runTempEnv`: `<runDir>/tmp` as `TEMP`/`TMP`/`TMPDIR`), and
+  `checkPreflight` / `preflightReadable` allow exactly: reading that one
+  JSON file, reading inside a payload folder right under the run's temp
+  folder, `node <helper> < <request file in the run's payload folder>` and
+  `node <helper> --digest <payload folder>` — paths followed through links,
+  any other `node` call refused. The helper runs `gh` with your login on
+  whatever PR the request names, so the request is held to the run's own PR
+  and the four keys the skill sends (`requestProblem`). `node` never reads
+  the session's own file, which it could rewrite or rename over after the
+  check: the hook copies the checked text into `<runDir>/requests`, where
+  the session writes nothing (`requestStore`), and hands Claude Code the
+  command rewritten to read that copy (`updatedInput`), allowed by the hook
+  itself (`permissionDecision: "allow"`): the guard built all of that
+  command, and the copy is outside the session's folders, so Claude Code
+  would otherwise ask for an approval a headless run can't give — and the
+  review would abort. Nothing is locked, so a
+  refused request can be corrected and run again. The temp folder is the run's own because
+  your shared one keeps the payloads of every other review of the last day.
+  Without this every review aborted at the preflight (`preflight-unverified`)
+  and was reported as "Reviewed — nothing to post".
 - **Except a drive on your own PR, with full context** (Settings › Agent ›
   "Your PRs: full context", `permissions.fullContextDrive`, on by default).
   Its diff and comments are yours and your reviewers', so it runs with your
@@ -830,3 +917,43 @@ Three layers:
   (Glassmorphism's backdrop): about one step a second, only while the document
   is visible, and off under reduced motion — a new one needs the same
   justification, not a `setInterval` in place of a CSS animation.
+
+## Windows release signing
+
+GitHub Actions Release signs Windows builds using `WIN_CSC_LINK` (base64 PFX)
+and `WIN_CSC_KEY_PASSWORD` secrets. `forceCodeSigning` is required in CI. Before
+upload, `scripts/verify-windows-release.ps1` checks the app and installer against
+`build/windows-signing/PR-Dashboard.cer`, checks timestamps and updater publisher
+verification, then stages dash-named assets with `WINDOWS-TRUST.md` and
+`Install-PR-Dashboard-Trust.ps1`. The user-run script pins the certificate SHA-256,
+checks validity before importing, and installs trust in CurrentUser only. Keep private
+keys outside Git and the renderer. Certificate rotation must update the secrets,
+public certificate and documented fingerprint together. Self-signed trust is a
+one-time user action; do not claim it guarantees no SmartScreen warnings.
+
+`build/installer.nsh` adds an unchecked finish-page trust option; trust is never
+an install hook. Silent installs and updates skip it. `win.extraFiles` embeds the
+public certificate, trust script and instructions in `windows-signing/`. The finish
+action uses `StdUtils.ExecShellAsUser`; `-FromInstaller` refuses an elevated token
+so a shell fallback cannot change the administrator's trust. Separate release
+assets remain the alternative. Uninstall does not remove user-managed trust.
+
+Auto-update does not need that trust. electron-updater accepts a downloaded
+installer only when Windows calls its signature Valid, so on a machine without
+the trust every update was downloaded and thrown away. `main/update-signature.ts`
+wraps the NSIS verifier (`verifyUpdateCodeSignature`, set in `updater.ts` on
+win32): it accepts one more case — the signature is intact, the only fault is
+the untrusted root (`StatusMessage` compared with Windows' own text for
+CERT_E_UNTRUSTEDROOT, since it is localized), and the signer certificate's
+SHA-256 is `PINNED_SIGNER_SHA256`. HashMismatch, no signature, another signer
+and a Valid signature all go to electron-updater's verifier unchanged. The file
+path reaches PowerShell through the environment, never the command line, and
+is compared with the signed file's path inside PowerShell (`samePath`): stdout
+comes back in the OEM code page, so a profile folder with non-ASCII letters
+would garble a printed path. The probe runs without `PSModulePath`, which an
+inherited PowerShell 7 value would break, as electron-updater's own call does. A
+test pins the constant to `PR-Dashboard.cer` and to the trust script, so a
+rotation updates all three; a release signed with a new self-signed key is
+refused by every older release's pin, so its users install it by hand once.
+Releases 3.4.1 and older have only electron-updater's check: they need the
+trust script or a manual install once.

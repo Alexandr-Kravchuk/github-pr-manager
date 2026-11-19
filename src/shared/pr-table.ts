@@ -362,10 +362,12 @@ export function primaryRole(pr: Pick<PullRequest, "roles">): "author" | "reviewe
 export function approvalTally(
   pr: Pick<PullRequest, "reviewers">,
 ): { approved: number; total: number } | null {
-  if (pr.reviewers.length === 0) return null;
+  // Commenters are listed among the avatars but nobody waits on their approval.
+  const counted = pr.reviewers.filter((r) => r.reviewState !== "commented");
+  if (counted.length === 0) return null;
   return {
-    approved: pr.reviewers.filter((r) => r.reviewState === "approved").length,
-    total: pr.reviewers.length,
+    approved: counted.filter((r) => r.reviewState === "approved").length,
+    total: counted.length,
   };
 }
 

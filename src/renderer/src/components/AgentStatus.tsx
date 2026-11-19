@@ -69,6 +69,11 @@ export function useAgentWord(pr: PullRequest): AgentWord | null {
     // "Your call: …" already says what the button would.
     text = line.startsWith(stage.action.label) ? line : `${stage.action.label} — ${line}`;
     short = stage.action.label;
+  } else if (stage.stale) {
+    // The PR's own state first; the out-of-date run after it, never as a move of yours.
+    const line = stageLine(stage, pr);
+    text = line && line !== stage.note ? `${line} · ${stage.note}` : (stage.note ?? "");
+    short = column;
   } else {
     text = stage.note ?? stageLine(stage, pr);
     short = column;

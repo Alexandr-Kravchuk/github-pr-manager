@@ -40,8 +40,10 @@ import { AuthorFilterContext } from "./components/author-filter-context";
 import { StaleCloseDialog } from "./components/StaleCloseDialog";
 import { StaleCloseContext } from "./components/stale-close-context";
 import { BasePrContext } from "./components/base-pr-context";
-import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
+import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext, CodexAvailableContext } from "./components/claude-context";
 import { WeatherBadge } from "./components/WeatherBadge";
+import { UpsourceCard, UpsourceTile } from "./components/UpsourceCard";
+import { isUpsource } from "../../shared/upsource";
 import { applyUiStyle } from "./ui-style";
 import {
   DEFAULT_TABLE_SORT,
@@ -833,6 +835,8 @@ export function App() {
   const stats = useMemo(() => baselineStats(allPrs), [allPrs]);
 
   const filtered = useMemo(() => filterPrs(allPrs, filterState), [allPrs, filterState]);
+  const boardPrs = useMemo(() => filtered.filter((p) => !isUpsource(p)), [filtered]);
+  const boardAll = useMemo(() => allPrs.filter((p) => !isUpsource(p)), [allPrs]);
 
   // Chip badges are facet counts. A source chip reports how big that source is
   // under role / host / search and the reveal gate — blind to the other sources,
@@ -1554,12 +1558,14 @@ export function App() {
       <AgentContext.Provider value={agentContext}>
       <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
       <ClaudeDesktopContext.Provider value={config?.claudeDesktop ?? false}>
+      <CodexAvailableContext.Provider value={config?.codexAvailable ?? false}>
       <ClaudeSessionsContext.Provider value={claudeSessions}>
       <AuthorFilterContext.Provider value={authorFilter}>
       <StaleCloseContext.Provider value={setClosingPr}>
       <BasePrContext.Provider value={basePrs}>
       {viewMode === "board" ? (
-        <PrBoard prs={filtered} all={allPrs} onOpen={openPr} focus={boardFocus} onClearFilters={clearFilters} />
+        // The Board is the PR agent's work: Upsource reviews are not on it.
+        <PrBoard prs={boardPrs} all={boardAll} onOpen={openPr} focus={boardFocus} onClearFilters={clearFilters} />
       ) : viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable
@@ -1659,6 +1665,7 @@ export function App() {
         />
       )}
       </ClaudeSessionsContext.Provider>
+      </CodexAvailableContext.Provider>
       </ClaudeDesktopContext.Provider>
       </ClaudeEnabledContext.Provider>
       </AgentContext.Provider>
@@ -1686,6 +1693,13 @@ export function App() {
         )}
         {updateStatus?.state === "downloaded" && (
           <span className={FLOATING_PILL}>Restarting to install v{updateStatus.version}…</span>
+        )}
+        {updateStatus?.state === "error" && (
+          // pointer-events-auto: the row is click-through, and a span that
+          // gets no hover never shows its title — the only place the reason is.
+          <span className={`${FLOATING_PILL} pointer-events-auto cursor-help`} title={updateStatus.message}>
+            Update failed
+          </span>
         )}
         {/* The What's new button already names the version, so the bare one
             shows only without it. */}
@@ -1748,7 +1762,10 @@ function PrList({
           className,
         )}
       >
-        {prs.map((pr) => (
+        {prs.map((pr) =>
+          isUpsource(pr) ? (
+            <UpsourceTile key={pr.id} pr={pr} hideRepo={hideRepo} onOpen={onOpen} onToggleIgnore={onToggleIgnore} />
+          ) : (
           <PrTile
             key={pr.id}
             pr={pr}
@@ -1757,7 +1774,8 @@ function PrList({
             onOpen={onOpen}
             onToggleIgnore={onToggleIgnore}
           />
-        ))}
+          ),
+        )}
       </div>
     );
   }
@@ -1769,7 +1787,19 @@ function PrList({
         className,
       )}
     >
-      {prs.map((pr) => (
+      {prs.map((pr) =>
+        isUpsource(pr) ? (
+          <UpsourceCard
+            key={pr.id}
+            pr={pr}
+            hideRepo={hideRepo}
+            parentGroupKey={parentGroupKey}
+            jiraBaseUrl={jiraBaseUrl}
+            onOpen={onOpen}
+            onMarkSeen={onMarkSeen}
+            onToggleIgnore={onToggleIgnore}
+          />
+        ) : (
         <PrCard
           key={pr.id}
           pr={pr}
@@ -1781,7 +1811,8 @@ function PrList({
           onMarkSeen={onMarkSeen}
           onToggleIgnore={onToggleIgnore}
         />
-      ))}
+        ),
+      )}
     </div>
   );
 }

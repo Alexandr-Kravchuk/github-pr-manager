@@ -4,12 +4,12 @@ import path from "node:path";
 
 import { DEFAULT_AGENT_PROMPTS, languageRule } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
-import { describePlan, disputeSteps, gitBashPath, readPlanLines, shasNotOnPr, summarizePlan, type PublishStep } from "../../shared/agent-publish";
-import { describeToolUse, type RunProgress } from "../../shared/agent-stream";
+import { describePlan, disputeSteps, gitBashPath, readPlanLines, shasNotOnPr, summarizePlan, type PublishStep, type PublishSummary } from "../../shared/agent-publish";
+import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
-import { AGENT_CLOSED, approvalStands, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
+import { AGENT_CLOSED, approvalStands, boardStage, cardKey, keyHead, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -33,6 +33,7 @@ import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type Installed
 import {
   ghApiArgs,
   ghError,
+  heldWrites,
   hostFlag,
   planHash,
   prepareRunFolder,
@@ -49,7 +50,7 @@ import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, redirectingKeys, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
-import { claudeSessionRoots, cutShort, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
+import { claudeSessionRoots, cutShort, preflightFor, runTempEnv, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
 import { approveAgainRequest, checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
 import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
@@ -343,6 +344,8 @@ function scenarioRules(
       `That wrapper is the app's own — it records each write for the user and posts nothing; the app publishes what it recorded${later}. ` +
       `Write every file the wrapper takes (the review JSON, a comment JSON, a reply's text) under ${out}/ and pass that absolute path — nothing else is writable — and never call gh api for a write. ` +
       threads +
+      // The publish check holds such a write back anyway; said here so the session doesn't spend its words on one.
+      `Reply and resolve only in threads you opened (their first comment is yours — \`gh api user\` gives your login): never in a thread a colleague opened, even to follow up on it — put that point in the review body instead. The app holds back any reply or resolve in a colleague's thread and shows it to the user. ` +
       `${jira} End with a short summary of what you prepared${scenario === "rereview" ? ", resolved and escalated" : ""}. ${never}`
     );
   }
@@ -370,12 +373,6 @@ function promptForScenario(scenario: AgentScenario, claude: ClaudeSettings): str
   if (scenario === "rereview") return claude.agentPrompts.rereview || DEFAULT_AGENT_PROMPTS.rereview;
   if (scenario === "drive") return claude.prompts.drive || DEFAULT_CLAUDE_PROMPTS.drive;
   return claude.prompts.review || DEFAULT_CLAUDE_PROMPTS.review;
-}
-
-/** The head commit an item was keyed on ("<id>|<scenario>|<head>…"). */
-function keyHead(key: string): string | null {
-  const h = key.split("|")[2];
-  return h && h !== "-" ? h : null;
 }
 
 /** When a re-review's trigger happened — the time in its key's cursor (`reply@…`, `asked@…`) — or null when none is known. */
@@ -484,6 +481,25 @@ export function createAgent(deps: AgentDeps): Agent {
   const changed = () => deps.onChange?.();
   const stamp = () => now().toISOString();
   const findItem = (runId: string) => store.data.items.find((i) => i.runId === runId);
+  const itemsOf = (prId: string) => store.data.items.filter((i) => i.prId === prId);
+  /** Whether a PR's card sits in Your turn now — the only cards "Not now" sets aside. */
+  const inYourTurn = (pr: PullRequest) => boardStage(pr, itemsOf(pr.id), { today: localDay(now()), idle, orchestrated: sdlcBadges })?.column === "you";
+  /** A card stays set aside while its PR is on the dashboard, shows what it showed then, and the card is still in Your turn. */
+  const stillAside = (pr: PullRequest | undefined, key: string): boolean => pr !== undefined && cardKey(pr, itemsOf(pr.id)) === key && inYourTurn(pr);
+  /** The set-aside cards still aside — a change counts at once, not only at the next plan. */
+  const liveSetAside = (snapshot: DashboardResponse | null = deps.getSnapshot()): Record<string, string> => {
+    const prs = new Map((snapshot?.pullRequests ?? []).map((p) => [p.id, p]));
+    return Object.fromEntries(Object.entries(store.data.setAside ?? {}).filter(([prId, key]) => stillAside(prs.get(prId), key)));
+  };
+  /** Forgets the set-aside cards no longer aside; true when one came back. Runs on every snapshot, the agent on or off. */
+  const pruneSetAside = (snapshot: DashboardResponse): boolean => {
+    const before = store.data.setAside;
+    if (!before) return false;
+    const live = liveSetAside(snapshot);
+    if (Object.keys(live).length === Object.keys(before).length) return false;
+    store.data.setAside = live;
+    return true;
+  };
   /** One of a run's own steps, in the log. */
   const logRun = (item: AgentItemRecord, event: string, extra: Partial<AgentLogEntry> = {}) => store.log({ at: stamp(), kind: "run", event, ...itemFields(item), ...extra });
 
@@ -959,7 +975,7 @@ export function createAgent(deps: AgentDeps): Agent {
         req = reapproveRequest(item.repo, item.prNumber, head, r.oldHead, all.agent.policy.signature);
       } else {
         // Not who approved since, or is asked already.
-        const settled = new Set(pr.reviewers.filter((x) => x.reviewState !== "changes_requested").map((x) => x.login.toLowerCase()));
+        const settled = new Set(pr.reviewers.filter((x) => x.reviewState === "approved" || x.reviewState === "pending").map((x) => x.login.toLowerCase()));
         logins = r.logins.filter((l) => !settled.has(l.toLowerCase()));
         if (logins.length === 0) {
           await closeAs(item, "Your reviewers are asked again already");
@@ -1091,6 +1107,11 @@ export function createAgent(deps: AgentDeps): Agent {
     logSettings(s);
     // Housekeeping holds whether the agent is on or off.
     closeGone(snapshot, s);
+    // A set-aside card whose PR changed comes back now: tell the window, which has no other word of it while the agent is off.
+    if (pruneSetAside(snapshot)) {
+      changed();
+      void store.save();
+    }
     if (!s?.enabled) {
       idle = Object.fromEntries(snapshot.pullRequests.map((p) => [p.id, "The agent is off"]));
       sdlcBadges = {};
@@ -1254,6 +1275,8 @@ export function createAgent(deps: AgentDeps): Agent {
         dirty = true;
       }
     }
+    // A card set aside comes back once its PR or its card changed during the plan, or is forgotten once the PR left.
+    if (pruneSetAside(snapshot)) dirty = true;
     if (store.data.reapprove) {
       for (const key of Object.keys(store.data.reapprove)) {
         if (!byId.has(key.split("|")[0])) {
@@ -1412,6 +1435,17 @@ export function createAgent(deps: AgentDeps): Agent {
     const fromPlugins = resolveSkillRefs(renderAgentPrompt(promptFor(item, all.claude), "", item.url), plugins());
     const mine = mountUserSkills(fromPlugins.prompt, plugins(), path.join(runDir, "user-skills"), deps.userSkillsDir);
     const pluginDirs = [...fromPlugins.pluginDirs, ...mine.pluginDirs];
+    // The review skill's preflight helper: only a review or re-review with a
+    // payload folder runs it, and in a temp folder of its own — the helper
+    // writes the PR's data there, and your shared one holds every other
+    // review's payloads of the last day. One gate for the guard file, the
+    // tools, the folders and the environment below.
+    // The folder exists before it is resolved: the guard compares real paths.
+    const runTmp = path.join(runDir, "tmp");
+    const mayPreflight = (kind === "review" || kind === "rereview") && folder !== null;
+    if (mayPreflight) fs.mkdirSync(runTmp, { recursive: true });
+    const preflight = mayPreflight ? preflightFor(pluginDirs, runTmp, claudeConfigDir(launcherEnv(process.env))) : null;
+    const tempEnv = preflight ? runTempEnv(runTmp) : {};
     const settingsFile = path.join(runDir, "settings.json");
     const guardFile = path.join(runDir, "guard.json");
     const hooksDir = freshHooksDir(runDir);
@@ -1434,9 +1468,10 @@ export function createAgent(deps: AgentDeps): Agent {
       // home folder, gh's or ssh's keys, this app's settings.
       readDirs: [dir, ...(folder ? [folder.outDir] : []), ...pluginDirs],
       sessionId,
-      sessionRoots: claudeSessionRoots(launcherEnv(process.env)),
+      sessionRoots: claudeSessionRoots({ ...launcherEnv(process.env), ...tempEnv }),
       // A skill's Workflow may run its script from the plugins this run mounted — never one from the PR.
       workflowDirs: pluginDirs,
+      ...(preflight ? { preflight } : {}),
     });
     writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url, guardFile));
     item.sessionId = sessionId;
@@ -1458,9 +1493,15 @@ export function createAgent(deps: AgentDeps): Agent {
     });
 
     // The wrapper's own rule, and Write — which the guard holds to the payload folder.
-    const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : [])])];
+    // The preflight's node, which the guard holds to the helper's two calls.
+    const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(preflight ? ["Bash(node *)"] : [])])];
     // Read-only runs may read the plugins' folders (a skill's Workflow reads its script from there); a run that edits never gets them.
-    const addDirs = [...(folder ? [folder.outDir] : []), ...pluginDirs];
+    // The preflight's file and payload folders too — the guard narrows them to installed_plugins.json and the helper's own folders.
+    const addDirs = [
+      ...(folder ? [folder.outDir] : []),
+      ...pluginDirs,
+      ...(preflight ? [path.dirname(preflight.installedPlugins), preflight.tmpDir] : []),
+    ];
 
     const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false, byAgentPause: false, offStop: false };
     const handle = startRun(
@@ -1504,6 +1545,8 @@ export function createAgent(deps: AgentDeps): Agent {
           // git in a drive (every remote URL is rewritten there), and without
           // a host it would ask github.com — the wrong place for an Enterprise PR.
           ...ghTarget(item.url, item.repo),
+          // The run's own temp folder, where the preflight helper writes (`preflightFor`).
+          ...tempEnv,
         },
       },
       (progress) => {
@@ -1511,9 +1554,8 @@ export function createAgent(deps: AgentDeps): Agent {
           entry.recent = [...entry.recent, { at: stamp(), text: progress.activity }].slice(-RECENT_MAX);
         }
         entry.progress = progress;
-        if (progress.rateLimit && progress.rateLimit.status !== "allowed" && progress.rateLimit.resetsAt) {
-          heldUntil = progress.rateLimit.resetsAt * 1000;
-        }
+        const hold = usageHoldUntil(progress.rateLimit);
+        if (hold !== null) heldUntil = hold;
         changed();
       },
       deps.spawner,
@@ -1539,6 +1581,8 @@ export function createAgent(deps: AgentDeps): Agent {
     if (!cut) item.cuts = undefined;
     let publishNow = false;
     let pushNow = false;
+    // Why the run-end thread check couldn't run, when it couldn't: the log tells it from "nothing held".
+    let heldUnchecked: string | null = null;
     // A finished review or brief gets its diagrams before it reaches you: still
     // "working", its slot stays taken and nothing can be sent without them.
     const finished = !cut && !entry.takeOver && !entry.offStop && !outcome.stopped && !outcome.timedOut && result && !result.isError && result.subtype === "success";
@@ -1628,10 +1672,15 @@ export function createAgent(deps: AgentDeps): Agent {
           }
         }
       } else if (steps.length > 0) {
-        item.plan = summarizePlan(steps);
+        const review = await summarizeReview(item, steps, s);
+        item.plan = review.plan;
+        heldUnchecked = review.unchecked;
         item.planHash = planHash(planText);
         item.headline = `Would post: ${describePlan(item.plan)}`;
-        publishNow = item.mode === "on";
+        // A write held back is yours to answer, and one that couldn't be checked would only
+        // be refused at publish: On waits for you rather than send the rest past either.
+        publishNow = item.mode === "on" && !item.plan.held?.length && !heldUnchecked;
+        if (item.mode === "on" && heldUnchecked) item.headline += " — waits for you: couldn't check whose threads its replies land in";
       } else {
         // Nothing captured to post: there's nothing to send — the report says what it found.
         item.state = "done";
@@ -1665,6 +1714,7 @@ export function createAgent(deps: AgentDeps): Agent {
           ...(item.result ? { asks: item.result.asks.length, findings: item.result.findings.length, structured: item.result.structured } : {}),
           ...(publishNow ? { publishNow: true } : {}),
           ...(pushNow ? { pushNow: true } : {}),
+          ...(heldUnchecked ? { heldUnchecked } : {}),
         },
       });
     }
@@ -2211,6 +2261,27 @@ export function createAgent(deps: AgentDeps): Agent {
   }
 
   /**
+   * A review's plan as the card shows it, with its replies and resolves in
+   * colleagues' threads set aside (`held`): a review answers only in threads
+   * you opened, and finding that out on Approve failed the whole publish —
+   * the approve with it — over a write you never needed to send. When a
+   * target can't be checked now (`unchecked`: the PR, your login or a comment
+   * out of reach), it is not set aside: the check at publish refuses it with
+   * its reason, so On leaves such a plan for you instead of sending it.
+   */
+  async function summarizeReview(item: AgentItemRecord, steps: readonly PublishStep[], s: AgentSettings): Promise<{ plan: PublishSummary; unchecked: string | null }> {
+    const plan = summarizePlan(steps);
+    if (!steps.some((st) => st.kind === "reply" || st.kind === "resolve")) return { plan, unchecked: null };
+    const read = await fresh(item, snapshotPr(item.prId)?.roles ?? ["reviewer"]);
+    if (!read.ok) return { plan, unchecked: read.error };
+    if (!read.fresh.viewer) return { plan, unchecked: "your login on the host is unknown" };
+    const allowResolve = item.scenario === "rereview" ? s.scenarios.rereview.resolve : undefined;
+    const { held, unchecked } = await heldWrites(steps, item.url, item.repo, item.prNumber, read.fresh.viewer, gh, allowResolve).catch((e: Error) => ({ held: [], unchecked: e.message }));
+    // The same filter Publish applies (`postedSteps`), so the card counts what goes out.
+    return { plan: held.length === 0 ? plan : summarizePlan(steps, held), unchecked };
+  }
+
+  /**
    * Posts what a review prepared — on your Publish (`byYou`) or, in On, right
    * after the run. The PR is read again first: a new push since the review
    * stops it (the review would talk about code that isn't the head), as does
@@ -2337,6 +2408,7 @@ export function createAgent(deps: AgentDeps): Agent {
         signature: all.agent.policy.signature,
         holdApprove,
         ...(rr ? { allowResolve: rr.resolve, allowApprove: rr.approve } : {}),
+        ...(item.plan.held?.length ? { held: item.plan.held } : {}),
       },
       // A review answers and resolves only in threads you opened; your own PR's
       // drive answers reviewers in theirs and resolves nothing, as after a push.
@@ -2349,7 +2421,7 @@ export function createAgent(deps: AgentDeps): Agent {
       // Edited in the session since you saw it: show the new plan, post nothing.
       if (publishedCount(item.runFolder) > 0) return refuse("part of it went out already and the rest changed in the session — run it again");
       const text = readPlanText(item.runFolder);
-      item.plan = summarizePlan(readPlanLines(text));
+      item.plan = drive ? summarizePlan(readPlanLines(text)) : (await summarizeReview(item, readPlanLines(text), all.agent)).plan;
       if (postsDiagrams(item, all.agent)) item.plan.diagrams = item.diagrams!.list.length;
       item.planHash = planHash(text);
       item.planEdited = true;
@@ -2361,7 +2433,7 @@ export function createAgent(deps: AgentDeps): Agent {
       return { ok: false, error: "It changed in the session since you saw it — check what it would post now, then Publish." };
     }
     if (!out.ok) {
-      return refuse(`stopped after ${out.posted} of ${out.total}: ${out.error}`);
+      return refuse(out.posted > 0 ? `posted ${out.posted} of ${out.total}, then stopped: ${out.error}` : `nothing was posted: ${out.error}`);
     }
     item.published = true;
     item.state = "done";
@@ -2742,6 +2814,20 @@ export function createAgent(deps: AgentDeps): Agent {
       return { ok: true };
     }
     if (action.type === "approveAgain") return approveAgain(action.prId, all);
+    if (action.type === "notNow" || action.type === "bringBack") {
+      const pr = snapshot?.pullRequests.find((p) => p.id === action.prId);
+      if (action.type === "notNow") {
+        if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+        if (!inYourTurn(pr)) return { ok: false, error: "Only a card in Your turn can be set aside." };
+        // The key is the app's own reading of the PR now, never one the renderer sends.
+        store.data.setAside = { ...(store.data.setAside ?? {}), [pr.id]: cardKey(pr, itemsOf(pr.id)) };
+      } else if (store.data.setAside) {
+        delete store.data.setAside[action.prId];
+      }
+      changed();
+      void store.save();
+      return { ok: true };
+    }
     if (action.type === "enqueue") {
       const pr = snapshot?.pullRequests.find((p) => p.id === action.prId);
       if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
@@ -2969,6 +3055,7 @@ export function createAgent(deps: AgentDeps): Agent {
         items: store.data.items,
         running: [...running.entries()].map(([runId, r]) => ({ runId, progress: r.progress, recent: r.recent, paused: r.paused })),
         idle,
+        heads: Object.fromEntries((deps.getSnapshot()?.pullRequests ?? []).filter((p) => p.headOid).map((p) => [p.id, p.headOid!])),
         runsToday: store.data.runsToday,
         perDay: s?.limits.perDay ?? 0,
         parallel: s?.limits.parallel ?? 0,
@@ -2980,6 +3067,7 @@ export function createAgent(deps: AgentDeps): Agent {
         acceptedUnchanged: store.data.acceptedUnchanged,
         suggestOn: s?.scenarios.review.mode === "shadow" && store.data.acceptedUnchanged >= s.limits.promoteAfter,
         orchestrated: sdlcBadges,
+        setAside: liveSetAside(),
       };
     },
     ownSessionIds: () => new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!)),
