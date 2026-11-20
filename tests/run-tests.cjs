@@ -11515,6 +11515,22 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual([theirs.choices[0].label, theirs.choices[0].act], ["Let the agent review", { type: "enqueue", prId: "F" }]);
     });
 
+    test("agent board words: your PR from a fork that your Claude session holds — the session's way first, the fork's advice not shown", () => {
+      // Both say "not the agent"; the one with a button wins: the session is where the work already is.
+      const view2 = require(path.join(__dirname, "../dist/main/shared/agent-view.js"));
+      const pr = xPr({ id: "K", isCrossRepository: true, hasConflicts: true });
+      const e = ex.explainBoard([pr], [pr], xState([]), { today: sToday, idle: { K: "yours — " + view2.OWN_SESSION_WHY.toLowerCase() } }).entries[0];
+      assert.deepStrictEqual([e.owner, e.stage.action.kind], ["you", "fixYourself"]);
+      assert.ok(!e.choices.some((c) => c.act), "nothing that starts the agent");
+      assert.strictEqual(e.ask, "Carry on in your Claude session — the agent stays off this PR while it is open.");
+      assert.doesNotMatch(e.ask, /fork/);
+      assert.deepStrictEqual(e.choices.map((c) => [c.label, c.control ?? null, Boolean(c.primary)]), [
+        ["Open your Claude session", "session", true],
+        ["Open on GitHub", null, false],
+      ]);
+      assert.strictEqual(e.next, "CI runs again on your push. Once you archive the session, the agent can take this PR again.");
+    });
+
     test("agent board words: the agent's review of this head found nothing blocking — Approve on the card, not a trip to GitHub", () => {
       // The case of creatio-ai-chat-shared#298: asked again after my change request; the re-review had nothing to post.
       const RID = "00000000-0000-4000-8000-000000000298";
