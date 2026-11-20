@@ -385,6 +385,20 @@ function keyCursorTime(key: string): number | null {
   return Number.isNaN(t) ? null : t;
 }
 
+/** One file however it is spelled: links followed, and on Windows a drive letter's case ignored (git prints `c:/…`). */
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => {
+    let r: string;
+    try {
+      r = fs.realpathSync(p);
+    } catch {
+      r = path.resolve(p);
+    }
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
+  return norm(a) === norm(b);
+}
+
 /** Why the agent can't work on a PR's code — with the command that clones it where the agent looks. */
 const noCheckoutWhy = (pr: PullRequest, claude: ClaudeSettings | null | undefined): string => {
   const clone = cloneCommand(pr, claude);
@@ -423,6 +437,8 @@ export function createAgent(deps: AgentDeps): Agent {
   const git = deps.git ?? runGit;
   // A clone of the agent's own, and what fills it, may take minutes (`runGitLong`).
   const slowGit = deps.slowGit ?? deps.git ?? runGitLong;
+  /** git for work in `checkout`: the long one in an agent clone, whose blobs arrive on demand. */
+  const gitFor = (checkout: string): GitRunner => (isAgentClone(deps.dir, checkout) ? slowGit : git);
   const sshResolve = deps.sshResolve ?? ((args: string[]) => execFileSync("ssh", args, { encoding: "utf8", timeout: 15_000, env: launcherEnv(process.env), stdio: ["ignore", "pipe", "ignore"] }));
   const plugins = deps.plugins ?? (() => readInstalledPlugins());
   /** Set once everything the journal reads exists: the first saves of the constructor come before it. */
@@ -902,7 +918,7 @@ export function createAgent(deps: AgentDeps): Agent {
           gh,
           { id: pr.id, url: pr.url, repo: pr.repo, number: pr.number, headOid: pr.headOid },
           job.scenario === "reask" ? "reask" : "reapprove",
-          checkout && remote ? { git, checkout, remote } : null,
+          checkout && remote ? { git: gitFor(checkout), checkout, remote } : null,
         );
         if (stopped) return;
         const mark: ReapproveMark = {
@@ -1129,7 +1145,7 @@ export function createAgent(deps: AgentDeps): Agent {
         const found = await checkBaseOnly(
           gh,
           { id: pr.id, url: pr.url, repo: pr.repo, number: pr.number, headOid: newHead, baseRefName: pr.baseRefName, viewerReviewedAt: pr.viewerReviewedAt, viewerReviewedOid: oldHead },
-          checkout && remote ? { git, checkout, remote } : null,
+          checkout && remote ? { git: gitFor(checkout), checkout, remote } : null,
         );
         if (stopped) return;
         const mark: BaseOnlyMark = { verdict: found.verdict, oldHead, baseRefName: found.baseRefName, note: found.note, at: stamp() };
@@ -1448,8 +1464,7 @@ export function createAgent(deps: AgentDeps): Agent {
       checkout = item.checkout ?? null;
     } else if (pr && checkout && remote) {
       try {
-        const filler = isAgentClone(deps.dir, checkout) ? slowGit : git;
-        dir = await prepareWorktree(filler, { checkout, remote, base: worktreeBase(s.worktreeDir, checkout), pr, runId: item.runId });
+        dir = await prepareWorktree(gitFor(checkout), { checkout, remote, base: worktreeBase(s.worktreeDir, checkout), pr, runId: item.runId });
       } catch (e) {
         return fail("Could not check out the PR", (e as Error).message);
       }
@@ -1463,7 +1478,7 @@ export function createAgent(deps: AgentDeps): Agent {
           const clone = checkout;
           const [url, commonDir, worktreeGitDir] = await withNoHooks(async (h) => {
             if (isPlainBranch(pr.baseRefName)) {
-              await git([...safeGit(h), "fetch", "--no-tags", remote, `+refs/heads/${pr.baseRefName}:refs/remotes/${remote}/${pr.baseRefName}`], clone).catch(() => {});
+              await gitFor(clone)([...safeGit(h), "fetch", "--no-tags", remote, `+refs/heads/${pr.baseRefName}:refs/remotes/${remote}/${pr.baseRefName}`], clone).catch(() => {});
               if (isAgentClone(deps.dir, clone)) await prefetchForDrive(slowGit, safeGit(h), dir, `refs/remotes/${remote}/${pr.baseRefName}`);
             }
             return [
@@ -1907,11 +1922,15 @@ export function createAgent(deps: AgentDeps): Agent {
     const pr = snapshotPr(item.prId);
     const claude = loadAll()?.claude;
     if (!pr || !claude || !item.checkout) return null;
-    // The agent's own clone counts too: its place is derived from the PR, like your folders.
-    const found = knownCheckout(pr, claude);
-    if (!found) return null;
+    // The agent's own clone counts too: its place is derived from the PR, like
+    // your folders. Either one, since you may have cloned the repository after
+    // a run in the agent's clone (or the other way round).
     const real = (p: string) => fs.promises.realpath(p).catch(() => path.resolve(p));
-    return (await real(found)) === (await real(item.checkout)) ? found : null;
+    const want = await real(item.checkout);
+    for (const found of [deps.findCheckout(pr, claude), findAgentClone(deps.dir, pr)]) {
+      if (found && (await real(found)) === want) return found;
+    }
+    return null;
   }
 
   /**
@@ -1999,7 +2018,7 @@ export function createAgent(deps: AgentDeps): Agent {
       "/etc/gitconfig",
       "/opt/homebrew/etc/gitconfig",
       "/usr/local/etc/gitconfig",
-    ], ghOnly ? (key, file) => key === "credential.helper" && file === path.resolve(cloneConfig) : undefined);
+    ], ghOnly ? (key, file) => key === "credential.helper" && samePath(file, cloneConfig) : undefined);
     if (redirects.length > 0) throw new Error(`the repository's config sets ${redirects.join(", ")}`);
     const ssh = snapshotSsh(url, sshResolve);
     item.pushTo = { url, commonDir, worktreeGitDir, fingerprint: await gitFingerprint(git, place, commonDir, url), ...(ssh !== null ? { sshSnapshot: ssh } : {}), recovered: true };

@@ -15453,7 +15453,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         listWorktree(commonDir, item.worktree);
         state.commits = fourCommits;
         state.ahead = 4;
-        again = agentFixture({ home, checkout: false, pr: mine, script: askingDrive, git: gitFor(state), tickMs: 20 });
+        // Meanwhile you cloned the repository yourself: the run's own clone is still the one it trusts.
+        again = agentFixture({ home, checkout: true, pr: mine, script: askingDrive, git: gitFor(state), tickMs: 20 });
         again.agent.onSnapshot(again.snapshot);
         await until(() => only(again)[0].drive?.commits.length === 4);
         const now = only(again)[0];

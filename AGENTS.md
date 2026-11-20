@@ -852,17 +852,21 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   holds its slot (a clone can take minutes). A drive's session has no
   network and a blobless clone lacks old file contents, so before a drive in
   such a clone the app runs the base diffs and the merge of the base
-  (`prefetchForDrive`) and git fetches what they read. The clone, a run's
-  worktree in it and that prefetch run under `runGitLong` (30 min, not
-  `runGit`'s 2): a large repository over a slow VPN would otherwise be cut
-  short at the same point on every plan. The re-approve and base-only checks
+  (`prefetchForDrive`) and git fetches what they read. The clone and all
+  git work in it — a run's worktree, a drive's base fetch and prefetch, the
+  re-approve and base-only checks (`gitFor`) — run under `runGitLong`
+  (30 min, not `runGit`'s 2): a large repository over a slow VPN would
+  otherwise be cut short at the same point on every plan. Nothing cancels
+  such a git yet, so switching the agent off lets it finish. The re-approve and base-only checks
   use an agent clone that is already there but never make one: they take no
   run slot, so a plan would start a clone per repository at once. The clone
-  is a trusted checkout (`trustedCheckout` takes `knownCheckout`), and a
+  is a trusted checkout (`trustedCheckout` takes your folder or the agent's
+  clone, whichever the run used), and a
   drive's push place is rebuilt after a restart there too: `recoverPushTo`
   lets `redirectingKeys` pass `credential.helper` from the clone's own
-  config only while its values are exactly the pair `cloneCommands` wrote
-  (an empty reset, then gh's) — any other helper there is still a redirect.
+  config (compared by real path) only while its values are exactly the pair
+  `cloneCommands` wrote (an empty reset, then gh's) — any other helper there
+  is still a redirect.
 - **An agent session reads its own folders only, and uses only the tools the
   guard names.** A PR's diff, description or comments can tell a review to
   read `~/.config/gh/hosts.yml`, `~/.ssh/*` or `userData` and quote it in a
