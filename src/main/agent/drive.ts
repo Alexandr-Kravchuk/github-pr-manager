@@ -239,7 +239,13 @@ export async function gitFingerprint(git: GitRunner, place: GitPlace, commonDir:
  * place rebuilt after a restart (`recovered`) has no fingerprint from before
  * the session to vouch for these, so it is refused while any is there.
  */
-export function redirectingKeys(out: string, cwd: string, repoDirs: readonly string[], userFiles: readonly string[] = []): string[] {
+export function redirectingKeys(
+  out: string,
+  cwd: string,
+  repoDirs: readonly string[],
+  userFiles: readonly string[] = [],
+  allowed?: (key: string, file: string) => boolean,
+): string[] {
   const parts = out.split("\0");
   const found: string[] = [];
   const inRepo = (file: string) =>
@@ -260,6 +266,7 @@ export function redirectingKeys(out: string, cwd: string, repoDirs: readonly str
       if (!users.has(file)) found.push(`${key} (from ${file})`);
       continue;
     }
+    if (allowed?.(key, file)) continue;
     if (
       /^url\..+\.(push)?insteadof$/.test(key) ||
       /^remote\..+\.(pushurl|receivepack|uploadpack|proxy)$/.test(key) ||

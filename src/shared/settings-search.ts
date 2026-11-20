@@ -194,6 +194,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       "repositories",
       "only these",
       "checkout",
+      "clone",
+      "no checkout",
     ],
   },
   {
