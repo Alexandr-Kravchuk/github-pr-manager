@@ -83,15 +83,27 @@ export function prepareCommands(remote: string, pr: Pick<PullRequest, "number" |
 export type GitRunner = (args: string[], cwd: string) => Promise<string>;
 
 /** git with the launcher's scrubbed environment, a timeout, and no prompts. */
-export const runGit: GitRunner = (args, cwd) =>
-  new Promise((resolve, reject) => {
-    execFile(
-      "git",
-      args,
-      { cwd, timeout: 120_000, env: { ...launcherEnv(process.env), GIT_TERMINAL_PROMPT: "0" }, maxBuffer: 4 * 1024 * 1024 },
-      (err, stdout, stderr) => (err ? reject(new Error(`git ${args[0]}: ${(stderr || err.message).trim()}`)) : resolve(stdout)),
-    );
-  });
+export function gitRunner(timeoutMs: number): GitRunner {
+  return (args, cwd) =>
+    new Promise((resolve, reject) => {
+      execFile(
+        "git",
+        args,
+        { cwd, timeout: timeoutMs, env: { ...launcherEnv(process.env), GIT_TERMINAL_PROMPT: "0" }, maxBuffer: 4 * 1024 * 1024 },
+        (err, stdout, stderr) => (err ? reject(new Error(`git ${args[0]}: ${(stderr || err.message).trim()}`)) : resolve(stdout)),
+      );
+    });
+}
+
+export const runGit: GitRunner = gitRunner(120_000);
+
+/**
+ * For what fetches a repository's contents into the agent's own blobless clone
+ * — the clone itself, a run's worktree and a drive's prefetch: a large
+ * repository over a slow VPN takes longer than `runGit`'s two minutes, and a
+ * clone cut short at the same point on every plan would never finish.
+ */
+export const runGitLong: GitRunner = gitRunner(30 * 60_000);
 
 /** Creates (or recreates) the worktree for the PR's head commit and returns its folder. */
 export async function prepareWorktree(

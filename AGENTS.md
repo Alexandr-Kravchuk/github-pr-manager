@@ -214,7 +214,10 @@ Three layers:
   (the Agent tab's defaults and bounds: off until switched on, then every
   scenario On — the settings the agent is run with day to day, so a fresh
   install works without a round of tuning; Shadow is a per-scenario choice
-  and a merge is only ever offered), `agent-stream.ts` (a run's
+  and a merge is only ever offered. Those defaults fill only settings with
+  no agent saved at all: in saved ones a posting scenario's mode that is
+  missing or unknown is Shadow (`validateAgent`), since falling back to On
+  would post and approve under your name unchosen), `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (where a
   PR stands — `boardStage`: the column is whose move it is, the agent's
@@ -849,8 +852,17 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   holds its slot (a clone can take minutes). A drive's session has no
   network and a blobless clone lacks old file contents, so before a drive in
   such a clone the app runs the base diffs and the merge of the base
-  (`prefetchForDrive`) and git fetches what they read. The re-approve and
-  base-only checks use the agent's clone too, making one if needed.
+  (`prefetchForDrive`) and git fetches what they read. The clone, a run's
+  worktree in it and that prefetch run under `runGitLong` (30 min, not
+  `runGit`'s 2): a large repository over a slow VPN would otherwise be cut
+  short at the same point on every plan. The re-approve and base-only checks
+  use an agent clone that is already there but never make one: they take no
+  run slot, so a plan would start a clone per repository at once. The clone
+  is a trusted checkout (`trustedCheckout` takes `knownCheckout`), and a
+  drive's push place is rebuilt after a restart there too: `recoverPushTo`
+  lets `redirectingKeys` pass `credential.helper` from the clone's own
+  config only while its values are exactly the pair `cloneCommands` wrote
+  (an empty reset, then gh's) — any other helper there is still a redirect.
 - **An agent session reads its own folders only, and uses only the tools the
   guard names.** A PR's diff, description or comments can tell a review to
   read `~/.config/gh/hosts.yml`, `~/.ssh/*` or `userData` and quote it in a

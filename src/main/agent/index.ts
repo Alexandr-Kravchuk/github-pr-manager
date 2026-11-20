@@ -60,8 +60,8 @@ import { findTranscript, readTranscriptEnd } from "./followup";
 import { claudeConfigDir } from "../claude-sessions";
 import { openStore, type AgentItemRecord, type AgentLogEntry, type AgentStore, type BaseOnlyMark, type LedgerEntry, type ReapproveMark } from "./store";
 import { describeOrchestratorRun, orchestratorRoots, orchestratorRunFor, type OrchestratorRun } from "./sdlc";
-import { ensureAgentClone, findAgentClone, isAgentClone, prefetchForDrive } from "./clones";
-import { holdsWork, keepRef, prepareWorktree, readLocalWork, recoverPlace, remoteFor, removeWorktree, runGit, worktreeBase, type GitRunner, type LocalWork } from "./worktrees";
+import { GH_HELPER, ensureAgentClone, findAgentClone, isAgentClone, prefetchForDrive } from "./clones";
+import { holdsWork, keepRef, prepareWorktree, readLocalWork, recoverPlace, remoteFor, removeWorktree, runGit, runGitLong, worktreeBase, type GitRunner, type LocalWork } from "./worktrees";
 import { normalizeRemote, prRemoteKey } from "../../shared/claude-launch";
 import os from "node:os";
 
@@ -107,6 +107,8 @@ export interface AgentDeps {
   notify?: (notice: AgentNotice) => void;
   plugins?: () => InstalledPlugin[];
   git?: GitRunner;
+  /** git for the agent's own clone and what fills it (`runGitLong`); tests pass `git` alone. */
+  slowGit?: GitRunner;
   spawner?: Spawner;
   /** Parses diagrams in the renderer's mermaid (a flowchart needs a DOM); absent, none is posted. */
   checkMermaid?: MermaidChecker;
@@ -419,6 +421,8 @@ const STARTS_A_RUN: ReadonlySet<AgentAction["type"]> = new Set(["enqueue", "retr
 export function createAgent(deps: AgentDeps): Agent {
   const now = deps.now ?? (() => new Date());
   const git = deps.git ?? runGit;
+  // A clone of the agent's own, and what fills it, may take minutes (`runGitLong`).
+  const slowGit = deps.slowGit ?? deps.git ?? runGitLong;
   const sshResolve = deps.sshResolve ?? ((args: string[]) => execFileSync("ssh", args, { encoding: "utf8", timeout: 15_000, env: launcherEnv(process.env), stdio: ["ignore", "pipe", "ignore"] }));
   const plugins = deps.plugins ?? (() => readInstalledPlugins());
   /** Set once everything the journal reads exists: the first saves of the constructor come before it. */
@@ -482,9 +486,6 @@ export function createAgent(deps: AgentDeps): Agent {
   /** Your checkout of the PR's repository, else the clone the agent made of it earlier. */
   const knownCheckout = (pr: PullRequest, claude: ClaudeSettings): string | null =>
     deps.findCheckout(pr, claude) ?? findAgentClone(deps.dir, pr);
-  /** `knownCheckout`, else — when Settings › Agent lets it — a clone the agent makes now; null if that fails. */
-  const checkoutOrClone = async (pr: PullRequest, claude: ClaudeSettings): Promise<string | null> =>
-    knownCheckout(pr, claude) ?? (settings()?.cloneMissing ? await ensureAgentClone(git, deps.dir, pr).catch(() => null) : null);
   const changed = () => deps.onChange?.();
   const stamp = () => now().toISOString();
   const findItem = (runId: string) => store.data.items.find((i) => i.runId === runId);
@@ -895,7 +896,7 @@ export function createAgent(deps: AgentDeps): Agent {
       try {
         // The push is checked in your clone of the repository (or the agent's): without one, nothing is given again.
         const claude = loadAll()?.claude;
-        const checkout = claude ? await checkoutOrClone(pr, claude) : null;
+        const checkout = claude ? knownCheckout(pr, claude) : null;
         const remote = checkout ? remoteFor(checkout, pr) : null;
         const found = await checkReapproval(
           gh,
@@ -1123,7 +1124,7 @@ export function createAgent(deps: AgentDeps): Agent {
     void (async () => {
       try {
         const claude = loadAll()?.claude;
-        const checkout = claude ? await checkoutOrClone(pr, claude) : null;
+        const checkout = claude ? knownCheckout(pr, claude) : null;
         const remote = checkout ? remoteFor(checkout, pr) : null;
         const found = await checkBaseOnly(
           gh,
@@ -1429,7 +1430,7 @@ export function createAgent(deps: AgentDeps): Agent {
 
     if (!resume && pr && item.scenario !== "afterMerge" && !checkout) {
       try {
-        checkout = await ensureAgentClone(git, deps.dir, pr);
+        checkout = await ensureAgentClone(slowGit, deps.dir, pr);
       } catch (e) {
         return fail(`Could not clone ${pr.repo}`, (e as Error).message);
       }
@@ -1447,7 +1448,8 @@ export function createAgent(deps: AgentDeps): Agent {
       checkout = item.checkout ?? null;
     } else if (pr && checkout && remote) {
       try {
-        dir = await prepareWorktree(git, { checkout, remote, base: worktreeBase(s.worktreeDir, checkout), pr, runId: item.runId });
+        const filler = isAgentClone(deps.dir, checkout) ? slowGit : git;
+        dir = await prepareWorktree(filler, { checkout, remote, base: worktreeBase(s.worktreeDir, checkout), pr, runId: item.runId });
       } catch (e) {
         return fail("Could not check out the PR", (e as Error).message);
       }
@@ -1462,7 +1464,7 @@ export function createAgent(deps: AgentDeps): Agent {
           const [url, commonDir, worktreeGitDir] = await withNoHooks(async (h) => {
             if (isPlainBranch(pr.baseRefName)) {
               await git([...safeGit(h), "fetch", "--no-tags", remote, `+refs/heads/${pr.baseRefName}:refs/remotes/${remote}/${pr.baseRefName}`], clone).catch(() => {});
-              if (isAgentClone(deps.dir, clone)) await prefetchForDrive(git, safeGit(h), dir, `refs/remotes/${remote}/${pr.baseRefName}`);
+              if (isAgentClone(deps.dir, clone)) await prefetchForDrive(slowGit, safeGit(h), dir, `refs/remotes/${remote}/${pr.baseRefName}`);
             }
             return [
               (await git([...safeGit(h), "remote", "get-url", "--push", remote], clone)).trim(),
@@ -1905,7 +1907,8 @@ export function createAgent(deps: AgentDeps): Agent {
     const pr = snapshotPr(item.prId);
     const claude = loadAll()?.claude;
     if (!pr || !claude || !item.checkout) return null;
-    const found = deps.findCheckout(pr, claude);
+    // The agent's own clone counts too: its place is derived from the PR, like your folders.
+    const found = knownCheckout(pr, claude);
     if (!found) return null;
     const real = (p: string) => fs.promises.realpath(p).catch(() => path.resolve(p));
     return (await real(found)) === (await real(item.checkout)) ? found : null;
@@ -1983,13 +1986,20 @@ export function createAgent(deps: AgentDeps): Agent {
     if (normalizeRemote(url) !== prRemoteKey(item)) throw new Error("the clone's push URL isn't the PR's repository");
     const home = os.homedir();
     const xdg = process.env.XDG_CONFIG_HOME ?? path.join(home, ".config");
+    // The agent's clone signs in through gh (`cloneCommands`): exactly that
+    // pair of helpers in the clone's own config is the app's, not a redirect.
+    const cloneConfig = path.join(commonDir, "config");
+    const ghOnly =
+      isAgentClone(deps.dir, checkout) &&
+      (await withNoHooks((h) => git([...safeGit(h), "config", "--file", cloneConfig, "--get-all", "credential.helper"], checkout)).catch(() => "")) ===
+        `\n${GH_HELPER}\n`;
     const redirects = redirectingKeys(origins, dir, [commonDir, worktreeGitDir, dir], [
       path.join(home, ".gitconfig"),
       path.join(xdg, "git", "config"),
       "/etc/gitconfig",
       "/opt/homebrew/etc/gitconfig",
       "/usr/local/etc/gitconfig",
-    ]);
+    ], ghOnly ? (key, file) => key === "credential.helper" && file === path.resolve(cloneConfig) : undefined);
     if (redirects.length > 0) throw new Error(`the repository's config sets ${redirects.join(", ")}`);
     const ssh = snapshotSsh(url, sshResolve);
     item.pushTo = { url, commonDir, worktreeGitDir, fingerprint: await gitFingerprint(git, place, commonDir, url), ...(ssh !== null ? { sshSnapshot: ssh } : {}), recovered: true };

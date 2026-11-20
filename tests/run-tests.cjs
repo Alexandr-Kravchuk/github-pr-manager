@@ -9042,7 +9042,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(a.enabled, true);
       assert.strictEqual(a.effort, "");
       assert.deepStrictEqual(a.repos, ["acme/widgets", "acme/gadgets"]);
-      assert.strictEqual(a.scenarios.review.mode, "on", "an unknown mode is the default");
+      assert.strictEqual(a.scenarios.review.mode, "shadow", "an unknown posting mode in saved settings is Shadow, never On");
+      assert.strictEqual(a.scenarios.driveCi.mode, "shadow", "a missing one too");
       assert.strictEqual(a.scenarios.rereview.mode, "shadow", "a mode you chose is kept");
       assert.deepStrictEqual([a.scenarios.review.maxLines, a.scenarios.review.maxFiles], [1, 40]);
       assert.strictEqual(a.scenarios.brief.mode, "on", "a brief has no shadow mode — it posts nothing either way");
@@ -11238,6 +11239,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: with cloning on, a run you ask for on a repository with no checkout is taken — the run clones it", async () => {
+      const f = agentFixture({ checkout: false, script: () => {}, tickMs: 1e9 });
+      try {
+        f.agent.onSnapshot({ ...f.snapshot, pullRequests: [] });
+        const r = await f.agent.act({ type: "enqueue", prId: "PR_R" });
+        assert.deepStrictEqual(r, { ok: true }, "not refused for the missing checkout");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
     await atest("agent: without a checkout the agent clones the repository itself — blobless, signed in through gh — and the run works in it", async () => {
       const made = [];
       const gitImpl = async (args) => {
@@ -11354,6 +11366,28 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(da, db);
       assert.strictEqual(clones, 1);
       assert.strictEqual(await cl.ensureAgentClone(async () => assert.fail("no git for a clone that exists"), root, pr), da);
+    });
+
+    await atest("agent clones: a stale .partial is cleared first; a failing config step leaves neither the clone nor .partial", async () => {
+      const cl = require(path.join(__dirname, "../dist/main/main/agent/clones.js"));
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-clones-"));
+      const pr = { url: "https://github.com/a/b/pull/7", repo: "a/b" };
+      const place = cl.agentClonePlace(root, pr);
+      // A clone cut short by an earlier run.
+      nfsA.mkdirSync(path.join(`${place.dir}.partial`, "leftover"), { recursive: true });
+      const git = async (args) => {
+        const sub = gitSub(args);
+        if (sub[0] === "clone") {
+          assert.ok(!nfsA.existsSync(path.join(`${place.dir}.partial`, "leftover")), "the old .partial is gone before git clones");
+          nfsA.mkdirSync(path.join(sub[sub.length - 1], ".git"), { recursive: true });
+          nfsA.writeFileSync(path.join(sub[sub.length - 1], ".git", "config"), "");
+        }
+        if (sub.includes("config") && sub.includes("--add")) throw new Error("git config: could not lock config file");
+        return "";
+      };
+      await assert.rejects(cl.ensureAgentClone(git, root, pr), /could not lock/);
+      assert.ok(!nfsA.existsSync(place.dir) && !nfsA.existsSync(`${place.dir}.partial`), "nothing half-made is left");
+      assert.strictEqual(cl.findAgentClone(root, pr), null);
     });
 
     test("checkout: with no projects folder set, the usual places in your home are searched — never a drive root; yours alone when set", () => {
@@ -12369,8 +12403,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(journal.diffIdle({ A: "x" }, {}, jAt(0), prs), [], "taken up: its queued line says so");
       assert.deepStrictEqual(journal.diffIdle({ A: "x" }, { A: "y" }, jAt(0), prs).map((e) => [e.from, e.to]), [["x", "y"]]);
 
-      const base = cfg.validateAgent({ enabled: true });
-      assert.strictEqual(journal.settingsDiff(base, cfg.validateAgent({ enabled: true })), null);
+      const base = cfg.validateAgent({ enabled: true, scenarios: { review: { mode: "on" } } });
+      assert.strictEqual(journal.settingsDiff(base, cfg.validateAgent({ enabled: true, scenarios: { review: { mode: "on" } } })), null);
       assert.deepStrictEqual(journal.settingsDiff(base, cfg.validateAgent({ enabled: true, scenarios: { review: { mode: "shadow" } } })), { "scenarios.review.mode": ["on", "shadow"] });
 
       const progress = { ...stream.initialProgress(), toolCalls: 31, steps: [{ id: "1", subject: "a", status: "completed" }, { id: "2", subject: "b", status: "in_progress" }] };
@@ -14833,6 +14867,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.match(rules, /Never push and never rewrite history/);
         assert.match(rules, /fetched for you as origin\/main/);
         assert.ok(f.gitCalls.some((a) => a[0] === "fetch" && a.includes("+refs/heads/main:refs/remotes/origin/main")), "the app fetches the base before the session");
+        assert.ok(!f.gitCalls.some((a) => a[0] === "merge-tree"), "your own checkout gets no prefetch");
         // Your own PR runs with full context by default: your Claude setup, the guard in its "full" mode.
         for (const flag of ["--restricted", "--strict-mcp-config", "--tools"]) assert.ok(!c.args.includes(flag), flag);
         assert.match(rules, /runs with the user's own Claude setup/);
@@ -15149,6 +15184,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // A push URL of its own, a credential program, a proxy — and anything an include brings in.
       const more = ["file:/repo/.git/config", "remote.origin.pushurl", "file:/repo/.git/config", "credential.helper", "file:/repo/.git/config", "http.proxy", "file:/repo/.git/config", "include.path", "file:/tmp/x", "user.name", ""].join("\0");
       assert.deepStrictEqual(driveM.redirectingKeys(more, "/repo/wt", ["/repo/.git"], ["/home/me/.gitconfig"]), ["remote.origin.pushurl", "credential.helper", "http.proxy", "include.path", "user.name (from /tmp/x)"]);
+      // The agent's clone: its own gh helpers are allowed by name and file, nothing else is.
+      const allowed = (key, file) => key === "credential.helper" && file === path.resolve("/repo/.git/config");
+      assert.deepStrictEqual(driveM.redirectingKeys(more, "/repo/wt", ["/repo/.git"], ["/home/me/.gitconfig"], allowed), ["remote.origin.pushurl", "http.proxy", "include.path", "user.name (from /tmp/x)"]);
+      const wtHelper = ["file:/repo/.git/worktrees/w/config.worktree", "credential.helper", ""].join("\0");
+      assert.deepStrictEqual(driveM.redirectingKeys(wtHelper, "/repo/wt", ["/repo/.git"], [], allowed), ["credential.helper"], "a helper from another repository file is still refused");
     });
 
     await atest("worktrees: a run's worktree with commits not on the PR, or changed files, holds work; its git folder is found from the clone's side", async () => {
@@ -15357,6 +15397,102 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await until(() => only(again)[0].result.summary === "Moved into a service.");
         assert.strictEqual(only(again)[0].headline, "Would push 4 commits: refactor: step 4");
         assert.strictEqual(actionLabel(only(again)[0]), "Push 4 fixes");
+      } finally {
+        f.agent.stop();
+        again?.agent.stop();
+      }
+    });
+
+    await atest("agent clone: a drive in the agent's own clone prefetches after the base fetch, and its push place is rebuilt after a restart", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      // The app's folder with the clone the agent made earlier: no checkout of yours.
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const clone = path.join(home, "agent", "clones", "github.com", "a", "b");
+      nfsA.mkdirSync(path.join(clone, ".git"), { recursive: true });
+      nfsA.writeFileSync(path.join(clone, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
+      // The clone's own config: exactly the pair of helpers `cloneCommands` writes.
+      const cfgFile = path.join(commonDir, "config");
+      const state = { commits: [], config: `file:${cfgFile}\0credential.helper\0file:${cfgFile}\0credential.helper\0` };
+      const calls = [];
+      const gitFor = (st) => {
+        const inner = worktreeGit(commonDir, A, st);
+        return async (all, cwd) => {
+          calls.push([gitSub(all), cwd, all]);
+          if (gitSub(all).includes("--get-all")) return st.helpers ?? "\n!gh auth git-credential\n";
+          return inner(all);
+        };
+      };
+      const f = agentFixture({ home, checkout: false, pr: mine, script: askingDrive, captureScript: captureJs, git: gitFor(state), tickMs: 20, openResume: async () => {} });
+      let again;
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        assert.strictEqual(item.checkout, clone, "the run works in the agent's clone");
+        assert.ok(!calls.some(([sub]) => sub[0] === "clone"), "the clone it had is used, not made again");
+        const base = calls.findIndex(([sub]) => sub[0] === "fetch" && sub.includes("+refs/heads/main:refs/remotes/origin/main"));
+        assert.ok(base >= 0, "the base is fetched");
+        const pre = calls.slice(base + 1, base + 4);
+        assert.deepStrictEqual(
+          pre.map(([sub]) => sub),
+          [
+            ["diff", "--stat", "refs/remotes/origin/main...HEAD"],
+            ["diff", "--stat", "refs/remotes/origin/main", "HEAD"],
+            ["merge-tree", "--write-tree", "HEAD", "refs/remotes/origin/main"],
+          ],
+          "then the prefetch, in order",
+        );
+        for (const [, cwd, all] of pre) {
+          assert.strictEqual(cwd, item.worktree, "in the run's worktree");
+          assert.ok(all.some((a) => /^core\.hooksPath=/.test(a)), "hooks off");
+        }
+        f.agent.stop();
+        // After a restart the push place is rebuilt from the clone's side: the gh helpers are the app's own.
+        listWorktree(commonDir, item.worktree);
+        state.commits = fourCommits;
+        state.ahead = 4;
+        again = agentFixture({ home, checkout: false, pr: mine, script: askingDrive, git: gitFor(state), tickMs: 20 });
+        again.agent.onSnapshot(again.snapshot);
+        await until(() => only(again)[0].drive?.commits.length === 4);
+        const now = only(again)[0];
+        assert.strictEqual(now.pushTo?.recovered, true, "an agent clone is a trusted checkout, its gh helpers no redirect");
+        assert.strictEqual(now.localWork, undefined);
+      } finally {
+        f.agent.stop();
+        again?.agent.stop();
+      }
+    });
+
+    await atest("agent clone: a helper beyond the app's pair in the clone's config still refuses the rebuild", async () => {
+      const A = "a".repeat(40);
+      const mine = { ...reviewPr({ role: "author", headOid: A }), headOid: A, ciState: "failure", headRefName: "feature/x", baseRefName: "main" };
+      const commonDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-common-"));
+      nfsA.writeFileSync(path.join(commonDir, "config"), "[core]\n");
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const clone = path.join(home, "agent", "clones", "github.com", "a", "b");
+      nfsA.mkdirSync(path.join(clone, ".git"), { recursive: true });
+      nfsA.writeFileSync(path.join(clone, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
+      const cfgFile = path.join(commonDir, "config");
+      const state = { commits: [], config: `file:${cfgFile}\0credential.helper\0` };
+      const gitFor = (st) => {
+        const inner = worktreeGit(commonDir, A, st);
+        return async (all) => (gitSub(all).includes("--get-all") ? "\n!gh auth git-credential\n!evil\n" : inner(all));
+      };
+      const f = agentFixture({ home, checkout: false, pr: mine, script: askingDrive, captureScript: captureJs, git: gitFor(state), tickMs: 20, openResume: async () => {} });
+      let again;
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const item = await continueIt(f);
+        f.agent.stop();
+        listWorktree(commonDir, item.worktree);
+        state.commits = fourCommits;
+        state.ahead = 4;
+        again = agentFixture({ home, checkout: false, pr: mine, script: askingDrive, git: gitFor(state), tickMs: 20 });
+        again.agent.onSnapshot(again.snapshot);
+        await until(() => only(again)[0].localWork !== undefined || only(again)[0].pushTo !== undefined);
+        assert.strictEqual(only(again)[0].pushTo, undefined, "not rebuilt");
       } finally {
         f.agent.stop();
         again?.agent.stop();

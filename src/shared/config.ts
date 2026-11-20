@@ -337,6 +337,12 @@ export function validateAgent(raw: unknown): AgentSettings {
   const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
     allowed.includes(v as T) ? (v as T) : fallback;
   const MODES: readonly AgentMode[] = ["off", "shadow", "on"];
+  // A posting scenario's mode that is missing or not one this build knows, in
+  // agent settings that were saved, is Shadow: falling back to the default
+  // (On) would post and approve under your name without you ever choosing it.
+  // Only settings with no agent saved at all take the defaults.
+  const saved = typeof raw === "object" && raw !== null && !Array.isArray(raw);
+  const postMode = (v: unknown, fallback: AgentMode) => oneOf(v, MODES, saved ? "shadow" : fallback);
   const clock = (v: unknown, fallback: string): string => (typeof v === "string" && isClockTime(v) ? v : fallback);
   const list = (v: unknown): string[] | null =>
     Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim()) : null;
@@ -379,7 +385,7 @@ export function validateAgent(raw: unknown): AgentSettings {
     repos: (list(obj.repos) ?? []).filter((r) => /^[^/\s]+\/[^/\s]+$/.test(r)),
     scenarios: {
       review: {
-        mode: oneOf(review.mode, MODES, d.scenarios.review.mode),
+        mode: postMode(review.mode, d.scenarios.review.mode),
         maxLines: num(review.maxLines, "maxLines", d.scenarios.review.maxLines),
         maxFiles: num(review.maxFiles, "maxFiles", d.scenarios.review.maxFiles),
         teamRequests: bool(review.teamRequests, d.scenarios.review.teamRequests),
@@ -388,7 +394,7 @@ export function validateAgent(raw: unknown): AgentSettings {
       },
       brief: { mode: oneOf(brief.mode, ["off", "on"] as const, d.scenarios.brief.mode) },
       rereview: {
-        mode: oneOf(rereview.mode, MODES, d.scenarios.rereview.mode),
+        mode: postMode(rereview.mode, d.scenarios.rereview.mode),
         resolve: bool(rereview.resolve, d.scenarios.rereview.resolve),
         approve: bool(rereview.approve, d.scenarios.rereview.approve),
       },
@@ -400,14 +406,14 @@ export function validateAgent(raw: unknown): AgentSettings {
         method: oneOf(merge.method, ["github", "merge", "squash", "rebase"] as const, d.scenarios.merge.method),
         deleteBranch: bool(merge.deleteBranch, d.scenarios.merge.deleteBranch),
       },
-      selfReview: { mode: oneOf(selfReview.mode, MODES, d.scenarios.selfReview.mode) },
+      selfReview: { mode: postMode(selfReview.mode, d.scenarios.selfReview.mode) },
       driveCi: {
-        mode: oneOf(driveCi.mode, MODES, d.scenarios.driveCi.mode),
+        mode: postMode(driveCi.mode, d.scenarios.driveCi.mode),
         maxAttempts: num(driveCi.maxAttempts, "maxAttempts", d.scenarios.driveCi.maxAttempts),
       },
-      driveComments: { mode: oneOf(driveComments.mode, MODES, d.scenarios.driveComments.mode) },
+      driveComments: { mode: postMode(driveComments.mode, d.scenarios.driveComments.mode) },
       reapprove: {
-        mode: oneOf(reapprove.mode, MODES, d.scenarios.reapprove.mode),
+        mode: postMode(reapprove.mode, d.scenarios.reapprove.mode),
         askReviewers: bool(reapprove.askReviewers, d.scenarios.reapprove.askReviewers),
       },
     },

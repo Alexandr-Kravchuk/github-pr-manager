@@ -21,7 +21,7 @@ import type { GitRunner } from "./worktrees";
 // - made under a `.partial` name and renamed when complete, so a clone cut
 //   short is never taken for a usable one; no hook runs on the way (`safeGit`).
 
-const GH_HELPER = "!gh auth git-credential";
+export const GH_HELPER = "!gh auth git-credential";
 
 /** A folder name from a URL part: only plain characters, never `.` or `..`. */
 function part(s: string): string | null {
