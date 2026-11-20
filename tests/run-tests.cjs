@@ -824,6 +824,13 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
       }
     }));
 
+  test("main.js wiring: defaults standing in for unreadable settings leave the login item alone", () => {
+    const src = fsSync.readFileSync(path.join(__dirname, "../src/main/main.ts"), "utf8");
+    assert.match(src, /function applyPreferences\(settings: Settings, loaded = true\): void \{[^}]*if \(loaded\) applyLaunchAtLogin\(settings\.launchAtLogin\);/);
+    assert.match(src, /prefs = loadSettings\(\);\s*prefsLoaded = true;/);
+    assert.match(src, /applyPreferences\(prefs, prefsLoaded\);/);
+  });
+
   test("diag log: appends a timestamped line, keeps the old half, never throws", () =>
     withFolders((dir) => {
       const diagLog = require(path.join(__dirname, "../dist/main/main/diag-log.js"));
@@ -842,12 +849,124 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
       assert.doesNotThrow(() => diagLog.diag("ignored"));
     }));
 
-  test("renderer: a snapshot of hosts the config doesn't list reads the config again", () => {
+  test("configLooksStale: an empty config with polled hosts is read again", () => {
     // The config was read once; an empty first read kept "No repositories configured" up all run.
+    const hs = require(path.join(__dirname, "../dist/main/shared/host-status.js"));
+    const polled = { rateLimits: [{ hostLabel: "GH" }], errors: [] };
+    assert.strictEqual(hs.configLooksStale(0, polled), true);
+    assert.strictEqual(hs.configLooksStale(0, { rateLimits: [], errors: [{ hostLabel: "GH" }] }), true, "a failed host was polled too");
+    assert.strictEqual(hs.configLooksStale(0, { rateLimits: [], errors: [] }), false, "nothing polled: really unconfigured");
+    assert.strictEqual(hs.configLooksStale(0, null), false, "no snapshot yet");
+    assert.strictEqual(hs.configLooksStale(1, polled), false, "hosts configured");
+    assert.strictEqual(hs.configLooksStale(null, polled), true, "a config read that failed is read again too");
+    assert.strictEqual(hs.configLooksStale(null, null), false);
     const src = fsSync.readFileSync(path.join(__dirname, "../src/renderer/src/App.tsx"), "utf8");
-    const effect = /const polledHosts = [^\n]+\n\s*useEffect\(\(\) => \{\s*if \(!noHosts \|\| polledHosts === 0\) return;\s*window\.api\s*\.getConfig\(\)/.exec(src);
-    assert.ok(effect, "the stale empty config is read again once hosts were polled");
+    assert.match(src, /const staleConfig = configLooksStale\(config\?\.hosts\.length \?\? null, data\);/);
+    assert.match(src, /\}, \[staleConfig, data\]\);/, "read again on each snapshot while stale, not once");
   });
+
+  // Windows: a scanner holds the file it just saw written, for a moment or for good.
+  test("settings: transient read and rename errors are retried; a lasting one fails fast and keeps the file", () =>
+    withFolders((userData) => {
+      const settingsJs = path.join(__dirname, "../dist/main/main/settings.js");
+      const elPath = require.resolve("electron", { paths: [path.dirname(settingsJs)] });
+      const hadElectron = require.cache[elPath];
+      const settingsPath = require.resolve(settingsJs);
+      require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: { app: { getPath: () => userData } } };
+      delete require.cache[settingsPath];
+      const realRead = fsSync.readFileSync;
+      const realRename = fsSync.renameSync;
+      const realNow = Date.now;
+      const file = path.join(userData, "settings.json");
+      const failing = (code, times) => {
+        let calls = 0;
+        return {
+          get calls() {
+            return calls;
+          },
+          wrap: (real) =>
+            function (...args) {
+              if (args[0] === file || String(args[1]) === file) {
+                calls++;
+                if (calls <= times) throw Object.assign(new Error(code), { code });
+              }
+              return real.apply(this, args);
+            },
+        };
+      };
+      try {
+        const settings = require(settingsJs);
+        writeJson(file, { hosts: [], theme: "dark" });
+        // EBUSY twice, then the text: three reads.
+        let f = failing("EBUSY", 2);
+        fsSync.readFileSync = f.wrap(realRead);
+        assert.strictEqual(settings.loadSettings().theme, "dark");
+        assert.strictEqual(f.calls, 3);
+        // EPERM for good: the first try plus three retries, then ConfigError.
+        f = failing("EPERM", Infinity);
+        fsSync.readFileSync = f.wrap(realRead);
+        assert.throws(() => settings.readSettingsText(file), /could not be read \(EPERM\)/);
+        assert.strictEqual(f.calls, 4);
+        // Within the memo the next loads throw at once: no read, no sleep.
+        assert.throws(() => settings.loadSettings(), /could not be read \(EPERM\)/);
+        assert.strictEqual(f.calls, 4, "the memo answered without touching the file");
+        // A Save reads anyway (and still refuses to write over it).
+        assert.throws(() => settings.persistSettings({ hosts: [] }), /could not be read \(EPERM\)/);
+        assert.strictEqual(f.calls, 8);
+        // A clock set back does not stretch the memo.
+        Date.now = () => realNow() - 3600000;
+        assert.throws(() => settings.loadSettings(), /could not be read/);
+        assert.strictEqual(f.calls, 12, "a negative age reads the file again");
+        // Once it expires the file is read again.
+        Date.now = () => realNow() + 10000;
+        fsSync.readFileSync = realRead;
+        assert.strictEqual(settings.loadSettings().theme, "dark");
+        Date.now = realNow;
+        // A non-transient error is not retried, and not remembered.
+        f = failing("EIO", Infinity);
+        fsSync.readFileSync = f.wrap(realRead);
+        assert.throws(() => settings.readSettingsText(file), /could not be read \(EIO\)/);
+        assert.strictEqual(f.calls, 1);
+        fsSync.readFileSync = realRead;
+        assert.strictEqual(settings.loadSettings().theme, "dark");
+        // A rename held twice still lands.
+        f = failing("EPERM", 2);
+        fsSync.renameSync = f.wrap(realRename);
+        settings.persistSettings({ hosts: [], theme: "light" });
+        assert.strictEqual(readJson(file).theme, "light");
+        assert.strictEqual(f.calls, 3);
+        // A rename held for good: ConfigError, the old file intact, no .tmp left.
+        f = failing("EPERM", Infinity);
+        fsSync.renameSync = f.wrap(realRename);
+        assert.throws(() => settings.persistSettings({ hosts: [], theme: "dark" }), (e) => e instanceof cfg.ConfigError && /could not be saved \(EPERM\)/.test(e.message));
+        assert.strictEqual(readJson(file).theme, "light");
+        assert.deepStrictEqual(fsSync.readdirSync(userData).filter((n) => n.endsWith(".tmp")), []);
+        fsSync.renameSync = realRename;
+        // Writing the temporary file fails: the same error, nothing left behind.
+        const realWrite = fsSync.writeFileSync;
+        fsSync.writeFileSync = function (target, ...rest) {
+          if (String(target).endsWith(".tmp")) {
+            realWrite.call(this, target, "{ half");
+            throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+          }
+          return realWrite.call(this, target, ...rest);
+        };
+        try {
+          assert.throws(() => settings.persistSettings({ hosts: [], theme: "dark" }), /could not be saved \(ENOSPC\)/);
+        } finally {
+          fsSync.writeFileSync = realWrite;
+        }
+        assert.strictEqual(readJson(file).theme, "light");
+        assert.deepStrictEqual(fsSync.readdirSync(userData).filter((n) => n.endsWith(".tmp")), []);
+      } finally {
+        fsSync.readFileSync = realRead;
+        fsSync.renameSync = realRename;
+        Date.now = realNow;
+        delete require.cache[settingsPath];
+        if (hadElectron) require.cache[elPath] = hadElectron;
+        else delete require.cache[elPath];
+      }
+    }));
 
   // --- A packaged app's copy of the data folder (Claude Desktop's MSIX view) ---
   const dataCopy = require(path.join(__dirname, "../dist/main/main/data-copy.js"));
@@ -8734,7 +8853,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       "only close-to-tray may start hidden, and not on Windows",
     );
     assert.match(src, /createWindow\(\{ show: !startInTray \}\)/, "the first window must honor the tray start");
-    const applyIdx = src.indexOf("applyPreferences(prefs);");
+    const applyIdx = src.indexOf("applyPreferences(prefs, prefsLoaded);");
     const fallback = /if \(startInTray && !trayController\.hidesToTray\(\)\)\s*focusMainWindow\(\);/.exec(src);
     assert.ok(fallback, "a missing tray icon must bring the window back");
     assert.ok(applyIdx !== -1 && applyIdx < fallback.index, "the fallback must run after the tray is created");

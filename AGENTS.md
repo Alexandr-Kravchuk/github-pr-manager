@@ -589,30 +589,42 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
 - Settings never contain tokens; tokens are resolved per host via `gh` at fetch
   time (`config.ts`).
 - **A save never erases a field another build wrote.** Loading reads a field
-  this build doesn't know (or a value it doesn't accept) as its default, so
-  `persistSettings` merges the file on disk back in (`keepUnknownSettings` in
-  `shared/config.ts`): every field outside this build's known shape — the
-  defaults plus the optional `jira` and `upsource` — is kept at any depth,
-  while a known one always comes from the save, so a cleared Jira site,
-  Upsource address or removed repo path stays gone (an empty object in the
-  shape, like `claude.repoPaths`, is a map owned whole; arrays too). A new
-  optional section the defaults leave out goes in `knownSettingsShape` by
-  hand, or clearing it in Settings brings it back from disk. Renaming or
-  reshaping a field therefore needs both directions: read the old key, and
-  expect an older build to keep writing it. A field removed on purpose — a
-  moved secret — goes in `RETIRED_SETTINGS_FIELDS`, or the merge keeps it
-  alive.
+  this build doesn't know as nothing, so `persistSettings` merges the file on
+  disk back in (`keepUnknownSettings` in `shared/config.ts`): every field
+  outside this build's known shape — the defaults plus the optional fields in
+  `OPTIONAL_SETTINGS_SHAPE` — is kept at any depth, while a known one always
+  comes from the save, so a cleared Jira site, Upsource address or removed
+  repo path stays gone (an empty object in the shape, like `claude.repoPaths`,
+  is a map owned whole; arrays too). A known field whose value this build
+  rejects is not kept: validation turns it into the default, and the save
+  writes that default (a newer build's `uiStyle` is lost to an older one's
+  theme toggle). `OPTIONAL_SETTINGS_SHAPE` is typed against `Settings`, so a
+  new optional top-level field, or a new key of `jira`/`upsource`, fails the
+  build until it is listed — unlisted, clearing it in Settings would bring it
+  back from disk. Renaming or reshaping a field therefore needs both
+  directions: read the old key, and expect an older build to keep writing it.
+  A field removed on purpose — a moved secret — goes in
+  `RETIRED_SETTINGS_FIELDS`, or the merge keeps it alive.
 - **Only a missing `settings.json` is the first run.** `readSettingsText`
   (`main/settings.ts`) returns empty settings for ENOENT alone; a read that
-  fails otherwise is tried again a few times (EBUSY/EPERM/EACCES — a scan or
-  an installer holding it), then throws `ConfigError`, which the poller and
-  the UI show as an error. It used to read as "no file", so a file that was
-  there but unreadable looked like a first run, and the next save wrote
-  defaults over it. So `persistSettings` refuses to write over a file it could
-  not read, writes
-  through a temporary file renamed over the old one, and `App.tsx` reads the
-  config again once a snapshot polled hosts the config doesn't list (it was
-  read once on mount and never again). `userData/main.log`
+  fails otherwise is tried again a few times (EBUSY/EPERM/EACCES/EAGAIN — a
+  scan or an installer holding it), then throws `ConfigError`, which the
+  poller and the UI show as an error. The retries sleep on the main thread and
+  `loadSettings` runs on every poll tick, so a transient error that outlasted
+  them is remembered for a few seconds (`READ_FAILURE_MEMO_MS`): calls in that
+  time throw at once, with no retry (a Save's read-before-write reads anyway),
+  and each failure is logged once until a read succeeds. A start that cannot
+  read them runs on the defaults but leaves the OS login item as it is. It
+  used to read as "no
+  file", so a file that was there but unreadable looked like a first run, and
+  the next save wrote defaults over it. So `persistSettings` refuses to write
+  over a file it could not read, writes through a temporary file renamed over
+  the old one — the rename retried like a read, since a scanner opens the file
+  it just saw written; one that still fails removes the temporary file and
+  throws `ConfigError`, the old settings intact — and `App.tsx` reads the
+  config again once a snapshot polled hosts the config doesn't list
+  (`configLooksStale` in `shared/host-status.ts`; it was read once on mount
+  and never again). `userData/main.log`
   (`main/diag-log.ts`, capped, `.old` kept) records each start — version,
   argv, data folder, how many hosts and whether the agent loaded — every
   failed settings read and the updater's downloads and errors (one line each;

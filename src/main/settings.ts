@@ -22,13 +22,47 @@ export function ignoredStatePath(): string {
   return path.join(app.getPath("userData"), "ignored-state.json");
 }
 
-/** Read errors a virus scan or an installer's file work holds for a moment. */
-const TRANSIENT_READ_ERRORS = new Set(["EBUSY", "EPERM", "EACCES", "EAGAIN"]);
-const READ_RETRIES = 3;
-const READ_RETRY_MS = 100;
+/** File errors a virus scan or an installer's file work holds for a moment. */
+const TRANSIENT_FILE_ERRORS = new Set(["EBUSY", "EPERM", "EACCES", "EAGAIN"]);
+const FILE_RETRIES = 3;
+const FILE_RETRY_MS = 100;
+/**
+ * How long a failed read is answered from memory. The retries sleep on the
+ * main thread, and `loadSettings` runs on every poll tick and several IPC
+ * calls: a file that stays unreadable must not freeze the app on each of them.
+ */
+const READ_FAILURE_MEMO_MS = 5000;
+
+let lastReadFailure: { file: string; code: string; at: number } | null = null;
+// Each failure is logged once until a read succeeds: the poller reads the
+// settings every tick, and repeats would rotate the start lines out of main.log.
+let missingLogged = false;
+let loggedFailure: string | null = null;
 
 function pause(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Runs `op`, trying again a few times while it fails with a transient file error. */
+function withFileRetries<T>(op: () => T): T {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return op();
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (attempt < FILE_RETRIES && code && TRANSIENT_FILE_ERRORS.has(code)) {
+        pause(FILE_RETRY_MS);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+function unreadableError(code: string): ConfigError {
+  return new ConfigError(
+    `settings.json could not be read (${code}). Your settings were not changed — restart PR Dashboard; main.log in its data folder has the details.`,
+  );
 }
 
 /**
@@ -36,31 +70,43 @@ function pause(ms: number): void {
  * other failure throws ConfigError after a few short retries — it used to read
  * as "no file", so an app that couldn't read its settings came up looking
  * unconfigured, and a Save from there would have written the defaults over
- * them. Exported for tests.
+ * them. A transient error that outlasted the retries is remembered for a few
+ * seconds, and the calls in that time throw at once, without retries; `fresh`
+ * (a Save's read-before-write, not a hot path) reads anyway. Exported for tests.
  */
-export function readSettingsText(file: string = settingsPath()): string | null {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return fs.readFileSync(file, "utf8");
-    } catch (e) {
-      const err = e as NodeJS.ErrnoException;
-      if (err.code === "ENOENT") {
-        // A first run has no other state either; one that has means the file
-        // went missing, which is worth knowing when settings "reset".
-        if (fs.existsSync(path.join(path.dirname(file), "seen-state.json"))) {
-          diag(`settings: ${file} is missing although the folder holds app state — starting unconfigured`);
-        }
-        return null;
+export function readSettingsText(file: string = settingsPath(), opts: { fresh?: boolean } = {}): string | null {
+  const recent = lastReadFailure;
+  // A clock set back makes the age negative: that is no reason to keep failing.
+  const age = recent ? Date.now() - recent.at : -1;
+  if (!opts.fresh && recent && recent.file === file && age >= 0 && age < READ_FAILURE_MEMO_MS) {
+    throw unreadableError(recent.code);
+  }
+  try {
+    const text = withFileRetries(() => fs.readFileSync(file, "utf8"));
+    lastReadFailure = null;
+    loggedFailure = null;
+    return text;
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") {
+      lastReadFailure = null;
+      loggedFailure = null;
+      // A first run has no other state either; one that has means the file
+      // went missing, which is worth knowing when settings "reset".
+      if (!missingLogged && fs.existsSync(path.join(path.dirname(file), "seen-state.json"))) {
+        missingLogged = true;
+        diag(`settings: ${file} is missing although the folder holds app state — starting unconfigured`);
       }
-      if (attempt < READ_RETRIES && err.code && TRANSIENT_READ_ERRORS.has(err.code)) {
-        pause(READ_RETRY_MS);
-        continue;
-      }
-      diag(`settings: cannot read ${file}: ${err.code ?? ""} ${err.message}`);
-      throw new ConfigError(
-        `settings.json could not be read (${err.code ?? err.message}). Your settings were not changed — restart PR Dashboard; main.log in its data folder has the details.`,
-      );
+      return null;
     }
+    const code = err.code ?? err.message;
+    // Only a failure the retries slept on is worth answering from memory.
+    lastReadFailure = err.code && TRANSIENT_FILE_ERRORS.has(err.code) ? { file, code, at: Date.now() } : null;
+    if (loggedFailure !== `${file}|${code}`) {
+      loggedFailure = `${file}|${code}`;
+      diag(`settings: cannot read ${file}: ${err.code ?? ""} ${err.message}`);
+    }
+    throw unreadableError(code);
   }
 }
 
@@ -118,10 +164,29 @@ export function persistSettings(raw: unknown): Settings {
   const settings = validateSettings(raw);
   const file = settingsPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const stored = keepUnknownSettings(parseOrUndefined(readSettingsText(file)), toStoredSettings(settings));
+  const stored = keepUnknownSettings(
+    parseOrUndefined(readSettingsText(file, { fresh: true })),
+    toStoredSettings(settings),
+  );
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(stored, null, 2), "utf8");
-  fs.renameSync(tmp, file);
+  try {
+    withFileRetries(() => fs.writeFileSync(tmp, JSON.stringify(stored, null, 2), "utf8"));
+    // A scanner that opens the file it just saw written fails the rename on
+    // Windows for a moment, like a read.
+    withFileRetries(() => fs.renameSync(tmp, file));
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Already gone, or held as well: nothing more to do about it here.
+    }
+    diag(`settings: cannot replace ${file}: ${err.code ?? ""} ${err.message}`);
+    throw new ConfigError(
+      `settings.json could not be saved (${err.code ?? err.message}). Your previous settings were kept — try again; main.log in its data folder has the details.`,
+    );
+  }
+  missingLogged = false;
   return settings;
 }
 

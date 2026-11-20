@@ -501,18 +501,30 @@ export function toStoredSettings(settings: Settings): Settings {
  */
 export const RETIRED_SETTINGS_FIELDS: readonly string[] = [];
 
+/** The keys of `Settings` that may be left out. */
+type OptionalSettingsKey = { [K in keyof Settings]-?: undefined extends Settings[K] ? K : never }[keyof Settings];
+/** A section's shape: every one of its keys, optional ones included. */
+type ShapeOf<T> = T extends object ? { [K in keyof T]-?: unknown } : unknown;
+
+/**
+ * The optional fields, which the defaults may leave out (`jira`, `upsource`):
+ * a save that clears one leaves it out, and as an unknown field it would come
+ * back from disk. Typed so that a new optional field, or a new key of these
+ * sections, fails the build until it is listed here.
+ */
+const OPTIONAL_SETTINGS_SHAPE: { [K in OptionalSettingsKey]-?: ShapeOf<NonNullable<Settings[K]>> } = {
+  uiStyle: "",
+  weatherCity: "",
+  jira: { baseUrl: "", email: "" },
+  upsource: { baseUrl: "" },
+};
+
 /**
  * Every field this build knows. An empty object stands for a map
- * (`claude.repoPaths`): its keys are data, owned whole. The optional sections
- * the defaults leave out (`jira`, `upsource`) are listed by hand: a save that
- * clears one leaves it out, and as an unknown field it would come back from disk.
+ * (`claude.repoPaths`): its keys are data, owned whole.
  */
 function knownSettingsShape(): Record<string, unknown> {
-  return {
-    ...toStoredSettings(defaultSettings()),
-    jira: { baseUrl: "", email: "" },
-    upsource: { baseUrl: "" },
-  };
+  return { ...toStoredSettings(defaultSettings()), ...OPTIONAL_SETTINGS_SHAPE };
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);

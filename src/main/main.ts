@@ -557,8 +557,10 @@ function applyThemeSource(theme: Settings["theme"]): void {
 
 /** Applies user preferences (launch-at-login + auto-update + close-to-tray +
  *  theme) to the OS/updater. */
-function applyPreferences(settings: Settings): void {
-  applyLaunchAtLogin(settings.launchAtLogin);
+function applyPreferences(settings: Settings, loaded = true): void {
+  // Defaults standing in for settings that could not be read must not remove
+  // the user's login item: that outlives the run.
+  if (loaded) applyLaunchAtLogin(settings.launchAtLogin);
   setAutoUpdateEnabled(settings.autoUpdate);
   // Creates or removes the tray icon; a failure to create one leaves close
   // quitting (the controller says so) rather than hiding an unreachable window.
@@ -1327,8 +1329,10 @@ function startApp(): void {
   // and the native window background already match (no dark flash in light mode).
   // Fall back to defaults if the settings file is invalid.
   let prefs: Settings;
+  let prefsLoaded = false;
   try {
     prefs = loadSettings();
+    prefsLoaded = true;
     diag(`settings: ${prefs.hosts.length} host(s), agent ${prefs.agent.enabled ? "on" : "off"}`);
   } catch (e) {
     diag(`settings: not loaded at start — ${(e as Error).message}`);
@@ -1374,7 +1378,7 @@ function startApp(): void {
 
   // Apply the remaining prefs (launch-at-login + auto-update; theme re-applied
   // harmlessly). Runs after the updater is initialized.
-  applyPreferences(prefs);
+  applyPreferences(prefs, prefsLoaded);
 
   // The tray icon only exists once applyPreferences has run. If it failed to
   // appear, a hidden window would be unreachable, so show it after all.

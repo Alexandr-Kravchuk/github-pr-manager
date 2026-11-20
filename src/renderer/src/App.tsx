@@ -34,7 +34,7 @@ import {
   type RoleFilter,
 } from "../../shared/pr-filter";
 import { basePrIndex, groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
-import { hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
+import { configLooksStale, hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
 import { createJiraStatusLoader } from "../../shared/jira-status";
 import { AuthorFilterContext } from "./components/author-filter-context";
 import { StaleCloseDialog } from "./components/StaleCloseDialog";
@@ -1050,20 +1050,18 @@ export function App() {
 
   const noHosts = config !== null && config.hosts.length === 0;
 
-  // The config is read once, on mount. When that one read came back empty while
-  // the settings could not be loaded, "No repositories configured" stayed up for
-  // the whole run although the poller — which reads them every tick — went on
-  // polling. A snapshot of hosts the config doesn't list reads it again.
-  const polledHosts = (data?.rateLimits?.length ?? 0) + (data?.errors?.length ?? 0);
+  // A config read empty while the snapshot polled hosts is stale (`configLooksStale`).
+  // Read again on each snapshot while it stays so: one read can fail as well.
+  const staleConfig = configLooksStale(config?.hosts.length ?? null, data);
   useEffect(() => {
-    if (!noHosts || polledHosts === 0) return;
+    if (!staleConfig) return;
     window.api
       .getConfig()
       .then((r) => {
         if (r.ok) setConfig(r.config);
       })
       .catch(() => {});
-  }, [noHosts, polledHosts]);
+  }, [staleConfig, data]);
 
   if (view === "settings") {
     return (
