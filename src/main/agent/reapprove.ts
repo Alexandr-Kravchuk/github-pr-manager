@@ -358,6 +358,18 @@ export function approveAgainRequest(repo: string, number: number, head: string, 
   };
 }
 
+/**
+ * Your approval of a head the agent reviewed and found nothing blocking in —
+ * on your click, from the Board: one line and the signature.
+ */
+export function approveRequest(repo: string, number: number, head: string, signature: string): PublishRequest {
+  return {
+    label: "approval",
+    endpoint: `repos/${repo}/pulls/${number}/reviews`,
+    body: { event: "APPROVE", commit_id: head, body: signedBody(`Approved \`${head.slice(0, 7)}\`: nothing blocking is left.`, signature) },
+  };
+}
+
 /** Your reviewers asked again — GitHub tells them; nothing is written in the PR. */
 export function reaskRequest(repo: string, number: number, logins: readonly string[]): PublishRequest {
   return { label: "review request", endpoint: `repos/${repo}/pulls/${number}/requested_reviewers`, body: { reviewers: [...logins] } };

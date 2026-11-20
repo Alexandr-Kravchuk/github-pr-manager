@@ -16,7 +16,8 @@ import type { AgentRunKind } from "./types";
 // alone let `-XDELETE`, `'-X' POST`, or a PR file named `-XDELETE` matched by
 // an unquoted `*` straight through.
 
-export type GuardDecision = { allow: true } | { allow: false; reason: string };
+/** An allow may carry the command to run in place of the one asked for (the review preflight's checked request). */
+export type GuardDecision = { allow: true; command?: string } | { allow: false; reason: string };
 
 /** The PR a run works on: its `gh` reads are held to it. */
 export interface GuardPr {
@@ -43,6 +44,12 @@ export function guardPrFromUrl(url: string): GuardPr | null {
  * plugin folders a skill's Workflow script may come from.
  */
 export interface GuardRun {
+  /**
+   * "full": a drive on your own PR that runs with your own Claude setup
+   * (`checkFullToolUse`) — every tool and folder, minus writes to GitHub.
+   * Absent: the isolated rules below.
+   */
+  mode?: "full";
   wrapperPath?: string;
   outDir?: string;
   /** Plugin folders: a Workflow may run a script from inside one of these, and from nowhere else. */
@@ -69,7 +76,37 @@ export interface GuardRun {
   sessionId?: string;
   /** Those roots: `projects` in Claude Code's config folder, its temp folder. */
   sessionRoots?: string[];
+  /** The review skill's preflight, when a mounted plugin carries its helper (`checkPreflight`). */
+  preflight?: GuardPreflight;
 }
+
+/**
+ * The creatio-code-review skill starts each review with a deterministic
+ * helper (`scripts/rereview-context.cjs`): an agent of its Workflow reads
+ * `installed_plugins.json` to find the helper of the installed plugin, writes
+ * the request to a file, runs `node <helper> < <file>`, and the helper writes
+ * the PR's data to `<tmp>/creatio-rereview-payload-*`, which the later agents
+ * read after `node <helper> --digest <dir>`. Each step is allowed here as
+ * exactly that and nothing wider: one file read, these two command shapes,
+ * reads of the helper's payload folders.
+ */
+export interface GuardPreflight {
+  /** The helpers the run may start: the mounted plugins' own copies, absolute. */
+  helpers: string[];
+  /** Claude Code's `plugins/installed_plugins.json`, which the skill reads to find its helper. */
+  installedPlugins: string;
+  /**
+   * The run's own temp folder (`TEMP`/`TMP`/`TMPDIR` of its session), where
+   * the helper writes its payload folders — never your shared one, which
+   * holds the payloads of every other review of the last day.
+   */
+  tmpDir: string;
+}
+
+/** What the helper names its payload folders. */
+export const PREFLIGHT_PAYLOAD_PREFIX = "creatio-rereview-payload-";
+/** Where a review skill keeps its preflight helper, inside its plugin. */
+export const PREFLIGHT_HELPER = ["skills", "creatio-code-review", "scripts", "rereview-context.cjs"] as const;
 
 /**
  * Inside a drive run's worktree, what it still may not change: git's own
@@ -343,6 +380,7 @@ export function checkRead(toolName: string, input: unknown, run: GuardRun | null
     const r = real(target);
     if (!r) return deny(`${target} is a link to nowhere; agent runs don't read through it.`);
     if (dirs.some((d) => withinDir(r, d)) || (run && inSessionFolder(r, run, real))) continue;
+    if (run?.preflight && preflightReadable(r, run.preflight, real)) continue;
     const really = samePath(r, target) ? "" : ` (it really is ${r})`;
     return deny(
       dirs.length
@@ -351,6 +389,166 @@ export function checkRead(toolName: string, input: unknown, run: GuardRun | null
     );
   }
   return { allow: true };
+}
+
+/** A preflight file a read may open: `installed_plugins.json`, or anything inside one of the helper's payload folders. */
+function preflightReadable(file: string, p: GuardPreflight, real: RealPath): boolean {
+  const list = real(p.installedPlugins);
+  if (list && samePath(file, list)) return true;
+  const rest = underTmp(file, p, real);
+  return rest !== null && isPayloadName(rest[0]);
+}
+
+/** Whether `dir` is one of the helper's payload folders itself, right under the run's temp folder. */
+function isPayloadFolder(dir: string, p: GuardPreflight, real: RealPath): boolean {
+  const rest = underTmp(dir, p, real);
+  return rest !== null && rest.length === 1 && isPayloadName(rest[0]);
+}
+
+/** The path's segments below the run's temp folder, or null when it is not inside it. */
+function underTmp(file: string, p: GuardPreflight, real: RealPath): string[] | null {
+  const tmp = real(p.tmpDir);
+  if (!tmp || !isInsideDir(file, tmp) || file.split(/[\\/]/).includes("..")) return null;
+  return gitBashPath(file).slice(gitBashPath(tmp).replace(/\/+$/, "").length + 1).split("/");
+}
+
+function isPayloadName(name: string): boolean {
+  return name.startsWith(PREFLIGHT_PAYLOAD_PREFIX) && name.length > PREFLIGHT_PAYLOAD_PREFIX.length;
+}
+
+/**
+ * Splits a command at its one unquoted `<`, read the way `shellWords` reads
+ * quotes; null when there is none or more than one (`<<` included).
+ */
+function splitStdin(command: string): { left: string; file: string } | null {
+  let quote: string | null = null;
+  let at = -1;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote === "'") {
+      if (c === "'") quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (c === '"') quote = null;
+      else if (c === "\\" && (command[i + 1] === '"' || command[i + 1] === "\\")) i++;
+      continue;
+    }
+    if (c === "'" || c === '"') quote = c;
+    else if (c === "\\") i++;
+    else if (c === "<") {
+      if (at >= 0) return null;
+      at = i;
+    }
+  }
+  if (at < 0 || quote) return null;
+  return { left: command.slice(0, at), file: command.slice(at + 1) };
+}
+
+const NODE_NAMES = new Set(["node", "node.exe"]);
+
+/** The keys the review skill's preflight request carries — nothing else is let through. */
+const PREFLIGHT_REQUEST_KEYS = new Set(["pr", "dryRun", "rereview", "guidanceDocs"]);
+
+/**
+ * Where the guard reads a preflight request and keeps the copy `node` reads.
+ * The session can rewrite or rename a file in its payload folder at any time —
+ * between this check and `node` opening it, too — so the helper never reads
+ * the file the session wrote: `keep` puts the checked text where the session
+ * can't write and the command is rewritten to read that. Nothing is locked, so
+ * a refused request can be corrected and run again. Injected: the guard itself
+ * never touches the disk.
+ */
+export interface RequestStore {
+  /** The request's text; null when it can't be read (or isn't a small file). */
+  read(file: string): string | null;
+  /** A copy of `text` the session can't change; its path, or null when it can't be made. */
+  keep(text: string): string | null;
+}
+
+/** A store that has nothing: every request is refused. */
+const NO_REQUESTS: RequestStore = { read: () => null, keep: () => null };
+
+/** A path as one single-quoted shell word. */
+function shellQuote(p: string): string {
+  return `'${p.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Whether a preflight request is for this run's PR only. The helper runs `gh`
+ * with your login and fetches whatever PR `pr` names, so a request a PR's text
+ * steered toward another repository would carry that repository's threads,
+ * diff and files into this run's payload. `guidanceDocs` are paths in that same
+ * PR's repository, read at its base — already readable through `gh api`.
+ */
+function requestProblem(text: string | null, pr: GuardPr | null): string | null {
+  if (text === null) return "the request file can't be read";
+  if (!pr) return "this run has no PR to hold the request to";
+  let req: unknown;
+  try {
+    req = JSON.parse(text);
+  } catch {
+    return "the request is not JSON";
+  }
+  if (typeof req !== "object" || req === null || Array.isArray(req)) return "the request is not a JSON object";
+  const r = req as Record<string, unknown>;
+  const extra = Object.keys(r).filter((k) => !PREFLIGHT_REQUEST_KEYS.has(k));
+  if (extra.length) return `the request carries ${extra.join(", ")}, which the preflight doesn't take`;
+  const target = typeof r.pr === "string" ? guardPrFromUrl(r.pr.trim()) : null;
+  if (!target || target.host !== pr.host || target.repo !== pr.repo || target.number !== pr.number) return `the request must name this run's PR, ${pr.url}`;
+  if ("dryRun" in r && typeof r.dryRun !== "boolean") return "dryRun must be true or false";
+  if ("rereview" in r && (typeof r.rereview !== "string" || r.rereview.length > 20)) return "rereview must be a short word";
+  if ("guidanceDocs" in r) {
+    const docs = r.guidanceDocs;
+    const safe = (d: unknown) => typeof d === "string" && d.length > 0 && d.length <= 300 && !d.startsWith("/") && !d.includes("\\") && !d.split("/").includes("..");
+    if (!Array.isArray(docs) || docs.length > 50 || !docs.every(safe)) return "guidanceDocs must be up to 50 relative paths in the PR's repository";
+  }
+  return null;
+}
+
+/**
+ * The review skill's preflight (`GuardPreflight`): `node <helper> < <request>`
+ * with the request in the run's payload folder and for the run's own PR, or
+ * `node <helper> --digest <payload folder>`. Null when the command doesn't
+ * start a helper, so the other rules judge it; any other use of a helper —
+ * one of another plugin version included — is refused with what is allowed.
+ */
+function checkPreflight(command: string, pr: GuardPr | null, run: GuardRun | null, real: RealPath, requests: RequestStore): GuardDecision | null {
+  const p = run?.preflight;
+  if (!p) return null;
+  const stdin = splitStdin(command);
+  const split = shellWords(stdin ? stdin.left : command);
+  if ("error" in split) return null;
+  const w = split.words;
+  if (w.length < 2 || !NODE_NAMES.has(w[0].toLowerCase())) return null;
+  const helper = real(w[1]);
+  const listed = helper !== null && p.helpers.some((h) => samePath(helper, h));
+  if (!listed) {
+    const name = PREFLIGHT_HELPER[PREFLIGHT_HELPER.length - 1];
+    if (gitBashPath(w[1]).split("/").pop()?.toLowerCase() !== name) return null;
+    return deny(`This run's review preflight helper is ${p.helpers.join(" or ")}; ${w[1]} is not it (a plugin updated since the run started?).`);
+  }
+  const shape = `The review preflight runs as node "<helper>" < "<request file under ${run?.outDir ?? "the run's payload folder"}>", or node "<helper>" --digest "<payload folder>" — nothing else.`;
+  if (stdin) {
+    const file = shellWords(stdin.file);
+    if ("error" in file || file.words.length !== 1 || w.length !== 2) return deny(shape);
+    const outDir = run?.outDir ? real(run.outDir) : null;
+    const req = real(file.words[0]);
+    if (!outDir || !req || !isInsideDir(req, outDir)) return deny(shape);
+    const text = requests.read(req);
+    const problem = requestProblem(text, pr);
+    if (problem) return deny(`The review preflight request is refused: ${problem}.`);
+    const copy = text === null ? null : requests.keep(text);
+    if (!copy) return deny("The review preflight request couldn't be set aside for node to read.");
+    // The helper reads the checked copy, never the file the session can still change.
+    const fwd = (s: string) => s.replace(/\\/g, "/");
+    return { allow: true, command: `node ${shellQuote(fwd(helper))} < ${shellQuote(fwd(copy))}` };
+  }
+  if (w.length === 4 && w[2] === "--digest") {
+    const dir = real(w[3]);
+    if (dir && isAbsolutePath(w[3]) && isPayloadFolder(dir, p, real)) return { allow: true };
+  }
+  return deny(shape);
 }
 
 function deny(reason: string): GuardDecision {
@@ -1126,7 +1324,16 @@ function checkGit(kind: AgentRunKind, words: string[], run: GuardRun | null, rea
   return checkGitFiles(sub, words.slice(2), run, real);
 }
 
-export function checkBash(kind: AgentRunKind, rawCommand: string, pr: GuardPr | null = null, run: GuardRun | null = null, real: RealPath = asWritten): GuardDecision {
+export function checkBash(
+  kind: AgentRunKind,
+  rawCommand: string,
+  pr: GuardPr | null = null,
+  run: GuardRun | null = null,
+  real: RealPath = asWritten,
+  requests: RequestStore = NO_REQUESTS,
+): GuardDecision {
+  const preflight = kind === "review" || kind === "rereview" ? checkPreflight(rawCommand, pr, run, real, requests) : null;
+  if (preflight) return preflight;
   const split = shellWords(rawCommand);
   if ("error" in split) return deny(split.error);
   const words = split.words;
@@ -1160,7 +1367,9 @@ export function checkToolUse(
   pr: GuardPr | null = null,
   run: GuardRun | null = null,
   real: RealPath = asWritten,
+  requests: RequestStore = NO_REQUESTS,
 ): GuardDecision {
+  if (run?.mode === "full" && kind === "drive") return checkFullToolUse(toolName, input, pr, run);
   if (NEVER.has(toolName)) return deny(`${toolName} is not available to agent runs.`);
   if (toolName === "Workflow") return checkWorkflow(input, run);
   if (READ_TOOLS.has(toolName)) return checkRead(toolName, input, run, real);
@@ -1181,10 +1390,192 @@ export function checkToolUse(
   if (toolName === "Bash") {
     const command = typeof (input as { command?: unknown } | null)?.command === "string" ? (input as { command: string }).command : "";
     if (!command.trim()) return deny("An empty command.");
-    return checkBash(kind, command, pr, run, real);
+    return checkBash(kind, command, pr, run, real, requests);
   }
   if (SESSION_TOOLS.has(toolName)) return { allow: true };
   return deny(`${toolName || "That tool"} is not one of the tools agent runs may use.`);
+}
+
+// ---------------------------------------------------------------------------
+// Full context: a drive on your own PR (Settings › Agent › "Your PRs: full
+// context"). The session runs with your CLAUDE.md, hooks, plugins and MCP
+// servers, reads and writes anywhere you can, runs any command. What it still
+// may not do is write to GitHub — the app pushes the commits and posts the
+// replies itself, after your click in Shadow. This is a denylist and a
+// best-effort one: it stops a model that forgets the rule (`git push`,
+// `gh pr comment`, a GitHub MCP write tool), not a script that hides the call
+// (`sh script.sh`, `python -c`). The hard boundary for the push is the
+// session's environment (`sessionGitEnv`): no credentials, every remote URL
+// rewritten to one git can't reach.
+// ---------------------------------------------------------------------------
+
+/** Programs that run the next word as the command: their own flags and assignments are skipped. */
+const COMMAND_PREFIXES = new Set(["sudo", "env", "command", "exec", "nohup", "time", "xargs", "nice", "caffeinate"]);
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
+
+/** A lenient split for full-context runs: quotes are taken off, operators and substitutions start a new command. */
+export function looseCommands(command: string): string[][] {
+  const out: string[][] = [];
+  let words: string[] = [];
+  let cur = "";
+  let inWord = false;
+  const endWord = () => {
+    if (inWord) words.push(cur);
+    cur = "";
+    inWord = false;
+  };
+  const endCommand = () => {
+    endWord();
+    if (words.length > 0) out.push(words);
+    words = [];
+  };
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === "'" || ch === '"') {
+      const end = command.indexOf(ch, i + 1);
+      const stop = end < 0 ? command.length : end;
+      const inner = command.slice(i + 1, stop);
+      // A substitution inside double quotes runs too.
+      if (ch === '"' && /\$\(|`/.test(inner)) for (const c of looseCommands(inner.replace(/^[^$`]*(\$\(|`)/, ""))) out.push(c);
+      cur += inner;
+      inWord = true;
+      i = stop;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      cur += command[++i];
+      inWord = true;
+      continue;
+    }
+    if (";&|()`\n\r{}".includes(ch) || (ch === "$" && command[i + 1] === "(")) {
+      endCommand();
+      continue;
+    }
+    if (ch === " " || ch === "\t") {
+      endWord();
+      continue;
+    }
+    cur += ch;
+    inWord = true;
+  }
+  endCommand();
+  return out;
+}
+
+/** The program and its arguments, past assignments and `sudo`/`env`/`xargs`-like prefixes; the program by its base name. */
+function commandCore(words: string[]): string[] {
+  let i = 0;
+  for (;;) {
+    while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++;
+    const name = (words[i] ?? "").split("/").pop() ?? "";
+    if (!COMMAND_PREFIXES.has(name)) break;
+    i++;
+    while (i < words.length && words[i].startsWith("-")) i++;
+  }
+  const rest = words.slice(i);
+  if (rest.length > 0) rest[0] = rest[0].split("/").pop() ?? rest[0];
+  return rest;
+}
+
+const GH_WRITES: Record<string, ReadonlySet<string> | "all-but-read"> = {
+  pr: new Set(["comment", "review", "merge", "edit", "close", "create", "ready", "reopen", "lock", "unlock", "update-branch"]),
+  issue: new Set(["create", "comment", "edit", "close", "reopen", "delete", "transfer", "pin", "unpin", "lock", "unlock", "develop"]),
+  repo: new Set(["create", "edit", "delete", "fork", "rename", "archive", "unarchive", "sync"]),
+  label: new Set(["create", "edit", "delete", "clone"]),
+  secret: new Set(["set", "delete"]),
+  variable: new Set(["set", "delete"]),
+  release: "all-but-read",
+  gist: new Set(["create", "edit", "delete", "rename"]),
+};
+const GH_RELEASE_READS = new Set(["list", "view", "download"]);
+
+function fullGhApi(args: string[]): GuardDecision {
+  let endpoint: string | null = null;
+  const fields: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const eq = a.indexOf("=");
+    const name = a.startsWith("--") && eq > 0 ? a.slice(0, eq) : a;
+    const attached = a.startsWith("--") && eq > 0 ? a.slice(eq + 1) : null;
+    const value = (): string => attached ?? args[++i] ?? "";
+    if (name === "-X" || name === "--method") {
+      if (value().toUpperCase() !== "GET") return deny("This session doesn't write to GitHub — the app pushes and posts after your click.");
+    } else if (/^-X./.test(a)) {
+      if (a.slice(2).toUpperCase() !== "GET") return deny("This session doesn't write to GitHub — the app pushes and posts after your click.");
+    } else if (FIELD_FLAGS.has(name) || /^-[fF]./.test(a)) {
+      fields.push(/^-[fF]./.test(a) ? a.slice(2) : value());
+    } else if (name === "--input") {
+      return deny("gh api --input sends a request body; this session doesn't write to GitHub.");
+    } else if (!a.startsWith("-") && endpoint === null) {
+      endpoint = a;
+    }
+  }
+  if (fields.length === 0) return { allow: true };
+  // With fields gh sends a POST: only a GraphQL query is a read.
+  if (endpoint === "graphql" && !fields.some((f) => /\bmutation\b/i.test(f))) return { allow: true };
+  return deny("That gh api call writes to GitHub; this session doesn't — the app pushes and posts after your click.");
+}
+
+function fullCommand(words: string[], pr: GuardPr | null, run: GuardRun, depth: number): GuardDecision {
+  if (run.wrapperPath && run.outDir && words[0] && samePath(words[0], run.wrapperPath)) return checkWrapper(words, pr, run.outDir, run.subs);
+  const w = commandCore(words);
+  const prog = w[0] ?? "";
+  if (SHELLS.has(prog)) {
+    const c = w.indexOf("-c");
+    if (c > 0 && w[c + 1] !== undefined && depth < 3) return checkFullBash(w[c + 1], pr, run, depth + 1);
+    return { allow: true };
+  }
+  if (prog === "git") {
+    let i = 1;
+    for (; i < w.length && w[i].startsWith("-"); i++) {
+      if (w[i] === "-c" && /^alias\./i.test(w[i + 1] ?? "")) return deny("git aliases set on the command line are not allowed here.");
+      if (["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(w[i])) i++;
+    }
+    const sub = w[i] ?? "";
+    if (sub === "push" || sub === "send-pack") return deny("This session doesn't push — the app pushes your branch after your click.");
+    return { allow: true };
+  }
+  if (prog === "gh") {
+    const group = w[1] ?? "";
+    const sub = w[2] ?? "";
+    if (group === "api") return fullGhApi(w.slice(2));
+    const writes = GH_WRITES[group];
+    if (writes === "all-but-read" ? sub !== "" && !GH_RELEASE_READS.has(sub) : writes?.has(sub)) {
+      return deny(`gh ${group} ${sub} writes to GitHub; this session doesn't — the app pushes and posts the replies after your click.`);
+    }
+  }
+  return { allow: true };
+}
+
+export function checkFullBash(command: string, pr: GuardPr | null, run: GuardRun, depth = 0): GuardDecision {
+  for (const words of looseCommands(command)) {
+    const d = fullCommand(words, pr, run, depth);
+    if (!d.allow) return d;
+  }
+  return { allow: true };
+}
+
+/** The read tools of a GitHub MCP server; any other tool of it writes. */
+const GITHUB_MCP_READ = /^(get_|list_|search_)|_read$|^(actions_get|actions_list|projects_get|projects_list|web_search|semantic_issue_similarity_search|check_dependency_vulnerabilities)$/;
+
+/** `mcp__<server>__<tool>`: a GitHub (or GHE) server's tool that writes. */
+export function isGithubMcpWrite(toolName: string): boolean {
+  const m = /^mcp__(.+?)__(.+)$/.exec(toolName);
+  if (!m) return false;
+  if (!/(^|[_-])(github|ghe)([_-]|$)/i.test(m[1])) return false;
+  return !GITHUB_MCP_READ.test(m[2]);
+}
+
+/** A full-context drive: everything but writing to GitHub. */
+export function checkFullToolUse(toolName: string, input: unknown, pr: GuardPr | null, run: GuardRun): GuardDecision {
+  if (toolName === "Bash") {
+    const command = typeof (input as { command?: unknown } | null)?.command === "string" ? (input as { command: string }).command : "";
+    return checkFullBash(command, pr, run);
+  }
+  if (isGithubMcpWrite(toolName)) {
+    return deny(`${toolName} writes to GitHub; this session doesn't — the app pushes and posts the replies after your click.`);
+  }
+  return { allow: true };
 }
 
 const RUN_KINDS: readonly AgentRunKind[] = ["review", "brief", "rereview", "drive", "afterMerge"];

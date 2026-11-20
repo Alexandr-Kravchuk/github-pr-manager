@@ -24,7 +24,9 @@ import type {
   ClaudeLaunchResult,
   ClaudeSessionInfo,
   ConfigResult,
+  DataCopy,
   FocusClaudeSessionResult,
+  DashboardResponse,
   DashboardResult,
   GhStatus,
   JiraHealth,
@@ -32,17 +34,30 @@ import type {
   PullRequest,
   SaveSettingsResult,
   Settings,
+  WeatherLocateResult,
   WeatherStatus,
 } from "../shared/types";
 import { loadAppIcon } from "./app-icon";
 import { createAgent, type Agent, type AgentNotice } from "./agent";
+import { hasCommand } from "./command-path";
 import { findCheckout, launchClaude, launchGroup, resumeClaudeSession } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
+import { devUserDataDir, isInstalledBuild, seedDevUserData } from "./dev-user-data";
+import { findDataCopies } from "./data-copy";
+import { diag, initDiagLog } from "./diag-log";
 import { clearJiraCaches, deleteTask, fetchTaskInfo, transitionTask } from "../shared/jira";
 import { shouldNotifyJiraAuth } from "../shared/jira-health";
 import type { CloseStaleResult, JiraTaskInfo } from "../shared/stale";
 import { buildJiraEnricher, getJiraStatus, getJiraToken, setJiraToken } from "./jira-store";
+import {
+  createUpsourceSource,
+  getUpsourceStatus,
+  getUpsourceToken,
+  setUpsourceToken,
+  type UpsourceSource,
+} from "./upsource";
+import { githubOnly } from "../shared/upsource";
 import { closeStale, staleJiraTask, type StaleCloseDeps } from "./stale-close";
 import { getTwgStatus, openTwgLogin } from "./twg";
 import { createTwgStatusCache } from "../shared/jira-twg";
@@ -53,6 +68,7 @@ import {
   validateIgnoredArgs,
   validateJiraStatusMode,
   validateJiraToken,
+  validateUpsourceToken,
   validateAgentAction,
   validateClaudeKind,
   validateDiagramsChecked,
@@ -61,9 +77,10 @@ import {
   validateClaudeSessionId,
   validatePrId,
   validateSeenItems,
+  validateUiStyle,
   validateThemePreference,
 } from "./ipc-validation";
-import { loginItemSettingsFor, staleLoginItemsFor, wasLaunchedAtLogin } from "./login-launch";
+import { loginItemSettingsFor, staleLoginItemsFor, startsInTray, wasLaunchedAtLogin } from "./login-launch";
 import { createMenuActions, installAppMenu } from "./menu";
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
@@ -82,12 +99,46 @@ import {
 import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./updater";
 import { whatsNewFor } from "../shared/whats-new";
 import { createWeatherService } from "./weather";
+import { locate } from "./locate";
+import { forgetLocation, readSavedLocation, saveLocation } from "./weather-location";
+
+/**
+ * False for a build run from source or from a packaging folder's
+ * `win-unpacked` (see dev-user-data.ts). Such a build keeps its data apart and
+ * leaves the installed app's launch-at-login entry and updates alone.
+ */
+const installedApp = isInstalledBuild({
+  isPackaged: app.isPackaged,
+  platform: process.platform,
+  execPath: process.execPath,
+  productName: app.getName(),
+});
+
+// First thing at load: the single-instance lock below and every file under
+// userData follow the folder set here, and Electron takes a new userData only
+// before `ready`.
+if (!installedApp) {
+  const releaseDir = app.getPath("userData");
+  const devDir = devUserDataDir(releaseDir);
+  try {
+    const seeded = seedDevUserData(releaseDir, devDir);
+    if (seeded.length) console.log("[main] dev data folder seeded from the installed app:", seeded.join(", "));
+  } catch (e) {
+    console.error("[main] could not seed the dev data folder:", e);
+  }
+  app.setPath("userData", devDir);
+}
+initDiagLog(app.getPath("userData"));
 
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
+/** Upsource reviews, read in the background (null in fixture mode). */
+let upsourceSource: UpsourceSource | null = null;
 /** The PR agent; null in fixture mode (PRD_MOCK), where it would act on fake PRs. */
 let agent: Agent | null = null;
 let agentPushTimer: NodeJS.Timeout | null = null;
+/** A packaged app's copy of the data folder, looked up once at start (data-copy.ts). */
+let dataCopy: DataCopy | null = null;
 
 /**
  * Pushes the agent's state at most every 250 ms — a run reports a step per
@@ -348,7 +399,11 @@ function handleAgentNotice({ kind, item }: AgentNotice): void {
   try {
     const s = loadSettings();
     if (!s.agent.notifications[kind] || !Notification.isSupported()) return;
-    showOsNotification(agentNoticeTitle(kind, item), `${item.title}\n${item.headline}`, !s.notifications.sound, () => {
+    // The PR's head now: a result someone pushed past while it ran gets no toast, as the Board shows it as no move of yours.
+    const head = poller?.getSnapshot()?.pullRequests.find((p) => p.id === item.prId)?.headOid ?? null;
+    const title = agentNoticeTitle(kind, item, head);
+    if (title === null) return;
+    showOsNotification(title, `${item.title}\n${item.headline}`, !s.notifications.sound, () => {
       focusMainWindow();
       sendToRenderer("agent-show-board", item.runId);
     });
@@ -471,10 +526,11 @@ function handleNotifications(prs: PullRequest[]): void {
   });
 }
 
-/** Registers/unregisters the OS "open at login" item. Packaged app only — in dev
- *  the item would point at the dev Electron binary. Not supported on Linux. */
+/** Registers/unregisters the OS "open at login" item. The installed app only —
+ *  the item is written with this exe's path, so a dev or `win-unpacked` build
+ *  would make the next sign-in start that build. Not supported on Linux. */
 function applyLaunchAtLogin(enabled: boolean): void {
-  if (!app.isPackaged || process.platform === "linux") return;
+  if (!installedApp || process.platform === "linux") return;
   for (const stale of staleLoginItemsFor(process.platform)) app.setLoginItemSettings(stale);
   const options = loginItemSettingsFor(enabled, process.platform);
   app.setLoginItemSettings(options);
@@ -490,7 +546,7 @@ function applyLaunchAtLogin(enabled: boolean): void {
  *  renderer's `--canvas` so there's no flash before paint nor a mismatched
  *  edge on resize. */
 function themeBackground(): string {
-  return nativeTheme.shouldUseDarkColors ? "#09090b" : "#f7f7f8";
+  return nativeTheme.shouldUseDarkColors ? "#141417" : "#ebebee";
 }
 
 /** Drives the renderer's `prefers-color-scheme` (and native chrome) from the
@@ -501,8 +557,10 @@ function applyThemeSource(theme: Settings["theme"]): void {
 
 /** Applies user preferences (launch-at-login + auto-update + close-to-tray +
  *  theme) to the OS/updater. */
-function applyPreferences(settings: Settings): void {
-  applyLaunchAtLogin(settings.launchAtLogin);
+function applyPreferences(settings: Settings, loaded = true): void {
+  // Defaults standing in for settings that could not be read must not remove
+  // the user's login item: that outlives the run.
+  if (loaded) applyLaunchAtLogin(settings.launchAtLogin);
   setAutoUpdateEnabled(settings.autoUpdate);
   // Creates or removes the tray icon; a failure to create one leaves close
   // quitting (the controller says so) rather than hiding an unreachable window.
@@ -551,6 +609,8 @@ async function refreshClaudeSessions(): Promise<ClaudeSessionInfo[]> {
     if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
       sendToRenderer("claude-sessions", claudeSessions);
     }
+    // The plan reads the sessions too; it would otherwise wait for the PRs to change.
+    agent?.sessionsChanged();
   }
   return claudeSessions;
 }
@@ -736,6 +796,15 @@ function createWindow({ show = true }: { show?: boolean } = {}): void {
   }
 }
 
+/**
+ * The snapshot without Upsource reviews: what every GitHub action (the agent,
+ * Claude launches, closing a stale PR) looks PRs up in.
+ */
+function githubSnapshot(): DashboardResponse | null {
+  const snapshot = poller?.getSnapshot() ?? null;
+  return snapshot ? githubOnly(snapshot) : null;
+}
+
 /** Current cached dashboard state as an IPC result. */
 function dashboardResult(): DashboardResult {
   const configError = poller?.getConfigError() ?? null;
@@ -767,7 +836,7 @@ function registerIpc(): void {
 
   ipcMain.handle("config:get", async (): Promise<ConfigResult> => {
     try {
-      return { ok: true, config: toPublicConfig(loadSettings()) };
+      return { ok: true, config: toPublicConfig(loadSettings(), hasCommand("codex")) };
     } catch (e) {
       if (e instanceof ConfigError) return { ok: false, error: e.message };
       throw e;
@@ -812,7 +881,7 @@ function registerIpc(): void {
       const id = validatePrId(raw);
       const kind = validateClaudeKind(rawKind);
       const inTerminal = validateInTerminal(rawInTerminal);
-      const pr = poller?.getSnapshot()?.pullRequests.find((p) => p.id === id);
+      const pr = githubSnapshot()?.pullRequests.find((p) => p.id === id);
       if (!pr) return { ok: false, error: "This PR is no longer on the dashboard." };
       let settings: Settings;
       try {
@@ -840,7 +909,8 @@ function registerIpc(): void {
     "claude:launchGroup",
     async (_event, rawKind: unknown, rawKey: unknown, rawIds: unknown): Promise<ClaudeGroupLaunchResult> => {
       const { kind, key, ids } = validateGroupLaunchArgs(rawKind, rawKey, rawIds);
-      const all = poller?.getSnapshot()?.pullRequests ?? [];
+      // A group can hold Upsource reviews; Claude works on GitHub PRs only.
+      const all = githubSnapshot()?.pullRequests ?? [];
       // In the order the renderer listed them, which is the order it shows.
       const prs = ids.flatMap((id) => all.filter((p) => p.id === id));
       let settings: Settings;
@@ -960,6 +1030,17 @@ function registerIpc(): void {
     }
   });
 
+  // The look (Flat / Neumorphism / Claymorphism): the renderer applies it
+  // itself; main only keeps it.
+  ipcMain.handle("style:set", async (_event, raw: unknown): Promise<void> => {
+    const uiStyle = validateUiStyle(raw);
+    try {
+      persistSettings({ ...loadSettings(), uiStyle });
+    } catch {
+      /* the look still switches for this session */
+    }
+  });
+
   ipcMain.handle("gh:status", async (): Promise<GhStatus> => {
     try {
       return getGhStatus(loadSettings());
@@ -999,6 +1080,21 @@ function registerIpc(): void {
     return result;
   });
 
+  ipcMain.handle("upsource:status", async () => getUpsourceStatus(loadSettings));
+
+  ipcMain.handle("upsource:setToken", async (_event, raw: unknown) => {
+    const result = setUpsourceToken(validateUpsourceToken(raw));
+    // Read the reviews with the new token now, in the background: Settings
+    // closes only on this reply. The source reads with the token on disk now,
+    // even when a poll that started before the save is still running, and the
+    // snapshot is built again at once so a removed token shows straight away.
+    if (result.ok) {
+      upsourceSource?.kick(true);
+      poller?.rebuildSnapshot();
+    }
+    return result;
+  });
+
   ipcMain.handle("app:getVersion", async (): Promise<string> => app.getVersion());
 
   ipcMain.handle("app:getWhatsNew", async () => {
@@ -1018,6 +1114,13 @@ function registerIpc(): void {
     acknowledgeVersion(app.getVersion());
   });
 
+  ipcMain.handle("app:dataCopy", async (): Promise<DataCopy | null> => dataCopy);
+
+  // No argument: only the folder main found is ever shown.
+  ipcMain.handle("app:showDataCopy", async (): Promise<void> => {
+    if (dataCopy) await shell.openPath(dataCopy.dir);
+  });
+
   ipcMain.handle("app:copyText", async (_event, text: unknown): Promise<void> => {
     clipboard.writeText(validateClipboardText(text));
   });
@@ -1034,7 +1137,7 @@ function registerIpc(): void {
     transitionTask,
     deleteTask,
   };
-  const snapshotPr = (id: string) => poller?.getSnapshot()?.pullRequests.find((p) => p.id === id);
+  const snapshotPr = (id: string) => githubSnapshot()?.pullRequests.find((p) => p.id === id);
 
   ipcMain.handle(
     "stale:jiraTask",
@@ -1057,17 +1160,44 @@ function registerIpc(): void {
     return result;
   });
 
-  // No argument: the city comes from the saved settings, so the renderer
-  // cannot point the request anywhere else.
+  // No argument: the city comes from the saved settings and the coordinates
+  // from the location saved by "Use my location", so the renderer cannot
+  // point the request anywhere else. A typed city wins over the location.
   const weather = createWeatherService();
-  ipcMain.handle("weather:get", async (): Promise<WeatherStatus> => {
+  const locationFile = path.join(app.getPath("userData"), "weather-location.json");
+  const currentWeather = async (): Promise<WeatherStatus> => {
     let city = "";
     try {
       city = loadSettings().weatherCity ?? "";
     } catch {
-      /* unreadable settings: the header keeps its snowfall */
+      /* unreadable settings: fall back to the location, else no weather */
     }
-    return weather.get(city);
+    if (city.trim()) return weather.get(city);
+    const loc = readSavedLocation(locationFile);
+    return loc ? weather.get(loc) : { state: "off" };
+  };
+  ipcMain.handle("weather:get", () => currentWeather());
+  // The location comes from the OS through main (main/locate.ts), never from
+  // the renderer, and only on the user's click in Settings. One at a time.
+  const locateHelper = app.isPackaged
+    ? path.join(process.resourcesPath, "prd-locate.app")
+    : path.join(app.getAppPath(), "dist", "native", "prd-locate.app");
+  let locating: Promise<WeatherLocateResult> | null = null;
+  ipcMain.handle("weather:locate", (): Promise<WeatherLocateResult> => {
+    locating ??= (async (): Promise<WeatherLocateResult> => {
+      const r = await locate({ helperApp: locateHelper });
+      if (process.env.PRD_DEBUG) console.log(`[weather] locate: ${r.status}`);
+      if (r.status === "ok") saveLocation(locationFile, r);
+      const message = r.status === "failed" || r.status === "unavailable" ? r.reason : undefined;
+      return { outcome: r.status === "ok" ? "granted" : r.status, ...(message ? { message } : {}), weather: await currentWeather() };
+    })().finally(() => {
+      locating = null;
+    });
+    return locating;
+  });
+  ipcMain.handle("weather:forgetLocation", (): Promise<WeatherStatus> => {
+    forgetLocation(locationFile);
+    return currentWeather();
   });
 }
 
@@ -1076,6 +1206,21 @@ function registerIpc(): void {
 // readable, and (b) so the single-instance decision logic lives in the
 // unit-tested single-instance.ts rather than an inline closure.
 function startApp(): void {
+  diag(
+    `start v${app.getVersion()} pid=${process.pid} installed=${installedApp} ` +
+      `userData=${app.getPath("userData")} argv=${JSON.stringify(process.argv.slice(1))}`,
+  );
+  // Before anything reads settings: a copy here explains settings that look reset.
+  const copies = findDataCopies({
+    platform: process.platform,
+    appData: app.getPath("appData"),
+    userData: app.getPath("userData"),
+    localAppData: process.env.LOCALAPPDATA,
+  });
+  for (const c of copies) {
+    diag(`data copy (${c.where}) of ${c.appName}: ${c.dir}, settings changed ${new Date(c.changedAt).toISOString()}`);
+  }
+  dataCopy = copies[0] ?? null;
   // Must run before any `gh` invocation: a Finder/.app launch inherits a minimal
   // PATH without Homebrew, so without this `gh` is not found and token
   // resolution fails with a misleading "not signed in".
@@ -1100,6 +1245,11 @@ function startApp(): void {
     acknowledgeVersion(app.getVersion());
   }
 
+  // Reads in the background; each finished read builds the snapshot again.
+  upsourceSource = isMockMode()
+    ? null
+    : createUpsourceSource({ loadSettings, getToken: getUpsourceToken, onUpdate: () => poller?.rebuildSnapshot() });
+
   poller = new Poller({
     loadSettings,
     toHostConfigs,
@@ -1108,6 +1258,7 @@ function startApp(): void {
     appVersion: app.getVersion(),
     // No real Jira calls in fixture mode; the mock overrides below win anyway.
     enrichJira: isMockMode() ? undefined : buildJiraEnricher(loadSettings),
+    upsource: upsourceSource ?? undefined,
     onSnapshot: (snapshot) => {
       if (process.env.PRD_DEBUG) {
         console.log(
@@ -1125,7 +1276,7 @@ function startApp(): void {
       // The agent first: a regular toast for a trigger it just took in On is
       // left out (its own result is what you hear about), and it can only tell
       // once it has taken it.
-      agent?.onSnapshot(snapshot);
+      agent?.onSnapshot(githubOnly(snapshot));
       handleNotifications(snapshot.pullRequests);
       handleJiraAuthNotification(snapshot.jiraHealth);
     },
@@ -1143,7 +1294,7 @@ function startApp(): void {
     agent = createAgent({
       dir: path.join(app.getPath("userData"), "agent"),
       loadSettings,
-      getSnapshot: () => poller?.getSnapshot() ?? null,
+      getSnapshot: githubSnapshot,
       getSessions: () => claudeSessions,
       findCheckout,
       // Run by Claude Code before each tool call, as Node (ELECTRON_RUN_AS_NODE).
@@ -1178,9 +1329,13 @@ function startApp(): void {
   // and the native window background already match (no dark flash in light mode).
   // Fall back to defaults if the settings file is invalid.
   let prefs: Settings;
+  let prefsLoaded = false;
   try {
     prefs = loadSettings();
-  } catch {
+    prefsLoaded = true;
+    diag(`settings: ${prefs.hosts.length} host(s), agent ${prefs.agent.enabled ? "on" : "off"}`);
+  } catch (e) {
+    diag(`settings: not loaded at start — ${(e as Error).message}`);
     prefs = defaultSettings();
   }
   applyThemeSource(prefs.theme);
@@ -1194,12 +1349,13 @@ function startApp(): void {
   });
 
   // Started by the OS login item with close-to-tray on: come up in the tray
-  // rather than putting a window in front of the user on every sign-in.
+  // rather than putting a window in front of the user on every sign-in — on
+  // macOS only, where the menu bar icon stays in sight (`startsInTray`).
   const launchedAtLogin = wasLaunchedAtLogin(
     process.argv,
     process.platform === "darwin" ? app.getLoginItemSettings().wasOpenedAtLogin : undefined,
   );
-  const startInTray = launchedAtLogin && prefs.closeToTray;
+  const startInTray = startsInTray(process.platform, launchedAtLogin, prefs.closeToTray);
   createWindow({ show: !startInTray });
 
   // The application menu owns the keyboard shortcuts (Settings on CmdOrCtrl+,
@@ -1216,11 +1372,13 @@ function startApp(): void {
     { devItems: !app.isPackaged },
   );
 
-  initAutoUpdater((status) => sendToRenderer("update-status", status));
+  // A `win-unpacked` build ships app-update.yml too, and its update would run
+  // the real installer over the installed app.
+  if (installedApp) initAutoUpdater((status) => sendToRenderer("update-status", status));
 
   // Apply the remaining prefs (launch-at-login + auto-update; theme re-applied
   // harmlessly). Runs after the updater is initialized.
-  applyPreferences(prefs);
+  applyPreferences(prefs, prefsLoaded);
 
   // The tray icon only exists once applyPreferences has run. If it failed to
   // appear, a hidden window would be unreachable, so show it after all.

@@ -8,7 +8,9 @@
  * asked of you, or nothing to do (default: sleeping). `?jiraAuth=token|twg` shows the
  * rejected-credentials banner for that Jira source.
  */
-import { rankBefore } from "../../shared/agent-view";
+import { isUiStyle } from "../../shared/ui-style";
+import { toUpsourcePrs } from "../../shared/upsource";
+import { OWN_SESSION_WHY, rankBefore } from "../../shared/agent-view";
 import type {
   AgentAction,
   AgentItem,
@@ -17,6 +19,7 @@ import type {
   WeatherStatus,
   ClaudeSessionInfo,
   DashboardResponse,
+  DataCopy,
   JiraSource,
   PrManagerApi,
   PullRequest,
@@ -406,17 +409,147 @@ const FIXTURES: Record<string, PullRequest[]> = {
   ],
 };
 
+// Upsource reviews next to the PRs of `?buddy=review`, mapped by the real
+// `toUpsourcePrs`: one asked of you (sharing ENG-90463 with a PR above), one of
+// yours with a concern, one of yours every reviewer accepted.
+const UPSOURCE_USERS = new Map(
+  [
+    { userId: "me", name: "You", login: "me" },
+    { userId: "ak", name: "Avery Kim", login: "a.kim" },
+    { userId: "md", name: "Morgan Diaz", login: "m.diaz" },
+    { userId: "kb", name: "Kai Brooks", login: "k.brooks" },
+  ].map((u) => [u.userId, u]),
+);
+const upsourceAt = (hoursAgo: number) => Date.now() - hoursAgo * 3_600_000;
+const UPSOURCE_REVIEWS = toUpsourcePrs(
+  [
+    {
+      reviewId: { projectId: "acme", reviewId: "CR-1795" },
+      title: "ENG-90463 Panel page object: wait for the collapse animation",
+      participants: [
+        { userId: "ak", role: 1, state: 2 },
+        { userId: "md", role: 2, state: 3 },
+        { userId: "me", role: 2, state: 1 },
+        { userId: "kb", role: 2, state: 2 },
+      ],
+      state: 1,
+      isUnread: true,
+      createdAt: upsourceAt(30),
+      updatedAt: upsourceAt(2),
+      completionRate: { completedCount: 1, reviewersCount: 3, hasConcern: false },
+      discussionCounter: { count: 0, unresolvedCount: 0 },
+      deadline: upsourceAt(-48),
+    },
+    {
+      reviewId: { projectId: "acme", reviewId: "CR-1759" },
+      title: "ENG-90512 Distance unit lookup and its default setting",
+      participants: [
+        { userId: "me", role: 1, state: 2 },
+        { userId: "ak", role: 2, state: 3 },
+        { userId: "md", role: 2, state: 3 },
+        { userId: "kb", role: 2, state: 4 },
+      ],
+      state: 1,
+      createdAt: upsourceAt(70),
+      updatedAt: upsourceAt(20),
+      completionRate: { completedCount: 2, reviewersCount: 3, hasConcern: true },
+      discussionCounter: { count: 3, unresolvedCount: 2 },
+      deadline: upsourceAt(30),
+    },
+    {
+      reviewId: { projectId: "acme", reviewId: "CR-1792" },
+      title: "ENG-90530 Expression editor keeps focus on apply",
+      participants: [
+        { userId: "me", role: 1, state: 2 },
+        { userId: "ak", role: 2, state: 3 },
+        { userId: "md", role: 2, state: 3 },
+        { userId: "kb", role: 2, state: 3 },
+      ],
+      state: 1,
+      isReadyToClose: true,
+      createdAt: upsourceAt(50),
+      updatedAt: upsourceAt(40),
+      completionRate: { completedCount: 3, reviewersCount: 3, hasConcern: false },
+      discussionCounter: { count: 1, unresolvedCount: 0 },
+    },
+  ],
+  UPSOURCE_USERS,
+  "me",
+  "https://upsource.example.com",
+).map((p) => ({
+  ...p,
+  // `applyActivity` sets this in the app; the mock skips it.
+  needsAttention: p.roles.includes("reviewer") || p.hasUnaddressedChangeRequest || p.unresolvedThreads > 0,
+}));
+FIXTURES.review.push(...UPSOURCE_REVIEWS);
+
 // The PR agent's Board, chip and statuses: PRs in every state it shows. `?buddy=agent`.
-FIXTURES.agent = [...FIXTURES.showcase, ...FIXTURES.review];
+FIXTURES.agent = [
+  ...FIXTURES.showcase,
+  ...FIXTURES.review,
+  // Two of yours the agent can't start on: one from a fork (it never pushes
+  // there), one a Claude session of yours already works on.
+  pr({
+    id: "mock-fork-pr",
+    repo: "acme/widgets",
+    number: 47,
+    url: "https://github.com/acme/widgets/pull/47",
+    title: "feat: agent defaults that keep up",
+    headRefName: "agent-defaults",
+    isCrossRepository: true,
+    hasConflicts: true,
+    hasNoReviews: false,
+    reviewDecision: "CHANGES_REQUESTED",
+  }),
+  pr({
+    id: "mock-session-pr",
+    repo: "acme/clio",
+    number: 64,
+    url: "https://github.com/acme/clio/pull/64",
+    title: "fix: why settings reset on Windows",
+    headRefName: "fix/settings-reset",
+    ciState: "failure",
+    failingChecks: [{ name: "build", kind: "check", state: "failure", url: "https://github.com/acme/clio/actions/runs/1" }],
+  }),
+  // Asked again after my change request; the agent's re-review of this head
+  // found nothing blocking and had nothing to post — Approve is one click.
+  pr({
+    id: "mock-approvable-pr",
+    repo: "acme/chat-shared",
+    number: 298,
+    url: "https://github.com/acme/chat-shared/pull/298",
+    title: "APD-15172 The chat's colour table, and chat-ui colours from variables",
+    roles: ["reviewer", "reviewed"],
+    author: { login: "teammate", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4" },
+    viewerHasReviewed: true,
+    viewerReviewedAt: new Date(Date.now() - 26 * 3600e3).toISOString(),
+    hasNoReviews: false,
+    reviewDecision: "CHANGES_REQUESTED",
+    reviewers: [{ login: "me", avatarUrl: "", reviewState: "changes_requested" }],
+  }),
+];
 
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
 // `?jiraAuth=token` / `?jiraAuth=twg` shows the rejected-credentials banner and
 // the matching Settings state, which a working mock never reaches.
-// `?weather=rain` (any WeatherKind) previews a header sky; none keeps the snowfall.
+// `?weather=rain` (any WeatherKind) previews the header's weather icon;
+// none shows no weather.
 const weatherParam = new URLSearchParams(window.location.search).get("weather");
-const WEATHER: WeatherStatus = weatherParam
+let WEATHER: WeatherStatus = weatherParam
   ? { state: "ok", kind: weatherParam as WeatherKind, place: "Kyiv, Ukraine", temperatureC: 4, fetchedAt: Date.now() }
   : { state: "off" };
+
+// `?dataCopy=inside|outside` previews the banner about a packaged app's copy of the data folder.
+const dataCopyParam = new URLSearchParams(window.location.search).get("dataCopy");
+const DATA_COPY: DataCopy | null =
+  dataCopyParam === "inside" || dataCopyParam === "outside"
+    ? {
+        appName: "Claude",
+        dir: "C:\\Users\\you\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\PR Dashboard",
+        where: dataCopyParam,
+        changedAt: Date.now() - 3 * 86_400_000,
+      }
+    : null;
 
 const jiraAuthParam = new URLSearchParams(window.location.search).get("jiraAuth");
 const jiraAuth: JiraSource | null = jiraAuthParam === "token" || jiraAuthParam === "twg" ? jiraAuthParam : null;
@@ -430,10 +563,16 @@ const snapshot: DashboardResponse = {
   rateLimits: [
     { hostLabel: "GitHub", remaining: 4980, limit: 5000, cost: 20, resetAt: new Date().toISOString(), fetchedAt: new Date().toISOString() },
     { hostLabel: "GHE", remaining: 320, limit: 5000, cost: 20, resetAt: new Date().toISOString(), fetchedAt: new Date().toISOString() },
+    // Upsource reports no budget: an empty `resetAt` reads as "no budget", a green dot.
+    { hostLabel: "Upsource", remaining: 0, cost: 0, resetAt: "", fetchedAt: new Date().toISOString() },
   ],
   fetchedAt: new Date().toISOString(),
   version: "dev",
 };
+
+// `?ui=<style>` (neumorphism, claymorphism, neobrutalism, bento, glassmorphism) previews a look (Settings › Appearance).
+const uiParam = new URLSearchParams(window.location.search).get("ui");
+const mockUiStyle = isUiStyle(uiParam) ? uiParam : "flat";
 
 const settings: Settings = {
   pollIntervalSeconds: 60,
@@ -441,6 +580,7 @@ const settings: Settings = {
   autoUpdate: false,
   closeToTray: true,
   theme: "system",
+  uiStyle: mockUiStyle,
   trackComments: true,
   notifications: {
     enabled: true,
@@ -449,6 +589,7 @@ const settings: Settings = {
     events: { yourTurn: true, ciFailed: true, goodNews: true },
   },
   hosts: [{ label: "GitHub", graphqlUrl: "https://api.github.com/graphql", repos: ["acme/widgets"] }],
+  upsource: { baseUrl: "https://upsource.example.com" },
   claude: { ...DEFAULT_CLAUDE_SETTINGS, enabled: true },
   agent: structuredClone(DEFAULT_AGENT_SETTINGS),
   staleAfterDays: 30,
@@ -505,6 +646,16 @@ const CLAUDE_SESSIONS: ClaudeSessionInfo[] = [
     groups: [{ kind: "explain", key: "ENG-93367" }],
     repoKeys: ["github.com/acme/clio"],
     branch: "main",
+  },
+  {
+    // On the `?buddy=agent` PR #64: its Board card switches here.
+    id: "00000000-0000-4000-8000-000000000007",
+    name: "Settings reset on Windows",
+    status: "idle",
+    where: "desktop",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "fix/settings-reset",
   },
   {
     id: "00000000-0000-4000-8000-000000000004",
@@ -594,7 +745,7 @@ function mockAgentState(): AgentState {
     item(118, { state: "error", headline: "No checkout of acme/clio-knowledge: set its folder in Settings > Claude", finishedAt: iso(30 * 60_000) }),
     item(929, {
       state: "needsYou",
-      headline: "Would post: request changes, 1 inline comment, 1 reply, 1 diagram",
+      headline: "Would post: request changes, 1 inline comment, 1 reply, 1 diagram — 1 held back for you",
       diagrams: {
         checked: true,
         list: [
@@ -633,6 +784,16 @@ function mockAgentState(): AgentState {
         resolves: 0,
         escalations: [],
         diagrams: 1,
+        // A follow-up the session wrote in a colleague's thread: set aside, not sent.
+        held: [
+          {
+            kind: "reply",
+            replyTo: 1003,
+            author: "a-colleague",
+            url: "https://github.com/acme/clio/pull/929#discussion_r1003",
+            body: "Follow-up: the Jira task still lists this as open. Who signed it off?",
+          },
+        ],
       },
     }),
     item(934, {
@@ -728,6 +889,23 @@ function mockAgentState(): AgentState {
       reapproval: { logins: ["me"], oldHead: "4f1c2e9a7b3d5e6f" },
       finishedAt: iso(2 * 60_000),
     }),
+    item(298, {
+      key: `mock-approvable-pr|rereview|${byNumber(298)?.headOid}`,
+      scenario: "rereview",
+      state: "done",
+      headline: "Reviewed — nothing to post",
+      finishedAt: iso(23 * 60_000),
+      result: {
+        summary: "Moves the chat's colours into a shared table with a chat-ui mapping layer; all review threads are closed and only my formal changes-requested still stands.",
+        asks: [],
+        authorQuestions: [],
+        findings: [
+          { severity: "minor", text: "The withdrawn Major on the dark selector rests partly on claims about hosts outside this repository.", where: "packages/chat-shared/src/theme/theme.css:122" },
+          { severity: "note", text: "My standing \"changes requested\" is formal only — no finding of mine remains open.", where: "" },
+        ],
+        structured: true,
+      },
+    }),
   ].filter((i): i is AgentItem => i !== null);
   // A PR the agent merged this morning: gone from the dashboard, done today.
   items.push({
@@ -804,7 +982,20 @@ function mockAgentState(): AgentState {
       run(44, [["Read the PR", "in_progress"], ["Review the dependency bumps", "pending"]], "$ gh pr diff 44"),
     ].filter((r) => items.some((i) => i.runId === r.runId)),
     idle: Object.fromEntries(
-      prs.map((p) => [p.id, p.roles.includes("author") ? "Yours: nothing for the agent yet" : p.isDraft ? "Draft: picked up once ready for review" : "Nothing for the agent"]),
+      prs.map((p) => [
+        p.id,
+        p.id === "mock-fork-pr"
+          ? "Yours, from a fork — the agent pushes only to branches of the repository itself"
+          : p.id === "mock-session-pr"
+            ? OWN_SESSION_WHY
+            : p.id === "mock-approvable-pr"
+              ? "Its last run on this head ended: Reviewed — nothing to post"
+              : p.roles.includes("author")
+              ? "Yours: nothing for the agent yet"
+              : p.isDraft
+                ? "Draft: picked up once ready for review"
+                : "Nothing for the agent",
+      ]),
     ),
     runsToday: 6,
     perDay: 30,
@@ -845,6 +1036,24 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
     if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
     pr.requestedOfMe = false;
     pr.roles = pr.roles.filter((r) => r !== "reviewer");
+    return { ok: true };
+  }
+  // Your approval on the agent's review: GitHub shows it on the head, and stops listing you as asked.
+  if (action.type === "approve") {
+    const item = items.find((i) => i.runId === action.runId);
+    const pr = item ? snapshot.pullRequests.find((p) => p.id === item.prId) : undefined;
+    if (!item || !pr) return { ok: false, error: "That run is gone." };
+    Object.assign(item, { published: true, finishedAt: at, headline: `Approved by you on ${(pr.headOid ?? "").slice(0, 7)}` });
+    agentState = { ...agentState, items };
+    for (const l of agentListeners) l(agentState);
+    Object.assign(pr, { requestedOfMe: false, myReReviewDue: false, viewerApproved: true, viewerHasReviewed: true, viewerReviewedHead: true, viewerReviewedAt: at, roles: pr.roles.filter((r) => r !== "reviewer") });
+    return { ok: true };
+  }
+  // The mock keeps a card aside until you bring it back: nothing on its PRs changes by itself.
+  if (action.type === "notNow" || action.type === "bringBack") {
+    const { [action.prId]: _dropped, ...rest } = agentState.setAside ?? {};
+    agentState = { ...agentState, setAside: action.type === "notNow" ? { ...rest, [action.prId]: "mock" } : rest };
+    for (const l of agentListeners) l(agentState);
     return { ok: true };
   }
   if (action.type === "enqueue") {
@@ -955,10 +1164,13 @@ const api: PrManagerApi = {
       hosts: [
         { label: "GitHub", repos: ["acme/widgets"] },
         { label: "GHE", repos: ["corp/widgets"] },
+        { label: "Upsource", repos: [] },
       ],
       trackComments: true,
       claudeEnabled: true,
       claudeDesktop: true,
+      codexAvailable: true,
+      uiStyle: settings.uiStyle,
     },
   }),
   markSeen: async () => {},
@@ -967,6 +1179,9 @@ const api: PrManagerApi = {
   getSettings: async () => settings,
   saveSettings: async () => ({ ok: true }),
   setTheme: async () => {},
+  setUiStyle: async (style) => {
+    settings.uiStyle = style;
+  },
   getGhStatus: async () => ({ installed: true, hosts: [{ hostname: "github.com", label: "GitHub", authenticated: true }] }),
   // A site is set so the issue-key badge renders in mock mode; openExternal is a
   // no-op above, so clicking it stays inert.
@@ -988,6 +1203,13 @@ const api: PrManagerApi = {
     encryptionAvailable: true,
   }),
   setJiraToken: async () => ({ ok: true }),
+  getUpsourceStatus: async () => ({
+    hasConfig: true,
+    baseUrl: "https://upsource.example.com",
+    hasToken: true,
+    encryptionAvailable: true,
+  }),
+  setUpsourceToken: async () => ({ ok: true }),
   twgLogin: async () => ({ ok: false, error: "Not available in mock mode." }),
   getAppVersion: async () => "dev",
   launchClaude: async () => ({ ok: false, error: "Not available in mock mode." }),
@@ -1032,8 +1254,17 @@ const api: PrManagerApi = {
     jira: options.jira.action === "keep" ? null : { ok: true, message: `Task: ${options.jira.action} (mock).` },
   }),
   getWeather: async () => WEATHER,
-  getWhatsNew: async () => null,
+  locateForWeather: async () => {
+    WEATHER = { state: "ok", kind: "clouds", place: "Your location", temperatureC: 7, fetchedAt: Date.now(), fromLocation: true };
+    return { outcome: "granted", weather: WEATHER };
+  },
+  forgetWeatherLocation: async () => {
+    WEATHER = { state: "off" };
+    return WEATHER;
+  },  getWhatsNew: async () => null,
   dismissWhatsNew: async () => {},
+  getDataCopy: async () => DATA_COPY,
+  showDataCopy: async () => {},
   onSnapshot: (listener) => {
     snapshotListeners.add(listener);
     return () => snapshotListeners.delete(listener);
@@ -1043,6 +1274,7 @@ const api: PrManagerApi = {
   onNotifySound: () => () => {},
   onOpenSettings: () => () => {},
   onRefreshRequest: () => () => {},
+  onFindRequest: () => () => {},
   getAgentState: async () => agentState,
   agentAction: async (action) => mockAgentAction(action),
   revealAgentLog: async () => {},

@@ -6,10 +6,13 @@ import type {
   ClaudeSettings,
   GhStatus,
   JiraStatus,
+  UpsourceStatus,
   NotificationEventToggles,
   NotificationSettings,
   Settings,
   ThemePreference,
+  UiStyle,
+  WeatherLocateResult,
   WeatherStatus,
 } from "../../../shared/types";
 // notify.ts is deliberately Electron/Node-free (unlike the rest of shared/), so
@@ -23,6 +26,7 @@ import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS } from "../../../shared
 import { DEFAULT_AGENT_PROMPTS, DEFAULT_AGENT_SETTINGS } from "../../../shared/agent-defaults";
 import { DEFAULT_STALE_AFTER_DAYS, MAX_STALE_AFTER_DAYS } from "../../../shared/stale";
 import { createJiraStatusLoader } from "../../../shared/jira-status";
+import { upsourceTokenPageUrl } from "../../../shared/upsource";
 import { describeWeather } from "../../../shared/weather";
 import {
   SETTINGS_TABS,
@@ -32,6 +36,8 @@ import {
   type SettingsSectionId,
   type SettingsTabId,
 } from "../../../shared/settings-search";
+import { applyUiStyle } from "../ui-style";
+import { UI_STYLES } from "../../../shared/ui-style";
 import { cn } from "../format";
 import { agentSectionContent } from "./AgentSettings";
 
@@ -130,11 +136,37 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [trackComments, setTrackComments] = useState(true);
   const [staleAfterDays, setStaleAfterDays] = useState(DEFAULT_STALE_AFTER_DAYS);
   const [theme, setTheme] = useState<ThemePreference>("system");
+  const [uiStyle, setUiStyle] = useState<UiStyle>("flat");
   const [weatherCity, setWeatherCity] = useState("");
   // The weather main reports is for the SAVED city; it is shown only while the
   // field still holds that city, or it would describe a place not typed there.
   const [savedWeatherCity, setSavedWeatherCity] = useState("");
   const [weather, setWeather] = useState<WeatherStatus | null>(null);
+  const [locating, setLocating] = useState(false);
+  const [locationNote, setLocationNote] = useState<string | null>(null);
+  // Saved right away, like the theme: the location lives outside settings.json.
+  const LOCATE_NOTE: Record<WeatherLocateResult["outcome"], string | null> = {
+    granted: null,
+    denied: "Location access is denied — allow PR Dashboard in System Settings › Privacy & Security › Location Services.",
+    failed: "Your location could not be determined.",
+    unavailable: "Location is not available on this system.",
+    timeout: "No answer to the location prompt.",
+  };
+  const runLocation = (attempt: Promise<WeatherLocateResult | WeatherStatus>) => {
+    setLocating(true);
+    setLocationNote(null);
+    attempt
+      .then((r) => {
+        if ("outcome" in r) {
+          setWeather(r.weather);
+          setLocationNote(r.message ?? LOCATE_NOTE[r.outcome]);
+        } else {
+          setWeather(r);
+        }
+      })
+      .catch((e) => setLocationNote((e as Error).message))
+      .finally(() => setLocating(false));
+  };
   const [notifications, setNotifications] = useState<NotificationSettings>(DEFAULT_NOTIFICATIONS);
   const [hosts, setHosts] = useState<DraftHost[]>([]);
   const [claude, setClaude] = useState<ClaudeSettings>(DEFAULT_CLAUDE_SETTINGS);
@@ -156,6 +188,16 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [jiraToken, setJiraToken] = useState("");
   const [jira, setJira] = useState<JiraStatus | null>(null);
 
+  // Upsource: the address persists in settings; the Hub token is write-only
+  // here, like Jira's — stored encrypted in the main process, never read back.
+  const [upsourceBaseUrl, setUpsourceBaseUrl] = useState("");
+  const [upsourceToken, setUpsourceTokenDraft] = useState("");
+  const [upsource, setUpsource] = useState<UpsourceStatus | null>(null);
+  const upsourceTokenPage = upsourceTokenPageUrl(upsourceBaseUrl);
+  const loadUpsource = useCallback(() => {
+    window.api.getUpsourceStatus().then(setUpsource).catch(() => {});
+  }, []);
+
   const loadGh = useCallback(() => {
     window.api.getGhStatus().then(setGh).catch(() => {});
   }, []);
@@ -173,6 +215,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         setTrackComments(s.trackComments);
         setStaleAfterDays(s.staleAfterDays ?? DEFAULT_STALE_AFTER_DAYS);
         setTheme(s.theme);
+        setUiStyle(s.uiStyle ?? "flat");
         setWeatherCity(s.weatherCity ?? "");
         setSavedWeatherCity(s.weatherCity ?? "");
         setNotifications(s.notifications ?? DEFAULT_NOTIFICATIONS);
@@ -192,13 +235,15 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         );
         setJiraBaseUrl(s.jira?.baseUrl ?? "");
         setJiraEmail(s.jira?.email ?? "");
+        setUpsourceBaseUrl(s.upsource?.baseUrl ?? "");
         setLoaded(true);
       })
       .catch((e) => setError((e as Error).message));
     loadGh();
     loadJira();
+    loadUpsource();
     window.api.getWeather().then(setWeather).catch(() => {});
-  }, [loadGh, loadJira]);
+  }, [loadGh, loadJira, loadUpsource]);
 
   const updateHost = (i: number, patch: Partial<DraftHost>) =>
     setHosts((prev) => prev.map((h, j) => (j === i ? { ...h, ...patch } : h)));
@@ -210,6 +255,11 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const changeTheme = (next: ThemePreference) => {
     setTheme(next);
     window.api.setTheme(next).catch(() => {});
+  };
+  const changeUiStyle = (next: UiStyle) => {
+    setUiStyle(next);
+    applyUiStyle(next);
+    window.api.setUiStyle(next).catch(() => {});
   };
 
   const [twgLoginNote, setTwgLoginNote] = useState<string | null>(null);
@@ -233,6 +283,22 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       await window.api.setJiraToken("");
       setJiraToken("");
       loadJira();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const removeUpsourceToken = async () => {
+    setError(null);
+    try {
+      // A failed removal is reported as { ok: false }, not thrown.
+      const result = await window.api.setUpsourceToken("");
+      if (!result.ok) {
+        setError(result.error ?? "Failed to remove the Upsource token.");
+        return;
+      }
+      setUpsourceTokenDraft("");
+      loadUpsource();
     } catch (e) {
       setError((e as Error).message);
     }
@@ -264,6 +330,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         autoUpdate,
         closeToTray,
         theme,
+        uiStyle,
         trackComments,
         notifications,
         weatherCity: weatherCity.trim(),
@@ -277,6 +344,8 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         })),
         // The site turns Jira on; the email only matters to the API-token fallback.
         jira: baseUrl ? { baseUrl, ...(email ? { email } : {}) } : undefined,
+        // The address turns Upsource on; an empty one turns it off.
+        upsource: upsourceBaseUrl.trim() ? { baseUrl: upsourceBaseUrl.trim() } : undefined,
         claude: { ...claude, repoPaths: folders },
         agent,
         staleAfterDays,
@@ -292,6 +361,13 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         const t = await window.api.setJiraToken(jiraToken.trim());
         if (!t.ok) {
           setError(t.error ?? "Failed to store the Jira token.");
+          return;
+        }
+      }
+      if (upsourceToken.trim()) {
+        const t = await window.api.setUpsourceToken(upsourceToken.trim());
+        if (!t.ok) {
+          setError(t.error ?? "Failed to store the Upsource token.");
           return;
         }
       }
@@ -337,6 +413,30 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         <p className="mt-1 text-xs text-fg-subtle">
           Follow the system theme, or force light or dark. Applies right away, without Save.
         </p>
+        <div className="mt-3 flex items-center justify-between gap-4">
+          <label className="text-sm text-fg-secondary" htmlFor="ui-style">
+            Style
+          </label>
+          <select
+            id="ui-style"
+            value={uiStyle}
+            onChange={(e) => changeUiStyle(e.target.value as UiStyle)}
+            className={cn(fieldCls, "w-48")}
+          >
+            {UI_STYLES.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p className="mt-1 text-xs text-fg-subtle">
+          Flat is the default. Neumorphism raises cards and buttons out of the background with a light and a dark
+          shadow; Claymorphism makes them soft, rounded and pastel; Neobrutalism draws them with thick outlines, hard
+          shadows and loud colours; Bento grid lays the cards out as borderless cells, some twice as wide;
+          Glassmorphism turns them into frosted glass over a colourful backdrop. Each works with either theme and
+          applies right away.
+        </p>
       </section>
     ),
     weather: (
@@ -356,10 +456,9 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           />
         </div>
         <p className="mt-1 text-xs text-fg-subtle">
-          The header draws the current weather there — snow, rain, a thunderstorm, clouds, fog, the
-          sun or stars — and moves it while the pointer is over it. Add the country to pick among
-          same-named places (&quot;Paris, France&quot;). Only the city is sent, to Open-Meteo; empty
-          keeps the snowfall.
+          A small icon next to the PR count shows the current weather there. Add the country to pick
+          among same-named places (&quot;Paris, France&quot;). Only the city (or your location) is
+          sent, to Open-Meteo. Empty uses your location from the button below, else shows no weather.
         </p>
         {weather && weather.state !== "off" && weatherCity.trim() === savedWeatherCity && (
           <p className={cn("mt-1 text-xs", weather.state === "ok" ? "text-fg-muted" : "text-amber-700 dark:text-amber-300")}>
@@ -368,6 +467,29 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               : weather.message}
           </p>
         )}
+        {/* Location: only on this click — nothing asks for it on its own. */}
+        <div className="mt-2 flex items-center gap-2 text-xs">
+          {weather?.state === "ok" && weather.fromLocation && savedWeatherCity === "" ? (
+            <button
+              type="button"
+              disabled={locating}
+              onClick={() => runLocation(window.api.forgetWeatherLocation())}
+              className="rounded-md border border-line-strong px-2 py-0.5 text-fg-secondary hover:bg-elevated disabled:opacity-50"
+            >
+              Forget my location
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={locating}
+              onClick={() => runLocation(window.api.locateForWeather())}
+              className="rounded-md border border-line-strong px-2 py-0.5 text-fg-secondary hover:bg-elevated disabled:opacity-50"
+            >
+              {locating ? "Locating…" : "Use my location"}
+            </button>
+          )}
+          {locationNote && <span className="text-fg-subtle">{locationNote}</span>}
+        </div>
       </section>
     ),
     refresh: (
@@ -876,6 +998,81 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         </div>
       </section>
     ),
+    upsource: (
+      <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-fg-secondary">Upsource (optional)</h2>
+          {upsource?.hasConfig && upsource.hasToken ? (
+            <span className="text-xs text-emerald-700 dark:text-emerald-400">connected ✓</span>
+          ) : upsource?.hasConfig ? (
+            <span className="text-xs text-amber-700 dark:text-amber-400">token needed</span>
+          ) : (
+            <span className="text-xs text-fg-faint">not set up</span>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-fg-subtle">
+          Lists your open Upsource reviews — the ones you wrote and the ones you review — next to
+          the pull requests, with a host pill of their own. They group by Jira key with the PRs;
+          the PR agent and the Claude button leave them alone. Upsource is an internal server, so
+          the reviews refresh only while the VPN is up.
+        </p>
+
+        <div className="mt-3">
+          <label className={labelCls}>Server URL</label>
+          <input
+            value={upsourceBaseUrl}
+            onChange={(e) => setUpsourceBaseUrl(e.target.value)}
+            placeholder="https://upsource.example.com"
+            className={inputCls}
+          />
+        </div>
+
+        <p className="mt-3 text-xs text-fg-subtle">
+          The token is a Hub permanent token:{" "}
+          {upsourceTokenPage ? (
+            <button
+              type="button"
+              onClick={() => window.api.openExternal(upsourceTokenPage).catch(() => {})}
+              className="underline hover:text-fg-secondary"
+            >
+              your Hub profile › Authentication
+            </button>
+          ) : (
+            <span className="text-fg-muted">your Hub profile › Authentication</span>
+          )}{" "}
+          › New token, with the Upsource scope. It is stored encrypted by your OS keychain — never
+          in settings.
+        </p>
+        {upsource && !upsource.encryptionAvailable && (
+          <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
+            Your OS keychain is unavailable, so the token can&apos;t be stored securely.
+          </p>
+        )}
+        <div className="mt-3">
+          <label className={labelCls}>Hub token</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="password"
+              value={upsourceToken}
+              onChange={(e) => setUpsourceTokenDraft(e.target.value)}
+              placeholder={upsource?.hasToken ? "•••••••• stored — paste to replace" : "Paste Hub token"}
+              autoComplete="off"
+              className={inputCls}
+            />
+            {upsource?.hasToken && (
+              <button
+                type="button"
+                onClick={removeUpsourceToken}
+                className="mt-1 shrink-0 rounded-md border border-line-strong px-2 py-1.5 text-xs text-fg-muted hover:bg-elevated hover:text-red-600 dark:hover:text-red-300"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-fg-faint">Saved with the Save button, encrypted at rest.</p>
+        </div>
+      </section>
+    ),
     claude: (
       <section className="mb-6 rounded-lg border border-line bg-surface/40 p-4">
         {/* Same frame as the Jira block: an integration with a status on the right. */}
@@ -946,10 +1143,26 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
                 are searched. A folder set below wins.
               </p>
             </div>
+            <label className={cn("flex items-start gap-3", claude.enabled ? undefined : "hidden")}>
+              <input
+                type="checkbox"
+                checked={claude.reviewGroupApprove}
+                onChange={(e) => setClaude((prev) => ({ ...prev, reviewGroupApprove: e.target.checked }))}
+                className="mt-0.5 h-4 w-4 accent-sky-500"
+              />
+              <span>
+                <span className="block text-sm text-fg-secondary">Review all may approve</span>
+                <span className="block text-xs text-fg-faint">
+                  A review session that finds no Blocker and no Major approves the commit it reviewed, under
+                  your GitHub account. Off: it posts a comment and leaves the approval to you.
+                </span>
+              </span>
+            </label>
             {(
               [
                 ["drive", "Your PR is blocked (CI, conflict, threads, changes requested)"],
                 ["review", "Your review is due"],
+                ["codexReview", "Review with Codex (from the button's menu only; opens the Codex app or runs the codex CLI)"],
                 ["close", "Your PR is ready to merge"],
                 ["explain", "Explain (from the button's menu only)"],
                 ["open", "Anything else"],
@@ -1137,6 +1350,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             if (e.key === "Escape") setQuery("");
           }}
           placeholder="Search settings"
+          data-find-field
           aria-label="Search settings"
           className={cn(fieldCls, "min-w-[12rem] flex-1")}
         />

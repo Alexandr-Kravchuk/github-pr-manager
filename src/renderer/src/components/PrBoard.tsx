@@ -3,12 +3,15 @@ import { useContext, useEffect, useState, type FormEvent, type ReactNode } from 
 // Node-free (see AGENTS.md): the Board in plain words, the queue, the summary line.
 import { explainBoard, type BoardChoice, type BoardEntry, type BoardOwner } from "../../../shared/agent-explain";
 import { agentSummary, queueOrder, todayKey } from "../../../shared/agent-view";
-import type { PublishSummary } from "../../../shared/agent-publish";
+// Node-free too: a held write is worded once, for the card and the publish refusal alike.
+import { heldLabel, type HeldWrite, type PublishSummary } from "../../../shared/agent-publish";
 import type { FindingSeverity, RunAsk, RunFinding } from "../../../shared/agent-result";
 import type { AgentAction, AgentItem, AgentState, MergeMethod, PullRequest } from "../../../shared/types";
 import { cn, relativeTime } from "../format";
+import { describeSession, sessionsForPr, shownSession } from "../../../shared/claude-sessions";
 import { AgentContext } from "./agent-context";
 import { AgentDiagrams } from "./AgentDiagrams";
+import { ClaudeSessionsContext } from "./claude-context";
 
 // The Board: what needs you first, then what doesn't. One sentence says how
 // much is yours; then every decision as an open card — what happened, what to
@@ -82,14 +85,14 @@ export function PrBoard({
   if (!state) {
     return <div className="rounded-lg border border-line bg-surface/40 p-8 text-center text-sm text-fg-subtle">The PR agent isn&apos;t available here.</div>;
   }
-  const { entries, earlier, hiddenReady } = explainBoard(prs, all, state, { today: todayKey(new Date()), idle: state.idle, orchestrated: state.orchestrated });
+  const { entries, earlier, hiddenReady, aside } = explainBoard(prs, all, state, { today: todayKey(new Date()), idle: state.idle, orchestrated: state.orchestrated });
   const first = queueOrder(state.items.filter((i) => i.state === "queued"))[0]?.runId ?? null;
   const run: Run = async (action) => {
     const res = await act(action);
     const prId = "prId" in action ? action.prId : "runId" in action ? (state.items.find((i) => i.runId === action.runId)?.prId ?? null) : null;
     setNotice(res.ok ? null : { text: res.error, prId });
-    // An approval given again changes GitHub's state, not an item: read it again so the card moves now.
-    if (res.ok && action.type === "approveAgain") void window.api.refresh().catch(() => {});
+    // An approval changes GitHub's state: read it again so the card moves now.
+    if (res.ok && (action.type === "approveAgain" || action.type === "approve")) void window.api.refresh().catch(() => {});
     return res.ok;
   };
   const open = (e: BoardEntry) => (e.pr ? onOpen(e.pr) : openUrl(e.url));
@@ -134,7 +137,45 @@ export function PrBoard({
         onOpen={open}
         aside={earlier > 0 ? <span className="text-xs font-normal text-fg-subtle" title="Your approvals from earlier days: their PRs wait on others now">+{earlier} approved earlier</span> : null}
       />
+
+      <SetAside list={aside} run={run} onOpen={open} />
     </div>
+  );
+}
+
+/**
+ * Your-turn cards you set aside with "Not now", folded: each comes back to
+ * Your turn by itself once its PR changes (a push, a comment, CI, a run), or
+ * now with Bring back.
+ */
+function SetAside({ list, run, onOpen }: { list: BoardEntry[]; run: Run; onOpen: (e: BoardEntry) => void }) {
+  const [open, setOpen] = useState(false);
+  if (list.length === 0) return null;
+  return (
+    <section aria-label="Set aside">
+      <h2 className="flex flex-wrap items-baseline gap-x-2 px-1 text-sm font-semibold text-fg">
+        <button type="button" aria-expanded={open} onClick={() => setOpen((v) => !v)} className="hover:underline">
+          {open ? "▾" : "▸"} Set aside
+        </button>
+        <span className="text-xs font-normal text-fg-subtle">{list.length}</span>
+        <span className="text-xs font-normal text-fg-subtle">· back in Your turn as soon as something on the PR changes</span>
+      </h2>
+      {open && (
+        <ul className="mt-2 divide-y divide-line overflow-hidden rounded-xl border border-line bg-surface">
+          {list.map((e) => (
+            <li key={e.prId} data-pr-id={e.prId} className="flex items-center gap-3 px-4 py-2.5">
+              <button type="button" onClick={() => onOpen(e)} className="min-w-0 flex-1 truncate text-left text-sm text-fg-secondary hover:underline" title={e.title}>
+                <span className="text-fg-subtle">#{e.number}</span> {e.title}
+              </button>
+              <span className="hidden shrink-0 text-[11px] text-fg-subtle sm:inline">{e.laneLabel}</span>
+              <button type="button" className={BTN} onClick={() => void run({ type: "bringBack", prId: e.prId })} title="Puts the card back in Your turn now">
+                Bring back
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -238,7 +279,7 @@ function Decision({ e, n, run, onOpen, notice }: { e: BoardEntry; n: number; run
   const rest = e.choices.filter((c) => c !== primary);
   const kind = e.stage.action?.kind ?? null;
   return (
-    <article data-run-id={item?.runId} data-pr-id={e.prId} className={cn("overflow-hidden rounded-xl border bg-surface shadow-sm", kind === "fix" ? "border-red-500/50" : "border-amber-500/50")}>
+    <article data-run-id={item?.runId} data-pr-id={e.prId} className={cn("overflow-hidden rounded-xl border bg-surface shadow-tile", kind === "fix" ? "border-red-500/50" : "border-amber-500/50")}>
       <div className={cn("flex items-center gap-2 border-b border-line px-4 py-1.5 text-xs text-fg-muted", kind === "fix" ? "bg-red-500/[0.06]" : "bg-amber-500/[0.06]")}>
         <span className={cn("flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white", kind === "fix" ? "bg-red-500" : "bg-amber-500")}>{n}</span>
         <span className="shrink-0 rounded border border-line-strong px-1.5 py-px">{e.laneLabel}</span>
@@ -250,6 +291,15 @@ function Decision({ e, n, run, onOpen, notice }: { e: BoardEntry; n: number; run
         <span className="shrink-0" title={`Here since ${new Date(e.since).toLocaleString()}`}>
           {relativeTime(e.since)}
         </span>
+        <button
+          type="button"
+          onClick={() => void run({ type: "notNow", prId: e.prId })}
+          title="Not now: moves this card to Set aside. It comes back by itself once something on the PR changes."
+          aria-label={`Not now: set ${shortRepo(e.repo)} #${e.number} aside`}
+          className="shrink-0 rounded px-1.5 py-px text-fg-subtle hover:bg-elevated hover:text-fg"
+        >
+          Not now ✕
+        </button>
       </div>
       <div className="space-y-4 px-4 py-3">
         <button type="button" onClick={onOpen} className="text-left text-base font-semibold text-fg hover:text-sky-700 hover:underline dark:hover:text-sky-300">
@@ -265,9 +315,9 @@ function Decision({ e, n, run, onOpen, notice }: { e: BoardEntry; n: number; run
             <YourCall item={item} asks={e.read.asks} canAnswer={Boolean(item.sessionId) && !item.needsRerun} run={run} />
           )}
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            {primary && <ChoiceButton choice={primary} item={item} run={run} big />}
+            {primary && <ChoiceButton choice={primary} item={item} pr={e.pr} run={run} big />}
             {rest.map((c) => (
-              <ChoiceButton key={c.label} choice={c} item={item} run={run} big />
+              <ChoiceButton key={c.label} choice={c} item={item} pr={e.pr} run={run} big />
             ))}
           </div>
           {notice && (
@@ -320,6 +370,8 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
     <Row label="Read this">
       <div className="space-y-2">
         {sends && plan.escalations.length > 0 && item && <Disputes item={item} plan={plan} run={run} />}
+        {/* Still yours to answer after the rest went out: kept on the done card too. */}
+        {plan && (sends || item?.published) && (plan.held?.length ?? 0) > 0 && <HeldBack held={plan.held ?? []} />}
         {r.error && <pre className="whitespace-pre-wrap rounded-md bg-red-500/10 p-2 font-mono text-[11px] text-red-800 dark:text-red-200">{r.error}</pre>}
         {r.summary && <p className="whitespace-pre-wrap text-sm leading-snug text-fg-secondary">{r.summary}</p>}
         {r.findings.length > 0 && <FindingsList findings={r.findings} />}
@@ -342,7 +394,7 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
         )}
         {commits && item?.drive && (
           <div>
-            <div className="text-xs font-medium text-fg">{item.needsRerun ? "What it committed — never pushed; the new run makes it again" : "What gets pushed"}</div>
+            <div className="text-xs font-medium text-fg">{item.localWork && !item.localWork.kept ? "What the app read before — the session's later commits are only in the worktree" : "What gets pushed"}</div>
             <DriveView drive={item.drive} />
             {item.plan && item.plan.replies.length > 0 && <PlanView plan={item.plan} />}
           </div>
@@ -370,9 +422,10 @@ function ReadThis({ e, run }: { e: BoardEntry; run: Run }) {
 }
 
 /** A button that does what its card says it does: the merge with its method, the rest with their action or link. */
-function ChoiceButton({ choice, item, run, big = false }: { choice: BoardChoice; item: AgentItem | null; run: Run; big?: boolean }) {
+function ChoiceButton({ choice, item, pr, run, big = false }: { choice: BoardChoice; item: AgentItem | null; pr: PullRequest | null; run: Run; big?: boolean }) {
   const [busy, setBusy] = useState(false);
   if (choice.control === "merge" && item) return <MergeButton item={item} run={run} big={big} />;
+  if (choice.control === "session" && pr) return <SessionButton choice={choice} pr={pr} big={big} />;
   const press = async () => {
     if (choice.url && !choice.act) return openUrl(choice.url);
     if (!choice.act) return;
@@ -389,6 +442,38 @@ function ChoiceButton({ choice, item, run, big = false }: { choice: BoardChoice;
       className={big ? cn(BTN_BIG, choice.primary ? "border-sky-600 bg-sky-600 text-white hover:bg-sky-700" : "border-line-strong bg-surface text-fg-secondary hover:bg-elevated") : choice.primary ? BTN_PRIMARY : BTN}
     >
       {busy ? "…" : choice.label}
+    </button>
+  );
+}
+
+/**
+ * The way back to the Claude session of yours that holds the PR — the same
+ * session the card's Claude button switches to. One running in the background
+ * has no window to bring up, so the button says so instead of failing.
+ */
+function SessionButton({ choice, pr, big }: { choice: BoardChoice; pr: PullRequest; big: boolean }) {
+  const all = useContext(ClaudeSessionsContext);
+  const session = shownSession(sessionsForPr(pr, all));
+  const reachable = session !== undefined && session.where !== "background";
+  const title = session ? (reachable ? `Switch to ${describeSession(session)}` : `${describeSession(session)} — it has no window to switch to.`) : "The session isn't listed right now — it may have just ended.";
+  const press = () => {
+    if (!session || !reachable) return;
+    window.api
+      .focusClaudeSession(session.id)
+      .then((res) => {
+        if (!res.ok) window.alert(res.error);
+      })
+      .catch((e: unknown) => window.alert((e as Error).message));
+  };
+  return (
+    <button
+      type="button"
+      title={title}
+      disabled={!reachable}
+      onClick={press}
+      className={big ? cn(BTN_BIG, choice.primary ? "border-sky-600 bg-sky-600 text-white hover:bg-sky-700" : "border-line-strong bg-surface text-fg-secondary hover:bg-elevated") : choice.primary ? BTN_PRIMARY : BTN}
+    >
+      {choice.label}
     </button>
   );
 }
@@ -502,7 +587,7 @@ function StatusRow({ e, state, first, run, onOpen }: { e: BoardEntry; state: Age
                       Watch
                     </button>
                   ) : (
-                    <ChoiceButton choice={c} item={item} run={run} />
+                    <ChoiceButton choice={c} item={item} pr={e.pr} run={run} />
                   )}
                   <span className="text-[11px] text-fg-subtle">{c.does}</span>
                 </li>
@@ -624,6 +709,35 @@ function gist(text: string): string {
     .replace(/[*_`#>]+/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * What the review wanted to write in threads a colleague opened, in a thread
+ * it handed back to you, or to a comment whose thread GitHub didn't name. A
+ * review answers and resolves only in threads you opened, and not where the
+ * author pushed back, so these stay out of what Approve sends; each links to
+ * its thread, where you can answer yourself.
+ */
+function HeldBack({ held }: { held: HeldWrite[] }) {
+  return (
+    <div className="mt-2 rounded-md border border-amber-500/50 bg-amber-500/[0.07] p-2 text-xs">
+      <div className="font-medium text-amber-800 dark:text-amber-300">Not sent — {held.length === 1 ? "this one stays" : "these stay"} with you</div>
+      {held.map((h, i) => (
+        <div key={h.replyTo ?? h.threadId ?? i} className="mt-1.5">
+          <div className="text-fg-subtle">
+            {heldLabel(h).replace(/^./, (c) => c.toUpperCase())}
+            {h.url && (
+              <button type="button" onClick={() => openUrl(h.url!)} className={cn(LINK, "ml-1.5")}>
+                open it ↗
+              </button>
+            )}
+          </div>
+          {h.body && <div className="mt-0.5 whitespace-pre-wrap text-fg-secondary">{h.body}</div>}
+        </div>
+      ))}
+      <div className="mt-1.5 text-[11px] text-fg-faint">A review answers and resolves only in threads you opened. The rest goes out without these; answer there yourself if it is worth saying.</div>
+    </div>
+  );
 }
 
 /**
@@ -774,8 +888,8 @@ function YourCall({ item, asks, canAnswer, run }: { item: AgentItem; asks: RunAs
       <div className="mt-1.5 text-[11px] text-fg-faint">
         {canAnswer
           ? "The same session goes on with your answer and comes back here."
-          : item.needsRerun
-            ? "This can't be answered any more — the app restarted since. Run it again: the new run asks this again if it still needs to."
+          : item.localWork && !item.localWork.kept
+            ? `Answer it in the session (Open in Claude): its work is in ${item.localWork.worktree}.`
             : "Answer it in the session: the dry run changes nothing by itself."}
       </div>
     </div>

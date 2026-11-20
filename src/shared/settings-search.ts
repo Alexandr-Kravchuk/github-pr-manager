@@ -21,6 +21,7 @@ export type SettingsSectionId =
   | "gh"
   | "hosts"
   | "jira"
+  | "upsource"
   | "claude"
   | "agent"
   | "agentScenarios"
@@ -45,13 +46,7 @@ export interface SettingsSection {
 
 /** In display order — within a tab, and across tabs in the search results. */
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
-  { id: "appearance", tab: "general", title: "Appearance", keywords: ["theme", "dark", "light", "system", "mode"] },
-  {
-    id: "weather",
-    tab: "general",
-    title: "Header weather",
-    keywords: ["weather", "city", "location", "sky", "snow", "rain", "sun", "stars", "clouds", "fog", "open-meteo", "header"],
-  },
+  { id: "appearance", tab: "general", title: "Appearance", keywords: ["theme", "dark", "light", "system", "mode", "neumorphism", "neumorphic", "claymorphism", "clay", "neobrutalism", "brutalism", "bento", "grid", "glassmorphism", "glass", "frosted", "blur", "soft ui", "style", "look", "flat"] },
   {
     id: "refresh",
     tab: "general",
@@ -83,6 +78,12 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       "to do",
       "delete task",
     ],
+  },
+  {
+    id: "weather",
+    tab: "general",
+    title: "Header weather",
+    keywords: ["weather", "city", "location", "geolocation", "temperature", "icon", "snow", "rain", "sun", "clouds", "fog", "open-meteo", "header", "use my location", "forget my location"],
   },
   {
     id: "notifications",
@@ -131,11 +132,18 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     keywords: ["atlassian", "twg", "sign in", "api token", "site url", "email", "parent task", "group by", "issue"],
   },
   {
+    id: "upsource",
+    tab: "integrations",
+    title: "Upsource",
+    keywords: ["jetbrains", "code review", "reviews", "hub", "permanent token", "token", "server url", "vpn"],
+  },
+  {
     id: "claude",
     tab: "integrations",
     title: "Claude",
     keywords: [
       "claude code",
+      "codex",
       "session",
       "terminal",
       "iterm",
@@ -175,6 +183,11 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       "background",
       "model",
       "effort",
+      "language",
+      "english",
+      "ukrainian",
+      "polish",
+      "flag",
       "worktree",
       "folder",
       "merged or closed",
@@ -242,7 +255,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: "agentPermissions",
     tab: "agent",
     title: "Permissions",
-    keywords: ["permissions", "allowed tools", "allowlist", "push", "branch", "safety"],
+    keywords: ["permissions", "allowed tools", "allowlist", "push", "branch", "safety", "full context", "your prs", "claude.md", "mcp", "isolation", "restricted"],
   },
   {
     id: "agentDiagrams",

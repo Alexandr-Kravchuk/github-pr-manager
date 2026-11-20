@@ -6,8 +6,9 @@ import {
   type GroupLaunchKind,
   type ClaudeLaunchKind,
 } from "../shared/claude-launch";
+import { isUiStyle } from "../shared/ui-style";
 import type { CloseStaleOptions } from "../shared/stale";
-import type { AgentAction, JiraStatusMode, SeenInput, ThemePreference } from "../shared/types";
+import type { AgentAction, JiraStatusMode, SeenInput, ThemePreference, UiStyle } from "../shared/types";
 
 // Validators for values that cross the IPC boundary from the renderer. The
 // renderer is trusted, but a compromised/buggy caller must not be able to push
@@ -77,6 +78,12 @@ export function validateThemePreference(value: unknown): ThemePreference {
   throw new Error(`setTheme: invalid theme preference: ${String(value)}`);
 }
 
+/** The look picked in Settings › Appearance: one of `UI_STYLES`. */
+export function validateUiStyle(value: unknown): UiStyle {
+  if (isUiStyle(value)) return value;
+  throw new Error(`setUiStyle: invalid style: ${String(value)}`);
+}
+
 /** Ensures a Jira token is a string of sane length. Empty string clears it. */
 export function validateJiraToken(value: unknown): string {
   if (typeof value !== "string") {
@@ -86,6 +93,23 @@ export function validateJiraToken(value: unknown): string {
     throw new Error("setJiraToken: token too long.");
   }
   return value.trim();
+}
+
+/** Validates the Upsource token from `setUpsourceToken` (empty clears it). */
+export function validateUpsourceToken(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new Error("setUpsourceToken: expected a string.");
+  }
+  if (value.length > 5_000) {
+    throw new Error("setUpsourceToken: token too long.");
+  }
+  const token = value.trim();
+  // A Hub token is printable ASCII with no spaces. Anything else could not go
+  // into an Authorization header, and the failure would quote it back.
+  if (token && !/^[!-~]+$/.test(token)) {
+    throw new Error("setUpsourceToken: the token has characters a Hub token never has (spaces, line breaks).");
+  }
+  return token;
 }
 
 /** Ensures a Jira status mode is one of the known ones; absent means `cached`. */
@@ -182,7 +206,7 @@ export function validateDiagramsChecked(requestId: unknown, results: unknown): {
   return { requestId, results: results as boolean[] };
 }
 
-const RUN_ACTIONS = ["skip", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver", "publish", "push", "reapprove"] as const;
+const RUN_ACTIONS = ["skip", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver", "publish", "push", "reapprove", "approve"] as const;
 const MERGE_METHODS = ["merge", "squash", "rebase"] as const;
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A hint is a note to the running session, not a document. */
@@ -207,6 +231,8 @@ export function validateAgentAction(value: unknown): AgentAction {
   }
   // What goes out is main's own line on the PR's head: only the PR is named.
   if (v.type === "approveAgain") return { type: "approveAgain", prId: validatePrId(v.prId) };
+  // Main reads what the card shows itself: only the PR is named.
+  if (v.type === "notNow" || v.type === "bringBack") return { type: v.type, prId: validatePrId(v.prId) };
   // The whole agent: nothing else rides along.
   if (v.type === "pauseAgent" || v.type === "resumeAgent") return { type: v.type };
   if (typeof v.runId !== "string" || !RUN_ID.test(v.runId)) throw new Error("agentAction: expected a run id.");

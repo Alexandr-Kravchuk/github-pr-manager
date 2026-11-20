@@ -12,13 +12,18 @@ const api: PrManagerApi = {
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (settings) => ipcRenderer.invoke("settings:save", settings),
   setTheme: (theme) => ipcRenderer.invoke("theme:set", theme),
+  setUiStyle: (style) => ipcRenderer.invoke("style:set", style),
   getGhStatus: () => ipcRenderer.invoke("gh:status"),
   getJiraStatus: (mode) => ipcRenderer.invoke("jira:status", mode),
   setJiraToken: (token) => ipcRenderer.invoke("jira:setToken", token),
+  getUpsourceStatus: () => ipcRenderer.invoke("upsource:status"),
+  setUpsourceToken: (token) => ipcRenderer.invoke("upsource:setToken", token),
   twgLogin: () => ipcRenderer.invoke("jira:twgLogin"),
   getAppVersion: () => ipcRenderer.invoke("app:getVersion"),
   getWhatsNew: () => ipcRenderer.invoke("app:getWhatsNew"),
   dismissWhatsNew: () => ipcRenderer.invoke("app:dismissWhatsNew"),
+  getDataCopy: () => ipcRenderer.invoke("app:dataCopy"),
+  showDataCopy: () => ipcRenderer.invoke("app:showDataCopy"),
   launchClaude: (prId, kind, inTerminal) => ipcRenderer.invoke("claude:launch", prId, kind, inTerminal),
   launchClaudeGroup: (kind, groupKey, prIds) => ipcRenderer.invoke("claude:launchGroup", kind, groupKey, prIds),
   getClaudeSessions: () => ipcRenderer.invoke("claude:sessions"),
@@ -63,6 +68,8 @@ const api: PrManagerApi = {
   getStaleJiraTask: (prId) => ipcRenderer.invoke("stale:jiraTask", prId),
   closeStalePr: (prId, options) => ipcRenderer.invoke("stale:close", prId, options),
   getWeather: () => ipcRenderer.invoke("weather:get"),
+  locateForWeather: () => ipcRenderer.invoke("weather:locate"),
+  forgetWeatherLocation: () => ipcRenderer.invoke("weather:forgetLocation"),
   onSnapshot: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DashboardResponse) =>
       listener(payload);
@@ -104,6 +111,13 @@ const api: PrManagerApi = {
     ipcRenderer.on("menu:refresh", handler);
     return () => {
       ipcRenderer.removeListener("menu:refresh", handler);
+    };
+  },
+  onFindRequest: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on("menu:find", handler);
+    return () => {
+      ipcRenderer.removeListener("menu:find", handler);
     };
   },
   onNotifySound: (listener) => {

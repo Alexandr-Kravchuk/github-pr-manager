@@ -16,5 +16,8 @@ export const ClaudeEnabledContext = createContext(false);
  */
 export const ClaudeDesktopContext = createContext(false);
 
+/** Whether the `codex` CLI is installed — without it the menu has no "Review" with Codex. */
+export const CodexAvailableContext = createContext(false);
+
 /** The running Claude Code sessions main pushes; each button picks its PR's out of them. */
 export const ClaudeSessionsContext = createContext<readonly ClaudeSessionInfo[]>([]);

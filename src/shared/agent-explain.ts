@@ -8,7 +8,7 @@
 import { resultCard, type RunAsk, type RunFinding } from "./agent-result";
 import type { PublishSummary } from "./agent-publish";
 import { currentStep } from "./agent-stream";
-import { queueOrder, runFor, stageColumns, stageLine, type BoardStage, type StageCard, type StageContext } from "./agent-view";
+import { approvableReview, isOwnSessionWhy, queueOrder, runFor, stageColumns, stageLine, type BoardStage, type StageCard, type StageContext } from "./agent-view";
 import type { AgentAction, AgentItem, AgentState, PullRequest } from "./types";
 
 /** Whose move it is: yours, the agent's, someone else's (the author, reviewers), or nobody's. */
@@ -22,8 +22,12 @@ export interface BoardChoice {
   /** Opens this in the browser instead of acting. */
   url?: string;
   primary?: boolean;
-  /** The Board draws it with its own control: a Merge with the method beside it. */
-  control?: "merge";
+  /**
+   * The Board draws it with its own control: a Merge with the method beside
+   * it, or a switch to the Claude session of yours that holds the PR (the
+   * renderer knows the sessions; this module only knows one is on it).
+   */
+  control?: "merge" | "session";
 }
 
 export interface BoardEntry {
@@ -75,6 +79,8 @@ export interface ExplainedBoard {
   earlier: number;
   /** Moves the agent prepared on PRs the dashboard's filters hide. */
   hiddenReady: number;
+  /** Your-turn cards set aside with "Not now": back in Your turn once their PR changes. */
+  aside: BoardEntry[];
 }
 
 const OWNER_ORDER: Record<BoardOwner, number> = { you: 0, agent: 1, others: 2, done: 3 };
@@ -97,7 +103,8 @@ export function explainBoard(prs: readonly PullRequest[], all: readonly PullRequ
     }
   }
   entries.sort((a, b) => OWNER_ORDER[a.owner] - OWNER_ORDER[b.owner] || rankOf(a) - rankOf(b) || (a.owner === "agent" ? agentOrder(a) - agentOrder(b) : 0) || order(a, b));
-  return { entries, earlier: board.mine.earlier + board.review.earlier, hiddenReady: board.hiddenReady };
+  const aside = board.aside.map((card) => explainCard(card, card.stage.lane, state, place));
+  return { entries, earlier: board.mine.earlier + board.review.earlier, hiddenReady: board.hiddenReady, aside };
 }
 
 function rankOf(e: BoardEntry): number {
@@ -157,9 +164,18 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
   const runId = item?.runId ?? "";
   const prId = card.prId;
   const kind = stage.action?.kind ?? null;
-  // Starting a run only works while the agent is on, and never on a PR an SDLC run has.
-  const canStart = state.enabled && !stage.sdlc;
+  // Starting a run only works while the agent is on, never on a PR an SDLC run
+  // has, and never beside a Claude session of yours on it: the main process
+  // refuses that too, since two sessions on one PR answer the same threads twice.
+  const sessionOnIt = isOwnSessionWhy(stage.why);
+  // Your PR from a fork: every run on it ends in a push the agent never makes
+  // (main refuses the enqueue), so no button may offer one.
+  const fork = lane === "mine" && pr?.isCrossRepository === true;
+  const canStart = state.enabled && !stage.sdlc && !sessionOnIt && !fork;
   const open = (label = lane === "review" ? "Review on GitHub myself" : "Open on GitHub"): BoardChoice => ({ label, does: "Opens the PR in your browser.", url });
+  // Beside your own session the way back to it comes first — "carry on there" with no way there was a dead end.
+  const toSession: BoardChoice = { label: "Open your Claude session", primary: true, does: "Switches to the Claude session that is working on this PR.", control: "session" };
+  const SESSION_NEXT = "Once you archive the session, the agent can take this PR again.";
   let owner: BoardOwner = "done";
   let waitingOn: string | null = null;
   let now = stageLine(stage, pr) || item?.headline || "";
@@ -197,7 +213,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
   } else if (stage.column === "waiting") {
     owner = "others";
     if (lane === "mine") {
-      const pending = pr?.reviewers.filter((r) => r.reviewState !== "approved").map((r) => r.login) ?? [];
+      const pending = pr?.reviewers.filter((r) => r.reviewState === "pending" || r.reviewState === "changes_requested").map((r) => r.login) ?? [];
       const changes = pr?.reviewers.filter((r) => r.reviewState === "changes_requested").map((r) => r.login) ?? [];
       waitingOn = pr?.blockedByStack ? "The PR below it" : pending.length > 0 ? pending.join(", ") : "Reviewers";
       now = pr?.blockedByStack
@@ -235,12 +251,27 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
     owner = "you";
     const plan = read.plan;
     /**
-     * A drive's result from before the app restarted (`needsRerun`): its push
-     * and its answer would only be refused, so the card offers what still
-     * works — running it again — and shows its question as what the new run
-     * will ask, not as buttons.
+     * A drive's result from before the app restarted (`needsRerun`) that is
+     * still a card of yours: commits in its worktree the app couldn't read
+     * (a push card), or replies with a worktree it couldn't read again (a
+     * send card). A restarted run with questions or plain commits is stale
+     * (`staleRun`) and never reaches here.
      */
     const rerunCard = (it: AgentItem) => {
+      const lw = it.localWork && !it.localWork.kept && it.localWork.ahead !== 0 ? it.localWork : null;
+      if (lw) {
+        // Work the app couldn't read sits in the worktree: never "nothing to push", never a Run again that drops it unsaid.
+        const many = lw.ahead === null ? "commits" : plural(lw.ahead, "commit");
+        now = `Your session left ${many} in ${lw.worktree} that the app couldn't read (${lw.reason}). They are not on the PR, and its replies may cite them.`;
+        ask = "Push them from the session, then come back — the card reads them again.";
+        choices = [
+          ...(it.sessionId ? [{ label: "Open in Claude", primary: true, does: "Opens the session in that worktree; push from there. What it ends with comes back to this card.", act: { type: "continue", runId } } as BoardChoice] : []),
+          { label: "Run again", does: `Starts over from the PR's head without the ${many} — the worktree stays with them.`, act: { type: "retry", runId } },
+          { label: "Discard", does: "Closes the card; the worktree stays with the commits, and a ref keeps them.", act: { type: "skip", runId } },
+        ];
+        next = "Once they are on the PR, the replies can go out.";
+        return;
+      }
       const n = it.drive?.commits.length ?? 0;
       now = `The app restarted after this run, so it can't push ${n > 0 ? `its ${plural(n, "commit")}` : "anything"} or go on with your answer any more.`;
       ask = "Run it again — the new run redoes the work and asks you again if it still needs to.";
@@ -253,6 +284,10 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
     };
     switch (kind) {
       case "send": {
+        if (item?.scenario === "drive" && item.needsRerun && item.localWork) {
+          rerunCard(item);
+          break;
+        }
         if (item?.scenario === "drive") {
           // Your own PR, nothing to push: only its answers to the reviewers wait to go out.
           const replies = plan?.replies.length ?? 0;
@@ -265,7 +300,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
               does: `Posts ${replies === 1 ? "the reply" : "the replies"} in the reviewers' threads under your name, signed by the agent. Nothing is pushed.`,
               act: { type: "publish", runId },
             },
-            ...(item.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them.", act: { type: "continue", runId } } as BoardChoice] : []),
+            ...(item.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them; what it ends with comes back to this card.", act: { type: "continue", runId } } as BoardChoice] : []),
             { label: "Discard", does: "Drops the replies; the agent leaves this commit to you.", act: { type: "skip", runId } },
           ];
           next = "The reviewers read your answers; when they comment again, the agent picks it up.";
@@ -285,6 +320,19 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
             : `The agent drafted a review that ${plan?.event === "REQUEST_CHANGES" ? "requests changes" : "comments"}: ${plural(n, "inline comment")}.`;
         }
         if (pushedBack > 0) now += ` The author pushed back on ${plural(pushedBack, "comment")} — your call below.`;
+        const held = plan?.held ?? [];
+        // A reply with no author answers a comment mid-thread whose thread GitHub didn't name — maybe yours, so not "a colleague's".
+        const handedBack = held.filter((h) => h.kind === "reply" && h.escalated).length;
+        const midThread = held.filter((h) => h.kind === "reply" && !h.author && !h.escalated).length;
+        const theirs = held.length - midThread - handedBack;
+        const where = [
+          theirs > 0 && (theirs === 1 ? "in a colleague's thread" : `in ${theirs} colleagues' threads`),
+          handedBack > 0 && (handedBack === 1 ? "in a thread it handed back to you" : `in ${handedBack} threads it handed back to you`),
+          midThread > 0 && (midThread === 1 ? "to a comment whose thread GitHub didn't name" : `to ${midThread} comments whose threads GitHub didn't name`),
+        ].filter(Boolean);
+        if (held.length > 0) {
+          now += ` It also wrote ${where.join(" and ")}; a review answers only in threads you opened, and not where the author pushed back, so ${held.length === 1 ? "that stays" : "those stay"} out — shown below.`;
+        }
         ask = approve ? "Read the summary, then approve — or discard it." : pushedBack > 0 ? "Decide on the pushed-back comments, check the rest, then send." : "Check what goes out, then send — or edit or discard it.";
         choices = [
           {
@@ -346,7 +394,8 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         break;
       }
       case "push": {
-        if (item?.needsRerun) {
+        // After a restart only commits the app couldn't read keep a push card (a stale run is no move of yours).
+        if (item?.needsRerun && item.localWork) {
           rerunCard(item);
           break;
         }
@@ -358,17 +407,13 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         ask = "Look at the commits, then push them.";
         choices = [
           { label: stage.action?.label ?? "Push", primary: true, does: `Pushes these commits to your branch — a fast-forward, never forced${replies > 0 ? ", then posts the answers" : ""}. CI runs again.`, act: { type: "push", runId } },
-          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them.", act: { type: "continue", runId } } as BoardChoice] : []),
+          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the session in your terminal to change them; what it ends with comes back to this card.", act: { type: "continue", runId } } as BoardChoice] : []),
           { label: "Discard", does: "Drops the commits; the agent leaves this commit to you.", act: { type: "skip", runId } },
         ];
         next = "CI runs on them. Green and approved, Merge comes to Your turn.";
         break;
       }
       case "decide": {
-        if (item?.scenario === "drive" && item.needsRerun) {
-          rerunCard(item);
-          break;
-        }
         const q = read.asks[0];
         now = `The agent needs your decision${read.asks.length > 1 ? ` on ${read.asks.length} questions` : q ? `: ${q.question}` : ""}.`;
         ask = "Answer below — only you can decide this.";
@@ -380,7 +425,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
           ...(replies > 0
             ? [{ label: `Send ${plural(replies, "reply", "replies")} as ${replies === 1 ? "it is" : "they are"}`, does: "Posts them in the reviewers' threads without answering.", act: { type: "publish", runId } } as BoardChoice]
             : []),
-          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Answers it in the session instead.", act: { type: "continue", runId } } as BoardChoice] : []),
+          ...(item?.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Answers it in the session instead; once a turn there ends with a new result, this card shows it — and closes when nothing is left to send or push.", act: { type: "continue", runId } } as BoardChoice] : []),
           { label: "Discard", does: "Drops it; the agent leaves this commit to you.", act: { type: "skip", runId } },
         ];
         next = "The same session goes on with your answer and brings the result back here.";
@@ -404,23 +449,44 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
       case "rereview": {
         const again = kind === "rereview";
         const who = again ? (pr?.myReReviewDue ? "The author answered your review" : "Your review was asked for again") : pr?.requestedOfMe ? "Your review is requested" : "Your team's review is requested";
+        const letAgent: BoardChoice = { label: again ? "Let the agent re-review" : "Let the agent review", does: "The agent starts now; its draft comes back here. Nothing is posted until you send it.", act: { type: "enqueue", prId } };
+        // The agent's review of this very head found nothing blocking and had nothing to post: the approval is one click here, not a trip to GitHub.
+        if (item && approvableReview(item, pr)) {
+          const left = read.findings.length;
+          now = `${who} — the agent ${again ? "re-reviewed" : "reviewed"} this commit and found nothing blocking${left > 0 ? ` (${plural(left, "point")} below)` : ""}; it had nothing to post.`;
+          ask = "Read what it found, then approve — or look yourself.";
+          choices = [
+            { label: "Approve", primary: true, does: "Posts your approval of this commit on GitHub under your name: one line, signed by the agent.", act: { type: "approve", runId } },
+            ...(sessionOnIt ? [{ ...toSession, primary: false }] : []),
+            ...(canStart ? [{ ...letAgent, label: again ? "Re-review again" : "Review again" }] : []),
+            open(),
+          ];
+          next = "The author can merge once the other reviewers and CI allow it. If they push again, the agent reviews the new commits.";
+          break;
+        }
         const why = stage.why ? ` — the agent didn't ${again ? "re-review" : "review"} it: ${lower(stage.why)}` : "";
         now = `${who}${why}.`;
-        ask = canStart ? `Let the agent ${again ? "re-review" : "review"} it — or do it yourself.` : "Review it on GitHub.";
-        choices = canStart
-          ? [{ label: again ? "Let the agent re-review" : "Let the agent review", primary: true, does: "The agent starts now; its draft comes back here. Nothing is posted until you send it.", act: { type: "enqueue", prId } }, open()]
-          : [{ ...open(), primary: true }];
-        next = canStart ? "The draft comes back to Your turn." : "The author sees your review on GitHub.";
+        ask = canStart ? `Let the agent ${again ? "re-review" : "review"} it — or do it yourself.` : sessionOnIt ? "Carry on in your Claude session — the agent stays off this PR while it is open." : "Review it on GitHub.";
+        choices = canStart ? [{ ...letAgent, primary: true }, open()] : sessionOnIt ? [toSession, open()] : [{ ...open(), primary: true }];
+        next = canStart ? "The draft comes back to Your turn." : `The author sees your review on GitHub.${sessionOnIt ? ` ${SESSION_NEXT}` : ""}`;
         break;
       }
       case "fixYourself": {
         const why = stage.why ? ` The agent: ${lower(stage.why)}.` : "";
         now = `${now}.${why}`;
-        ask = canStart ? "Let the agent fix it — or fix it yourself." : "Fix it on GitHub or in your clone.";
+        ask = canStart
+          ? "Let the agent fix it — or fix it yourself."
+          : sessionOnIt
+            ? "Carry on in your Claude session — the agent stays off this PR while it is open."
+            : fork
+              ? "Fix it in your clone and push to your fork — or reopen the PR from a branch of this repository, and the agent can take it."
+              : "Fix it on GitHub or in your clone.";
         choices = canStart
           ? [{ label: "Let the agent fix it", primary: true, does: "The agent fixes it in a separate checkout; you see the commits before anything is pushed.", act: { type: "enqueue", prId } }, open()]
-          : [{ ...open(), primary: true }];
-        next = canStart ? "Its commits come back to Your turn to push." : "CI runs again on your push.";
+          : sessionOnIt
+            ? [toSession, open()]
+            : [{ ...open(), primary: true }];
+        next = canStart ? "Its commits come back to Your turn to push." : `CI runs again on your push.${sessionOnIt ? ` ${SESSION_NEXT}` : ""}`;
         break;
       }
       case "draft":
@@ -434,6 +500,23 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         choices = [{ ...open(), primary: true }];
         next = "";
     }
+  }
+
+  // A run whose result can't be acted on any more: GitHub placed the card; the run is told as out of date, with Discard.
+  if (stage.stale && item) {
+    now = `${now ? `${now.replace(/\.$/, "")}. ` : ""}The agent's earlier run is out of date: ${lower(stage.note ?? "")}.`;
+    const first = !choices.some((c) => c.primary);
+    choices = [
+      ...choices,
+      {
+        label: "Discard",
+        primary: first,
+        does: "Closes the out-of-date run. Its worktree stays while it holds commits that are not on the PR, and a ref keeps them.",
+        act: { type: "skip", runId },
+      },
+      ...(item.sessionId && item.worktree ? [{ label: "Open in Claude", does: "Opens the old session in your terminal — anything from it is then yours to push or post.", act: { type: "continue", runId } } as BoardChoice] : []),
+    ];
+    if (first && !ask) ask = "Nothing to do on its result — discard it.";
   }
 
   return {

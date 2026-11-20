@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 
+import { isUiStyle } from "./ui-style";
 import {
   AGENT_BOUNDS,
   DEFAULT_AGENT_PROMPTS,
@@ -7,6 +8,7 @@ import {
   DEFAULT_AGENT_SIGNATURE,
   AGENT_TOOLS_VERSION,
   DEFAULT_AGENT_TOOLS,
+  isAgentLanguage,
   isClockTime,
   migrateTools,
   PREVIOUS_DEFAULT_AGENT_PROMPTS,
@@ -15,6 +17,7 @@ import {
 import { DEFAULT_CLAUDE_PROMPTS, DEFAULT_CLAUDE_SETTINGS, PREVIOUS_DEFAULT_PROMPTS } from "./claude-launch";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "./notify";
 import { DEFAULT_STALE_AFTER_DAYS, validateStaleAfterDays } from "./stale";
+import { UPSOURCE_HOST_LABEL, normalizeUpsourceBaseUrl } from "./upsource";
 import type {
   AgentMode,
   AgentPromptKey,
@@ -24,6 +27,7 @@ import type {
   GhStatus,
   HostConfig,
   JiraSettings,
+  UpsourceSettings,
   NotificationSettings,
   PublicConfig,
   Settings,
@@ -171,6 +175,8 @@ export function validateSettings(raw: unknown): Settings {
 
   // Appearance defaults to following the OS; anything unrecognized falls back.
   const theme = obj.theme === "light" || obj.theme === "dark" ? obj.theme : "system";
+  // The look is opt-in: anything but a known style is the flat default.
+  const uiStyle = isUiStyle(obj.uiStyle) ? obj.uiStyle : "flat";
 
   // Comment tracking defaults ON — it is the app's original behavior, so an
   // existing settings file (which has no such key) must keep it.
@@ -212,10 +218,12 @@ export function validateSettings(raw: unknown): Settings {
     autoUpdate,
     closeToTray,
     theme,
+    uiStyle,
     trackComments,
     notifications,
     hosts,
     jira: validateJira(obj.jira),
+    upsource: validateUpsource(obj.upsource),
     claude: validateClaude(obj.claude),
     agent: validateAgent(obj.agent),
     staleAfterDays: validateStaleAfterDays(obj.staleAfterDays),
@@ -282,6 +290,7 @@ export function validateClaude(raw: unknown): ClaudeSettings {
     prompts: {
       drive: prompt("drive"),
       review: prompt("review"),
+      codexReview: prompt("codexReview"),
       close: prompt("close"),
       explain: prompt("explain"),
       open: prompt("open"),
@@ -299,6 +308,8 @@ export function validateClaude(raw: unknown): ClaudeSettings {
       obj.terminal === "iterm" || obj.terminal === "terminal" || obj.terminal === "desktop"
         ? obj.terminal
         : d.terminal,
+    // Only an explicit true opts in: the approval goes out under the user's account.
+    reviewGroupApprove: obj.reviewGroupApprove === true,
   };
 }
 
@@ -361,6 +372,7 @@ export function validateAgent(raw: unknown): AgentSettings {
     enabled: bool(obj.enabled, d.enabled),
     model: str(obj.model),
     effort: oneOf(obj.effort, ["", "low", "medium", "high"] as const, d.effort),
+    language: isAgentLanguage(obj.language) ? obj.language : d.language,
     worktreeDir: str(obj.worktreeDir),
     removeWorktree: bool(obj.removeWorktree, d.removeWorktree),
     cloneMissing: bool(obj.cloneMissing, d.cloneMissing),
@@ -410,7 +422,9 @@ export function validateAgent(raw: unknown): AgentSettings {
       },
       promoteAfter: num(limits.promoteAfter, "promoteAfter", d.limits.promoteAfter),
     },
-    permissions: { tools, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: bool(permissions.pushOwnBranch, d.permissions.pushOwnBranch) },
+    permissions: { tools, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: bool(permissions.pushOwnBranch, d.permissions.pushOwnBranch),
+      fullContextDrive: bool(permissions.fullContextDrive, d.permissions.fullContextDrive),
+    },
     diagrams: {
       enabled: bool(diagrams.enabled, d.diagrams.enabled),
       minLines: num(diagrams.minLines, "diagramMinLines", d.diagrams.minLines),
@@ -456,6 +470,23 @@ function validateJira(raw: unknown): JiraSettings | undefined {
 }
 
 /**
+ * Validates the optional Upsource connection: undefined when absent or without
+ * an address (Upsource stays off), the address normalized by
+ * `normalizeUpsourceBaseUrl` — https only, since the token is a Bearer credential.
+ */
+function validateUpsource(raw: unknown): UpsourceSettings | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const value = (raw as Record<string, unknown>).baseUrl;
+  const rawUrl = typeof value === "string" ? value.trim() : "";
+  if (!rawUrl) return undefined;
+  const baseUrl = normalizeUpsourceBaseUrl(rawUrl);
+  if (!baseUrl) {
+    throw new ConfigError(`settings: upsource.baseUrl must be an https URL (the token is never sent over http): ${rawUrl}`);
+  }
+  return { baseUrl };
+}
+
+/**
  * What `persistSettings` writes: the settings with every Claude prompt and
  * every agent prompt that is still its default stored empty. An empty prompt
  * reads back as the default, so a later release that changes a default reaches
@@ -472,6 +503,74 @@ export function toStoredSettings(settings: Settings): Settings {
     if (agentPrompts[k] === DEFAULT_AGENT_PROMPTS[k]) agentPrompts[k] = "";
   }
   return { ...settings, claude: { ...settings.claude, prompts, agentPrompts } };
+}
+
+/**
+ * Dotted paths of fields a build removed on purpose — a moved secret, a switch
+ * whose meaning changed. `keepUnknownSettings` drops these instead of carrying
+ * them, since this build no longer lists them and would otherwise keep them.
+ */
+export const RETIRED_SETTINGS_FIELDS: readonly string[] = [];
+
+/** The keys of `Settings` that may be left out. */
+type OptionalSettingsKey = { [K in keyof Settings]-?: undefined extends Settings[K] ? K : never }[keyof Settings];
+/** A section's shape: every one of its keys, optional ones included. */
+type ShapeOf<T> = T extends object ? { [K in keyof T]-?: unknown } : unknown;
+
+/**
+ * The optional fields, which the defaults may leave out (`jira`, `upsource`):
+ * a save that clears one leaves it out, and as an unknown field it would come
+ * back from disk. Typed so that a new optional field, or a new key of these
+ * sections, fails the build until it is listed here.
+ */
+const OPTIONAL_SETTINGS_SHAPE: { [K in OptionalSettingsKey]-?: ShapeOf<NonNullable<Settings[K]>> } = {
+  uiStyle: "",
+  weatherCity: "",
+  jira: { baseUrl: "", email: "" },
+  upsource: { baseUrl: "" },
+};
+
+/**
+ * Every field this build knows. An empty object stands for a map
+ * (`claude.repoPaths`): its keys are data, owned whole.
+ */
+function knownSettingsShape(): Record<string, unknown> {
+  return { ...toStoredSettings(defaultSettings()), ...OPTIONAL_SETTINGS_SHAPE };
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
+/**
+ * What `persistSettings` writes: `stored` plus every field of `previous` — the
+ * file as it was on disk — that this build does not know, at any depth. Loading
+ * reads an unknown field as nothing, so without this one Save erased what
+ * another build had written: a newer release's setting under an older build, or
+ * a branch's reshaped setting under the release that the next update restarted.
+ * A field this build knows is never brought back: a cleared Jira site or a
+ * removed repo path stays gone. Arrays are this build's whole (hosts can be
+ * reordered, so their entries can't be matched up).
+ */
+export function keepUnknownSettings(
+  previous: unknown,
+  stored: Settings,
+  retired: readonly string[] = RETIRED_SETTINGS_FIELDS,
+): Record<string, unknown> {
+  const carry = (prev: unknown, next: unknown, shape: unknown, at: string): unknown => {
+    if (!isRecord(prev) || !isRecord(next) || !isRecord(shape) || Object.keys(shape).length === 0) return next;
+    const out: Record<string, unknown> = { ...next };
+    for (const [key, value] of Object.entries(prev)) {
+      const dotted = at ? `${at}.${key}` : key;
+      if (key === "__proto__" || retired.includes(dotted)) continue;
+      if (hasOwn(shape, key)) {
+        if (hasOwn(out, key)) out[key] = carry(value, out[key], shape[key], dotted);
+      } else if (!hasOwn(out, key)) {
+        out[key] = value;
+      }
+    }
+    return out;
+  };
+  return carry(previous, stored, knownSettingsShape(), "") as Record<string, unknown>;
 }
 
 /**
@@ -495,6 +594,7 @@ export function defaultSettings(): Settings {
     autoUpdate: true,
     closeToTray: true,
     theme: "system",
+    uiStyle: "flat",
     trackComments: true,
     notifications: defaultNotificationSettings(),
     hosts: [],
@@ -522,13 +622,19 @@ export function toHostConfigs(settings: Settings): HostConfig[] {
 }
 
 /** Builds the sanitized (token-free) config for the renderer's filter bar. */
-export function toPublicConfig(settings: Settings): PublicConfig {
+export function toPublicConfig(settings: Settings, codexAvailable = false): PublicConfig {
   return {
     pollIntervalSeconds: settings.pollIntervalSeconds,
-    hosts: settings.hosts.map((h) => ({ label: h.label, repos: h.repos })),
+    // Upsource gets a host pill of its own, which is also its filter.
+    hosts: [
+      ...settings.hosts.map((h) => ({ label: h.label, repos: h.repos })),
+      ...(settings.upsource ? [{ label: UPSOURCE_HOST_LABEL, repos: [] }] : []),
+    ],
     trackComments: settings.trackComments,
     claudeEnabled: settings.claude.enabled,
     claudeDesktop: settings.claude.terminal === "desktop",
+    codexAvailable,
+    uiStyle: settings.uiStyle ?? "flat",
   };
 }
 

@@ -6,6 +6,8 @@ export interface AppMenuDeps {
   openSettings(): void;
   /** Force an immediate poll — the same action as the header's Refresh button. */
   refresh(): void;
+  /** Focus the search box of the screen on view (the PR list's, or Settings'). */
+  find(): void;
 }
 
 /** What `createMenuActions` needs from the app to build those two actions. */
@@ -17,7 +19,7 @@ export interface MenuActionDeps {
 }
 
 /**
- * The two menu actions, as one testable unit.
+ * The menu actions, as one testable unit.
  *
  * Both surface the window first. Close-to-tray makes hidden-but-alive the app's
  * normal idle state, and on macOS the app can be frontmost with no window on
@@ -35,6 +37,10 @@ export function createMenuActions(deps: MenuActionDeps): AppMenuDeps {
     refresh: () => {
       deps.focusWindow();
       deps.send("menu:refresh");
+    },
+    find: () => {
+      deps.focusWindow();
+      deps.send("menu:find");
     },
   };
 }
@@ -59,7 +65,7 @@ export interface AppMenuOptions {
  * handler, it also shows the user what the shortcut is. `CmdOrCtrl` resolves to
  * Command on macOS and Control elsewhere, so one template serves both.
  *
- * Everything beyond our two items is role-based on purpose. `setApplicationMenu`
+ * Everything beyond our own items is role-based on purpose. `setApplicationMenu`
  * **replaces** Electron's default menu, and on macOS that default is what makes
  * Cmd+C / Cmd+V / Cmd+A work inside text fields (the search box, the Jira token
  * field) as well as Cmd+Q / Cmd+H / Cmd+W — a hand-rolled two-item menu would
@@ -89,6 +95,14 @@ export function buildAppMenuTemplate(
     click: () => deps.refresh(),
   };
 
+  // CmdOrCtrl+F: Chromium has no find-in-page of its own here, so nothing is
+  // shadowed; the renderer focuses whichever search box is on screen.
+  const findItem: Electron.MenuItemConstructorOptions = {
+    label: "Search",
+    accelerator: "CmdOrCtrl+F",
+    click: () => deps.find(),
+  };
+
   // `reload` would claim CmdOrCtrl+R and shadow Refresh, so only the explicit
   // force-reload is offered next to the DevTools toggle.
   const devItems: Electron.MenuItemConstructorOptions[] = options.devItems
@@ -99,6 +113,7 @@ export function buildAppMenuTemplate(
     label: "View",
     submenu: [
       refreshItem,
+      findItem,
       ...devItems,
       { type: "separator" },
       { role: "resetZoom" },

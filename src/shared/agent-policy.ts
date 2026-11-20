@@ -1,4 +1,5 @@
 import { brokenLayerBelow, STACK_REBASE_HINT } from "./agent-stack";
+import { OWN_SESSION_WHY } from "./agent-view";
 import type { AgentRunKind, AgentScenario, AgentSettings, PullRequest } from "./types";
 
 export type { AgentScenario };
@@ -80,7 +81,7 @@ function selfReviewBlock(pr: PullRequest, s: AgentSettings, ctx: PlanContext): s
   if (s.scenarios.selfReview.mode === "off") return "self-reviews are off";
   if (pr.isDraft) return "a draft — self-reviewed once it is ready for review";
   if (pr.isCrossRepository) return "from a fork — the agent pushes only to branches of the repository itself";
-  if (ctx.hasOwnSession(pr)) return "your Claude session is on it";
+  if (ctx.hasOwnSession(pr)) return OWN_SESSION_WHY.charAt(0).toLowerCase() + OWN_SESSION_WHY.slice(1);
   if (ctx.selfReviewed?.(pr)) return "self-reviewed at this head";
   return null;
 }
@@ -119,7 +120,7 @@ export function mergeBlocker(pr: PullRequest, s: AgentSettings): string | null {
   if (pr.ciState === "pending") return "CI is still running";
   if (pr.awaitingReview) return "Waiting for reviewers";
   if (!pr.canBeMerged) return "Not mergeable yet";
-  if (m.requireAllReviewers && pr.reviewers.some((r) => r.reviewState !== "approved")) return "Not every requested reviewer approved";
+  if (m.requireAllReviewers && pr.reviewers.some((r) => r.reviewState === "pending" || r.reviewState === "changes_requested")) return "Not every requested reviewer approved";
   if (m.requireThreadsResolved && pr.unresolvedThreads > 0) return `${pr.unresolvedThreads} unresolved thread${pr.unresolvedThreads === 1 ? "" : "s"}`;
   if (m.requireChecksGreen && pr.checks.length > 0 && pr.ciState !== "success") return "Not every check is green";
   return null;
@@ -282,7 +283,7 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
           continue;
         }
         if (ctx.hasOwnSession(pr)) {
-          skip("Your Claude session is on it");
+          skip(OWN_SESSION_WHY);
           continue;
         }
         const exhausted = ctx.driveExhausted?.(pr) ?? null;
@@ -374,7 +375,7 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
         continue;
       }
       if (ctx.hasOwnSession(pr)) {
-        skip("Your Claude session is on it");
+        skip(OWN_SESSION_WHY);
         continue;
       }
       // A push and nothing else since your review: it may be the change you
@@ -412,7 +413,7 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
       continue;
     }
     if (ctx.hasOwnSession(pr)) {
-      skip("Your Claude session is on it");
+      skip(OWN_SESSION_WHY);
       continue;
     }
     // A big PR gets a brief first — the problem, the approach, the risky parts,

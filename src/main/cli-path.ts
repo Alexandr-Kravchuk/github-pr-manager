@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // GUI-launched macOS apps inherit a minimal PATH (login shells add Homebrew etc.
 // via ~/.zprofile, but Finder/.app launches don't run a login shell). So `gh`
@@ -6,7 +8,11 @@ import { execFileSync } from "node:child_process";
 // which makes token resolution fail with a misleading "not signed in". We fix
 // that by merging the login shell's PATH + the usual locations at startup.
 
+// `~/.local/bin` is where per-user installers drop CLIs (twg, uv, pipx). Shell
+// setups usually add it in ~/.zshrc, which `zsh -l -c` does not read — the
+// login shell is non-interactive — so it is listed here explicitly.
 const COMMON_BIN_DIRS = [
+  join(homedir(), ".local", "bin"),
   "/opt/homebrew/bin",
   "/opt/homebrew/sbin",
   "/usr/local/bin",

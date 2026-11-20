@@ -9,6 +9,7 @@
 // Started by the app with ELECTRON_RUN_AS_NODE=1 (so the app's own binary runs
 // it as plain Node) and kept free of Electron imports for the same reason.
 
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -21,6 +22,7 @@ import {
   toolFilePath,
   type GuardDecision,
   type GuardRun,
+  type RequestStore,
 } from "../../shared/agent-guard";
 import { isInsideDir, PUBLISH_SUBS, type PublishSub } from "../../shared/agent-publish";
 import type { AgentRunKind } from "../../shared/types";
@@ -40,6 +42,10 @@ export function readGuardFile(file: string | undefined): GuardRun | null {
   try {
     const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
     const run: GuardRun = {};
+    if ("mode" in raw) {
+      if (raw.mode !== "full") return null;
+      run.mode = "full";
+    }
     const folders = (v: unknown): string[] | null =>
       Array.isArray(v) ? v.filter((d): d is string => typeof d === "string" && d.length > 0 && path.isAbsolute(d)) : null;
     if (typeof raw.wrapperPath === "string" && typeof raw.outDir === "string") {
@@ -71,10 +77,48 @@ export function readGuardFile(file: string | undefined): GuardRun | null {
       if (!roots) return null;
       run.sessionRoots = roots;
     }
+    // The review preflight: every path absolute, or the whole guard file is refused.
+    if ("preflight" in raw) {
+      const p = raw.preflight as { helpers?: unknown; installedPlugins?: unknown; tmpDir?: unknown } | null;
+      const abs = (v: unknown): v is string => typeof v === "string" && v.length > 0 && path.isAbsolute(v);
+      if (!p || !Array.isArray(p.helpers) || !p.helpers.every(abs) || !abs(p.installedPlugins) || !abs(p.tmpDir)) return null;
+      run.preflight = { helpers: [...p.helpers], installedPlugins: p.installedPlugins, tmpDir: p.tmpDir };
+    }
     return run;
   } catch {
     return null;
   }
+}
+
+/**
+ * The review preflight's requests (`RequestStore`): read as they are — a
+ * request over 64 KB, or anything but a file, is not read — and each checked
+ * one copied into `dir`, the `requests` folder next to the run's guard file,
+ * where the session writes nothing. `node` reads that copy, so nothing the
+ * session does to its own file after the check reaches the helper.
+ */
+export function requestStore(dir: string): RequestStore {
+  return {
+    read(file) {
+      try {
+        const st = fs.statSync(file);
+        if (!st.isFile() || st.size > 64 * 1024) return null;
+        return fs.readFileSync(file, "utf8");
+      } catch {
+        return null;
+      }
+    },
+    keep(text) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        const copy = path.join(dir, `${randomUUID()}.json`);
+        fs.writeFileSync(copy, text, { flag: "wx", mode: 0o444 });
+        return copy;
+      } catch {
+        return null;
+      }
+    },
+  };
 }
 
 /**
@@ -128,6 +172,8 @@ export function realRead(p: string): string | null {
  */
 export function checkRealWrite(kind: AgentRunKind, toolName: string, input: unknown, run: GuardRun | null): GuardDecision {
   if (kind !== "drive" || !isWriteTool(toolName)) return { allow: true };
+  // A full-context drive writes wherever you can (`checkFullToolUse`).
+  if (run?.mode === "full") return { allow: true };
   const file = toolFilePath(input);
   const real = realTarget(file);
   if (!real) return { allow: false, reason: `${file} is a link to nowhere; agent runs don't write through it.` };
@@ -153,7 +199,8 @@ function main(): void {
   // The PR the run works on: its gh reads are held to it.
   const prUrl = process.argv[3];
   const pr = prUrl ? guardPrFromUrl(prUrl) : null;
-  const run = readGuardFile(process.argv[4]);
+  const guardFile = process.argv[4];
+  const run = readGuardFile(guardFile);
   let input = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => (input += chunk));
@@ -173,14 +220,28 @@ function main(): void {
     let decision: GuardDecision;
     try {
       const tool = typeof call.tool_name === "string" ? call.tool_name : "";
-      decision = checkToolUse(kind, tool, call.tool_input, pr, run, realRead);
-      if (decision.allow) decision = checkRealWrite(kind, tool, call.tool_input, run);
+      // Checked preflight requests are copied next to the guard file, out of the session's reach.
+      const requests = requestStore(path.join(path.dirname(guardFile ?? "."), "requests"));
+      decision = checkToolUse(kind, tool, call.tool_input, pr, run, realRead, guardFile ? requests : undefined);
+      if (decision.allow) {
+        const real = checkRealWrite(kind, tool, call.tool_input, run);
+        decision = real.allow ? decision : real;
+      }
     } catch (e) {
       decision = { allow: false, reason: `the check failed (${(e as Error).message}) — refusing.` };
     }
     if (!decision.allow) {
       process.stderr.write(`PR agent guard: ${decision.reason}\n`);
       process.exit(2);
+    }
+    if (decision.command !== undefined) {
+      // Claude Code runs the command the hook hands back (`updatedInput`), allowed here: the guard
+      // built all of it — the listed helper and its own copy of the checked request — and the copy
+      // sits outside the session's folders, where Claude Code would ask for approval nobody can give.
+      const updatedInput = { ...(call.tool_input as Record<string, unknown>), command: decision.command };
+      const out = { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "PR agent guard: the review preflight on its checked request", updatedInput };
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: out }), () => process.exit(0));
+      return;
     }
     process.exit(0);
   });

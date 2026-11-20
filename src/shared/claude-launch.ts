@@ -15,13 +15,15 @@ import type { ClaudeSettings, PullRequest } from "./types";
  *  - `review` — your review is due (requested, returned to you, re-review);
  *  - `close` — your PR is ready to merge (`canBeMerged`);
  *  - `open` — anything else: the session gets only the link.
+ * `codexReview` starts the Codex CLI (not Claude) on the PR for a second-opinion review; like
+ * `explain` it is only in the button's menu.
  * `explain` is never picked from the state — it is only in the button's menu:
  * a plain-language explanation of the PR, shown in the session, no letter.
  */
-export type ClaudeLaunchKind = "drive" | "review" | "close" | "explain" | "open";
+export type ClaudeLaunchKind = "drive" | "review" | "codexReview" | "close" | "explain" | "open";
 
 /** Every kind, in the order the button's menu lists them. */
-export const CLAUDE_LAUNCH_KINDS: readonly ClaudeLaunchKind[] = ["drive", "review", "close", "explain", "open"];
+export const CLAUDE_LAUNCH_KINDS: readonly ClaudeLaunchKind[] = ["drive", "review", "codexReview", "close", "explain", "open"];
 
 /**
  * The kinds the menu offers for this PR. Closing means merging, which is the
@@ -39,20 +41,44 @@ export interface ClaudeMenuItem {
 }
 
 /**
- * The button's menu for this PR: every kind `claudeKindsFor` offers, plus
- * "Review in terminal" right after "Review" while Settings open sessions in
- * Claude Desktop (`desktop`). With a terminal chosen, "Review" already opens
- * one, so the extra item would repeat it.
+ * The button's menu for this PR: every kind `claudeKindsFor` offers, plus a
+ * second review row "in terminal" right after each review row while Settings
+ * open sessions in the desktop app (`desktop`): Claude Desktop for Claude, the
+ * Codex app for Codex. With a terminal chosen, the review row already opens
+ * one, so the extra item would repeat it. "Review" with Codex is left out when the
+ * `codex` CLI is not installed (`codex`), rather than failing in a terminal window.
  */
-export function claudeMenuItems(pr: Pick<PullRequest, "roles">, desktop: boolean): ClaudeMenuItem[] {
-  return claudeKindsFor(pr).flatMap((kind): ClaudeMenuItem[] =>
-    kind === "review" && desktop
+export function claudeMenuItems(pr: Pick<PullRequest, "roles">, desktop: boolean, codex = false): ClaudeMenuItem[] {
+  return claudeKindsFor(pr)
+    .filter((kind) => kind !== "codexReview" || codex)
+    .flatMap((kind): ClaudeMenuItem[] =>
+    isReviewKind(kind) && desktop
       ? [
           { kind, inTerminal: false },
           { kind, inTerminal: true },
         ]
       : [{ kind, inTerminal: false }],
   );
+}
+
+/** The review items of the menu share one visual group: one colour, one divider, a target on each row. */
+export function isReviewKind(kind: ClaudeLaunchKind): boolean {
+  return kind === "review" || kind === "codexReview";
+}
+
+/**
+ * Which tool a menu item starts and where. The row reads "Review with <name>" and
+ * `place` is a muted hint beside it, so the review rows differ in their main text. Only the review items have one: null for the others.
+ * `desktop` is Settings' choice of Claude Desktop.
+ */
+export function claudeMenuTarget(
+  item: ClaudeMenuItem,
+  desktop: boolean,
+): { tool: "claude" | "codex"; name: "Claude" | "Codex"; place: "Desktop" | "app" | "terminal" } | null {
+  if (!isReviewKind(item.kind)) return null;
+  const terminal = item.inTerminal || !desktop;
+  if (item.kind === "codexReview") return { tool: "codex", name: "Codex", place: terminal ? "terminal" : "app" };
+  return { tool: "claude", name: "Claude", place: terminal ? "terminal" : "Desktop" };
 }
 
 /**
@@ -79,15 +105,47 @@ export const GROUP_PROMPT_KEY: Record<GroupLaunchKind, "explainGroup" | "reviewG
 };
 
 /**
+ * The first three of the lines "Review all" adds to every nested review prompt:
+ * the user's publishing permission, quoted in their own words since a request
+ * from another session is not their consent, and the rules that bound it.
+ * `hold` keeps every APPROVE for the user's word in that PR's session;
+ * `approve` lets a review with no Blocker and no Major approve the head commit
+ * it read — only for a user who turned on Settings → Claude → "Review all may
+ * approve" (`ClaudeSettings.reviewGroupApprove`), since the approval is posted
+ * under their own GitHub account.
+ */
+export const REVIEW_GROUP_PERMISSIONS: Record<"hold" | "approve", string> = {
+  hold:
+    "a) Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
+    "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
+    "Публікуй рев'ю на PR за цим дозволом. " +
+    "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
+    "or by a test; without that check, ask it as a question in the summary. " +
+    "c) APPROVE only on my separate word for that PR: this permission does not cover it.",
+  approve:
+    "a) Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
+    "Подія цього рев'ю — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю; `COMMENT`, коли лишився " +
+    "лише Major з низькою впевненістю; `APPROVE`, коли немає ні Blocker, ні жодного Major.». " +
+    "Публікуй рев'ю на PR за цим дозволом. " +
+    "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
+    "or by a test; without that check, ask it as a question in the summary — and it still blocks the APPROVE. " +
+    "c) Post the review through the reviews API (gh api …/pulls/{number}/reviews) with commit_id set to the head commit you " +
+    "reviewed, and APPROVE only while that commit is still the PR's head: when the PR has a newer commit, post a COMMENT " +
+    "instead and say so in your report.",
+};
+
+/**
  * `{url}` is replaced with the PR's URL. The group templates take `{key}` (the
  * group's Jira key), `{count}` and `{urls}` (the links, space-separated);
  * `reviewGroup` also takes `{prompts}` — each PR's own "Your review is due"
  * prompt, numbered, for the sessions it starts, behind the folder of that PR's
- * own checkout when it differs from the parent's (`in <folder>:`).
+ * own checkout when it differs from the parent's (`in <folder>:`) — and
+ * `{permission}`, one of `REVIEW_GROUP_PERMISSIONS` by the user's setting.
  */
 export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
   drive: "/drive-pr-green {url}",
   review: "/creatio-code-review {url}",
+  codexReview: "Use the creatio-code-review skill to review the pull request {url}. Report the findings here; do not post anything to the PR.",
   close: "/drive-pr-close {url}",
   explain: "/usercustom-dev:pr-first-look {url} — show the explanation here in the session; do not send a letter",
   open: "{url}",
@@ -104,12 +162,7 @@ export const DEFAULT_CLAUDE_PROMPTS: Record<ClaudePromptKey, string> = {
     "session there through start_session's cwd, so it reads that repository's rules and code; the others run in this folder. " +
     "Give each session its prompt word for word, and add to it these five lines, each word for word as a line of its own " +
     "and without its letter: " +
-    "a) Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
-    "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
-    "Публікуй рев'ю на PR за цим дозволом. " +
-    "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
-    "or by a test; without that check, ask it as a question in the summary. " +
-    "c) APPROVE only on my separate word for that PR: this permission does not cover it. " +
+    "{permission} " +
     "d) Skip the PR when I already reviewed it after its last commit. " +
     "e) Start your report with the link to the review you published on the PR (#pullrequestreview-…) and your decision, " +
     "or with why you published none. " +
@@ -164,6 +217,30 @@ export const PREVIOUS_DEFAULT_PROMPTS: Partial<Record<ClaudePromptKey, readonly 
     "The prompts: {prompts}. " +
     "When every session has reported, give me one summary: for each PR the link to its review, its decision and its Blocker and Major findings, " +
     "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently.",
+    // Reads whole reports and leaves per-PR decisions to the PR's session; the
+    // permission lines were written out in full before `{permission}`.
+    "Review the {count} pull requests of {key} that wait for my review. Do not review them here: start one session per PR " +
+    "with the start_session tool (initiation user_asked, context fresh, use_worktree false), so each review runs in its own " +
+    "session nested under this one. A prompt that starts with a folder (in, the folder, a colon) is that PR's own repository: start its " +
+    "session there through start_session's cwd, so it reads that repository's rules and code; the others run in this folder. " +
+    "Give each session its prompt word for word, and add to it these five lines, each word for word as a line of its own " +
+    "and without its letter: " +
+    "a) Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
+    "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
+    "Публікуй рев'ю на PR за цим дозволом. " +
+    "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
+    "or by a test; without that check, ask it as a question in the summary. " +
+    "c) APPROVE only on my separate word for that PR: this permission does not cover it. " +
+    "d) Skip the PR when I already reviewed it after its last commit. " +
+    "e) Start your report with the link to the review you published on the PR (#pullrequestreview-…) and your decision, " +
+    "or with why you published none. " +
+    "The prompts: {prompts}. " +
+    "When every session has reported, give me one summary: for each PR the link to its review, its decision and its Blocker and Major findings, " +
+    "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently. " +
+    "Read each report whole with list_events, paging back to the session's last message, since the note on a session's turn " +
+    "keeps only its first 400 characters. " +
+    "A later decision on one PR — a review its session could not publish, an APPROVE — is mine to give in that PR's session: " +
+    "link me to the session and leave my answer for me to type there, so each session hears it once and from me.",
   ],
 };
 
@@ -204,7 +281,9 @@ export const MAX_GROUP_PRS = 30;
  * `folders[i]` is where the review of `prs[i]` should run — its repository's
  * checkout — or null to run it in the parent's folder: a review started in
  * another repository's folder loads that repository's CLAUDE.md as its own
- * rules and searches the wrong code for callers and patterns.
+ * rules and searches the wrong code for callers and patterns. `approve`
+ * picks the review permission (`REVIEW_GROUP_PERMISSIONS`) that fills
+ * `{permission}`.
  */
 export function renderGroupPrompt(
   prompts: Partial<Record<ClaudePromptKey, string>>,
@@ -212,11 +291,13 @@ export function renderGroupPrompt(
   key: string,
   prs: readonly Pick<PullRequest, "url">[],
   folders: readonly (string | null)[] = [],
+  approve = false,
 ): string {
   const templateKey = GROUP_PROMPT_KEY[kind];
   const template = prompts[templateKey]?.trim() || DEFAULT_CLAUDE_PROMPTS[templateKey];
   const fill = (text: string, token: string, value: string) => text.split(token).join(value);
-  let filled = fill(template, "{key}", key);
+  let filled = fill(template, "{permission}", REVIEW_GROUP_PERMISSIONS[approve ? "approve" : "hold"]);
+  filled = fill(filled, "{key}", key);
   filled = fill(filled, "{count}", String(prs.length));
   filled = fill(filled, "{urls}", prs.map((p) => p.url).join(" "));
   filled = fill(
@@ -242,12 +323,14 @@ export const JIRA_KEY_RE = new RegExp(`^${JIRA_KEY_PATTERN}$`);
  *    "Review" and the `To review` segment), so it never reviews your own PR,
  *    a draft or one nobody asked you about; at least one.
  */
-export function groupLaunchPrs<T extends Pick<PullRequest, "isDraft" | "roles" | "myReReviewDue">>(
+export function groupLaunchPrs<T extends Pick<PullRequest, "isDraft" | "roles" | "myReReviewDue" | "source">>(
   kind: GroupLaunchKind,
   key: string,
-  prs: readonly T[],
+  all: readonly T[],
 ): T[] | null {
   if (!JIRA_KEY_RE.test(key)) return null;
+  // A Jira group can hold Upsource reviews; Claude reads GitHub PRs only.
+  const prs = all.filter((p) => p.source !== "upsource");
   const picked = kind === "explain" ? prs.filter((p) => !p.isDraft) : prs.filter(isReviewDue);
   return picked.length >= (kind === "explain" ? 2 : 1) ? picked.slice(0, MAX_GROUP_PRS) : null;
 }
@@ -260,11 +343,13 @@ export const DEFAULT_CLAUDE_SETTINGS: ClaudeSettings = {
   prompts: { ...DEFAULT_CLAUDE_PROMPTS },
   agentPrompts: { ...DEFAULT_AGENT_PROMPTS },
   terminal: "auto",
+  reviewGroupApprove: false,
 };
 
 export const CLAUDE_LAUNCH_LABEL: Record<ClaudeLaunchKind, string> = {
   drive: "drive it to green",
   review: "review it",
+  codexReview: "review it with Codex",
   close: "close it",
   explain: "explain what it does",
   open: "open it",
@@ -274,6 +359,7 @@ export const CLAUDE_LAUNCH_LABEL: Record<ClaudeLaunchKind, string> = {
 export const CLAUDE_BUTTON_TEXT: Record<ClaudeLaunchKind, string> = {
   drive: "Drive to green",
   review: "Review",
+  codexReview: "Review with Codex",
   close: "Close PR",
   explain: "Explain",
   open: "Open session",
@@ -339,9 +425,14 @@ export function launcherEnv(env: Record<string, string | undefined>): Record<str
   return out;
 }
 
-/** The command a POSIX terminal runs: go to the checkout, start claude with the prompt. */
-export function posixLaunchCommand(dir: string, prompt: string): string {
-  return `unset ${CLAUDE_SESSION_ENV_MARKERS.join(" ")}; cd ${shellQuote(dir)} && claude ${shellQuote(prompt)}`;
+/** The CLI a kind starts: Codex for `codexReview`, Claude for everything else. */
+export function launchProgram(kind: ClaudeLaunchKind): "claude" | "codex" {
+  return kind === "codexReview" ? "codex" : "claude";
+}
+
+/** The command a POSIX terminal runs: go to the checkout, start the CLI with the prompt. */
+export function posixLaunchCommand(dir: string, prompt: string, program: "claude" | "codex" = "claude"): string {
+  return `unset ${CLAUDE_SESSION_ENV_MARKERS.join(" ")}; cd ${shellQuote(dir)} && ${program} ${shellQuote(prompt)}`;
 }
 
 /** iTerm2's bundle id — addressed by id so the app's display name ("iTerm" vs "iTerm2") doesn't matter. */
@@ -396,6 +487,15 @@ export function claudeDesktopUrl(dir: string, prompt: string): string {
   return `claude://code/new?q=${encodeURIComponent(prompt)}&folder=${encodeURIComponent(dir)}`;
 }
 
+/**
+ * The Codex app's link for a new thread: opens it in `dir` with `prompt`
+ * prefilled in the composer (not sent). The `path` and `prompt` parameters are
+ * read from the app's own link handler, not from published documentation.
+ */
+export function codexAppUrl(dir: string, prompt: string): string {
+  return `codex://threads/new?path=${encodeURIComponent(dir)}&prompt=${encodeURIComponent(prompt)}`;
+}
+
 /** An AppleScript string literal for `text`. */
 export function appleScriptString(text: string): string {
   return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
@@ -417,6 +517,31 @@ export function normalizeRemote(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The `git clone` that gives a PR's repository the checkout the app looks for:
+ * into the folder Settings › Claude names for that repository, else
+ * `<projects root>/<name>`, where `findCheckout` finds it by its remote. Null
+ * when the PR's URL has no host. A path with anything but plain characters is
+ * double-quoted, which zsh, bash, PowerShell and cmd all read the same way.
+ */
+export function cloneCommand(
+  pr: Pick<PullRequest, "url" | "repo">,
+  settings: Pick<ClaudeSettings, "projectsRoot" | "repoPaths"> | null | undefined,
+): string | null {
+  let host: string;
+  try {
+    host = new URL(pr.url).host;
+  } catch {
+    return null;
+  }
+  const name = pr.repo.split("/").pop();
+  if (!host || !name) return null;
+  const root = (settings?.projectsRoot || "~/Projects").replace(/[\\/]+$/, "");
+  const dir = settings?.repoPaths[pr.repo] || `${root}/${name}`;
+  const quoted = /^[\w~./:\\-]+$/.test(dir) ? dir : `"${dir}"`;
+  return `git clone https://${host}/${pr.repo}.git ${quoted}`;
 }
 
 /** `host/owner/repo` of a PR, the key its checkout's remote is matched on. */

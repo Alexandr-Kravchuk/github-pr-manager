@@ -34,14 +34,17 @@ import {
   type RoleFilter,
 } from "../../shared/pr-filter";
 import { basePrIndex, groupKeyOf, groupLabel, orderStacks, parentGroupKeys, type IssueGroupMode } from "../../shared/pr-group";
-import { hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
+import { configLooksStale, hasBudgetReading, hostHealth, type HostHealth } from "../../shared/host-status";
 import { createJiraStatusLoader } from "../../shared/jira-status";
 import { AuthorFilterContext } from "./components/author-filter-context";
 import { StaleCloseDialog } from "./components/StaleCloseDialog";
 import { StaleCloseContext } from "./components/stale-close-context";
 import { BasePrContext } from "./components/base-pr-context";
-import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext } from "./components/claude-context";
-import { HeaderSky } from "./components/HeaderSky";
+import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext, CodexAvailableContext } from "./components/claude-context";
+import { WeatherBadge } from "./components/WeatherBadge";
+import { UpsourceCard, UpsourceTile } from "./components/UpsourceCard";
+import { isUpsource } from "../../shared/upsource";
+import { applyUiStyle } from "./ui-style";
 import {
   DEFAULT_TABLE_SORT,
   parseColumnWidths,
@@ -64,6 +67,7 @@ import type {
   AgentState,
   ClaudeSessionInfo,
   DashboardResponse,
+  DataCopy,
   HostError,
   JiraSource,
   JiraStatus,
@@ -286,6 +290,8 @@ export function App() {
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraStatus | null>(null);
+  // A packaged app's copy of the data folder (Windows): why settings can look reset.
+  const [dataCopy, setDataCopy] = useState<DataCopy | null>(null);
   const loadJiraStatus = useMemo(() => createJiraStatusLoader((mode) => window.api.getJiraStatus(mode), setJiraStatus), []);
   const [claudeSessions, setClaudeSessions] = useState<ClaudeSessionInfo[]>([]);
   // The PR agent — null in fixture mode and until the first pull.
@@ -428,6 +434,7 @@ export function App() {
       })
       .catch(() => {});
     window.api.getWhatsNew().then(setWhatsNew).catch(() => {});
+    window.api.getDataCopy().then(setDataCopy).catch(() => {});
     void loadJiraStatus();
   }, [loadJiraStatus]);
 
@@ -439,9 +446,9 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [whatsNew]);
 
-  // The header's sky. Asked again on every return from Settings (the city may
-  // have changed) and every 10 minutes after; main caches the answer for 30,
-  // so most of these cost no request.
+  // The header's weather icon. Asked again on every return from Settings (the
+  // city or location may have changed) and every 10 minutes after; main
+  // caches the answer for 30, so most of these cost no request.
   const [weather, setWeather] = useState<WeatherStatus | null>(null);
   useEffect(() => {
     if (view !== "dashboard") return;
@@ -678,6 +685,18 @@ export function App() {
     if (view === "settings") return;
     return window.api.onRefreshRequest(() => void refresh());
   }, [refresh, view]);
+  // CmdOrCtrl+F: the search box of whichever screen is on view — the PR list's
+  // or Settings' — each marked `data-find-field`. Its text is selected, so
+  // typing replaces the last query.
+  useEffect(
+    () =>
+      window.api.onFindRequest(() => {
+        const field = document.querySelector<HTMLInputElement>("input[data-find-field]");
+        field?.focus();
+        field?.select();
+      }),
+    [],
+  );
 
   // F5 is the second Refresh shortcut. It is handled here rather than in the
   // menu because one menu item carries exactly one accelerator, and a hidden
@@ -762,6 +781,13 @@ export function App() {
   // for the frame before `getConfig` answers, which is the original behavior.
   const trackComments = config?.trackComments ?? true;
 
+  // The look (Settings › Appearance) once the config is known; the Settings
+  // switch applies it at once itself.
+  const uiStyle = config ? (config.uiStyle ?? "flat") : null;
+  useEffect(() => {
+    if (uiStyle !== null) applyUiStyle(uiStyle);
+  }, [uiStyle]);
+
   // Every filter decision lives in `shared/pr-filter` so it can be unit-tested —
   // this is the whole view state that module needs.
   const filterState = useMemo<FilterState>(
@@ -813,6 +839,8 @@ export function App() {
   const stats = useMemo(() => baselineStats(allPrs), [allPrs]);
 
   const filtered = useMemo(() => filterPrs(allPrs, filterState), [allPrs, filterState]);
+  const boardPrs = useMemo(() => filtered.filter((p) => !isUpsource(p)), [filtered]);
+  const boardAll = useMemo(() => allPrs.filter((p) => !isUpsource(p)), [allPrs]);
 
   // Chip badges are facet counts. A source chip reports how big that source is
   // under role / host / search and the reveal gate — blind to the other sources,
@@ -1022,6 +1050,18 @@ export function App() {
 
   const noHosts = config !== null && config.hosts.length === 0;
 
+  // A config read empty while the snapshot polled hosts is stale (`configLooksStale`).
+  // Read again on each snapshot while it stays so: one read can fail as well.
+  const staleConfig = configLooksStale(config?.hosts.length ?? null, data);
+  useEffect(() => {
+    if (!staleConfig) return;
+    window.api
+      .getConfig()
+      .then((r) => {
+        if (r.ok) setConfig(r.config);
+      })
+      .catch(() => {});
+  }, [staleConfig, data]);
 
   if (view === "settings") {
     return (
@@ -1050,16 +1090,20 @@ export function App() {
           sticky header, so it already sits at top 0 and doesn't shift up by
           that gap on the first pixels of scrolling before it sticks. */}
       {/* No rule under the header: its lighter tone sets it off from the list
-          scrolling beneath it. The whole header hosts the weather sky. */}
-      <header className="sky-host sticky top-0 z-10 -mx-4 mb-2 bg-surface/70 px-4 pb-3 pt-2 backdrop-blur">
-        <HeaderSky weather={weather} />
+          scrolling beneath it. */}
+      <header className="sticky top-0 z-10 -mx-4 mb-2 bg-surface/70 px-4 pb-3 pt-2 backdrop-blur">
         <div className="relative flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <img src={logoUrl} alt="" aria-hidden width={44} height={44} draggable={false} className="h-11 w-11 shrink-0 select-none" />
-            {/* The count sits on the title's line, after it: one row, not two. */}
-            <div className="ml-1 flex items-baseline gap-3">
-              <h1 className="text-xl font-semibold text-fg">Pull Requests</h1>
-              <p className="text-xs text-fg-subtle">
+            {/* The count sits on the title's line, after it: one row, not two,
+                centred on the title's ink (capitals to baseline — the title has
+                no descender), measured in pixels of the real window: the
+                baseline plus a 0.203125rem lift. A box-centred line read as too
+                high, a baseline-aligned one as too low. Changing the title's
+                text can move its ink centre (a "q" or "p" drops it). */}
+            <div className="ml-1 flex items-baseline gap-5">
+              <h1 className="text-xl font-semibold text-fg">GitHub PR Dashboard</h1>
+              <p className="relative -top-[0.203125rem] text-xs text-fg-subtle">
                 {/* Only what the filter chips can't say. The attention / failing /
                     new-comments totals used to sit here too, counted over every PR
                     while the chips count within the current role — two numbers
@@ -1068,6 +1112,8 @@ export function App() {
                 {headerCountLabel(filtered, stats.total)}
                 {/* No chip covers "back to you", so it stays. */}
                 {stats.returned > 0 && ` · ${stats.returned} back to you`}
+                {/* Inside the count's line, so it centres on that text. */}
+                <WeatherBadge weather={weather} />
               </p>
             </div>
             {/* The PR agent as a companion: what it is doing, in one chip. */}
@@ -1157,6 +1203,7 @@ export function App() {
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search by title, repo, author…"
+                  data-find-field
                   className={cn(
                     "w-full rounded-md border py-1.5 pl-3 pr-8 text-sm text-fg placeholder:text-fg-faint focus:outline-none",
                     searchActive
@@ -1422,6 +1469,10 @@ export function App() {
         </div>
       )}
 
+      {/* A packaged app's copy of the data folder — shown above everything that
+          reads settings, since it is the reason they can look reset. */}
+      {dataCopy && <DataCopyBanner copy={dataCopy} onHide={() => setDataCopy(null)} />}
+
       {/* Fetch error */}
       {error && (
         <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-600/40 dark:bg-red-950/40 dark:text-red-200">
@@ -1513,12 +1564,14 @@ export function App() {
       <AgentContext.Provider value={agentContext}>
       <ClaudeEnabledContext.Provider value={config?.claudeEnabled ?? false}>
       <ClaudeDesktopContext.Provider value={config?.claudeDesktop ?? false}>
+      <CodexAvailableContext.Provider value={config?.codexAvailable ?? false}>
       <ClaudeSessionsContext.Provider value={claudeSessions}>
       <AuthorFilterContext.Provider value={authorFilter}>
       <StaleCloseContext.Provider value={setClosingPr}>
       <BasePrContext.Provider value={basePrs}>
       {viewMode === "board" ? (
-        <PrBoard prs={filtered} all={allPrs} onOpen={openPr} focus={boardFocus} onClearFilters={clearFilters} />
+        // The Board is the PR agent's work: Upsource reviews are not on it.
+        <PrBoard prs={boardPrs} all={boardAll} onOpen={openPr} focus={boardFocus} onClearFilters={clearFilters} />
       ) : viewMode === "cozy" ? (
         tableRows.length > 0 && (
           <PrTable
@@ -1618,6 +1671,7 @@ export function App() {
         />
       )}
       </ClaudeSessionsContext.Provider>
+      </CodexAvailableContext.Provider>
       </ClaudeDesktopContext.Provider>
       </ClaudeEnabledContext.Provider>
       </AgentContext.Provider>
@@ -1645,6 +1699,13 @@ export function App() {
         )}
         {updateStatus?.state === "downloaded" && (
           <span className={FLOATING_PILL}>Restarting to install v{updateStatus.version}…</span>
+        )}
+        {updateStatus?.state === "error" && (
+          // pointer-events-auto: the row is click-through, and a span that
+          // gets no hover never shows its title — the only place the reason is.
+          <span className={`${FLOATING_PILL} pointer-events-auto cursor-help`} title={updateStatus.message}>
+            Update failed
+          </span>
         )}
         {/* The What's new button already names the version, so the bare one
             shows only without it. */}
@@ -1701,12 +1762,16 @@ function PrList({
   if (mode === "compact") {
     return (
       <div
+        data-pr-grid="compact"
         className={cn(
           "grid gap-1.5 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 3xl:grid-cols-8 4xl:grid-cols-10",
           className,
         )}
       >
-        {prs.map((pr) => (
+        {prs.map((pr) =>
+          isUpsource(pr) ? (
+            <UpsourceTile key={pr.id} pr={pr} hideRepo={hideRepo} onOpen={onOpen} onToggleIgnore={onToggleIgnore} />
+          ) : (
           <PrTile
             key={pr.id}
             pr={pr}
@@ -1715,18 +1780,32 @@ function PrList({
             onOpen={onOpen}
             onToggleIgnore={onToggleIgnore}
           />
-        ))}
+          ),
+        )}
       </div>
     );
   }
   return (
     <div
+      data-pr-grid="roomy"
       className={cn(
         "grid gap-2.5 md:grid-cols-2 2xl:grid-cols-3 3xl:grid-cols-4 4xl:grid-cols-5",
         className,
       )}
     >
-      {prs.map((pr) => (
+      {prs.map((pr) =>
+        isUpsource(pr) ? (
+          <UpsourceCard
+            key={pr.id}
+            pr={pr}
+            hideRepo={hideRepo}
+            parentGroupKey={parentGroupKey}
+            jiraBaseUrl={jiraBaseUrl}
+            onOpen={onOpen}
+            onMarkSeen={onMarkSeen}
+            onToggleIgnore={onToggleIgnore}
+          />
+        ) : (
         <PrCard
           key={pr.id}
           pr={pr}
@@ -1738,13 +1817,49 @@ function PrList({
           onMarkSeen={onMarkSeen}
           onToggleIgnore={onToggleIgnore}
         />
-      ))}
+        ),
+      )}
     </div>
   );
 }
 
 /** Where a new Atlassian API token is created. */
 const ATLASSIAN_API_TOKENS_URL = "https://id.atlassian.com/manage-profile/security/api-tokens";
+
+/**
+ * Windows keeps a packaged app's writes under %APPDATA% in that package's own
+ * copy, so PR Dashboard started from Claude Desktop saves its settings where
+ * the Start menu's PR Dashboard never looks (`main/data-copy.ts`). Inside that
+ * copy, the way out is starting the app from the Start menu; outside it, the
+ * copy is where settings that look reset went. Hidden for this run only.
+ */
+function DataCopyBanner({ copy, onHide }: { copy: DataCopy; onHide: () => void }) {
+  const btn =
+    "ml-2 rounded-md border border-amber-300 bg-white/60 px-2 py-0.5 text-xs font-medium hover:bg-white dark:border-amber-600/50 dark:bg-transparent dark:hover:bg-amber-900/40";
+  return (
+    <div className="mb-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-600/40 dark:bg-amber-950/30 dark:text-amber-200">
+      {copy.where === "inside" ? (
+        <>
+          <span className="font-semibold">Started from {copy.appName}.</span> Windows keeps a separate copy of PR
+          Dashboard&apos;s data for apps started from {copy.appName}, so these settings are not the ones the Start
+          menu, the desktop shortcut, sign-in or an update open. Quit and start PR Dashboard from the Start menu.
+        </>
+      ) : (
+        <>
+          <span className="font-semibold">{copy.appName} keeps another copy of your settings.</span> PR Dashboard
+          was once started from {copy.appName}, and Windows kept what it saved there apart (last changed{" "}
+          {new Date(copy.changedAt).toLocaleString()}). If your settings look reset, they are in that copy.
+        </>
+      )}
+      <button type="button" className={btn} onClick={() => window.api.showDataCopy().catch(() => {})}>
+        Show folder
+      </button>
+      <button type="button" className={btn} onClick={onHide}>
+        Hide
+      </button>
+    </div>
+  );
+}
 
 /**
  * Says that Jira or twg rejected the credentials and offers the one action that

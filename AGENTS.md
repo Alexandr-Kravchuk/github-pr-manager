@@ -139,9 +139,13 @@ Three layers:
   checkout (`in <folder>:`, started through `start_session`'s `cwd`), since a
   review in a foreign folder loads that folder's CLAUDE.md as its rules and
   searches the wrong code. The parent also adds to every nested prompt, word
-  for word, the user's permission to publish the review on the PR (never
-  `APPROVE`), since a request from another session is not the user's
-  consent; a default prompt is stored empty and an old default saved
+  for word, the user's permission to publish the review on the PR, since a
+  request from another session is not the user's consent. The template's
+  `{permission}` takes one of `REVIEW_GROUP_PERMISSIONS`: never `APPROVE` by
+  default, or — only with Settings → Claude → "Review all may approve"
+  (`reviewGroupApprove`, an explicit opt-in, because the approval goes out
+  under the user's own account) — an `APPROVE` of a review with no Blocker
+  and no Major, posted with `commit_id` of the head it read; a default prompt is stored empty and an old default saved
   verbatim is read through `PREVIOUS_DEFAULT_PROMPTS`, so a changed default
   reaches every user who never edited it — the agent's prompts too
   (`toStoredSettings`, `PREVIOUS_DEFAULT_AGENT_PROMPTS`). Each
@@ -172,7 +176,15 @@ Three layers:
   switches to it — Desktop through `claude://claude.ai/epitaxy/<hostSessionId>`,
   a CLI session through the iTerm2/Terminal tab on its tty — and launching a
   second one moves to the menu, since two sessions on one PR edit the same
-  branch),
+  branch; for the same reason the PR agent starts nothing on such a PR — not
+  its plan, not a run you ask for or answer, not one that waited in its queue
+  while the session opened (`yourSessionOn` in `main/agent/index.ts`; its own
+  run continued in your terminal counts, and so does one Desktop paused — it
+  may be waiting for your answer — whose refusal says to archive it; the plan
+  reads the same list and runs again whenever the list changes
+  (`sessionsChanged`), or a PR whose session ended would keep its reason until
+  the PR moved), and the Board offers no "Let the agent …" there
+  (`OWN_SESSION_WHY` in `shared/agent-view.ts`)),
   `settings-search.ts` (the Settings screen's tabs, which section sits on which,
   and the keywords its search box matches — every word of the query must hit a
   section's title or keywords; a setting whose label is missing there cannot be
@@ -238,9 +250,56 @@ Three layers:
   switch-off — so no reason waits for the next poll. A drive's result
   from before the app last started is marked `needsRerun` at start: its
   push and its answer are checked against what the app took in memory
-  (`pushTo`), so its card offers Run again (and Open in Claude) instead of
-  a question's buttons or a Push that would only be refused, and shows the
-  question as what the new run will ask. A refused action's message shows
+  (`pushTo`, never on disk). While its worktree is still there,
+  `recoverDrives` (and a followed turn) rebuild `pushTo` from the clone's
+  side — the worktree's git folder from `<commonDir>/worktrees/*/gitdir`,
+  not the worktree's own `.git` file, the clone's push URL, a fingerprint
+  taken now — only for the clone the app finds for the PR now
+  (`trustedCheckout`, never `checkout` from state.json alone), only for a
+  push URL that is the PR's repository, and refused while the
+  repository's config could redirect a push or run a program for it
+  (`redirectingKeys`: insteadOf, pushurl, credential/http/protocol keys,
+  sshCommand, askPass, any include) — mark it `recovered` (pushed only on
+  your click) and
+  read the commits again, those your session made since included. What
+  still can't be read becomes `localWork` (the folder and `rev-list`'s
+  count on top of the PR): the card names it, never says "nothing to
+  push", and Send is refused while it holds commits. Otherwise such a
+  result is stale (`staleRun`): its question or Push could only be
+  refused, so it is not your move — and neither is a drive's result once
+  the PR's head moved past the commit it started from (`headMoved`, by
+  `drive.base` or the key's head; a head that is one of its own commits
+  is excepted, whether the app or a session continued in Claude pushed
+  it). GitHub then places the card (With reviewers, Merge, Open on
+  GitHub…), the run is the card's note, Discard is its obvious choice, the
+  chip, tray and popover don't count it as ready (`AgentState.heads` gives
+  them each PR's head), and it raises no toast (`agentNoticeTitle` is null). A drive's worktree is never removed with work you
+  haven't seen (`keepForWork`: a HEAD that is not the one its card
+  showed, changed tracked files, or a count git couldn't make) — Discard, a
+  close and the sweep keep it and its run folder, write
+  `refs/prd-agent/<runId>` (create-only, a UUID run id only), and say so on
+  the card; the sweep frees it, ref and all, once that work is on the PR,
+  and pruning skips such a card. Run again says so once first. Reading a
+  worktree never goes through its own `.git` file (no git folder from the
+  clone's side: nothing is read), and `git status` — which runs the
+  config's clean filters — only while git's config matches the fingerprint
+  taken before the session. A drive's replies are held once when they cite a commit id the
+  PR doesn't have (`shasNotOnPr`), and a PR head that moved only by the
+  run's own commits (the run's head under it, it under the worktree's
+  HEAD) doesn't stop them. "Open in Claude" (`continue`)
+  does not leave the card behind: a drive's or a review's card follows the
+  session it resumed (`item.follow` in `state.json`, so a restart goes on
+  following it) on the agent's own timer — a stat per tick, the transcript's
+  tail read only once it changed and has been still for 2 s
+  (`main/agent/followup.ts`). A turn that ends with a new `prd-result`
+  block replaces the card's summary, questions and findings
+  (`shared/agent-followup.ts`: the final message of the main conversation,
+  not a subagent's, not a turn still going), and what is left is read
+  again — the replies recorded through the run's wrapper, a drive's commits
+  on top of the run's head (only while git's fingerprint still matches).
+  Nothing asked and nothing left to send or push closes the card; a turn
+  without the block changes nothing; a card that left Your move is no
+  longer followed. A refused action's message shows
   on the open card it came from, not only at the top of the Board. A
   move ready for you names itself wherever the PR shows — the Roomy line's
   button ("Send review →", "Push 2 fixes →") and the Cozy cell open its card
@@ -350,20 +409,36 @@ Three layers:
   re-approve's. The merge itself is not adapted yet: GitHub's
   synchronous merge API, which `gh pr merge` uses, does not support stacked
   PRs — the asynchronous `merge-async` endpoint does).
-  The header sky has its own: `weather.ts` (WMO weather code → one of
-  seven skies, and parsing Open-Meteo's geocoding and forecast answers;
-  `main/weather.ts` fetches them for the city in Settings — the only thing
-  that leaves the machine, so an empty city sends nothing and the header
-  keeps its snow — and caches the answer 30 min, a failure 5, keeping the
-  last good sky through a failed refresh; the `weather:get` channel takes no
-  argument, so the renderer cannot point the request elsewhere). Keep any such
+  The header's weather icon has its own: `weather.ts` (WMO weather code →
+  one of seven kinds, and parsing Open-Meteo's geocoding and forecast answers;
+  `main/weather.ts` fetches them for the city in Settings or, with no city,
+  for the location saved by Settings' "Use my location" — the only things
+  that leave the machine, so with neither nothing is sent and the header
+  shows no weather at all (`WeatherBadge.tsx`: one static icon and the
+  temperature beside the PR count) — and caches the answer 30 min, a failure
+  5, keeping the last good answer through a failed refresh; the `weather:get`
+  channel takes no argument, so the renderer cannot point the request
+  elsewhere). Nothing asks for the location on its own: only that button
+  does, over `weather:locate` (no argument — the coordinates come from the
+  OS through main, never from the renderer), and they are kept rounded to
+  ~1 km in `userData/weather-location.json` (`main/weather-location.ts`). Not
+  `navigator.geolocation`: in Electron it calls Google's paid geolocation
+  service and, with no API key, times out without a prompt.
+  `main/locate.ts` asks the OS instead — on macOS the `prd-locate.app` helper
+  (`native/macos-locate`, Swift/Core Location, built universal by
+  `scripts/build-locate.mjs` into `dist/native` and shipped through
+  `extraResources`), run with `open -n -g -W --stdout`, because Location
+  Services prompts only for a bundle with a usage string and a bare child
+  binary stays "not determined"; the hardened runtime needs
+  `com.apple.security.personal-information.location`. On Windows it is
+  GeoCoordinateWatcher in Windows PowerShell. Keep any such
   module Node-free — a `node:` import there breaks the renderer build (Vite fails
   to bundle it). A guard test in `tests/run-tests.cjs` asserts the compiled
   `notify.js`, `pr-filter.js`, `issue-key.js`, `hotkeys.js`, `pr-group.js`,
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `jira-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
   `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`,
-  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js` and `weather.js` stay free of `node:` builtin references, so the
+  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js`, `weather.js`, `ui-style.js` and `upsource.js` stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
@@ -385,7 +460,28 @@ Three layers:
   `shared/agent-view.ts`, one pure function the chip and the tray read too,
   so a PR shows once; the words are `shared/agent-explain.ts`. A card nobody
   started (asked of you, red CI) offers "Let the agent …" first and GitHub
-  second, never only a link. The two lanes are a tag on each card, not rows
+  second, never only a link — but never a button main would refuse: your PR
+  from a fork (the agent never pushes to one) says how to fix it yourself, and
+  a PR your own Claude session holds offers "Open your Claude session" first
+  (`control: "session"`; the Board finds the session the way the card's Claude
+  button does and switches to it). A review asked of you whose agent run on
+  this very head ended with nothing to post and nothing that holds an approval
+  back (`approvableReview` in `shared/agent-view.ts`: its own `prd-result`
+  block, no Blocker, no Major, no question for the author) offers "Approve"
+  first (`approve`, only the run id over IPC): main checks the rule again,
+  reads the PR again — open, same head, your approval not already on it — and
+  posts an APPROVE of that head with one line and the signature, logged as
+  `run/approved`; the run is then marked published, so it is offered once.
+  Every Your-turn card has "Not now" (`notNow`,
+  only the PR id goes over IPC): main stores the card's `cardKey` — the PR's
+  head, `updatedAt`, CI and conflict state, and its latest run — in
+  `state.json` (`setAside`), and while that still reads the same the card
+  sits folded under "Set aside" and out of every "ready for you" count
+  (`readyItems`, `hiddenReady`). Main sets aside only a card in Your turn,
+  and one rule (`stillAside`) says a card is still aside: its PR on the
+  dashboard, the same key, the card still in Your turn. Anything new on the
+  PR ends it — `getState` filters at once, and every snapshot prunes and
+  tells the window, the agent on or off — or Bring back (`bringBack`) now. The two lanes are a tag on each card, not rows
   of columns: a move was missed for days among eight equal columns. The
   three variants it was picked from are on the `prototype/board-redesign`
   branch. Like Cozy it turns off Group-by and Sort).
@@ -432,12 +528,41 @@ Three layers:
   to it wins on stylesheet order and the titles run to any number of lines,
   which is what made the tiles in a row different heights.
 
+## Repository skills (Claude and Codex)
+
+Keep repository skills in `.claude/skills/<name>/SKILL.md`. The tracked relative
+symlink `.agents/skills` → `../.claude/skills` exposes that same directory to
+Codex's repository skill discovery, including newly added skills. Edit the
+canonical Claude directory; do not copy skills or replace the symlink with a
+separate directory. Skill resources and scripts stay beside their `SKILL.md`.
+
 ## Build / run
 
 - `npm run dev` — Vite dev server (HMR) + Electron pointed at it. The main
   process compiles in `tsc --watch` and Electron restarts after each clean
   build: it reads `dist/main` only at startup, so a one-off compile kept a dev
   app on stale main code while the renderer hot-reloaded and looked current.
+- **A build that isn't the installed app has its own data folder**,
+  `<userData> (dev)` (`main/dev-user-data.ts`, set at the top of `main.ts`
+  before the single-instance lock): one run from source (`!app.isPackaged`) or
+  from a packaging folder — on Windows a packaged exe with no
+  `Uninstall PR Dashboard.exe` next to it is a `dist/win-unpacked` build
+  (`isInstalledBuild`). All of them are named "PR Dashboard", so every
+  worktree's build used to read and write the installed app's `settings.json`
+  and agent state: a branch with a reshaped setting saved it in its shape, and
+  the release the next auto-update restarted read it as defaults — "settings
+  reset on every update". Such a build also leaves the launch-at-login entry
+  alone (Windows writes it with the running exe's path, so the next sign-in
+  started a worktree's old build) and takes no updates (`win-unpacked` ships
+  `app-update.yml`, and its update would run the real installer). The first
+  launch copies `settings.json` (agent switched **off**), seen, ignored,
+  window and weather-location state from the installed app, once — never the
+  Jira token, whose key on Windows lives in the folder's own Chromium state.
+  It no longer shares the installed app's single-instance lock, so both can
+  run at once: two pollers, two sets of toasts, and two agents on the same PRs
+  if you switch its agent on. Delete the `(dev)` folder's `settings.json` to
+  seed it again. macOS has no such check: a `dist/mac*` app counts as
+  installed.
 - `npm run build` — `tsc` (main) + `vite` (renderer) → `dist/`.
 - `npm run typecheck` and `npm test` — the gate before any push.
 - `npm run package` / `npm run package:dir` — electron-builder (dmg / nsis).
@@ -454,8 +579,10 @@ Three layers:
 - Keyboard shortcuts live in the application menu (`menu.ts`), not in renderer
   key handlers: a menu accelerator fires whatever has focus and it shows the
   user what the shortcut is. Both items forward to the renderer over IPC
-  (`menu:open-settings`, `menu:refresh`) because the renderer owns the view and
-  the loading state. Both actions surface the window first (`createMenuActions`,
+  (`menu:open-settings`, `menu:refresh`, `menu:find`) because the renderer owns
+  the view and the loading state. View › Search (CmdOrCtrl+F) focuses and selects
+  the search box of the screen on view — the PR list's or Settings', each marked
+  `data-find-field`. Both actions surface the window first (`createMenuActions`,
   unit-tested): close-to-tray makes hidden-but-alive the normal idle state, and
   on macOS the app can be frontmost with no window on screen, so a shortcut that
   only pushed an event would look dead while still spending a GraphQL request. `CmdOrCtrl` covers both platforms — Cmd+, / Cmd+R on macOS,
@@ -482,6 +609,74 @@ Three layers:
   in-progress edit (a half-typed Jira token) was rejected instead.
 - Settings never contain tokens; tokens are resolved per host via `gh` at fetch
   time (`config.ts`).
+- **A save never erases a field another build wrote.** Loading reads a field
+  this build doesn't know as nothing, so `persistSettings` merges the file on
+  disk back in (`keepUnknownSettings` in `shared/config.ts`): every field
+  outside this build's known shape — the defaults plus the optional fields in
+  `OPTIONAL_SETTINGS_SHAPE` — is kept at any depth, while a known one always
+  comes from the save, so a cleared Jira site, Upsource address or removed
+  repo path stays gone (an empty object in the shape, like `claude.repoPaths`,
+  is a map owned whole; arrays too). A known field whose value this build
+  rejects is not kept: validation turns it into the default, and the save
+  writes that default (a newer build's `uiStyle` is lost to an older one's
+  theme toggle). `OPTIONAL_SETTINGS_SHAPE` is typed against `Settings`, so a
+  new optional top-level field, or a new key of `jira`/`upsource`, fails the
+  build until it is listed — unlisted, clearing it in Settings would bring it
+  back from disk. Renaming or reshaping a field therefore needs both
+  directions: read the old key, and expect an older build to keep writing it.
+  A field removed on purpose — a moved secret — goes in
+  `RETIRED_SETTINGS_FIELDS`, or the merge keeps it alive.
+- **Only a missing `settings.json` is the first run.** `readSettingsText`
+  (`main/settings.ts`) returns empty settings for ENOENT alone; a read that
+  fails otherwise is tried again a few times (EBUSY/EPERM/EACCES/EAGAIN — a
+  scan or an installer holding it), then throws `ConfigError`, which the
+  poller and the UI show as an error. The retries sleep on the main thread and
+  `loadSettings` runs on every poll tick, so a transient error that outlasted
+  them is remembered for a few seconds (`READ_FAILURE_MEMO_MS`): calls in that
+  time throw at once, with no retry (a Save's read-before-write reads anyway),
+  and each failure is logged once until a read succeeds. A start that cannot
+  read them runs on the defaults but leaves the OS login item as it is. It
+  used to read as "no
+  file", so a file that was there but unreadable looked like a first run, and
+  the next save wrote defaults over it. So `persistSettings` refuses to write
+  over a file it could not read, writes through a temporary file renamed over
+  the old one — the rename retried like a read, since a scanner opens the file
+  it just saw written; one that still fails removes the temporary file and
+  throws `ConfigError`, the old settings intact — and `App.tsx` reads the
+  config again once a snapshot polled hosts the config doesn't list
+  (`configLooksStale` in `shared/host-status.ts`; it was read once on mount
+  and never again). `userData/main.log`
+  (`main/diag-log.ts`, capped, `.old` kept) records each start — version,
+  argv, data folder, how many hosts and whether the agent loaded — every
+  failed settings read and the updater's downloads and errors (one line each;
+  an error's stack is in `userData/updater.log`): read it first when settings
+  "reset" again.
+- **A packaged app's copy of the data folder** (Windows, `main/data-copy.ts`).
+  A process started from an MSIX app keeps that app's view of `%APPDATA%`.
+  Claude Desktop's terminal and sessions are such processes: their writes land
+  in `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\PR Dashboard`,
+  and their reads show that copy over the real folder.
+  `GetCurrentPackageFullName` still says "not packaged", so nothing in the
+  process tells it apart.
+  - **The story behind "settings reset after every update".** The settings
+    one user had saved since a start from Claude lived in Claude's copy. The
+    app started from the Start menu, the desktop, the login entry or an
+    update's relaunch (`ExecShellAsUser`, through Explorer) read the real,
+    nearly empty folder. The same exe and file read fine from the shell,
+    because the shell itself sits inside Claude's view.
+  - **What the app does.** At start, `findDataCopies` looks for
+    `Packages\*\LocalCache\Roaming\<userData's name>` holding a
+    `settings.json`. It logs each copy to `main.log` and calls a copy
+    `inside` when the data folder's `settings.json` opens the same file, or
+    `outside` when it opens another one. The banner (`DataCopyBanner`, over
+    `app:dataCopy`) says why settings look reset: inside, start the app from
+    the Start menu; outside, the copy holds what was saved there.
+    `app:showDataCopy` opens only the folder main found and takes no
+    argument. In the plain-browser mock, `?dataCopy=inside|outside` previews
+    the banner.
+  - **How to see the real folder from a Claude session.** Run the command
+    through `explorer.exe <script>.cmd`. A test of the installed app with the
+    real profile must not start it from a session.
 - Jira is read through the Atlassian `twg` CLI first, the API token second —
   the `gh` model again: twg signs in with OAuth and refreshes itself, so there
   is nothing to expire. `shared/jira-pass.ts` picks the source per pass (twg
@@ -534,10 +729,14 @@ Three layers:
   move/resize and **flushed on `close` before `trayController.handleClose`**:
   close-to-tray may hide the window, and a hidden window's bounds are not
   reliable.
-- Launch at login starts the app **in the tray** when close-to-tray is on
-  (`main/login-launch.ts`): the Windows Run-key entry carries `--hidden`
-  (macOS relies on `wasOpenedAtLogin`, best-effort — login items there take no
-  arguments). The first window is then created with `show: false`, and it is
+- Launch at login starts the app **in the tray** when close-to-tray is on —
+  **on macOS only** (`startsInTray` in `main/login-launch.ts`; macOS relies on
+  `wasOpenedAtLogin`, best-effort — login items there take no arguments). On
+  Windows the window opens at sign-in: Windows 11 puts a new tray icon behind
+  `^`, so a tray start looked like the app had not started, and the Run-key
+  entry is now the plain exe (an older build's `--hidden` entry is rewritten
+  on the next start and ignored until then). A tray start creates the first
+  window with `show: false`, and it is
   shown anyway if the tray icon failed to appear, since a hidden window with no
   icon is unreachable. The saved maximized/full-screen state waits for the
   first `show`, because `maximize()` would itself show the hidden window.
@@ -545,6 +744,16 @@ Three layers:
   before `setAppUserModelId` left an `electron.app.PR Dashboard` value behind
   and the app started twice at sign-in, once without `--hidden`;
   `staleLoginItemsFor` deletes it on every apply, whatever the preference is.
+- **An update installs silently and starts the app again**
+  (`quitAndInstall(true, true)` in `main/updater.ts`, 3 s after the download).
+  The Windows installer is the assisted one (`oneClick: false`), and its NSIS
+  templates start the app after an update only when silent (`isForceRun` *and*
+  `Silent` in `installSection.nsh`); a plain `quitAndInstall()` quit the app
+  and left the wizard waiting for clicks — an update downloaded at night kept
+  the app closed until morning, its Finish page the only way back. Silent, the
+  installer takes the install mode and folder from the previous install's
+  registry entry (`initMultiUser` in `assistedInstaller.nsh`) and starts the
+  app through the Start menu shortcut, with its window shown.
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes
   `electron .` self-quit after the renderer loads (a non-interactive boot check).
 - **The PR agent's log** is `userData/agent/log.jsonl` — one JSON line per
@@ -558,6 +767,7 @@ Three layers:
   refused tools and stderr's tail; `interrupted` when its process was ended
   under it; `diagrams`; `published`/`pushed`/`merged`/`reapproved`/`reasked`
   and their `not-*` refusals; `approved-again` (no run: your Approve again);
+  `approved` (your Approve on a review that found nothing blocking);
   `offered` for an offer; `notice`), `item` (every
   state change of an item), `board`
   (a card's column or button changed: `seen` on the first look, `move`,
@@ -573,6 +783,38 @@ Three layers:
   rather than the filtered ones, and only while the agent is on — pruning runs
   only then; their marks persist in `state.json` (`board`), so a restart logs
   what moved while the app was closed rather than every card again.
+- **Upsource reviews** (Settings › Integrations › Upsource, `Settings.upsource`)
+  join the list as items of their own: `shared/upsource.ts` (Node-free) maps
+  each open review you wrote or review into a `PullRequest` with
+  `source: "upsource"` and the review itself in `pr.upsource`, so grouping by
+  Jira key, search, the role and author filters, sorting, seen-state and
+  ignoring work on it unchanged. Its GitHub fields hold neutral values (no CI,
+  `canBeMerged` false, no stack), and the card, tile and Cozy row read
+  `pr.upsource` (`UpsourceCard.tsx`); the copy, ignore, Jira-key and avatar
+  controls both kinds of card carry live once, in `components/card-controls.tsx`.
+  `main/upsource.ts` keeps the Hub permanent token encrypted like Jira's
+  (`userData/upsource-token.enc`; a token with spaces or line breaks is refused
+  before it is stored) and is the poller's `upsource` source:
+  `getCurrentUser` (a guest answer is a refused token), `getReviews` (paged),
+  `getUserInfo` over `POST <base>/~rpc/<method>` with `Authorization: Bearer`
+  — https only, in settings and again before every call, one deadline per
+  call that covers the body and one for the whole read, and an error before
+  any answer names only its code, never the request. The source reads **in
+  the background**, one read at a time, at most once per poll interval, the
+  last list kept through a failure (the server is internal: off the VPN it is
+  unreachable). The poller never waits for it: every tick that is not parked
+  kicks it (forced on a manual refresh) and takes `current()` as it is, its
+  `nextDueAt()` counts toward the tick's wake-up (so it is read on time with
+  idle GitHub hosts or none at all), and a finished read calls
+  `rebuildSnapshot()`, which runs once more after a tick in flight rather
+  than joining it. `upsource:setToken` kicks a forced read itself — a read
+  started with the old token is dropped and the new one follows — and does
+  not wait for it (Settings closes only on its reply).
+  The host pill "Upsource" comes from `toPublicConfig` and gets a no-budget
+  reading (`resetAt` empty) for its green dot. Nothing GitHub-only may see a
+  review: the agent and every GitHub action in `main.ts` read `githubSnapshot()`
+  (`githubOnly`), the Board drops reviews, and `groupLaunchPrs` skips them, so
+  "Explain all" / "Review all" never hand Claude an Upsource link.
 - **No hook of a PR's repository runs for the agent.** A relative
   `core.hooksPath` (husky v9's `.husky/_`) resolves inside the worktree, so a
   hook there is the PR's own script. Every git command the app runs in a clone
@@ -641,6 +883,85 @@ Three layers:
   and `StructuredOutput`, which a Workflow's agents answer through); a test
   pins that every tool the default `--allowedTools` lists grant is one the
   guard knows, so extend the guard before adding a tool to the defaults.
+  One exception is narrow on purpose: the review skill's preflight. Its
+  Workflow first runs a deterministic helper of the installed plugin
+  (`skills/creatio-code-review/scripts/rereview-context.cjs`), found through
+  Claude Code's `plugins/installed_plugins.json`; the helper writes the PR's
+  data to `<tmp>/creatio-rereview-payload-*`, which later agents read. When
+  a mounted plugin carries the helper, a review or re-review with a payload
+  folder gets `preflight` in its guard file (`preflightFor` in
+  `main/agent/runner.ts`), `Bash(node *)` and a temp folder of its own
+  (`runTempEnv`: `<runDir>/tmp` as `TEMP`/`TMP`/`TMPDIR`), and
+  `checkPreflight` / `preflightReadable` allow exactly: reading that one
+  JSON file, reading inside a payload folder right under the run's temp
+  folder, `node <helper> < <request file in the run's payload folder>` and
+  `node <helper> --digest <payload folder>` — paths followed through links,
+  any other `node` call refused. The helper runs `gh` with your login on
+  whatever PR the request names, so the request is held to the run's own PR
+  and the four keys the skill sends (`requestProblem`). `node` never reads
+  the session's own file, which it could rewrite or rename over after the
+  check: the hook copies the checked text into `<runDir>/requests`, where
+  the session writes nothing (`requestStore`), and hands Claude Code the
+  command rewritten to read that copy (`updatedInput`), allowed by the hook
+  itself (`permissionDecision: "allow"`): the guard built all of that
+  command, and the copy is outside the session's folders, so Claude Code
+  would otherwise ask for an approval a headless run can't give — and the
+  review would abort. Nothing is locked, so a
+  refused request can be corrected and run again. The temp folder is the run's own because
+  your shared one keeps the payloads of every other review of the last day.
+  Without this every review aborted at the preflight (`preflight-unverified`)
+  and was reported as "Reviewed — nothing to post".
+- **Except a drive on your own PR, with full context** (Settings › Agent ›
+  "Your PRs: full context", `permissions.fullContextDrive`, on by default).
+  Its diff and comments are yours and your reviewers', so it runs with your
+  own Claude setup: `RunSpec.isolation: "full"` drops `--restricted`,
+  `--strict-mcp-config` and `--tools` (your settings, permission mode,
+  CLAUDE.md, hooks, plugins and MCP servers load; the drive's `--allowedTools`
+  only add to yours; only the `prd-user-skills` plugin is mounted on top), and
+  the guard file says `mode: "full"`, with no `readDirs`. `checkFullToolUse`
+  then turns into a denylist of writes to GitHub — `git push` (also through
+  `sudo`/`env`/`sh -c`, a `$(…)`, a `-c alias.`), `gh pr|issue|repo|label|…`
+  writes, `gh api` with a non-GET method, fields (but a GraphQL query) or
+  `--input`, and any tool of a GitHub/GHE MCP server but its reads — and
+  `checkRealWrite` lets writes land anywhere. This is best-effort against a
+  model that forgets the rule, not against a script that hides the call; the
+  hard boundary is still `sessionGitEnv` (no credentials, every remote
+  rewritten), and the app still pushes and posts the replies itself. Reviews,
+  briefs, re-reviews and the after-merge run never run full.
+- **The look** (Settings › Appearance › Style, `Settings.uiStyle`): `flat`
+  (the default), `neumorphism`, `claymorphism`, `neobrutalism`, `bento` or
+  `glassmorphism` — one list in `shared/ui-style.ts` (`UI_STYLES`, Node-free,
+  read by settings validation, the IPC check, the Settings menu and the
+  renderer) — a second axis next to
+  light/dark, so each works with both themes. The renderer sets
+  `data-ui="<style>"` on `<html>` (none for flat; `renderer/src/ui-style.ts`,
+  also cached in localStorage so a restart does not flash the flat look) and
+  `styles.css` keys every rule on it. Neumorphism: canvas and surface one
+  colour, cards, panels and framed buttons raised by a light and a dark
+  shadow, fields and segmented wells pressed in. Claymorphism: a pastel
+  canvas, lighter cards with big radii puffed up by a drop shadow and two
+  inner shadows, buttons as small clay pills, the chosen segment a pastel
+  accent. Neobrutalism: a loud canvas, thick ink outlines and hard offset
+  shadows with no blur, buttons that drop onto their shadow when pressed, the
+  chosen segment a bright yellow (its children inherit the dark text, or a
+  count with its own colour class vanishes on it in the dark theme), and a
+  near-white ink in the dark theme. Bento grid: borderless cells with big radii,
+  and in the card grids (`data-pr-grid` on `PrList`'s two grids) every fifth
+  card / seventh tile spans two columns with dense packing — Roomy's only
+  from `md`, where it has two columns, or the span would invent one.
+  Glassmorphism: a fixed backdrop of soft colour blobs and
+  translucent cards, panels and the table with a backdrop blur. The blobs
+  (a fixed `.glass-backdrop` layer) drift very slowly, but in steps:
+  `renderer/src/glass-drift.ts` moves them a few pixels once a second through
+  custom properties on that layer alone, stopped while the window is hidden or
+  reduced motion is on — a CSS animation would re-blur every card each frame.
+  The table's sticky actions column takes no fill (any fill or second blur
+  showed as a lighter stripe). The rules sit outside Tailwind's layers so they beat the
+  utilities; a new card or panel that should take part needs `shadow-tile`
+  or the `rounded-xl border border-line` panel shape. The switch applies at
+  once and persists over `style:set`, like the theme. In the plain-browser
+  mock, `?ui=<style>` previews them (with `&buddy=review` for nine PRs, enough to
+  see the bento grid).
 - **No always-running animation in the renderer.** An `infinite` CSS animation —
   including Tailwind's `animate-pulse` / `-spin` / `-bounce` / `-ping` — keeps the
   compositor producing frames for as long as the app is open, and Electron
@@ -654,14 +975,7 @@ Three layers:
   fires — see `.live-beat` in `styles.css` (one
   blink per snapshot) and `.claude-glow` (three breaths of a PR card's glow
   when a Claude session on it starts working or waiting; only its own layer's
-  `opacity` animates, so nothing repaints per frame). The header sky
-  (`HeaderSky.tsx`: snow, rain, thunder, clouds, fog, sun, stars — from the
-  weather) is the one animation that runs for as long as something holds it:
-  every moving part carries `.sky-anim`, which plays only while the pointer is
-  over the header and is `animation-play-state: paused` otherwise (a test pins
-  both rules and that each animated element carries the class), with a finite
-  iteration count. The play-state rules are two-class selectors on purpose:
-  the one-class `animation` shorthand resets the play state. Key it on something monotonic per event: `App.tsx` uses a
+  `opacity` animates, so nothing repaints per frame). Key it on something monotonic per event: `App.tsx` uses a
   snapshot counter, because `snapshot.fetchedAt` is
   the *oldest* host's stamp and stalls. A guard test in `tests/run-tests.cjs`
   scans `.ts`/`.tsx`/`.css`/`.html` under `src/renderer` for
@@ -672,4 +986,49 @@ Three layers:
   `.agent-diagram svg *` sets `animation: none`.
   Related: `backdrop-blur` on the sticky header is free at rest but multiplies
   the cost of anything animating beneath it (~3x in one dev-instance A/B) — keep
-  animations under it short and finite.
+  animations under it short and finite. A JS timer that restyles a layer under
+  a `backdrop-filter` is an animation under this rule too, though the guard
+  test cannot see it. The one allowed exception is `glass-drift.ts`
+  (Glassmorphism's backdrop): about one step a second, only while the document
+  is visible, and off under reduced motion — a new one needs the same
+  justification, not a `setInterval` in place of a CSS animation.
+
+## Windows release signing
+
+GitHub Actions Release signs Windows builds using `WIN_CSC_LINK` (base64 PFX)
+and `WIN_CSC_KEY_PASSWORD` secrets. `forceCodeSigning` is required in CI. Before
+upload, `scripts/verify-windows-release.ps1` checks the app and installer against
+`build/windows-signing/PR-Dashboard.cer`, checks timestamps and updater publisher
+verification, then stages dash-named assets with `WINDOWS-TRUST.md` and
+`Install-PR-Dashboard-Trust.ps1`. The user-run script pins the certificate SHA-256,
+checks validity before importing, and installs trust in CurrentUser only. Keep private
+keys outside Git and the renderer. Certificate rotation must update the secrets,
+public certificate and documented fingerprint together. Self-signed trust is a
+one-time user action; do not claim it guarantees no SmartScreen warnings.
+
+`build/installer.nsh` adds an unchecked finish-page trust option; trust is never
+an install hook. Silent installs and updates skip it. `win.extraFiles` embeds the
+public certificate, trust script and instructions in `windows-signing/`. The finish
+action uses `StdUtils.ExecShellAsUser`; `-FromInstaller` refuses an elevated token
+so a shell fallback cannot change the administrator's trust. Separate release
+assets remain the alternative. Uninstall does not remove user-managed trust.
+
+Auto-update does not need that trust. electron-updater accepts a downloaded
+installer only when Windows calls its signature Valid, so on a machine without
+the trust every update was downloaded and thrown away. `main/update-signature.ts`
+wraps the NSIS verifier (`verifyUpdateCodeSignature`, set in `updater.ts` on
+win32): it accepts one more case — the signature is intact, the only fault is
+the untrusted root (`StatusMessage` compared with Windows' own text for
+CERT_E_UNTRUSTEDROOT, since it is localized), and the signer certificate's
+SHA-256 is `PINNED_SIGNER_SHA256`. HashMismatch, no signature, another signer
+and a Valid signature all go to electron-updater's verifier unchanged. The file
+path reaches PowerShell through the environment, never the command line, and
+is compared with the signed file's path inside PowerShell (`samePath`): stdout
+comes back in the OEM code page, so a profile folder with non-ASCII letters
+would garble a printed path. The probe runs without `PSModulePath`, which an
+inherited PowerShell 7 value would break, as electron-updater's own call does. A
+test pins the constant to `PR-Dashboard.cer` and to the trust script, so a
+rotation updates all three; a release signed with a new self-signed key is
+refused by every older release's pin, so its users install it by hand once.
+Releases 3.4.1 and older have only electron-updater's check: they need the
+trust script or a manual install once.

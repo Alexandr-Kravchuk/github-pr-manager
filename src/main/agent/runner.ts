@@ -5,7 +5,8 @@ import path from "node:path";
 
 import { applyStreamEvent, initialProgress, parseStreamLine, type RunProgress } from "../../shared/agent-stream";
 import { launcherEnv } from "../../shared/claude-launch";
-import type { GuardRun } from "../../shared/agent-guard";
+import { PREFLIGHT_HELPER, type GuardPreflight, type GuardRun } from "../../shared/agent-guard";
+import { claudeConfigDir } from "../claude-sessions";
 import type { AgentRunKind } from "../../shared/types";
 
 // One agent session: `claude -p` with stream-json both ways, isolated from the
@@ -17,6 +18,10 @@ import type { AgentRunKind } from "../../shared/types";
 //   --plugin-dir         only the plugins the prompt's skills come from;
 //   --settings           the app's own file, carrying only the guard hook;
 //   --permission-prompts none — anything the rules don't allow is refused, not asked.
+// A drive on your own PR may run with full context instead (`isolation:
+// "full"`, Settings › Agent): none of the isolation above, your whole Claude
+// setup, with the guard hook refusing writes to GitHub and `sessionGitEnv`
+// keeping the push to the app.
 // A hint is a user message on stdin, pause is an `interrupt` control request
 // (the process stays alive), resume is another user message.
 
@@ -26,6 +31,13 @@ export interface RunSpec {
   /** Continue `sessionId` (`--resume`) — a run the app's closing interrupted — rather than start it. */
   resume?: boolean;
   kind: AgentRunKind;
+  /**
+   * "restricted" (the default): isolated from your Claude setup, as above.
+   * "full": a drive on your own PR — your settings, CLAUDE.md, hooks, plugins
+   * and MCP servers load as in your own sessions; only the app's guard hook
+   * (writes to GitHub) and the push block in `env` stay.
+   */
+  isolation?: "restricted" | "full";
   prompt: string;
   appendSystemPrompt: string;
   allowedTools: string[];
@@ -114,6 +126,7 @@ export function builtInTools(allowedTools: readonly string[]): string[] {
 }
 
 export function buildClaudeArgs(spec: RunSpec): string[] {
+  const full = spec.isolation === "full";
   return [
     "-p",
     "--verbose",
@@ -123,8 +136,7 @@ export function buildClaudeArgs(spec: RunSpec): string[] {
     "stream-json",
     spec.resume ? "--resume" : "--session-id",
     spec.sessionId,
-    "--restricted",
-    "--strict-mcp-config",
+    ...(full ? [] : ["--restricted", "--strict-mcp-config"]),
     "--permission-prompts",
     "none",
     "--settings",
@@ -135,8 +147,8 @@ export function buildClaudeArgs(spec: RunSpec): string[] {
     ...(spec.addDirs ?? []).flatMap((d) => ["--add-dir", d]),
     ...(spec.model ? ["--model", spec.model] : []),
     ...(spec.effort ? ["--effort", spec.effort] : []),
-    "--tools",
-    builtInTools(spec.allowedTools).join(","),
+    // Full context keeps every built-in tool; its rules only add to yours.
+    ...(full ? [] : ["--tools", builtInTools(spec.allowedTools).join(",")]),
     // Last: it takes every argument after it.
     "--allowedTools",
     ...spec.allowedTools,
@@ -165,10 +177,41 @@ export function hookCommand(execPath: string, hookScript: string, kind: AgentRun
  * means nothing is read from it.
  */
 export function claudeSessionRoots(env: Record<string, string | undefined>, platform: string = process.platform): string[] {
-  const config = env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), ".claude");
+  const config = claudeConfigDir(env);
   const tmp = env.CLAUDE_CODE_TMPDIR?.trim();
-  const temps = tmp ? [tmp] : platform === "win32" ? [env.TEMP?.trim() || env.TMP?.trim() || os.tmpdir()] : [os.tmpdir(), "/tmp"];
+  const temps = tmp ? [tmp] : platform === "win32" ? [osTempDir(env, platform)] : [osTempDir(env, platform), "/tmp"];
   return [...new Set([path.join(config, "projects"), ...temps.map((t) => path.join(t, "claude"))])];
+}
+
+/** The temp folder a process started with `env` takes — `os.tmpdir()`'s own rule, for that environment rather than this one. */
+export function osTempDir(env: Record<string, string | undefined>, platform: string = process.platform): string {
+  return (platform === "win32" ? env.TEMP?.trim() || env.TMP?.trim() : env.TMPDIR?.trim()) || os.tmpdir();
+}
+
+/** A session's own temp folder: every name a program reads it from. */
+export function runTempEnv(dir: string): Record<string, string> {
+  return { TEMP: dir, TMP: dir, TMPDIR: dir };
+}
+
+/**
+ * The review skill's preflight for a run (`GuardPreflight`), when a mounted
+ * plugin carries the helper: each helper and the temp folder as they really
+ * are (links and 8.3 names resolved, the way the guard reads a command's
+ * paths), and Claude Code's `installed_plugins.json` in `configDir`. `tmpDir`
+ * is the run's own temp folder, which the app hands the session as its
+ * `TEMP`/`TMP`/`TMPDIR` (`runTempEnv`); it must exist.
+ */
+export function preflightFor(pluginDirs: readonly string[], tmpDir: string, configDir: string): GuardPreflight | null {
+  const real = (p: string): string | null => {
+    try {
+      return fs.realpathSync.native(p);
+    } catch {
+      return null;
+    }
+  };
+  const helpers = pluginDirs.map((d) => real(path.join(d, ...PREFLIGHT_HELPER))).filter((h): h is string => h !== null);
+  if (helpers.length === 0) return null;
+  return { helpers: [...new Set(helpers)], installedPlugins: path.join(configDir, "plugins", "installed_plugins.json"), tmpDir: real(tmpDir) ?? tmpDir };
 }
 
 /**

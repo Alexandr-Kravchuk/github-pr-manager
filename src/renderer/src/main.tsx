@@ -2,6 +2,9 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import "./styles.css";
+import { applyRememberedUiStyle } from "./ui-style";
+
+applyRememberedUiStyle();
 
 async function bootstrap() {
   // Plain-browser dev (no Electron preload): install the mock bridge first.

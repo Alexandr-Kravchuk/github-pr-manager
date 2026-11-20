@@ -86,17 +86,32 @@ export interface SettingsHost {
  */
 export type ThemePreference = "system" | "light" | "dark";
 
-/** The header's sky picture, chosen from the current weather (shared/weather.ts). */
+/** The app's look, independent of light/dark (Settings › Appearance). */
+export type UiStyle = "flat" | "neumorphism" | "claymorphism" | "neobrutalism" | "bento" | "glassmorphism";
+
+/** The header's weather icon, chosen from the current weather (shared/weather.ts). */
 export type WeatherKind = "clear-day" | "clear-night" | "clouds" | "fog" | "rain" | "snow" | "thunder";
 
 /**
- * The header's weather. `off` while no city is set (the header keeps its
- * snowfall); `error` when the city is not found or Open-Meteo did not answer.
+ * The header's weather. `off` while neither a city nor a location is set (the
+ * header shows nothing). `fromLocation` marks an answer for the location
+ * chosen in Settings rather than the typed city. `error` when the place is not
+ * found or Open-Meteo did not answer.
  */
 export type WeatherStatus =
   | { state: "off" }
-  | { state: "ok"; kind: WeatherKind; place: string; temperatureC: number; fetchedAt: number }
+  | { state: "ok"; kind: WeatherKind; place: string; temperatureC: number; fetchedAt: number; fromLocation?: boolean }
   | { state: "error"; message: string };
+
+/**
+ * How a "Use my location" attempt ended (main/locate.ts) and the weather
+ * after it. Only `granted` saves anything.
+ */
+export interface WeatherLocateResult {
+  outcome: "granted" | "denied" | "failed" | "unavailable" | "timeout";
+  message?: string;
+  weather: WeatherStatus;
+}
 
 /**
  * Jira connection for parent-task grouping — credential-free, like the rest of
@@ -111,6 +126,16 @@ export interface JiraSettings {
    * Only the API-token fallback needs it; the `twg` CLI signs in on its own.
    */
   email?: string;
+}
+
+/**
+ * Optional Upsource (JetBrains code review) connection. Its reviews are listed
+ * next to the PRs. Only the server's address lives here; the Hub permanent
+ * token is stored encrypted on its own (`main/upsource.ts`), like Jira's.
+ */
+export interface UpsourceSettings {
+  /** Server origin, e.g. "https://upsource.example.com". */
+  baseUrl: string;
 }
 
 /** Which PR events raise a desktop notification. Each maps to a group agreed
@@ -162,7 +187,7 @@ export interface ClaudeSettings {
    * `reviewGroup` are the group heading's "Explain all" and "Review all":
    * `{key}`, `{count}`, `{urls}` and, for the review, `{prompts}`.
    */
-  prompts: Record<"drive" | "review" | "close" | "explain" | "open" | "explainGroup" | "reviewGroup", string>;
+  prompts: Record<"drive" | "review" | "codexReview" | "close" | "explain" | "open" | "explainGroup" | "reviewGroup", string>;
   /**
    * Prompts only the PR agent runs (see `AgentSettings`). Kept apart from
    * `prompts` on purpose: those keys are the Claude button's launch kinds, and a
@@ -179,6 +204,12 @@ export interface ClaudeSettings {
    * every launch. `iterm` / `terminal` fall back to `auto` off macOS.
    */
   terminal: ClaudeTerminal;
+  /**
+   * "Review all" lets a nested review with no Blocker and no Major APPROVE the
+   * head commit it read (`REVIEW_GROUP_PERMISSIONS.approve`). Off by default:
+   * the approval is posted under the user's own GitHub account.
+   */
+  reviewGroupApprove: boolean;
 }
 
 /** Persisted application settings (userData/settings.json) — no tokens. */
@@ -196,6 +227,16 @@ export interface Settings {
   closeToTray: boolean;
   /** Light/dark appearance, or follow the OS. */
   theme: ThemePreference;
+  /**
+   * The app's look, on top of the light/dark theme: `flat` (the default — and
+   * what an absent value means), `neumorphism` (cards and controls raised out
+   * of a canvas of their own colour by a light and a dark shadow) or
+   * `claymorphism` (puffy pastel cards with big radii and inner shadows) or
+   * `neobrutalism` (thick ink outlines, hard offset shadows, loud colours),
+   * `bento` (a bento grid: borderless rounded cells, some twice as wide) or
+   * `glassmorphism` (frosted translucent cards over a colourful backdrop).
+   */
+  uiStyle?: UiStyle;
   /**
    * Whether an unread-comment count is kept per PR. Off drops that one channel:
    * `hasNewActivity` never gets set, so the `New comments` chip, the card badge
@@ -237,13 +278,15 @@ export interface Settings {
   hosts: SettingsHost[];
   /** Optional Jira connection for parent-task grouping (token stored separately). */
   jira?: JiraSettings;
+  /** Optional Upsource connection: its reviews join the list (token stored separately). */
+  upsource?: UpsourceSettings;
   /** Claude session launcher (off by default). */
   claude: ClaudeSettings;
   /**
    * The city whose current weather the header draws ("Kyiv" or "Kyiv,
-   * Ukraine"). Empty turns it off and the header keeps its snowfall — the
-   * city is the only thing that leaves the machine, so nothing is sent
-   * until one is typed.
+   * Ukraine"). Empty falls back to the location saved by "Use my location"
+   * (main/weather-location.ts), and with neither the header shows no weather
+   * and nothing is sent.
    */
   weatherCity?: string;
   /**
@@ -260,6 +303,9 @@ export type AgentPromptKey = "triage" | "rereview" | "afterMerge" | "selfReview"
 
 /** Off never runs; shadow does the work and waits for you before posting; on posts and tells you after. */
 export type AgentMode = "off" | "shadow" | "on";
+
+/** The language the agent speaks to you in (`AGENT_LANGUAGES` in agent-defaults.ts). */
+export type AgentLanguage = "en" | "uk" | "pl";
 
 /** The kinds of session the agent starts — each has its own tool set. */
 export type AgentRunKind = "review" | "brief" | "rereview" | "drive" | "afterMerge";
@@ -279,6 +325,11 @@ export interface AgentSettings {
   model: string;
   /** Effort for agent runs; "" = Claude Code's default. */
   effort: "" | "low" | "medium" | "high";
+  /**
+   * What the agent writes to you in: its task list, questions, briefs and
+   * results. What it posts on GitHub, commits or writes to Jira is not affected.
+   */
+  language: AgentLanguage;
   /** Where each run's git worktree goes; "" = `<checkout>/.claude/worktrees`. */
   worktreeDir: string;
   /** Remove a run's worktree once its PR is merged or closed. */
@@ -350,6 +401,12 @@ export interface AgentSettings {
     toolsVersion: number;
     /** Allow pushing to the head branch of your own PR (drive). */
     pushOwnBranch: boolean;
+    /**
+     * A drive on your own PR runs with your whole Claude setup — CLAUDE.md,
+     * hooks, plugins, MCP servers, any folder and command — instead of
+     * isolated; writes to GitHub stay with the app.
+     */
+    fullContextDrive: boolean;
   };
   /**
    * Mermaid diagrams of the change (`shared/agent-diagrams.ts`), drawn by a
@@ -454,10 +511,18 @@ export interface PublicConfig {
   claudeEnabled: boolean;
   /** Whether Claude sessions open in Claude Desktop — the only place "Review all" can nest its sessions. */
   claudeDesktop: boolean;
+  /** Whether the `codex` CLI is on the PATH — the menu offers "Review" with Codex only then. */
+  codexAvailable: boolean;
+  /** Mirror of {@link Settings.uiStyle} — the renderer switches its look on it. */
+  uiStyle?: UiStyle;
 }
 
-/** State of an individual reviewer on a PR. */
-export type ReviewerState = "approved" | "changes_requested" | "pending";
+/**
+ * State of an individual reviewer on a PR. `dismissed`: their review (usually an
+ * approval) was dismissed, typically by a push; `commented`: they only left
+ * comments. Neither is a verdict — only `approved` / `changes_requested` are.
+ */
+export type ReviewerState = "approved" | "changes_requested" | "pending" | "dismissed" | "commented";
 
 /** An individual reviewer and their current review state. */
 export interface Reviewer {
@@ -792,6 +857,67 @@ export interface PullRequest {
    * "Ignored" filter is on. Persisted across relaunches — see `ignored.ts`.
    */
   isIgnored: boolean;
+  /**
+   * Where the item comes from. Absent means GitHub. An Upsource review is
+   * listed, grouped, filtered and sorted like a PR, but GitHub-only parts — CI,
+   * merging, stacks, the Claude button and the PR agent — never apply to it:
+   * its GitHub fields hold neutral values (`shared/upsource.ts`), and what the
+   * card shows comes from {@link upsource}.
+   */
+  source?: PrSource;
+  /** The review as Upsource reports it; set only when {@link source} is "upsource". */
+  upsource?: UpsourceReviewInfo;
+}
+
+export type PrSource = "github" | "upsource";
+
+/** A review participant's progress, as Upsource names it. */
+export type UpsourceParticipantState = "unread" | "read" | "accepted" | "rejected";
+
+/** One participant of an Upsource review. */
+export interface UpsourceParticipant {
+  name: string;
+  login: string;
+  /** Hub avatar URL; empty when Upsource named none. */
+  avatarUrl: string;
+  role: "author" | "reviewer" | "watcher";
+  state: UpsourceParticipantState;
+}
+
+/** What the Upsource card shows beyond the shared PR fields. */
+export interface UpsourceReviewInfo {
+  projectId: string;
+  /** "CR-1795". */
+  reviewId: string;
+  /** Your role on the review; a watcher only is never listed. */
+  myRole: "author" | "reviewer";
+  /** Your own progress on it. */
+  myState: UpsourceParticipantState;
+  /** Reviewers who accepted, out of {@link reviewersCount}. */
+  accepted: number;
+  reviewersCount: number;
+  /** A reviewer raised a concern (rejected). */
+  hasConcern: boolean;
+  /** Discussions on the review, and how many are unresolved. */
+  discussions: number;
+  unresolved: number;
+  /** Due date (ISO), or null when the review has none. */
+  deadline: string | null;
+  /** Upsource marks the review unread for you. */
+  isUnread: boolean;
+  /** Every reviewer accepted: the author can close it. */
+  isReadyToClose: boolean;
+  /** Reviewers first, the author left out. */
+  participants: UpsourceParticipant[];
+}
+
+/** Upsource setup state for the Settings screen. */
+export interface UpsourceStatus {
+  /** A server address is saved. */
+  hasConfig: boolean;
+  baseUrl: string | null;
+  hasToken: boolean;
+  encryptionAvailable: boolean;
 }
 
 /** A fetch error for a specific host. */
@@ -857,7 +983,7 @@ export type SaveSettingsResult = { ok: true; warning?: string } | { ok: false; e
 
 /** Result of `launchClaude`: what was started and where, or why not. */
 export type ClaudeLaunchResult =
-  | { ok: true; kind: "drive" | "review" | "close" | "explain" | "open"; dir: string }
+  | { ok: true; kind: "drive" | "review" | "codexReview" | "close" | "explain" | "open"; dir: string }
   | { ok: false; error: string };
 
 /** Result of `launchClaudeGroup`: how many PRs went in and where it runs, or why not. */
@@ -971,6 +1097,20 @@ export interface AgentItem {
    * only be run again (or continued in your terminal).
    */
   needsRerun?: boolean;
+  /**
+   * A drive's worktree holds work that is not on the PR and the app couldn't
+   * read it as a result (`reason`): commits a session made after a restart,
+   * or a git that changed under it. `ahead` is what `git rev-list` counted on
+   * top of the PR's head (null: not even that). Its card names the folder,
+   * never says "nothing to push", and holds its replies back — they may cite
+   * those commits. `kept`: the card was closed, and the worktree (and run
+   * folder) stayed for the work in it; `ref` keeps the commits reachable too.
+   */
+  localWork?: { worktree: string; ahead: number | null; dirty: boolean; reason: string; kept?: boolean; ref?: string };
+  /** The plan (by its fingerprint) whose replies cite commits not on the PR, warned about once: Send again posts them. */
+  shaWarned?: string;
+  /** Run again was refused once for commits in the worktree that are not on the PR: pressed again, it runs. */
+  rerunWarned?: boolean;
   /** Your choice on each thread the author pushed back on (by its first comment's id): keep your comment, or drop it. */
   disputes?: Record<string, "keep" | "drop">;
   error?: string;
@@ -995,6 +1135,14 @@ export interface AgentItem {
   reapproval?: { logins: string[]; oldHead: string };
   /** The next run continues `sessionId` instead of starting a session: after a restart, or with your answer. */
   resumeSession?: boolean;
+  /**
+   * "Open in Claude" continued its session in your terminal: the app follows
+   * that session's transcript (in `cwd`'s Claude Code project folder) and puts
+   * the result of each turn it ends with a new prd-result block on this card —
+   * since: when you continued it; seen: the last final message taken (by its
+   * line's uuid). Dropped once the card leaves Your move.
+   */
+  follow?: { since: string; cwd: string; seen?: string };
   /**
    * Your place for it in the queue (dragged, or "Run next"): lower runs first.
    * Unset, it queues by the time it was queued.
@@ -1032,7 +1180,19 @@ export interface AgentItem {
    * a fingerprint of the repository's git config and hooks and your global
    * git config. A push goes out only while the fingerprint still matches.
    */
-  pushTo?: { url: string; commonDir: string; worktreeGitDir: string | null; fingerprint: string; sshSnapshot?: string };
+  pushTo?: {
+    url: string;
+    commonDir: string;
+    worktreeGitDir: string | null;
+    fingerprint: string;
+    sshSnapshot?: string;
+    /**
+     * Rebuilt after a restart from the clone and the worktree as they are now
+     * (`recoverPushTo`), not taken before the session: the fingerprint vouches
+     * only from then on. Such a drive is never pushed without your click.
+     */
+    recovered?: boolean;
+  };
 }
 
 export interface AgentDriveResult {
@@ -1063,6 +1223,11 @@ export interface AgentState {
   running: AgentRunState[];
   /** Why each PR on the dashboard is idle, by PR id. */
   idle: Record<string, string>;
+  /**
+   * Each PR's head commit now, by PR id — what tells a result the PR moved
+   * past (`staleRun`) where no PR is at hand: the chip, the tray, the popover.
+   */
+  heads?: Record<string, string>;
   runsToday: number;
   perDay: number;
   parallel: number;
@@ -1088,6 +1253,12 @@ export interface AgentState {
    * stage it is at — the badge their cards wear instead of the agent's work.
    */
   orchestrated?: Record<string, { key: string; stage: string | null }>;
+  /**
+   * Your-turn cards you set aside with "Not now", by PR id, only while the
+   * card shows what it showed then (`cardKey`): any change on the PR or its
+   * run brings it back. Out of Your turn and out of every "ready for you" count.
+   */
+  setAside?: Record<string, string>;
 }
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
@@ -1107,6 +1278,11 @@ export type AgentAction =
   | { type: "enqueue"; prId: string; before?: string | null }
   /** Your approval again, on a PR it already stands on, to answer a review request made after it. */
   | { type: "approveAgain"; prId: string }
+  /** Your approval of the PR, resting on the agent's review of its head that found nothing blocking (`approvableReview`). */
+  | { type: "approve"; runId: string }
+  /** Sets a Your-turn card aside until something on its PR changes; `bringBack` puts it back now. */
+  | { type: "notNow"; prId: string }
+  | { type: "bringBack"; prId: string }
   | { type: "moveQueued"; runId: string; before: string | null };
 
 export type AgentActionResult = { ok: true } | { ok: false; error: string };
@@ -1116,6 +1292,23 @@ export interface GhStatus {
   /** Whether the `gh` CLI is installed and on PATH. */
   installed: boolean;
   hosts: Array<{ hostname: string; label: string; authenticated: boolean }>;
+}
+
+/**
+ * A packaged (MSIX) app's private copy of the data folder, on Windows. A
+ * process started from that app — Claude Desktop's terminal or a session —
+ * reads and writes %APPDATA% through it, so settings changed there are not the
+ * ones the Start menu shortcut, the login entry or an update's relaunch see.
+ */
+export interface DataCopy {
+  /** The package's name, e.g. "Claude". */
+  appName: string;
+  /** The copy's folder under `%LOCALAPPDATA%\Packages\<package>\LocalCache\Roaming`. */
+  dir: string;
+  /** `inside`: this process reads its data through the copy (started from that app); `outside`: a copy it doesn't see. */
+  where: "inside" | "outside";
+  /** When the copy's settings.json last changed (ms since epoch). */
+  changedAt: number;
 }
 
 /**
@@ -1142,6 +1335,8 @@ export interface PrManagerApi {
   saveSettings(settings: Settings): Promise<SaveSettingsResult>;
   /** Apply an appearance preference immediately and persist it. */
   setTheme(theme: ThemePreference): Promise<void>;
+  /** Persist the look (one of {@link UI_STYLES}); no Save needed. */
+  setUiStyle(style: UiStyle): Promise<void>;
   /** `gh` CLI install + auth status for the configured hosts. */
   getGhStatus(): Promise<GhStatus>;
   /**
@@ -1155,6 +1350,13 @@ export interface PrManagerApi {
    * via the OS keychain. Returns whether it was persisted.
    */
   setJiraToken(token: string): Promise<{ ok: boolean; error?: string }>;
+  /** Upsource setup state for Settings. */
+  getUpsourceStatus(): Promise<UpsourceStatus>;
+  /**
+   * Store (or clear, when given an empty string) the Upsource Hub token,
+   * encrypted via the OS keychain. Returns whether it was persisted.
+   */
+  setUpsourceToken(token: string): Promise<{ ok: boolean; error?: string }>;
   /**
    * Opens a terminal running `twg login --force`: the sign-in is interactive
    * (site choice, browser consent), so the app can only start it, not finish it.
@@ -1171,7 +1373,7 @@ export interface PrManagerApi {
    */
   launchClaude(
     prId: string,
-    kind?: "drive" | "review" | "close" | "explain" | "open",
+    kind?: "drive" | "review" | "codexReview" | "close" | "explain" | "open",
     inTerminal?: boolean,
   ): Promise<ClaudeLaunchResult>;
   /**
@@ -1220,6 +1422,14 @@ export interface PrManagerApi {
    */
   getWeather(): Promise<WeatherStatus>;
   /**
+   * Settings › Header weather › "Use my location": asks the OS for the
+   * location (main/locate.ts), saves it on success and answers with the
+   * weather for it. Only ever on the user's click — nothing asks on its own.
+   */
+  locateForWeather(): Promise<WeatherLocateResult>;
+  /** Drops the saved location. */
+  forgetWeatherLocation(): Promise<WeatherStatus>;
+  /**
    * The Jira task of a stale PR of yours and the transitions Jira offers on it,
    * for the close dialog. Only the PR id crosses over; the issue key is read
    * from main's own snapshot.
@@ -1229,6 +1439,13 @@ export interface PrManagerApi {
   closeStalePr(prId: string, options: CloseStaleOptions): Promise<CloseStaleResult>;
   /** Returns release info if a new version was installed since last ack, or null. */
   getWhatsNew(): Promise<{ version: string; url: string; highlightUntil: number } | null>;
+  /**
+   * A packaged app's copy of the data folder (Windows), found at start, or
+   * null: see `main/data-copy.ts`. Main looks it up; the renderer sends nothing.
+   */
+  getDataCopy(): Promise<DataCopy | null>;
+  /** Shows that copy's folder in Explorer — the one main found, never a path from the renderer. */
+  showDataCopy(): Promise<void>;
   /** Acknowledges the current version (hides "What's new"). */
   dismissWhatsNew(): Promise<void>;
   /** Subscribe to live snapshots. Returns an unsubscribe function. */
@@ -1256,9 +1473,19 @@ export interface PrManagerApi {
    * Returns an unsubscribe function.
    */
   onRefreshRequest(listener: () => void): () => void;
+  /**
+   * Subscribe to the menu's "Search" item (CmdOrCtrl+F): the renderer focuses
+   * the search box of the screen on view. Returns an unsubscribe function.
+   */
+  onFindRequest(listener: () => void): () => void;
 }
 
 /** Auto-update lifecycle, pushed from main as electron-updater progresses. */
 export type UpdateStatus =
   | { state: "downloading"; version: string; percent: number }
-  | { state: "downloaded"; version: string };
+  | { state: "downloaded"; version: string }
+  // The updater failed after it started (e.g. the download's signature check
+  // failed): without this the pill stays on "Downloading… 100%" forever.
+  | { state: "error"; message: string }
+  // Nothing to show: up to date, or auto-update turned off. Clears an error.
+  | { state: "idle" };
