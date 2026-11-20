@@ -44,3 +44,20 @@ export function hostHealth(
   const floor = rateLimit.limit ? rateLimit.limit * LOW_BUDGET_SHARE : LOW_BUDGET_POINTS;
   return rateLimit.remaining < floor ? "limited" : "ok";
 }
+
+/**
+ * Whether the renderer's config should be read again: it lists no hosts, or
+ * could not be read at all, while the snapshot polled some. The config is read once, on mount, and a read that
+ * came back empty while the settings could not be loaded kept "No repositories
+ * configured" up for the whole run although the poller — which reads them every
+ * tick — went on polling. A configured Upsource is one of the config's hosts,
+ * so its pill alone never counts against a config that lists it.
+ */
+export function configLooksStale(
+  configHosts: number | null,
+  snapshot: { rateLimits?: readonly unknown[]; errors?: readonly unknown[] } | null | undefined,
+): boolean {
+  // null: the config read failed, which is the case this is for.
+  if ((configHosts !== null && configHosts !== 0) || !snapshot) return false;
+  return (snapshot.rateLimits?.length ?? 0) + (snapshot.errors?.length ?? 0) > 0;
+}

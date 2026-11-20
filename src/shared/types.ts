@@ -1290,6 +1290,23 @@ export interface GhStatus {
 }
 
 /**
+ * A packaged (MSIX) app's private copy of the data folder, on Windows. A
+ * process started from that app — Claude Desktop's terminal or a session —
+ * reads and writes %APPDATA% through it, so settings changed there are not the
+ * ones the Start menu shortcut, the login entry or an update's relaunch see.
+ */
+export interface DataCopy {
+  /** The package's name, e.g. "Claude". */
+  appName: string;
+  /** The copy's folder under `%LOCALAPPDATA%\Packages\<package>\LocalCache\Roaming`. */
+  dir: string;
+  /** `inside`: this process reads its data through the copy (started from that app); `outside`: a copy it doesn't see. */
+  where: "inside" | "outside";
+  /** When the copy's settings.json last changed (ms since epoch). */
+  changedAt: number;
+}
+
+/**
  * The bridge exposed on `window.api` by the preload script. Mirrors the IPC
  * handlers registered in the main process — the single source of truth for the
  * renderer↔main contract.
@@ -1417,6 +1434,13 @@ export interface PrManagerApi {
   closeStalePr(prId: string, options: CloseStaleOptions): Promise<CloseStaleResult>;
   /** Returns release info if a new version was installed since last ack, or null. */
   getWhatsNew(): Promise<{ version: string; url: string; highlightUntil: number } | null>;
+  /**
+   * A packaged app's copy of the data folder (Windows), found at start, or
+   * null: see `main/data-copy.ts`. Main looks it up; the renderer sends nothing.
+   */
+  getDataCopy(): Promise<DataCopy | null>;
+  /** Shows that copy's folder in Explorer — the one main found, never a path from the renderer. */
+  showDataCopy(): Promise<void>;
   /** Acknowledges the current version (hides "What's new"). */
   dismissWhatsNew(): Promise<void>;
   /** Subscribe to live snapshots. Returns an unsubscribe function. */

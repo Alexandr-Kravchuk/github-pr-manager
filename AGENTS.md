@@ -533,6 +533,27 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   process compiles in `tsc --watch` and Electron restarts after each clean
   build: it reads `dist/main` only at startup, so a one-off compile kept a dev
   app on stale main code while the renderer hot-reloaded and looked current.
+- **A build that isn't the installed app has its own data folder**,
+  `<userData> (dev)` (`main/dev-user-data.ts`, set at the top of `main.ts`
+  before the single-instance lock): one run from source (`!app.isPackaged`) or
+  from a packaging folder — on Windows a packaged exe with no
+  `Uninstall PR Dashboard.exe` next to it is a `dist/win-unpacked` build
+  (`isInstalledBuild`). All of them are named "PR Dashboard", so every
+  worktree's build used to read and write the installed app's `settings.json`
+  and agent state: a branch with a reshaped setting saved it in its shape, and
+  the release the next auto-update restarted read it as defaults — "settings
+  reset on every update". Such a build also leaves the launch-at-login entry
+  alone (Windows writes it with the running exe's path, so the next sign-in
+  started a worktree's old build) and takes no updates (`win-unpacked` ships
+  `app-update.yml`, and its update would run the real installer). The first
+  launch copies `settings.json` (agent switched **off**), seen, ignored,
+  window and weather-location state from the installed app, once — never the
+  Jira token, whose key on Windows lives in the folder's own Chromium state.
+  It no longer shares the installed app's single-instance lock, so both can
+  run at once: two pollers, two sets of toasts, and two agents on the same PRs
+  if you switch its agent on. Delete the `(dev)` folder's `settings.json` to
+  seed it again. macOS has no such check: a `dist/mac*` app counts as
+  installed.
 - `npm run build` — `tsc` (main) + `vite` (renderer) → `dist/`.
 - `npm run typecheck` and `npm test` — the gate before any push.
 - `npm run package` / `npm run package:dir` — electron-builder (dmg / nsis).
@@ -579,6 +600,74 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   in-progress edit (a half-typed Jira token) was rejected instead.
 - Settings never contain tokens; tokens are resolved per host via `gh` at fetch
   time (`config.ts`).
+- **A save never erases a field another build wrote.** Loading reads a field
+  this build doesn't know as nothing, so `persistSettings` merges the file on
+  disk back in (`keepUnknownSettings` in `shared/config.ts`): every field
+  outside this build's known shape — the defaults plus the optional fields in
+  `OPTIONAL_SETTINGS_SHAPE` — is kept at any depth, while a known one always
+  comes from the save, so a cleared Jira site, Upsource address or removed
+  repo path stays gone (an empty object in the shape, like `claude.repoPaths`,
+  is a map owned whole; arrays too). A known field whose value this build
+  rejects is not kept: validation turns it into the default, and the save
+  writes that default (a newer build's `uiStyle` is lost to an older one's
+  theme toggle). `OPTIONAL_SETTINGS_SHAPE` is typed against `Settings`, so a
+  new optional top-level field, or a new key of `jira`/`upsource`, fails the
+  build until it is listed — unlisted, clearing it in Settings would bring it
+  back from disk. Renaming or reshaping a field therefore needs both
+  directions: read the old key, and expect an older build to keep writing it.
+  A field removed on purpose — a moved secret — goes in
+  `RETIRED_SETTINGS_FIELDS`, or the merge keeps it alive.
+- **Only a missing `settings.json` is the first run.** `readSettingsText`
+  (`main/settings.ts`) returns empty settings for ENOENT alone; a read that
+  fails otherwise is tried again a few times (EBUSY/EPERM/EACCES/EAGAIN — a
+  scan or an installer holding it), then throws `ConfigError`, which the
+  poller and the UI show as an error. The retries sleep on the main thread and
+  `loadSettings` runs on every poll tick, so a transient error that outlasted
+  them is remembered for a few seconds (`READ_FAILURE_MEMO_MS`): calls in that
+  time throw at once, with no retry (a Save's read-before-write reads anyway),
+  and each failure is logged once until a read succeeds. A start that cannot
+  read them runs on the defaults but leaves the OS login item as it is. It
+  used to read as "no
+  file", so a file that was there but unreadable looked like a first run, and
+  the next save wrote defaults over it. So `persistSettings` refuses to write
+  over a file it could not read, writes through a temporary file renamed over
+  the old one — the rename retried like a read, since a scanner opens the file
+  it just saw written; one that still fails removes the temporary file and
+  throws `ConfigError`, the old settings intact — and `App.tsx` reads the
+  config again once a snapshot polled hosts the config doesn't list
+  (`configLooksStale` in `shared/host-status.ts`; it was read once on mount
+  and never again). `userData/main.log`
+  (`main/diag-log.ts`, capped, `.old` kept) records each start — version,
+  argv, data folder, how many hosts and whether the agent loaded — every
+  failed settings read and the updater's downloads and errors (one line each;
+  an error's stack is in `userData/updater.log`): read it first when settings
+  "reset" again.
+- **A packaged app's copy of the data folder** (Windows, `main/data-copy.ts`).
+  A process started from an MSIX app keeps that app's view of `%APPDATA%`.
+  Claude Desktop's terminal and sessions are such processes: their writes land
+  in `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\PR Dashboard`,
+  and their reads show that copy over the real folder.
+  `GetCurrentPackageFullName` still says "not packaged", so nothing in the
+  process tells it apart.
+  - **The story behind "settings reset after every update".** The settings
+    one user had saved since a start from Claude lived in Claude's copy. The
+    app started from the Start menu, the desktop, the login entry or an
+    update's relaunch (`ExecShellAsUser`, through Explorer) read the real,
+    nearly empty folder. The same exe and file read fine from the shell,
+    because the shell itself sits inside Claude's view.
+  - **What the app does.** At start, `findDataCopies` looks for
+    `Packages\*\LocalCache\Roaming\<userData's name>` holding a
+    `settings.json`. It logs each copy to `main.log` and calls a copy
+    `inside` when the data folder's `settings.json` opens the same file, or
+    `outside` when it opens another one. The banner (`DataCopyBanner`, over
+    `app:dataCopy`) says why settings look reset: inside, start the app from
+    the Start menu; outside, the copy holds what was saved there.
+    `app:showDataCopy` opens only the folder main found and takes no
+    argument. In the plain-browser mock, `?dataCopy=inside|outside` previews
+    the banner.
+  - **How to see the real folder from a Claude session.** Run the command
+    through `explorer.exe <script>.cmd`. A test of the installed app with the
+    real profile must not start it from a session.
 - Jira is read through the Atlassian `twg` CLI first, the API token second —
   the `gh` model again: twg signs in with OAuth and refreshes itself, so there
   is nothing to expire. `shared/jira-pass.ts` picks the source per pass (twg
@@ -631,10 +720,14 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   move/resize and **flushed on `close` before `trayController.handleClose`**:
   close-to-tray may hide the window, and a hidden window's bounds are not
   reliable.
-- Launch at login starts the app **in the tray** when close-to-tray is on
-  (`main/login-launch.ts`): the Windows Run-key entry carries `--hidden`
-  (macOS relies on `wasOpenedAtLogin`, best-effort — login items there take no
-  arguments). The first window is then created with `show: false`, and it is
+- Launch at login starts the app **in the tray** when close-to-tray is on —
+  **on macOS only** (`startsInTray` in `main/login-launch.ts`; macOS relies on
+  `wasOpenedAtLogin`, best-effort — login items there take no arguments). On
+  Windows the window opens at sign-in: Windows 11 puts a new tray icon behind
+  `^`, so a tray start looked like the app had not started, and the Run-key
+  entry is now the plain exe (an older build's `--hidden` entry is rewritten
+  on the next start and ignored until then). A tray start creates the first
+  window with `show: false`, and it is
   shown anyway if the tray icon failed to appear, since a hidden window with no
   icon is unreachable. The saved maximized/full-screen state waits for the
   first `show`, because `maximize()` would itself show the hidden window.
@@ -642,6 +735,16 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   before `setAppUserModelId` left an `electron.app.PR Dashboard` value behind
   and the app started twice at sign-in, once without `--hidden`;
   `staleLoginItemsFor` deletes it on every apply, whatever the preference is.
+- **An update installs silently and starts the app again**
+  (`quitAndInstall(true, true)` in `main/updater.ts`, 3 s after the download).
+  The Windows installer is the assisted one (`oneClick: false`), and its NSIS
+  templates start the app after an update only when silent (`isForceRun` *and*
+  `Silent` in `installSection.nsh`); a plain `quitAndInstall()` quit the app
+  and left the wizard waiting for clicks — an update downloaded at night kept
+  the app closed until morning, its Finish page the only way back. Silent, the
+  installer takes the install mode and folder from the previous install's
+  registry entry (`initMultiUser` in `assistedInstaller.nsh`) and starts the
+  app through the Start menu shortcut, with its window shown.
 - `PRD_DEBUG=1` enables main-process diagnostics; `PRD_SMOKE_EXIT_MS=<ms>` makes
   `electron .` self-quit after the renderer loads (a non-interactive boot check).
 - **The PR agent's log** is `userData/agent/log.jsonl` — one JSON line per

@@ -24,6 +24,7 @@ import type {
   ClaudeLaunchResult,
   ClaudeSessionInfo,
   ConfigResult,
+  DataCopy,
   FocusClaudeSessionResult,
   DashboardResponse,
   DashboardResult,
@@ -42,6 +43,9 @@ import { hasCommand } from "./command-path";
 import { findCheckout, launchClaude, launchGroup, resumeClaudeSession } from "./claude-launch";
 import { createClaudeSessionScanner } from "./claude-sessions";
 import { ensureCliPath } from "./cli-path";
+import { devUserDataDir, isInstalledBuild, seedDevUserData } from "./dev-user-data";
+import { findDataCopies } from "./data-copy";
+import { diag, initDiagLog } from "./diag-log";
 import { clearJiraCaches, deleteTask, fetchTaskInfo, transitionTask } from "../shared/jira";
 import { shouldNotifyJiraAuth } from "../shared/jira-health";
 import type { CloseStaleResult, JiraTaskInfo } from "../shared/stale";
@@ -76,7 +80,7 @@ import {
   validateUiStyle,
   validateThemePreference,
 } from "./ipc-validation";
-import { loginItemSettingsFor, staleLoginItemsFor, wasLaunchedAtLogin } from "./login-launch";
+import { loginItemSettingsFor, staleLoginItemsFor, startsInTray, wasLaunchedAtLogin } from "./login-launch";
 import { createMenuActions, installAppMenu } from "./menu";
 import { isMockMode, mockPollerOverrides } from "./mock";
 import { Poller } from "./poller";
@@ -98,6 +102,34 @@ import { createWeatherService } from "./weather";
 import { locate } from "./locate";
 import { forgetLocation, readSavedLocation, saveLocation } from "./weather-location";
 
+/**
+ * False for a build run from source or from a packaging folder's
+ * `win-unpacked` (see dev-user-data.ts). Such a build keeps its data apart and
+ * leaves the installed app's launch-at-login entry and updates alone.
+ */
+const installedApp = isInstalledBuild({
+  isPackaged: app.isPackaged,
+  platform: process.platform,
+  execPath: process.execPath,
+  productName: app.getName(),
+});
+
+// First thing at load: the single-instance lock below and every file under
+// userData follow the folder set here, and Electron takes a new userData only
+// before `ready`.
+if (!installedApp) {
+  const releaseDir = app.getPath("userData");
+  const devDir = devUserDataDir(releaseDir);
+  try {
+    const seeded = seedDevUserData(releaseDir, devDir);
+    if (seeded.length) console.log("[main] dev data folder seeded from the installed app:", seeded.join(", "));
+  } catch (e) {
+    console.error("[main] could not seed the dev data folder:", e);
+  }
+  app.setPath("userData", devDir);
+}
+initDiagLog(app.getPath("userData"));
+
 let mainWindow: BrowserWindow | null = null;
 let poller: Poller | null = null;
 /** Upsource reviews, read in the background (null in fixture mode). */
@@ -105,6 +137,8 @@ let upsourceSource: UpsourceSource | null = null;
 /** The PR agent; null in fixture mode (PRD_MOCK), where it would act on fake PRs. */
 let agent: Agent | null = null;
 let agentPushTimer: NodeJS.Timeout | null = null;
+/** A packaged app's copy of the data folder, looked up once at start (data-copy.ts). */
+let dataCopy: DataCopy | null = null;
 
 /**
  * Pushes the agent's state at most every 250 ms — a run reports a step per
@@ -492,10 +526,11 @@ function handleNotifications(prs: PullRequest[]): void {
   });
 }
 
-/** Registers/unregisters the OS "open at login" item. Packaged app only — in dev
- *  the item would point at the dev Electron binary. Not supported on Linux. */
+/** Registers/unregisters the OS "open at login" item. The installed app only —
+ *  the item is written with this exe's path, so a dev or `win-unpacked` build
+ *  would make the next sign-in start that build. Not supported on Linux. */
 function applyLaunchAtLogin(enabled: boolean): void {
-  if (!app.isPackaged || process.platform === "linux") return;
+  if (!installedApp || process.platform === "linux") return;
   for (const stale of staleLoginItemsFor(process.platform)) app.setLoginItemSettings(stale);
   const options = loginItemSettingsFor(enabled, process.platform);
   app.setLoginItemSettings(options);
@@ -522,8 +557,10 @@ function applyThemeSource(theme: Settings["theme"]): void {
 
 /** Applies user preferences (launch-at-login + auto-update + close-to-tray +
  *  theme) to the OS/updater. */
-function applyPreferences(settings: Settings): void {
-  applyLaunchAtLogin(settings.launchAtLogin);
+function applyPreferences(settings: Settings, loaded = true): void {
+  // Defaults standing in for settings that could not be read must not remove
+  // the user's login item: that outlives the run.
+  if (loaded) applyLaunchAtLogin(settings.launchAtLogin);
   setAutoUpdateEnabled(settings.autoUpdate);
   // Creates or removes the tray icon; a failure to create one leaves close
   // quitting (the controller says so) rather than hiding an unreachable window.
@@ -1077,6 +1114,13 @@ function registerIpc(): void {
     acknowledgeVersion(app.getVersion());
   });
 
+  ipcMain.handle("app:dataCopy", async (): Promise<DataCopy | null> => dataCopy);
+
+  // No argument: only the folder main found is ever shown.
+  ipcMain.handle("app:showDataCopy", async (): Promise<void> => {
+    if (dataCopy) await shell.openPath(dataCopy.dir);
+  });
+
   ipcMain.handle("app:copyText", async (_event, text: unknown): Promise<void> => {
     clipboard.writeText(validateClipboardText(text));
   });
@@ -1162,6 +1206,21 @@ function registerIpc(): void {
 // readable, and (b) so the single-instance decision logic lives in the
 // unit-tested single-instance.ts rather than an inline closure.
 function startApp(): void {
+  diag(
+    `start v${app.getVersion()} pid=${process.pid} installed=${installedApp} ` +
+      `userData=${app.getPath("userData")} argv=${JSON.stringify(process.argv.slice(1))}`,
+  );
+  // Before anything reads settings: a copy here explains settings that look reset.
+  const copies = findDataCopies({
+    platform: process.platform,
+    appData: app.getPath("appData"),
+    userData: app.getPath("userData"),
+    localAppData: process.env.LOCALAPPDATA,
+  });
+  for (const c of copies) {
+    diag(`data copy (${c.where}) of ${c.appName}: ${c.dir}, settings changed ${new Date(c.changedAt).toISOString()}`);
+  }
+  dataCopy = copies[0] ?? null;
   // Must run before any `gh` invocation: a Finder/.app launch inherits a minimal
   // PATH without Homebrew, so without this `gh` is not found and token
   // resolution fails with a misleading "not signed in".
@@ -1270,9 +1329,13 @@ function startApp(): void {
   // and the native window background already match (no dark flash in light mode).
   // Fall back to defaults if the settings file is invalid.
   let prefs: Settings;
+  let prefsLoaded = false;
   try {
     prefs = loadSettings();
-  } catch {
+    prefsLoaded = true;
+    diag(`settings: ${prefs.hosts.length} host(s), agent ${prefs.agent.enabled ? "on" : "off"}`);
+  } catch (e) {
+    diag(`settings: not loaded at start — ${(e as Error).message}`);
     prefs = defaultSettings();
   }
   applyThemeSource(prefs.theme);
@@ -1286,12 +1349,13 @@ function startApp(): void {
   });
 
   // Started by the OS login item with close-to-tray on: come up in the tray
-  // rather than putting a window in front of the user on every sign-in.
+  // rather than putting a window in front of the user on every sign-in — on
+  // macOS only, where the menu bar icon stays in sight (`startsInTray`).
   const launchedAtLogin = wasLaunchedAtLogin(
     process.argv,
     process.platform === "darwin" ? app.getLoginItemSettings().wasOpenedAtLogin : undefined,
   );
-  const startInTray = launchedAtLogin && prefs.closeToTray;
+  const startInTray = startsInTray(process.platform, launchedAtLogin, prefs.closeToTray);
   createWindow({ show: !startInTray });
 
   // The application menu owns the keyboard shortcuts (Settings on CmdOrCtrl+,
@@ -1308,11 +1372,13 @@ function startApp(): void {
     { devItems: !app.isPackaged },
   );
 
-  initAutoUpdater((status) => sendToRenderer("update-status", status));
+  // A `win-unpacked` build ships app-update.yml too, and its update would run
+  // the real installer over the installed app.
+  if (installedApp) initAutoUpdater((status) => sendToRenderer("update-status", status));
 
   // Apply the remaining prefs (launch-at-login + auto-update; theme re-applied
   // harmlessly). Runs after the updater is initialized.
-  applyPreferences(prefs);
+  applyPreferences(prefs, prefsLoaded);
 
   // The tray icon only exists once applyPreferences has run. If it failed to
   // appear, a hidden window would be unreachable, so show it after all.

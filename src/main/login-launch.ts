@@ -1,13 +1,13 @@
 /**
  * Launch-at-login, and recognizing that the current process IS that launch so
- * it can start in the tray instead of opening a window on every sign-in.
+ * it can start in the tray (macOS) instead of opening a window on every sign-in.
  *
  * Kept free of `electron` imports so both decisions are unit-testable; main.ts
  * passes in the platform, argv and the login-item state it reads from `app`.
  */
 
-/** Passed by the Windows login item so the launched process knows it was not
- *  opened by the user. */
+/** Passed by the Windows login item of older builds, so the launched process
+ *  knew it was not opened by the user. Still recognized; no longer written. */
 export const HIDDEN_LAUNCH_ARG = "--hidden";
 
 export interface LoginItemOptions {
@@ -20,16 +20,29 @@ export interface LoginItemOptions {
 
 /**
  * The options for `app.setLoginItemSettings`. On Windows the login item is a
- * Run-key command line, so the marker travels as an argument; the value is
- * keyed by the AppUserModelID, so re-applying this on every start also upgrades
- * an entry registered by an older build without the argument. macOS login items
- * carry no arguments — `openAsHidden` is the legacy (pre-13) equivalent and is
- * ignored by newer releases, which is why the macOS side is best-effort.
+ * plain Run-key command line with no marker: Windows 11 puts a new tray icon
+ * in the overflow behind `^`, so an app that came up in the tray at sign-in
+ * looked as if it had not started at all — the window opens instead (see
+ * `startsInTray`). The value is keyed by the AppUserModelID, so re-applying
+ * this on every start also rewrites an entry an older build registered with
+ * `--hidden`. macOS login items carry no arguments — `openAsHidden` is the
+ * legacy (pre-13) equivalent and is ignored by newer releases, which is why the
+ * macOS side is best-effort.
  */
 export function loginItemSettingsFor(enabled: boolean, platform: NodeJS.Platform): LoginItemOptions {
-  if (platform === "win32") return { openAtLogin: enabled, args: [HIDDEN_LAUNCH_ARG] };
+  if (platform === "win32") return { openAtLogin: enabled };
   if (platform === "darwin") return { openAtLogin: enabled, openAsHidden: true };
   return { openAtLogin: enabled };
+}
+
+/**
+ * Whether a launch comes up in the tray without a window: a login launch with
+ * close-to-tray on, and never on Windows — the menu bar icon is always in
+ * sight on macOS, while Windows 11 hides a tray icon behind `^`. An old Run
+ * entry's `--hidden` is ignored there for the same reason.
+ */
+export function startsInTray(platform: NodeJS.Platform, launchedAtLogin: boolean, closeToTray: boolean): boolean {
+  return platform !== "win32" && launchedAtLogin && closeToTray;
 }
 
 /**

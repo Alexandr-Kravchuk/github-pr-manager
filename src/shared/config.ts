@@ -495,6 +495,74 @@ export function toStoredSettings(settings: Settings): Settings {
 }
 
 /**
+ * Dotted paths of fields a build removed on purpose — a moved secret, a switch
+ * whose meaning changed. `keepUnknownSettings` drops these instead of carrying
+ * them, since this build no longer lists them and would otherwise keep them.
+ */
+export const RETIRED_SETTINGS_FIELDS: readonly string[] = [];
+
+/** The keys of `Settings` that may be left out. */
+type OptionalSettingsKey = { [K in keyof Settings]-?: undefined extends Settings[K] ? K : never }[keyof Settings];
+/** A section's shape: every one of its keys, optional ones included. */
+type ShapeOf<T> = T extends object ? { [K in keyof T]-?: unknown } : unknown;
+
+/**
+ * The optional fields, which the defaults may leave out (`jira`, `upsource`):
+ * a save that clears one leaves it out, and as an unknown field it would come
+ * back from disk. Typed so that a new optional field, or a new key of these
+ * sections, fails the build until it is listed here.
+ */
+const OPTIONAL_SETTINGS_SHAPE: { [K in OptionalSettingsKey]-?: ShapeOf<NonNullable<Settings[K]>> } = {
+  uiStyle: "",
+  weatherCity: "",
+  jira: { baseUrl: "", email: "" },
+  upsource: { baseUrl: "" },
+};
+
+/**
+ * Every field this build knows. An empty object stands for a map
+ * (`claude.repoPaths`): its keys are data, owned whole.
+ */
+function knownSettingsShape(): Record<string, unknown> {
+  return { ...toStoredSettings(defaultSettings()), ...OPTIONAL_SETTINGS_SHAPE };
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
+/**
+ * What `persistSettings` writes: `stored` plus every field of `previous` — the
+ * file as it was on disk — that this build does not know, at any depth. Loading
+ * reads an unknown field as nothing, so without this one Save erased what
+ * another build had written: a newer release's setting under an older build, or
+ * a branch's reshaped setting under the release that the next update restarted.
+ * A field this build knows is never brought back: a cleared Jira site or a
+ * removed repo path stays gone. Arrays are this build's whole (hosts can be
+ * reordered, so their entries can't be matched up).
+ */
+export function keepUnknownSettings(
+  previous: unknown,
+  stored: Settings,
+  retired: readonly string[] = RETIRED_SETTINGS_FIELDS,
+): Record<string, unknown> {
+  const carry = (prev: unknown, next: unknown, shape: unknown, at: string): unknown => {
+    if (!isRecord(prev) || !isRecord(next) || !isRecord(shape) || Object.keys(shape).length === 0) return next;
+    const out: Record<string, unknown> = { ...next };
+    for (const [key, value] of Object.entries(prev)) {
+      const dotted = at ? `${at}.${key}` : key;
+      if (key === "__proto__" || retired.includes(dotted)) continue;
+      if (hasOwn(shape, key)) {
+        if (hasOwn(out, key)) out[key] = carry(value, out[key], shape[key], dotted);
+      } else if (!hasOwn(out, key)) {
+        out[key] = value;
+      }
+    }
+    return out;
+  };
+  return carry(previous, stored, knownSettingsShape(), "") as Record<string, unknown>;
+}
+
+/**
  * Normalizes a Jira site to its origin (https://host), tolerating input with no
  * scheme ("org.atlassian.net") or a trailing path. Returns null if unparseable.
  */

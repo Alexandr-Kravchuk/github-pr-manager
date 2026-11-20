@@ -525,17 +525,26 @@ test("main gates startup + window-all-closed on the acquired single-instance loc
 // newer than this snapshot before requiring).
 const bootBaseline = new Set(Object.keys(require.cache));
 
-const bootCompiledMain = (lockGranted) => {
+// `appOverrides` replaces members of the fake `app`. By default the boot is the
+// installed app — packaged, and run from a folder with the NSIS uninstaller next
+// to the exe (`process.execPath` points there while main.js loads) — so it never
+// moves userData; `installed: false` drops the uninstaller, a `win-unpacked` build.
+const bootCompiledMain = (lockGranted, appOverrides = {}, { installed = true } = {}) => {
   const mainJs = path.join(__dirname, "../dist/main/main/main.js");
   const elPath = require.resolve("electron", { paths: [path.dirname(mainJs)] });
   for (const k of Object.keys(require.cache)) {
     if (!bootBaseline.has(k)) delete require.cache[k]; // fresh main.js graph each boot
   }
+  const fsSync = require("node:fs");
+  const installRoot = fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-boot-"));
+  if (installed) fsSync.writeFileSync(path.join(installRoot, "Uninstall PR Dashboard.exe"), "");
   const events = [];
   const handlers = new Map();
   const updaterEvents = [];
   let quits = 0;
   const fakeApp = {
+    isPackaged: true,
+    getName: () => "PR Dashboard",
     requestSingleInstanceLock: () => lockGranted,
     quit: () => quits++,
     on: (event, cb) => {
@@ -548,6 +557,7 @@ const bootCompiledMain = (lockGranted) => {
     getAppPath: () => path.join(__dirname, ".."),
     setAppUserModelId: () => {},
     isReady: () => false,
+    ...appOverrides,
   };
   class FakeBrowserWindow {
     static getAllWindows() {
@@ -587,7 +597,13 @@ const bootCompiledMain = (lockGranted) => {
     nativeImage: { createFromPath: () => ({ isEmpty: () => false, resize: () => ({}) }) },
   };
   require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: fakeElectron };
-  require(mainJs);
+  const realExecPath = process.execPath;
+  process.execPath = path.join(installRoot, "PR Dashboard.exe");
+  try {
+    require(mainJs);
+  } finally {
+    process.execPath = realExecPath;
+  }
   return {
     events,
     handlers,
@@ -601,6 +617,7 @@ const bootCompiledMain = (lockGranted) => {
         if (!bootBaseline.has(k)) delete require.cache[k];
       }
       delete require.cache[elPath];
+      fsSync.rmSync(installRoot, { recursive: true, force: true });
     },
   };
 };
@@ -659,6 +676,418 @@ test("main.js wiring: won lock -> no quit, registers second-instance + window-al
     r.cleanup();
   }
 });
+
+// --- a build run from source keeps its data apart from the installed app -----
+// Both are named "PR Dashboard", so they shared one userData: a branch's dev
+// build rewrote the release's settings.json in its own shape, and the release
+// the next auto-update restarted read what it didn't know as defaults.
+{
+  const fsSync = require("node:fs");
+  const devUserData = require(path.join(__dirname, "../dist/main/main/dev-user-data.js"));
+  const withFolders = (fn) => {
+    const root = fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-dev-data-"));
+    const release = path.join(root, "PR Dashboard");
+    fsSync.mkdirSync(release);
+    try {
+      fn(release, devUserData.devUserDataDir(release));
+    } finally {
+      fsSync.rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const writeJson = (file, value) => fsSync.writeFileSync(file, JSON.stringify(value));
+  const readJson = (file) => JSON.parse(fsSync.readFileSync(file, "utf8"));
+
+  test("devUserDataDir: the installed app's folder with a (dev) suffix", () =>
+    assert.strictEqual(devUserData.devUserDataDir(path.join("x", "PR Dashboard")), path.join("x", "PR Dashboard (dev)")));
+
+  test("seedDevUserData: copies the installed app's files once, the agent switched off", () =>
+    withFolders((release, dev) => {
+      writeJson(path.join(release, "settings.json"), { hosts: [{ label: "GH" }], agent: { enabled: true, model: "m" } });
+      writeJson(path.join(release, "seen-state.json"), { PR_1: 1 });
+      writeJson(path.join(release, "window-state.json"), { isMaximized: true });
+      fsSync.writeFileSync(path.join(release, "jira-token.enc"), "secret");
+      const written = devUserData.seedDevUserData(release, dev);
+      assert.deepStrictEqual(written.sort(), ["seen-state.json", "settings.json", "window-state.json"]);
+      const settings = readJson(path.join(dev, "settings.json"));
+      assert.strictEqual(settings.agent.enabled, false, "two agents on the same PRs is what this must not start");
+      assert.strictEqual(settings.agent.model, "m");
+      assert.deepStrictEqual(settings.hosts, [{ label: "GH" }]);
+      assert.ok(!fsSync.existsSync(path.join(dev, "jira-token.enc")), "the token's key does not travel with it");
+      // Seeded once: a later launch copies nothing over what the dev build changed.
+      writeJson(path.join(dev, "settings.json"), { hosts: [] });
+      writeJson(path.join(release, "ignored-state.json"), { PR_2: true });
+      assert.deepStrictEqual(devUserData.seedDevUserData(release, dev), []);
+      assert.deepStrictEqual(readJson(path.join(dev, "settings.json")), { hosts: [] });
+      // The release folder is only read.
+      assert.strictEqual(readJson(path.join(release, "settings.json")).agent.enabled, true);
+    }));
+
+  test("seedDevUserData: unreadable or missing settings leave the dev build to start fresh", () =>
+    withFolders((release, dev) => {
+      fsSync.writeFileSync(path.join(release, "settings.json"), "{ not json");
+      writeJson(path.join(release, "seen-state.json"), {});
+      assert.deepStrictEqual(devUserData.seedDevUserData(release, dev), ["seen-state.json"]);
+      assert.ok(!fsSync.existsSync(path.join(dev, "settings.json")));
+      // A file the dev folder has already is never overwritten.
+      writeJson(path.join(dev, "seen-state.json"), { mine: 1 });
+      writeJson(path.join(release, "settings.json"), { hosts: [] });
+      assert.deepStrictEqual(devUserData.seedDevUserData(release, dev), ["settings.json"]);
+      assert.deepStrictEqual(readJson(path.join(dev, "seen-state.json")), { mine: 1 });
+    }));
+
+  test("main.js wiring: an unpackaged build moves userData to its own folder before the single-instance lock", () =>
+    withFolders((release, dev) => {
+      writeJson(path.join(release, "settings.json"), { hosts: [], agent: { enabled: true } });
+      const calls = [];
+      const r = bootCompiledMain(true, {
+        isPackaged: false,
+        getPath: (name) => (name === "userData" ? release : os.tmpdir()),
+        setPath: (name, value) => calls.push(["setPath", name, value]),
+        requestSingleInstanceLock: () => {
+          calls.push(["lock"]);
+          return true;
+        },
+      });
+      try {
+        assert.deepStrictEqual(calls, [["setPath", "userData", dev], ["lock"]]);
+        assert.strictEqual(readJson(path.join(dev, "settings.json")).agent.enabled, false);
+      } finally {
+        r.cleanup();
+      }
+    }));
+
+  test("persistSettings: Save keeps the fields of the file on disk this build doesn't know", () =>
+    withFolders((userData) => {
+      const settingsJs = path.join(__dirname, "../dist/main/main/settings.js");
+      const elPath = require.resolve("electron", { paths: [path.dirname(settingsJs)] });
+      const hadElectron = require.cache[elPath];
+      const settingsPath = require.resolve(settingsJs);
+      require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: { app: { getPath: () => userData } } };
+      delete require.cache[settingsPath];
+      try {
+        const settings = require(settingsJs);
+        const file = path.join(userData, "settings.json");
+        // What the agent refactor branch wrote: its drive switches under `drive`.
+        writeJson(file, {
+          hosts: [],
+          theme: "dark",
+          agent: { scenarios: { drive: { ci: { mode: "on", maxAttempts: 2 } }, markReady: { mode: "off" } } },
+        });
+        // The release's own Save path for a theme switch: load, change, persist.
+        settings.persistSettings({ ...settings.loadSettings(), theme: "light" });
+        const saved = readJson(file);
+        assert.strictEqual(saved.theme, "light");
+        assert.deepStrictEqual(saved.agent.scenarios.drive, { ci: { mode: "on", maxAttempts: 2 } });
+        assert.deepStrictEqual(saved.agent.scenarios.markReady, { mode: "off" });
+        // A first save, with no file yet, writes just this build's settings.
+        fsSync.rmSync(file);
+        settings.persistSettings({ hosts: [] });
+        assert.ok(!("drive" in readJson(file).agent.scenarios));
+      } finally {
+        delete require.cache[settingsPath];
+        if (hadElectron) require.cache[elPath] = hadElectron;
+        else delete require.cache[elPath];
+      }
+    }));
+
+  // The app the installer started after an update read "no settings" while the
+  // file was there: a failed read must not look like a first run, and no write
+  // may land over a file that couldn't be read.
+  test("settings: an unreadable file is an error, not the first run, and is never written over", () =>
+    withFolders((userData) => {
+      const settingsJs = path.join(__dirname, "../dist/main/main/settings.js");
+      const elPath = require.resolve("electron", { paths: [path.dirname(settingsJs)] });
+      const hadElectron = require.cache[elPath];
+      const settingsPath = require.resolve(settingsJs);
+      require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: { app: { getPath: () => userData } } };
+      delete require.cache[settingsPath];
+      try {
+        const settings = require(settingsJs);
+        const file = path.join(userData, "settings.json");
+        // Missing: the first run, empty settings.
+        assert.strictEqual(settings.readSettingsText(file), null);
+        assert.deepStrictEqual(settings.loadSettings().hosts, []);
+        // Unreadable (a folder where the file should be: EISDIR, not transient).
+        fsSync.mkdirSync(file);
+        assert.throws(() => settings.loadSettings(), (e) => e instanceof cfg.ConfigError && /could not be read/.test(e.message));
+        assert.throws(() => settings.persistSettings({ hosts: [] }), cfg.ConfigError);
+        assert.ok(fsSync.statSync(file).isDirectory(), "nothing was written over it");
+        fsSync.rmSync(file, { recursive: true });
+        // A save goes through a temporary file renamed over the old one.
+        settings.persistSettings({ hosts: [], theme: "dark" });
+        assert.strictEqual(readJson(file).theme, "dark");
+        assert.deepStrictEqual(fsSync.readdirSync(userData).filter((f) => f.endsWith(".tmp")), []);
+      } finally {
+        delete require.cache[settingsPath];
+        if (hadElectron) require.cache[elPath] = hadElectron;
+        else delete require.cache[elPath];
+      }
+    }));
+
+  test("main.js wiring: defaults standing in for unreadable settings leave the login item alone", () => {
+    const src = fsSync.readFileSync(path.join(__dirname, "../src/main/main.ts"), "utf8");
+    assert.match(src, /function applyPreferences\(settings: Settings, loaded = true\): void \{[^}]*if \(loaded\) applyLaunchAtLogin\(settings\.launchAtLogin\);/);
+    assert.match(src, /prefs = loadSettings\(\);\s*prefsLoaded = true;/);
+    assert.match(src, /applyPreferences\(prefs, prefsLoaded\);/);
+  });
+
+  test("diag log: appends a timestamped line, keeps the old half, never throws", () =>
+    withFolders((dir) => {
+      const diagLog = require(path.join(__dirname, "../dist/main/main/diag-log.js"));
+      const file = path.join(dir, "main.log");
+      diagLog.diag("before init"); // nowhere to write yet: nothing happens
+      assert.ok(!fsSync.existsSync(file));
+      diagLog.initDiagLog(dir);
+      diagLog.diag("start v1");
+      assert.match(fsSync.readFileSync(file, "utf8"), /^\d{4}-\d\d-\d\dT[\d:.]+Z start v1\n$/);
+      fsSync.writeFileSync(file, "x".repeat(300 * 1024));
+      diagLog.diag("after rotation");
+      assert.strictEqual(fsSync.readFileSync(file, "utf8").trim().split(" ").slice(1).join(" "), "after rotation");
+      assert.ok(fsSync.existsSync(`${file}.old`));
+      diagLog.initDiagLog(path.join(dir, "settings.json", "nope")); // unwritable once a file blocks the path
+      fsSync.writeFileSync(path.join(dir, "settings.json"), "{}");
+      assert.doesNotThrow(() => diagLog.diag("ignored"));
+    }));
+
+  test("configLooksStale: an empty config with polled hosts is read again", () => {
+    // The config was read once; an empty first read kept "No repositories configured" up all run.
+    const hs = require(path.join(__dirname, "../dist/main/shared/host-status.js"));
+    const polled = { rateLimits: [{ hostLabel: "GH" }], errors: [] };
+    assert.strictEqual(hs.configLooksStale(0, polled), true);
+    assert.strictEqual(hs.configLooksStale(0, { rateLimits: [], errors: [{ hostLabel: "GH" }] }), true, "a failed host was polled too");
+    assert.strictEqual(hs.configLooksStale(0, { rateLimits: [], errors: [] }), false, "nothing polled: really unconfigured");
+    assert.strictEqual(hs.configLooksStale(0, null), false, "no snapshot yet");
+    assert.strictEqual(hs.configLooksStale(1, polled), false, "hosts configured");
+    assert.strictEqual(hs.configLooksStale(null, polled), true, "a config read that failed is read again too");
+    assert.strictEqual(hs.configLooksStale(null, null), false);
+    const src = fsSync.readFileSync(path.join(__dirname, "../src/renderer/src/App.tsx"), "utf8");
+    assert.match(src, /const staleConfig = configLooksStale\(config\?\.hosts\.length \?\? null, data\);/);
+    assert.match(src, /\}, \[staleConfig, data\]\);/, "read again on each snapshot while stale, not once");
+  });
+
+  // Windows: a scanner holds the file it just saw written, for a moment or for good.
+  test("settings: transient read and rename errors are retried; a lasting one fails fast and keeps the file", () =>
+    withFolders((userData) => {
+      const settingsJs = path.join(__dirname, "../dist/main/main/settings.js");
+      const elPath = require.resolve("electron", { paths: [path.dirname(settingsJs)] });
+      const hadElectron = require.cache[elPath];
+      const settingsPath = require.resolve(settingsJs);
+      require.cache[elPath] = { id: elPath, filename: elPath, loaded: true, exports: { app: { getPath: () => userData } } };
+      delete require.cache[settingsPath];
+      const realRead = fsSync.readFileSync;
+      const realRename = fsSync.renameSync;
+      const realNow = Date.now;
+      const file = path.join(userData, "settings.json");
+      const failing = (code, times) => {
+        let calls = 0;
+        return {
+          get calls() {
+            return calls;
+          },
+          wrap: (real) =>
+            function (...args) {
+              if (args[0] === file || String(args[1]) === file) {
+                calls++;
+                if (calls <= times) throw Object.assign(new Error(code), { code });
+              }
+              return real.apply(this, args);
+            },
+        };
+      };
+      try {
+        const settings = require(settingsJs);
+        writeJson(file, { hosts: [], theme: "dark" });
+        // EBUSY twice, then the text: three reads.
+        let f = failing("EBUSY", 2);
+        fsSync.readFileSync = f.wrap(realRead);
+        assert.strictEqual(settings.loadSettings().theme, "dark");
+        assert.strictEqual(f.calls, 3);
+        // EPERM for good: the first try plus three retries, then ConfigError.
+        f = failing("EPERM", Infinity);
+        fsSync.readFileSync = f.wrap(realRead);
+        assert.throws(() => settings.readSettingsText(file), /could not be read \(EPERM\)/);
+        assert.strictEqual(f.calls, 4);
+        // Within the memo the next loads throw at once: no read, no sleep.
+        assert.throws(() => settings.loadSettings(), /could not be read \(EPERM\)/);
+        assert.strictEqual(f.calls, 4, "the memo answered without touching the file");
+        // A Save reads anyway (and still refuses to write over it).
+        assert.throws(() => settings.persistSettings({ hosts: [] }), /could not be read \(EPERM\)/);
+        assert.strictEqual(f.calls, 8);
+        // A clock set back does not stretch the memo.
+        Date.now = () => realNow() - 3600000;
+        assert.throws(() => settings.loadSettings(), /could not be read/);
+        assert.strictEqual(f.calls, 12, "a negative age reads the file again");
+        // Once it expires the file is read again.
+        Date.now = () => realNow() + 10000;
+        fsSync.readFileSync = realRead;
+        assert.strictEqual(settings.loadSettings().theme, "dark");
+        Date.now = realNow;
+        // A non-transient error is not retried, and not remembered.
+        f = failing("EIO", Infinity);
+        fsSync.readFileSync = f.wrap(realRead);
+        assert.throws(() => settings.readSettingsText(file), /could not be read \(EIO\)/);
+        assert.strictEqual(f.calls, 1);
+        fsSync.readFileSync = realRead;
+        assert.strictEqual(settings.loadSettings().theme, "dark");
+        // A rename held twice still lands.
+        f = failing("EPERM", 2);
+        fsSync.renameSync = f.wrap(realRename);
+        settings.persistSettings({ hosts: [], theme: "light" });
+        assert.strictEqual(readJson(file).theme, "light");
+        assert.strictEqual(f.calls, 3);
+        // A rename held for good: ConfigError, the old file intact, no .tmp left.
+        f = failing("EPERM", Infinity);
+        fsSync.renameSync = f.wrap(realRename);
+        assert.throws(() => settings.persistSettings({ hosts: [], theme: "dark" }), (e) => e instanceof cfg.ConfigError && /could not be saved \(EPERM\)/.test(e.message));
+        assert.strictEqual(readJson(file).theme, "light");
+        assert.deepStrictEqual(fsSync.readdirSync(userData).filter((n) => n.endsWith(".tmp")), []);
+        fsSync.renameSync = realRename;
+        // Writing the temporary file fails: the same error, nothing left behind.
+        const realWrite = fsSync.writeFileSync;
+        fsSync.writeFileSync = function (target, ...rest) {
+          if (String(target).endsWith(".tmp")) {
+            realWrite.call(this, target, "{ half");
+            throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+          }
+          return realWrite.call(this, target, ...rest);
+        };
+        try {
+          assert.throws(() => settings.persistSettings({ hosts: [], theme: "dark" }), /could not be saved \(ENOSPC\)/);
+        } finally {
+          fsSync.writeFileSync = realWrite;
+        }
+        assert.strictEqual(readJson(file).theme, "light");
+        assert.deepStrictEqual(fsSync.readdirSync(userData).filter((n) => n.endsWith(".tmp")), []);
+      } finally {
+        fsSync.readFileSync = realRead;
+        fsSync.renameSync = realRename;
+        Date.now = realNow;
+        delete require.cache[settingsPath];
+        if (hadElectron) require.cache[elPath] = hadElectron;
+        else delete require.cache[elPath];
+      }
+    }));
+
+  // --- A packaged app's copy of the data folder (Claude Desktop's MSIX view) ---
+  const dataCopy = require(path.join(__dirname, "../dist/main/main/data-copy.js"));
+  const withAppData = (fn) => {
+    const root = fsSync.mkdtempSync(path.join(os.tmpdir(), "prd-data-copy-"));
+    const appData = path.join(root, "Roaming");
+    const localAppData = path.join(root, "Local");
+    const copyOf = (pkg) => path.join(localAppData, "Packages", pkg, "LocalCache", "Roaming", "PR Dashboard");
+    fsSync.mkdirSync(appData, { recursive: true });
+    try {
+      fn({ appData, localAppData, userData: path.join(appData, "PR Dashboard"), copyOf });
+    } finally {
+      fsSync.rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  test("findDataCopies: a package's copy with settings is found, named, and seen as outside", () =>
+    withAppData(({ appData, localAppData, userData, copyOf }) => {
+      fsSync.mkdirSync(userData);
+      writeJson(path.join(userData, "settings.json"), { hosts: [] });
+      fsSync.mkdirSync(copyOf("Claude_pzs8sxrjxfjjc"), { recursive: true });
+      writeJson(path.join(copyOf("Claude_pzs8sxrjxfjjc"), "settings.json"), { hosts: [{ label: "GitHub" }] });
+      fsSync.mkdirSync(copyOf("Other_abc"), { recursive: true }); // caches only: no settings, not a copy that matters
+      fsSync.mkdirSync(path.join(localAppData, "Packages", "Empty_x"), { recursive: true });
+      const input = { platform: "win32", appData, userData, localAppData };
+      const found = dataCopy.findDataCopies(input);
+      assert.strictEqual(found.length, 1);
+      assert.strictEqual(found[0].appName, "Claude");
+      assert.strictEqual(found[0].dir, copyOf("Claude_pzs8sxrjxfjjc"));
+      assert.strictEqual(found[0].where, "outside");
+      assert.ok(found[0].changedAt > 0);
+      assert.deepStrictEqual(dataCopy.findDataCopies({ ...input, platform: "darwin" }), [], "Windows only");
+      assert.deepStrictEqual(dataCopy.findDataCopies({ ...input, localAppData: undefined }), []);
+      assert.deepStrictEqual(
+        dataCopy.findDataCopies({ ...input, userData: path.join(localAppData, "elsewhere") }),
+        [],
+        "a data folder outside %APPDATA% has no such copy",
+      );
+    }));
+
+  test("findDataCopies: reading the data folder through the copy is inside, listed first", () =>
+    withAppData(({ appData, localAppData, userData, copyOf }) => {
+      fsSync.mkdirSync(copyOf("Claude_x"), { recursive: true });
+      writeJson(path.join(copyOf("Claude_x"), "settings.json"), { hosts: [] });
+      fsSync.mkdirSync(copyOf("Another_y"), { recursive: true });
+      writeJson(path.join(copyOf("Another_y"), "settings.json"), { hosts: [] });
+      // The package's view: the data folder's path opens the copy's files.
+      fsSync.symlinkSync(copyOf("Claude_x"), userData, "junction");
+      const found = dataCopy.findDataCopies({ platform: "win32", appData, userData, localAppData });
+      assert.deepStrictEqual(found.map((c) => [c.appName, c.where]), [["Claude", "inside"], ["Another", "outside"]]);
+    }));
+
+  test("main.js wiring: the data copy is looked up at start, logged, and shown only from main's own path", () => {
+    const src = fsSync.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+    const lookup = src.indexOf("findDataCopies)({");
+    assert.ok(lookup > 0, "looked up at start");
+    assert.ok(lookup < src.indexOf("registerIpc();", lookup), "before the IPC that answers for it");
+    assert.match(src, /diag\)\(`data copy \(\$\{c\.where\}\)/, "each copy goes to main.log");
+    assert.match(src, /ipcMain\.handle\("app:dataCopy", async \(\) =>/);
+    assert.match(src, /ipcMain\.handle\("app:showDataCopy", async \(\) =>/, "takes no path from the renderer");
+    const app = fsSync.readFileSync(path.join(__dirname, "../src/renderer/src/App.tsx"), "utf8");
+    assert.match(app, /window\.api\.getDataCopy\(\)\.then\(setDataCopy\)/);
+    assert.match(app, /\{dataCopy && <DataCopyBanner copy=\{dataCopy\}/);
+  });
+
+  test("main.js wiring: a packaged build keeps the installed app's userData", () => {
+    let moved = 0;
+    const r = bootCompiledMain(true, { setPath: () => moved++ });
+    try {
+      assert.strictEqual(moved, 0);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("isInstalledBuild: the installed app, not a build from source or a win-unpacked folder", () => {
+    const win = { platform: "win32", execPath: "C:\\Apps\\PR Dashboard\\PR Dashboard.exe", productName: "PR Dashboard" };
+    const uninstaller = "C:\\Apps\\PR Dashboard\\Uninstall PR Dashboard.exe";
+    const has = (file) => file === uninstaller;
+    assert.strictEqual(devUserData.isInstalledBuild({ ...win, isPackaged: true, exists: has }), true);
+    assert.strictEqual(devUserData.isInstalledBuild({ ...win, isPackaged: true, exists: () => false }), false, "win-unpacked");
+    assert.strictEqual(devUserData.isInstalledBuild({ ...win, isPackaged: false, exists: has }), false, "electron .");
+    assert.strictEqual(
+      devUserData.isInstalledBuild({ isPackaged: true, platform: "darwin", execPath: "/x", productName: "PR Dashboard", exists: () => false }),
+      true,
+      "macOS has no uninstaller to look for",
+    );
+  });
+
+  if (process.platform === "win32") {
+    test("main.js wiring: a win-unpacked build takes its own data folder too", () =>
+      withFolders((release, dev) => {
+        writeJson(path.join(release, "settings.json"), { hosts: [], agent: { enabled: true } });
+        const moved = [];
+        const r = bootCompiledMain(
+          true,
+          { getPath: (name) => (name === "userData" ? release : os.tmpdir()), setPath: (name, value) => moved.push([name, value]) },
+          { installed: false },
+        );
+        try {
+          assert.deepStrictEqual(moved, [["userData", dev]]);
+        } finally {
+          r.cleanup();
+        }
+      }));
+  }
+
+  test("main.js wiring: only the installed app writes launch-at-login and takes updates", () => {
+    const src = fsSync.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
+    assert.match(src, /if \(!installedApp \|\| process\.platform === "linux"\)\s*return;/, "the login item carries this exe's path");
+    assert.match(src, /if \(installedApp\)\s*\(0, updater_1\.initAutoUpdater\)/, "a win-unpacked update would run the real installer");
+  });
+
+  test("updater: an update installs silently and starts the app again", () => {
+    // The assisted (wizard) installer starts the app after an update only when
+    // silent; a plain quitAndInstall() left the app closed behind a wizard.
+    const src = fsSync.readFileSync(path.join(__dirname, "../dist/main/main/updater.js"), "utf8");
+    assert.match(src, /autoUpdater\.quitAndInstall\(true, true\)/);
+    assert.doesNotMatch(src, /autoUpdater\.quitAndInstall\(\)/);
+  });
+}
 
 // --- tray controller, verified against a mocked Electron --------------------
 // `tray.ts` is Electron-only, so it is exercised by requiring the COMPILED
@@ -1557,6 +1986,79 @@ test("validateSettings: jira with invalid baseUrl throws", () =>
     () => cfg.validateSettings({ hosts: [], jira: { baseUrl: "http://", email: "me@x.com" } }),
     /jira\.baseUrl/,
   ));
+
+// --- keepUnknownSettings: a save never erases what another build wrote --------
+// Loading reads a field this build doesn't know as nothing, so before this one
+// Save erased it: the agent refactor branch's `scenarios.drive` / `markReady`
+// vanished under the release, and the branch dropped the release's `uiStyle`.
+{
+  const saveOver = (previous, raw = previous) =>
+    cfg.keepUnknownSettings(previous, cfg.toStoredSettings(cfg.validateSettings(raw)));
+
+  test("keepUnknownSettings: another build's fields survive, at any depth", () => {
+    const previous = {
+      hosts: [],
+      newTopLevel: { a: 1 },
+      agent: {
+        scenarios: {
+          drive: { ci: { mode: "on", maxAttempts: 2 }, comments: { mode: "on" } },
+          markReady: { mode: "off" },
+          review: { mode: "on", futureKnob: 7 },
+        },
+      },
+    };
+    const out = saveOver(previous);
+    assert.deepStrictEqual(out.newTopLevel, { a: 1 });
+    assert.deepStrictEqual(out.agent.scenarios.drive, previous.agent.scenarios.drive);
+    assert.deepStrictEqual(out.agent.scenarios.markReady, { mode: "off" });
+    assert.strictEqual(out.agent.scenarios.review.futureKnob, 7, "an unknown key inside a known block is kept too");
+    assert.strictEqual(out.agent.scenarios.review.mode, "on");
+    // And the file still reads back as this build's settings.
+    assert.strictEqual(cfg.validateSettings(out).agent.scenarios.review.mode, "on");
+  });
+
+  test("keepUnknownSettings: what this build knows comes from this save, not the file", () => {
+    const previous = { hosts: [], theme: "dark", agent: { scenarios: { driveCi: { mode: "on" } } } };
+    const out = saveOver(previous, { hosts: [], theme: "light", agent: { scenarios: { driveCi: { mode: "shadow" } } } });
+    assert.strictEqual(out.theme, "light");
+    assert.strictEqual(out.agent.scenarios.driveCi.mode, "shadow");
+  });
+
+  test("keepUnknownSettings: a cleared Jira site, Upsource address, email or repo path stays cleared", () => {
+    const previous = {
+      hosts: [],
+      jira: { baseUrl: "https://org.atlassian.net", email: "me@x.com" },
+      upsource: { baseUrl: "https://upsource.example.com" },
+      claude: { repoPaths: { "o/a": "C:\\a", "o/b": "C:\\b" } },
+    };
+    assert.strictEqual(saveOver(previous, { hosts: [] }).jira, undefined, "Jira cleared");
+    assert.strictEqual(saveOver(previous, { hosts: [] }).upsource, undefined, "Upsource cleared");
+    const noEmail = saveOver(previous, { hosts: [], jira: { baseUrl: "https://org.atlassian.net" } });
+    assert.deepStrictEqual(noEmail.jira, { baseUrl: "https://org.atlassian.net" }, "email cleared");
+    const oneRepo = saveOver(previous, { hosts: [], claude: { repoPaths: { "o/a": "C:\\a" } } });
+    assert.deepStrictEqual(oneRepo.claude.repoPaths, { "o/a": "C:\\a" }, "a map's keys are data, not fields");
+  });
+
+  test("keepUnknownSettings: arrays are this save's whole; retired fields are dropped", () => {
+    const host = { label: "GH", graphqlUrl: "https://api.github.com/graphql", repos: ["a/b"] };
+    const previous = { hosts: [{ ...host, extra: true }, host], oldSecret: "x", agent: { gone: 1 } };
+    const stored = cfg.toStoredSettings(cfg.validateSettings({ hosts: [host] }));
+    const out = cfg.keepUnknownSettings(previous, stored, ["oldSecret", "agent.gone"]);
+    assert.strictEqual(out.hosts.length, 1);
+    assert.strictEqual(out.hosts[0].extra, undefined);
+    assert.ok(!("oldSecret" in out) && !("gone" in out.agent), "a retired path is not carried");
+  });
+
+  test("keepUnknownSettings: nothing usable on disk leaves the save as it is", () => {
+    const stored = cfg.toStoredSettings(cfg.validateSettings({ hosts: [] }));
+    for (const previous of [undefined, null, "text", [1, 2], 42]) {
+      assert.deepStrictEqual(cfg.keepUnknownSettings(previous, stored), stored);
+    }
+    const proto = cfg.keepUnknownSettings(JSON.parse('{"__proto__": {"polluted": true}}'), stored);
+    assert.strictEqual(Object.getPrototypeOf(proto), Object.prototype);
+    assert.strictEqual({}.polluted, undefined);
+  });
+}
 
 // --- toPublicConfig ----------------------------------------------------------
 test("toPublicConfig: strips graphqlUrl, keeps label + repos", () => {
@@ -8295,13 +8797,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
   // --- launch at login, starting in the tray -----------------------------------
 
-  test("loginItemSettingsFor: Windows passes the hidden-launch marker as an argument", () => {
-    assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(true, "win32"), {
-      openAtLogin: true,
-      args: [loginLaunch.HIDDEN_LAUNCH_ARG],
-    });
-    // Disabling must name the same args, or Windows reports/keeps a different entry.
-    assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(false, "win32").args, [loginLaunch.HIDDEN_LAUNCH_ARG]);
+  test("loginItemSettingsFor: Windows registers the plain exe — no hidden-launch marker", () => {
+    // Windows 11 tucks a new tray icon behind `^`: a tray start looked like no start.
+    assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(true, "win32"), { openAtLogin: true });
+    assert.deepStrictEqual(loginLaunch.loginItemSettingsFor(false, "win32"), { openAtLogin: false });
+  });
+
+  test("startsInTray: a login launch with close-to-tray, off Windows only", () => {
+    assert.strictEqual(loginLaunch.startsInTray("darwin", true, true), true);
+    assert.strictEqual(loginLaunch.startsInTray("darwin", true, false), false);
+    assert.strictEqual(loginLaunch.startsInTray("darwin", false, true), false);
+    assert.strictEqual(loginLaunch.startsInTray("win32", true, true), false, "an old Run entry's --hidden opens the window too");
   });
 
   test("loginItemSettingsFor: macOS asks for a hidden open, no arguments", () => {
@@ -8341,9 +8847,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     const staleIdx = src.indexOf("staleLoginItemsFor)(process.platform)");
     assert.ok(staleIdx !== -1, "the legacy login item must be removed on every apply, enabled or not");
     assert.ok(staleIdx < src.indexOf("loginItemSettingsFor)(enabled, process.platform)"), "removal runs before registering");
-    assert.match(src, /startInTray = launchedAtLogin && prefs\.closeToTray/, "only close-to-tray may start hidden");
+    assert.match(
+      src,
+      /startInTray = \(0, login_launch_1\.startsInTray\)\(process\.platform, launchedAtLogin, prefs\.closeToTray\)/,
+      "only close-to-tray may start hidden, and not on Windows",
+    );
     assert.match(src, /createWindow\(\{ show: !startInTray \}\)/, "the first window must honor the tray start");
-    const applyIdx = src.indexOf("applyPreferences(prefs);");
+    const applyIdx = src.indexOf("applyPreferences(prefs, prefsLoaded);");
     const fallback = /if \(startInTray && !trayController\.hidesToTray\(\)\)\s*focusMainWindow\(\);/.exec(src);
     assert.ok(fallback, "a missing tray icon must bring the window back");
     assert.ok(applyIdx !== -1 && applyIdx < fallback.index, "the fallback must run after the tray is created");
