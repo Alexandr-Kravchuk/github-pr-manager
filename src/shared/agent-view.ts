@@ -1,5 +1,6 @@
 import type { NotifyEventKind } from "./notify";
 import type { PlanStep } from "./agent-stream";
+import { resultCard } from "./agent-result";
 import { isReviewDue } from "./pr-filter";
 import type { AgentItem, AgentRunState, AgentSettings, AgentState, PullRequest } from "./types";
 
@@ -525,6 +526,26 @@ export function cardKey(pr: Pick<PullRequest, "headOid" | "updatedAt" | "ciState
 export function approvalStands(pr: Pick<PullRequest, "viewerApproved" | "viewerReviewedHead" | "viewerReviewedAt" | "authorRepliedAt">): boolean {
   if (!pr.viewerApproved || !pr.viewerReviewedHead) return false;
   return !(pr.authorRepliedAt !== null && pr.viewerReviewedAt !== null && pr.authorRepliedAt > pr.viewerReviewedAt);
+}
+
+/**
+ * The agent's review of the PR's current head that ended with nothing to post
+ * and nothing that holds an approval back: no Blocker, no Major, no question
+ * for the author left unasked (on a review a question for you is one for the
+ * author — `resultCard`) — read from the run's own `prd-result` block, never
+ * guessed from its prose. Your approval may rest on it, on your click (`approve`): the
+ * Board offers it there, rather than send you to GitHub for one button, and
+ * main checks it again on a fresh read of the PR before anything goes out.
+ */
+export function approvableReview(item: AgentItem | null | undefined, pr: PullRequest | null | undefined): boolean {
+  if (!item || !pr?.headOid || pr.isDraft || laneOfPr(pr) !== "review") return false;
+  if (item.scenario !== "review" && item.scenario !== "rereview") return false;
+  // Done with nothing to post: no plan, nothing sent, not cut short.
+  if (item.state !== "done" || item.interrupted || item.published || item.plan) return false;
+  if (keyHead(item.key) !== pr.headOid) return false;
+  const res = resultCard(item);
+  if (!res?.structured || res.asks.length > 0 || res.authorQuestions.length > 0) return false;
+  return !res.findings.some((f) => f.severity === "blocker" || f.severity === "major");
 }
 
 /** Your PR is ready to merge as GitHub sees it. */

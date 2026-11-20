@@ -8,7 +8,7 @@
 import { resultCard, type RunAsk, type RunFinding } from "./agent-result";
 import type { PublishSummary } from "./agent-publish";
 import { currentStep } from "./agent-stream";
-import { isOwnSessionWhy, queueOrder, runFor, stageColumns, stageLine, type BoardStage, type StageCard, type StageContext } from "./agent-view";
+import { approvableReview, isOwnSessionWhy, queueOrder, runFor, stageColumns, stageLine, type BoardStage, type StageCard, type StageContext } from "./agent-view";
 import type { AgentAction, AgentItem, AgentState, PullRequest } from "./types";
 
 /** Whose move it is: yours, the agent's, someone else's (the author, reviewers), or nobody's. */
@@ -449,14 +449,25 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
       case "rereview": {
         const again = kind === "rereview";
         const who = again ? (pr?.myReReviewDue ? "The author answered your review" : "Your review was asked for again") : pr?.requestedOfMe ? "Your review is requested" : "Your team's review is requested";
+        const letAgent: BoardChoice = { label: again ? "Let the agent re-review" : "Let the agent review", does: "The agent starts now; its draft comes back here. Nothing is posted until you send it.", act: { type: "enqueue", prId } };
+        // The agent's review of this very head found nothing blocking and had nothing to post: the approval is one click here, not a trip to GitHub.
+        if (item && approvableReview(item, pr)) {
+          const left = read.findings.length;
+          now = `${who} — the agent ${again ? "re-reviewed" : "reviewed"} this commit and found nothing blocking${left > 0 ? ` (${plural(left, "point")} below)` : ""}; it had nothing to post.`;
+          ask = "Read what it found, then approve — or look yourself.";
+          choices = [
+            { label: "Approve", primary: true, does: "Posts your approval of this commit on GitHub under your name: one line, signed by the agent.", act: { type: "approve", runId } },
+            ...(sessionOnIt ? [{ ...toSession, primary: false }] : []),
+            ...(canStart ? [{ ...letAgent, label: again ? "Re-review again" : "Review again" }] : []),
+            open(),
+          ];
+          next = "The author can merge once the other reviewers and CI allow it. If they push again, the agent reviews the new commits.";
+          break;
+        }
         const why = stage.why ? ` — the agent didn't ${again ? "re-review" : "review"} it: ${lower(stage.why)}` : "";
         now = `${who}${why}.`;
         ask = canStart ? `Let the agent ${again ? "re-review" : "review"} it — or do it yourself.` : sessionOnIt ? "Carry on in your Claude session — the agent stays off this PR while it is open." : "Review it on GitHub.";
-        choices = canStart
-          ? [{ label: again ? "Let the agent re-review" : "Let the agent review", primary: true, does: "The agent starts now; its draft comes back here. Nothing is posted until you send it.", act: { type: "enqueue", prId } }, open()]
-          : sessionOnIt
-            ? [toSession, open()]
-            : [{ ...open(), primary: true }];
+        choices = canStart ? [{ ...letAgent, primary: true }, open()] : sessionOnIt ? [toSession, open()] : [{ ...open(), primary: true }];
         next = canStart ? "The draft comes back to Your turn." : `The author sees your review on GitHub.${sessionOnIt ? ` ${SESSION_NEXT}` : ""}`;
         break;
       }

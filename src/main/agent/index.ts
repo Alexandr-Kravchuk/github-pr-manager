@@ -9,7 +9,7 @@ import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
-import { AGENT_CLOSED, approvalStands, boardStage, cardKey, keyHead, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
+import { AGENT_CLOSED, approvableReview, approvalStands, boardStage, cardKey, keyHead, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -52,7 +52,7 @@ import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, redirectingKeys, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { claudeSessionRoots, cutShort, preflightFor, runTempEnv, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
-import { approveAgainRequest, checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
+import { approveAgainRequest, approveRequest, checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
 import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
 import { diagramComment, wantsDiagrams } from "../../shared/agent-diagrams";
 import { actionArgs, boardNow, clip, diffBoard, diffIdle, diffItems, itemFields, runStats, settingsDiff, type ItemMark } from "./journal";
@@ -1037,6 +1037,52 @@ export function createAgent(deps: AgentDeps): Agent {
       return { ok: true };
     } finally {
       approvingAgain.delete(prId);
+    }
+  }
+
+  /**
+   * Your approval, on your click, resting on the agent's review of the PR's
+   * head that found nothing blocking and had nothing to post
+   * (`approvableReview`) — the Board's Approve, so a card whose review is done
+   * doesn't send you to GitHub for one button. The PR is read again first: it
+   * must still be open, at the head that review read, with the rule still
+   * holding; what goes out is one line and the signature, on that head.
+   */
+  async function approveOnReview(item: AgentItemRecord, all: Settings): Promise<AgentActionResult> {
+    const pr = snapshotPr(item.prId);
+    if (!pr?.headOid) return { ok: false, error: "The PR isn't on the dashboard any more." };
+    if (!approvableReview(item, pr)) {
+      return { ok: false, error: "The agent's review isn't of the PR's head any more, or it found something that holds an approval back — review it again first." };
+    }
+    if (!deps.fetchPr) return { ok: false, error: "The app can't read the PR here." };
+    if (approvingAgain.has(pr.id)) return { ok: false, error: "It is being approved already." };
+    approvingAgain.add(pr.id);
+    try {
+      let read: FreshPullRequest | null;
+      try {
+        read = await deps.fetchPr({ id: pr.id, hostLabel: pr.hostLabel, roles: pr.roles });
+      } catch (e) {
+        return { ok: false, error: `Couldn't read the PR: ${(e as Error).message}` };
+      }
+      if (!read) return { ok: false, error: "The PR is gone or out of reach." };
+      if (read.state !== "OPEN") return { ok: false, error: `The PR was ${read.state.toLowerCase()} already.` };
+      if (read.pr.headOid !== pr.headOid) return { ok: false, error: "There are new commits since the agent's review — it needs a review, not an approval." };
+      if (approvalStands(read.pr)) return { ok: false, error: "Your approval already stands on this head." };
+      const head = pr.headOid;
+      const req = approveRequest(pr.repo, pr.number, head, all.agent.policy.signature);
+      const res = await gh(ghApiArgs(req, pr.url), { input: JSON.stringify(req.body) });
+      if (res.code !== 0) return { ok: false, error: `GitHub refused it: ${ghError(res)}` };
+      // Posted: the card is not your move again before the snapshot shows the approval.
+      item.published = true;
+      item.finishedAt = stamp();
+      item.headline = `Approved by you on ${head.slice(0, 7)}`;
+      store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
+      logRun(item, "approved", { headOid: head, detail: "Approved on your click — the agent's review of this head found nothing blocking" });
+      void store.save();
+      changed();
+      return { ok: true };
+    } finally {
+      approvingAgain.delete(pr.id);
     }
   }
 
@@ -2954,6 +3000,10 @@ export function createAgent(deps: AgentDeps): Agent {
         if ((item.scenario !== "reapprove" && item.scenario !== "reask") || item.state !== "needsYou") return { ok: false, error: "There is nothing to give again here." };
         if (reapproving.has(item.runId)) return { ok: false, error: "It is on its way already." };
         return giveAgain(item, true);
+      }
+      case "approve": {
+        if (r) return { ok: false, error: "It is still running." };
+        return approveOnReview(item, all);
       }
       case "merge": {
         if (item.scenario !== "merge" || item.state !== "needsYou") return { ok: false, error: "There is nothing to merge here." };

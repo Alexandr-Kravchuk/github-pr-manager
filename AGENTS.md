@@ -455,7 +455,15 @@ Three layers:
   from a fork (the agent never pushes to one) says how to fix it yourself, and
   a PR your own Claude session holds offers "Open your Claude session" first
   (`control: "session"`; the Board finds the session the way the card's Claude
-  button does and switches to it). Every Your-turn card has "Not now" (`notNow`,
+  button does and switches to it). A review asked of you whose agent run on
+  this very head ended with nothing to post and nothing that holds an approval
+  back (`approvableReview` in `shared/agent-view.ts`: its own `prd-result`
+  block, no Blocker, no Major, no question for the author) offers "Approve"
+  first (`approve`, only the run id over IPC): main checks the rule again,
+  reads the PR again — open, same head, your approval not already on it — and
+  posts an APPROVE of that head with one line and the signature, logged as
+  `run/approved`; the run is then marked published, so it is offered once.
+  Every Your-turn card has "Not now" (`notNow`,
   only the PR id goes over IPC): main stores the card's `cardKey` — the PR's
   head, `updatedAt`, CI and conflict state, and its latest run — in
   `state.json` (`setAside`), and while that still reads the same the card
@@ -647,6 +655,7 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   refused tools and stderr's tail; `interrupted` when its process was ended
   under it; `diagrams`; `published`/`pushed`/`merged`/`reapproved`/`reasked`
   and their `not-*` refusals; `approved-again` (no run: your Approve again);
+  `approved` (your Approve on a review that found nothing blocking);
   `offered` for an offer; `notice`), `item` (every
   state change of an item), `board`
   (a card's column or button changed: `seen` on the first look, `move`,

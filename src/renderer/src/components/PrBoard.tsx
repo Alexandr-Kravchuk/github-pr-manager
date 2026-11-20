@@ -91,8 +91,8 @@ export function PrBoard({
     const res = await act(action);
     const prId = "prId" in action ? action.prId : "runId" in action ? (state.items.find((i) => i.runId === action.runId)?.prId ?? null) : null;
     setNotice(res.ok ? null : { text: res.error, prId });
-    // An approval given again changes GitHub's state, not an item: read it again so the card moves now.
-    if (res.ok && action.type === "approveAgain") void window.api.refresh().catch(() => {});
+    // An approval changes GitHub's state: read it again so the card moves now.
+    if (res.ok && (action.type === "approveAgain" || action.type === "approve")) void window.api.refresh().catch(() => {});
     return res.ok;
   };
   const open = (e: BoardEntry) => (e.pr ? onOpen(e.pr) : openUrl(e.url));
