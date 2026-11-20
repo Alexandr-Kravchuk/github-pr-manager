@@ -11094,6 +11094,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(v({ type: "hint", runId: RID, text: "  look at x.ts  " }), { type: "hint", runId: RID, text: "look at x.ts" });
       assert.deepStrictEqual(v({ type: "enqueue", prId: "PR_kwDOA" }), { type: "enqueue", prId: "PR_kwDOA" });
       assert.deepStrictEqual(v({ type: "approveAgain", prId: "PR_kwDOA", body: "anything", commit: "x" }), { type: "approveAgain", prId: "PR_kwDOA" }, "only the PR is named — what goes out is main's");
+      const rid = "00000000-0000-4000-8000-000000000298";
+      assert.deepStrictEqual(v({ type: "approve", runId: rid, body: "anything", commit: "x" }), { type: "approve", runId: rid }, "only the run is named — what goes out is main's");
+      assert.throws(() => v({ type: "approve", prId: "PR_kwDOA" }));
       assert.throws(() => v({ type: "approveAgain", prId: 7 }));
       assert.deepStrictEqual(v({ type: "notNow", prId: "PR_kwDOA", key: "forged" }), { type: "notNow", prId: "PR_kwDOA" }, "main reads what the card shows itself");
       assert.deepStrictEqual(v({ type: "bringBack", prId: "PR_kwDOA" }), { type: "bringBack", prId: "PR_kwDOA" });
@@ -11486,8 +11489,75 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const review = board(xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true }));
       assert.ok(!review.choices.some((c) => c.act), "nothing that starts the agent");
       assert.strictEqual(review.ask, "Carry on in your Claude session — the agent stays off this PR while it is open.");
+      // "Carry on there" comes with the way there: the session first, GitHub second.
+      const shape = (e) => e.choices.map((c) => [c.label, c.control ?? null, Boolean(c.primary)]);
+      assert.deepStrictEqual(shape(review), [["Open your Claude session", "session", true], ["Review on GitHub myself", null, false]]);
+      assert.match(review.next, /Once you archive the session, the agent can take this PR again\.$/);
       const red = board(xPr({ id: "R", ciState: "failure", failingChecks: [{ name: "build" }] }));
       assert.ok(!red.choices.some((c) => c.act?.type === "enqueue"), "your PR with red CI: no Let the agent fix it");
+      assert.deepStrictEqual(shape(red), [["Open your Claude session", "session", true], ["Open on GitHub", null, false]]);
+      assert.strictEqual(red.next, "CI runs again on your push. Once you archive the session, the agent can take this PR again.");
+    });
+
+    test("agent board words: your PR from a fork — no button that starts the agent, which never pushes there", () => {
+      // The case of #47: conflicts, the branch in a fork; "Let the agent fix it" was offered and always refused.
+      const conflict = xOne(xPr({ isCrossRepository: true, hasConflicts: true }));
+      assert.deepStrictEqual([conflict.owner, conflict.stage.action.kind], ["you", "fixYourself"]);
+      assert.ok(!conflict.choices.some((c) => c.act), "nothing that starts the agent");
+      assert.deepStrictEqual(conflict.choices.map((c) => [c.label, Boolean(c.primary)]), [["Open on GitHub", true]]);
+      assert.strictEqual(conflict.ask, "Fix it in your clone and push to your fork — or reopen the PR from a branch of this repository, and the agent can take it.");
+      assert.strictEqual(conflict.next, "CI runs again on your push.");
+      // Waiting on reviewers: no "Self-review again" either — it ends in a push too.
+      assert.ok(xOne(xPr()).choices.some((c) => c.label === "Self-review again"), "the same PR in the repository itself offers it");
+      assert.deepStrictEqual(xOne(xPr({ isCrossRepository: true })).choices, []);
+      // Someone else's PR from a fork stays the agent's to review: a review posts, it never pushes.
+      const theirs = xOne(xPr({ id: "F", isCrossRepository: true, roles: ["reviewer"], requestedOfMe: true }));
+      assert.deepStrictEqual([theirs.choices[0].label, theirs.choices[0].act], ["Let the agent review", { type: "enqueue", prId: "F" }]);
+    });
+
+    test("agent board words: the agent's review of this head found nothing blocking — Approve on the card, not a trip to GitHub", () => {
+      // The case of creatio-ai-chat-shared#298: asked again after my change request; the re-review had nothing to post.
+      const RID = "00000000-0000-4000-8000-000000000298";
+      const pr = xPr({ id: "P", headOid: "h", roles: ["reviewer", "reviewed"], requestedOfMe: true, viewerHasReviewed: true });
+      const card = {
+        summary: "All threads closed; only my formal change request stands.",
+        asks: [],
+        authorQuestions: [],
+        structured: true,
+        findings: [{ severity: "minor", text: "m", where: "x.css:1" }, { severity: "note", text: "n", where: "" }],
+      };
+      const run = (o = {}) => sIt({ runId: RID, key: "P|rereview|h", scenario: "rereview", state: "done", headline: "Reviewed — nothing to post", result: card, ...o });
+      const shape = (e) => e.choices.map((c) => [c.label, c.act?.type ?? null, Boolean(c.primary)]);
+      const e = xOne(pr, [run()]);
+      assert.deepStrictEqual([e.owner, e.stage.action.kind], ["you", "rereview"]);
+      assert.strictEqual(e.now, "Your review was asked for again — the agent re-reviewed this commit and found nothing blocking (2 points below); it had nothing to post.");
+      assert.strictEqual(e.ask, "Read what it found, then approve — or look yourself.");
+      assert.deepStrictEqual(shape(e), [["Approve", "approve", true], ["Re-review again", "enqueue", false], ["Review on GitHub myself", null, false]]);
+      assert.deepStrictEqual(e.choices[0].act, { type: "approve", runId: RID }, "only the run is named — main reads the rest");
+      assert.deepStrictEqual(e.read.findings.map((f) => f.severity), ["minor", "note"], "what it found is on the card above the button");
+      // The agent off: an approval starts nothing, so it is still one click.
+      assert.deepStrictEqual(shape(xOne(pr, [run()], { enabled: false })), [["Approve", "approve", true], ["Review on GitHub myself", null, false]]);
+      // A first review of someone's PR reads the same.
+      const first = xOne(xPr({ id: "P", headOid: "h", roles: ["reviewer"], requestedOfMe: true }), [run({ scenario: "review", key: "P|review|h" })]);
+      assert.deepStrictEqual(shape(first)[0], ["Approve", "approve", true]);
+      assert.match(first.now, /^Your review is requested — the agent reviewed this commit and found nothing blocking/);
+      // Nothing an approval may not rest on.
+      const cases = [
+        ["a Major", run({ result: { ...card, findings: [{ severity: "major", text: "x", where: "" }] } })],
+        ["a Blocker", run({ result: { ...card, findings: [{ severity: "blocker", text: "x", where: "" }] } })],
+        ["a question for the author it never asked", run({ result: { ...card, authorQuestions: ["q"] } })],
+        ["a question for you — on a review, one for the author", run({ result: { ...card, asks: [{ question: "q", options: [] }] } })],
+        ["no prd-result block — a summary guessed from prose", run({ result: { ...card, structured: false } })],
+        ["a review of another head", run({ key: "P|rereview|old" })],
+        ["a run cut short", run({ interrupted: true })],
+        ["a run that failed", run({ state: "error" })],
+        ["a review that prepared something to send", run({ state: "needsYou", plan: plan() })],
+      ];
+      for (const [why, item] of cases) assert.ok(!xOne(pr, [item]).choices.some((c) => c.act?.type === "approve"), why);
+      assert.strictEqual(view.approvableReview(run(), { ...pr, roles: ["author"] }), false, "never your own PR");
+      assert.strictEqual(view.approvableReview(run(), { ...pr, isDraft: true }), false, "never a draft");
+      assert.strictEqual(view.approvableReview(run({ published: true }), pr), false, "never twice");
+      assert.strictEqual(view.approvableReview(run(), pr), true);
     });
 
     test("agent board words: a review nobody started is the agent's to start — unless the agent is off", () => {
@@ -15799,6 +15869,73 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual((await f.agent.act({ type: "approveAgain", prId: "PR_GONE" })).ok, false);
       } finally {
         f.agent.stop();
+      }
+    });
+
+    await atest("agent: Approve rests on the agent's review of this head — read again first, signed, on that head, once", async () => {
+      const head = "e".repeat(40);
+      const block = (findings) => "Checked the answers.\n\n```prd-result\n" + JSON.stringify({ summary: "Nothing blocking left.", asks: [], findings }) + "\n```";
+      const changesAsked = (o = {}) => approvedHere({ viewerApproved: false, requestedOfMe: false, roles: ["reviewed"], ...o });
+      let freshPr = changesAsked();
+      const posted = [];
+      const f = agentFixture({
+        pr: changesAsked(),
+        script: succeed(block([{ severity: "minor", text: "m", where: "" }])),
+        captureScript: captureJs,
+        fetchPr: async () => ({ pr: freshPr, state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => {
+          if (args[0] === "api" && opts?.input) posted.push({ endpoint: args[1], body: JSON.parse(opts.input) });
+          return { code: 0, stdout: "{}", stderr: "" };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => only(f).length === 1 && only(f)[0].state === "done");
+        const item = only(f)[0];
+        assert.deepStrictEqual([item.scenario, item.headline, item.result.structured], ["rereview", "Reviewed — nothing to post", true]);
+        const runId = item.runId;
+        // GitHub says otherwise by now: nothing goes out.
+        freshPr = changesAsked({ headOid: "f".repeat(40) });
+        assert.match((await f.agent.act({ type: "approve", runId })).error, /new commits since/);
+        freshPr = changesAsked({ viewerApproved: true });
+        assert.match((await f.agent.act({ type: "approve", runId })).error, /already stands/);
+        assert.deepStrictEqual(posted, []);
+        freshPr = changesAsked();
+        assert.deepStrictEqual(await f.agent.act({ type: "approve", runId }), { ok: true });
+        assert.deepStrictEqual(posted.map((p) => [p.endpoint, p.body.event, p.body.commit_id]), [["repos/a/b/pulls/7/reviews", "APPROVE", head]]);
+        assert.ok(posted[0].body.body.startsWith("Approved `eeeeeee`: nothing blocking is left.") && posted[0].body.body.endsWith(ad.DEFAULT_AGENT_SIGNATURE), "one line and the signature");
+        const after = only(f)[0];
+        assert.deepStrictEqual([after.published, after.headline], [true, "Approved by you on eeeeeee"]);
+        const logged = readLog(f).find((l) => l.event === "approved");
+        assert.deepStrictEqual([logged.kind, logged.prNumber, logged.headOid, logged.runId], ["run", 7, head, runId]);
+        // Once: the run's review now carries your approval.
+        assert.match((await f.agent.act({ type: "approve", runId })).error, /isn't of the PR's head any more|holds an approval back/);
+        assert.strictEqual(posted.length, 1);
+      } finally {
+        f.agent.stop();
+      }
+      // A run that found a Major: refused before the PR is even read.
+      let reads = 0;
+      const g = agentFixture({
+        pr: changesAsked(),
+        script: succeed(block([{ severity: "major", text: "x", where: "" }])),
+        captureScript: captureJs,
+        fetchPr: async () => {
+          reads += 1;
+          return { pr: changesAsked(), state: "OPEN", viewer: "me" };
+        },
+        gh: async () => ({ code: 0, stdout: "{}", stderr: "" }),
+      });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        assert.deepStrictEqual(await g.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => only(g).length === 1 && only(g)[0].state === "done");
+        const before = reads;
+        assert.match((await g.agent.act({ type: "approve", runId: only(g)[0].runId })).error, /holds an approval back/);
+        assert.strictEqual(reads, before, "nothing read, nothing posted");
+      } finally {
+        g.agent.stop();
       }
     });
 

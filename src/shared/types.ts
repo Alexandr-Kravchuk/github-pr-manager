@@ -1273,6 +1273,8 @@ export type AgentAction =
   | { type: "enqueue"; prId: string; before?: string | null }
   /** Your approval again, on a PR it already stands on, to answer a review request made after it. */
   | { type: "approveAgain"; prId: string }
+  /** Your approval of the PR, resting on the agent's review of its head that found nothing blocking (`approvableReview`). */
+  | { type: "approve"; runId: string }
   /** Sets a Your-turn card aside until something on its PR changes; `bringBack` puts it back now. */
   | { type: "notNow"; prId: string }
   | { type: "bringBack"; prId: string }

@@ -10,7 +10,7 @@
  */
 import { isUiStyle } from "../../shared/ui-style";
 import { toUpsourcePrs } from "../../shared/upsource";
-import { rankBefore } from "../../shared/agent-view";
+import { OWN_SESSION_WHY, rankBefore } from "../../shared/agent-view";
 import type {
   AgentAction,
   AgentItem,
@@ -483,7 +483,50 @@ const UPSOURCE_REVIEWS = toUpsourcePrs(
 FIXTURES.review.push(...UPSOURCE_REVIEWS);
 
 // The PR agent's Board, chip and statuses: PRs in every state it shows. `?buddy=agent`.
-FIXTURES.agent = [...FIXTURES.showcase, ...FIXTURES.review];
+FIXTURES.agent = [
+  ...FIXTURES.showcase,
+  ...FIXTURES.review,
+  // Two of yours the agent can't start on: one from a fork (it never pushes
+  // there), one a Claude session of yours already works on.
+  pr({
+    id: "mock-fork-pr",
+    repo: "acme/widgets",
+    number: 47,
+    url: "https://github.com/acme/widgets/pull/47",
+    title: "feat: agent defaults that keep up",
+    headRefName: "agent-defaults",
+    isCrossRepository: true,
+    hasConflicts: true,
+    hasNoReviews: false,
+    reviewDecision: "CHANGES_REQUESTED",
+  }),
+  pr({
+    id: "mock-session-pr",
+    repo: "acme/clio",
+    number: 64,
+    url: "https://github.com/acme/clio/pull/64",
+    title: "fix: why settings reset on Windows",
+    headRefName: "fix/settings-reset",
+    ciState: "failure",
+    failingChecks: [{ name: "build", kind: "check", state: "failure", url: "https://github.com/acme/clio/actions/runs/1" }],
+  }),
+  // Asked again after my change request; the agent's re-review of this head
+  // found nothing blocking and had nothing to post — Approve is one click.
+  pr({
+    id: "mock-approvable-pr",
+    repo: "acme/chat-shared",
+    number: 298,
+    url: "https://github.com/acme/chat-shared/pull/298",
+    title: "APD-15172 The chat's colour table, and chat-ui colours from variables",
+    roles: ["reviewer", "reviewed"],
+    author: { login: "teammate", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4" },
+    viewerHasReviewed: true,
+    viewerReviewedAt: new Date(Date.now() - 26 * 3600e3).toISOString(),
+    hasNoReviews: false,
+    reviewDecision: "CHANGES_REQUESTED",
+    reviewers: [{ login: "me", avatarUrl: "", reviewState: "changes_requested" }],
+  }),
+];
 
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
 // `?jiraAuth=token` / `?jiraAuth=twg` shows the rejected-credentials banner and
@@ -590,6 +633,16 @@ const CLAUDE_SESSIONS: ClaudeSessionInfo[] = [
     groups: [{ kind: "explain", key: "ENG-93367" }],
     repoKeys: ["github.com/acme/clio"],
     branch: "main",
+  },
+  {
+    // On the `?buddy=agent` PR #64: its Board card switches here.
+    id: "00000000-0000-4000-8000-000000000007",
+    name: "Settings reset on Windows",
+    status: "idle",
+    where: "desktop",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "fix/settings-reset",
   },
   {
     id: "00000000-0000-4000-8000-000000000004",
@@ -823,6 +876,23 @@ function mockAgentState(): AgentState {
       reapproval: { logins: ["me"], oldHead: "4f1c2e9a7b3d5e6f" },
       finishedAt: iso(2 * 60_000),
     }),
+    item(298, {
+      key: `mock-approvable-pr|rereview|${byNumber(298)?.headOid}`,
+      scenario: "rereview",
+      state: "done",
+      headline: "Reviewed — nothing to post",
+      finishedAt: iso(23 * 60_000),
+      result: {
+        summary: "Moves the chat's colours into a shared table with a chat-ui mapping layer; all review threads are closed and only my formal changes-requested still stands.",
+        asks: [],
+        authorQuestions: [],
+        findings: [
+          { severity: "minor", text: "The withdrawn Major on the dark selector rests partly on claims about hosts outside this repository.", where: "packages/chat-shared/src/theme/theme.css:122" },
+          { severity: "note", text: "My standing \"changes requested\" is formal only — no finding of mine remains open.", where: "" },
+        ],
+        structured: true,
+      },
+    }),
   ].filter((i): i is AgentItem => i !== null);
   // A PR the agent merged this morning: gone from the dashboard, done today.
   items.push({
@@ -899,7 +969,20 @@ function mockAgentState(): AgentState {
       run(44, [["Read the PR", "in_progress"], ["Review the dependency bumps", "pending"]], "$ gh pr diff 44"),
     ].filter((r) => items.some((i) => i.runId === r.runId)),
     idle: Object.fromEntries(
-      prs.map((p) => [p.id, p.roles.includes("author") ? "Yours: nothing for the agent yet" : p.isDraft ? "Draft: picked up once ready for review" : "Nothing for the agent"]),
+      prs.map((p) => [
+        p.id,
+        p.id === "mock-fork-pr"
+          ? "Yours, from a fork — the agent pushes only to branches of the repository itself"
+          : p.id === "mock-session-pr"
+            ? OWN_SESSION_WHY
+            : p.id === "mock-approvable-pr"
+              ? "Its last run on this head ended: Reviewed — nothing to post"
+              : p.roles.includes("author")
+              ? "Yours: nothing for the agent yet"
+              : p.isDraft
+                ? "Draft: picked up once ready for review"
+                : "Nothing for the agent",
+      ]),
     ),
     runsToday: 6,
     perDay: 30,
@@ -940,6 +1023,17 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
     if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
     pr.requestedOfMe = false;
     pr.roles = pr.roles.filter((r) => r !== "reviewer");
+    return { ok: true };
+  }
+  // Your approval on the agent's review: GitHub shows it on the head, and stops listing you as asked.
+  if (action.type === "approve") {
+    const item = items.find((i) => i.runId === action.runId);
+    const pr = item ? snapshot.pullRequests.find((p) => p.id === item.prId) : undefined;
+    if (!item || !pr) return { ok: false, error: "That run is gone." };
+    Object.assign(item, { published: true, finishedAt: at, headline: `Approved by you on ${(pr.headOid ?? "").slice(0, 7)}` });
+    agentState = { ...agentState, items };
+    for (const l of agentListeners) l(agentState);
+    Object.assign(pr, { requestedOfMe: false, myReReviewDue: false, viewerApproved: true, viewerHasReviewed: true, viewerReviewedHead: true, viewerReviewedAt: at, roles: pr.roles.filter((r) => r !== "reviewer") });
     return { ok: true };
   }
   // The mock keeps a card aside until you bring it back: nothing on its PRs changes by itself.

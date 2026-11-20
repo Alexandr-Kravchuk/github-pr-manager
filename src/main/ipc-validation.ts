@@ -206,7 +206,7 @@ export function validateDiagramsChecked(requestId: unknown, results: unknown): {
   return { requestId, results: results as boolean[] };
 }
 
-const RUN_ACTIONS = ["skip", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver", "publish", "push", "reapprove"] as const;
+const RUN_ACTIONS = ["skip", "retry", "continue", "reviewAnyway", "pause", "resume", "stop", "takeOver", "publish", "push", "reapprove", "approve"] as const;
 const MERGE_METHODS = ["merge", "squash", "rebase"] as const;
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A hint is a note to the running session, not a document. */
