@@ -576,6 +576,424 @@
 }
 
 /*
+ * Terminal (Settings › Appearance): `data-ui="terminal"`. A TUI / phosphor
+ * CRT: monospace everywhere, square boxes drawn with a single line, no
+ * shadows, the chosen thing in inverse video, menus and dialogs in a
+ * double-line frame. Light is green-bar printer paper, dark is phosphor green
+ * on near-black with static scanlines on the canvas — a background image,
+ * nothing moves (see AGENTS.md). The accent is for chrome only; the status
+ * colours (stripe, pills) stay Tailwind's, so "ready" emerald never reads as
+ * the accent.
+ */
+:root[data-ui="terminal"] {
+  --canvas: #e6ece4;
+  --surface: #f6f9f4;
+  --elevated: #dbe5d8;
+  --line: #c3d0bf;
+  --line-strong: #7f9a7a;
+  --fg: #102016;
+  --fg-secondary: #1b2f22;
+  --fg-muted: #3d5645;
+  --fg-subtle: #587060;
+  --fg-faint: #7d927f;
+  --term-accent: #0f7a3a;
+  --term-sel-bg: #102016;
+  --term-sel-fg: #eef5ea;
+  --tile-shadow: none;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-ui="terminal"] {
+    --canvas: #0a0f0c;
+    --surface: #0f1612;
+    --elevated: #17231b;
+    --line: #1d3326;
+    --line-strong: #2f5a40;
+    --fg: #cdebd5;
+    --fg-secondary: #b9dcc3;
+    --fg-muted: #8fb79b;
+    --fg-subtle: #6a9277;
+    --fg-faint: #4c6d57;
+    --term-accent: #4ade80;
+    --term-sel-bg: #4ade80;
+    --term-sel-fg: #06130b;
+  }
+  [data-ui="terminal"] body {
+    background-image: repeating-linear-gradient(0deg, rgb(0 0 0 / 0.22) 0 1px, transparent 1px 3px);
+  }
+}
+[data-ui="terminal"] body {
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  letter-spacing: -0.01em;
+}
+/* Square everything but the avatars. */
+[data-ui="terminal"] *:not(img) {
+  border-radius: 0 !important;
+}
+[data-ui="terminal"] .shadow-tile[class*="border-l-"] {
+  border-top-color: var(--line-strong);
+  border-right-color: var(--line-strong);
+  border-bottom-color: var(--line-strong);
+}
+[data-ui="terminal"] .shadow-tile:hover {
+  background-color: var(--elevated);
+  border-top-color: var(--term-accent);
+  border-right-color: var(--term-accent);
+  border-bottom-color: var(--term-accent);
+}
+[data-ui="terminal"] :is(.rounded-xl.border.border-line, section.rounded-lg.border.border-line) {
+  border-color: var(--line-strong);
+}
+[data-ui="terminal"] .table-scroll {
+  border: 1px solid var(--line-strong);
+  background-color: var(--surface);
+}
+[data-ui="terminal"] .table-scroll :is(thead, .bg-canvas) {
+  background-color: var(--surface);
+}
+[data-ui="terminal"] .table-scroll th {
+  color: var(--term-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+[data-ui="terminal"] .table-scroll tbody tr {
+  border-bottom-style: dashed;
+}
+[data-ui="terminal"] .table-scroll tbody tr:hover,
+[data-ui="terminal"] .table-scroll tbody tr:hover > .bg-canvas {
+  background-color: var(--elevated);
+}
+[data-ui="terminal"] :is(button, select, a).border {
+  border-color: var(--line-strong);
+}
+/* A plain framed button is a box with no fill; hovered, it lights in the accent. */
+[data-ui="terminal"] :is(button, select, a).border:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])) {
+  background-color: transparent;
+}
+[data-ui="terminal"] :is(button, a).border:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])):not(:disabled):not([aria-pressed="true"]):hover {
+  background-color: color-mix(in oklab, var(--term-accent) 14%, transparent);
+  border-color: var(--term-accent);
+  color: var(--fg);
+}
+/* What is on or chosen is in inverse video. */
+[data-ui="terminal"] :is(button, a).border[aria-pressed="true"]:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])),
+[data-ui="terminal"] :is(button[aria-pressed="true"]:not(.border), [role="radio"][aria-checked="true"]) {
+  background-color: var(--term-sel-bg);
+  border-color: var(--term-sel-bg);
+  color: var(--term-sel-fg);
+  box-shadow: none;
+}
+[data-ui="terminal"] :is(button[aria-pressed="true"]:not(.border), [role="radio"][aria-checked="true"]) * {
+  color: inherit;
+}
+[data-ui="terminal"] :is([role="radiogroup"], div:has(> button[aria-pressed])).border {
+  border-color: var(--line-strong);
+  background-color: transparent;
+}
+[data-ui="terminal"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea).border {
+  border-color: var(--line-strong);
+  background-color: var(--surface);
+  caret-color: var(--term-accent);
+}
+[data-ui="terminal"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select).border:focus {
+  outline: 1px solid var(--term-accent);
+  outline-offset: 0;
+  border-color: var(--term-accent);
+}
+[data-ui="terminal"] :is([role="menu"], [role="dialog"], [role="listbox"]) {
+  border: 3px double var(--line-strong);
+  box-shadow: none;
+}
+[data-ui="terminal"] [data-split] > button.border:last-of-type {
+  border-left-color: currentColor;
+}
+[data-ui="terminal"] [data-needs-you] {
+  outline-style: dashed;
+  outline-offset: 2px;
+}
+[data-ui="terminal"] header.sticky {
+  background-color: var(--canvas);
+  border-bottom: 1px dashed var(--line-strong);
+}
+
+/*
+ * Paper (Settings › Appearance): `data-ui="paper"`. A Notion-like page: warm
+ * greys, headings in a book serif, framed buttons turned into ghost buttons —
+ * no frame, a grey fill on hover — fields and segmented wells as grey wells,
+ * the chosen segment a white chip, cards and menus lifted by a hairline and a
+ * soft layered shadow, and the Cozy table drawn like a database with rules
+ * between its columns.
+ */
+:root[data-ui="paper"] {
+  --canvas: #f7f7f5;
+  --surface: #ffffff;
+  --elevated: #efefed;
+  --line: #ebeae7;
+  --line-strong: #dcdbd7;
+  --fg: #37352f;
+  --fg-secondary: #3f3d37;
+  --fg-muted: #6b6964;
+  --fg-subtle: #8d8b86;
+  --fg-faint: #b4b2ad;
+  --paper-hover: rgb(55 53 47 / 0.08);
+  --paper-blue: #2383e2;
+  --tile-shadow: 0 0 0 1px rgb(15 15 15 / 0.05), 0 2px 4px rgb(15 15 15 / 0.06);
+  --paper-menu: 0 0 0 1px rgb(15 15 15 / 0.05), 0 3px 6px rgb(15 15 15 / 0.1), 0 9px 24px rgb(15 15 15 / 0.2);
+  --paper-serif: "Iowan Old Style", Charter, "Sitka Text", Cambria, Georgia, ui-serif, serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-ui="paper"] {
+    --canvas: #191919;
+    --surface: #202020;
+    --elevated: #2c2c2c;
+    --line: #2f2f2f;
+    --line-strong: #3a3a3a;
+    --fg: #d4d4d2;
+    --fg-secondary: #cacac7;
+    --fg-muted: #9b9b98;
+    --fg-subtle: #7f7f7c;
+    --fg-faint: #5a5a58;
+    --paper-hover: rgb(255 255 255 / 0.055);
+    --paper-blue: #529cca;
+    --tile-shadow: 0 0 0 1px rgb(255 255 255 / 0.05), 0 2px 4px rgb(0 0 0 / 0.3);
+    --paper-menu: 0 0 0 1px rgb(255 255 255 / 0.06), 0 3px 6px rgb(0 0 0 / 0.3), 0 9px 24px rgb(0 0 0 / 0.45);
+  }
+}
+[data-ui="paper"] :is(h1, h2, h3) {
+  font-family: var(--paper-serif);
+}
+[data-ui="paper"] .shadow-tile[class*="border-l-"] {
+  border-top-color: transparent;
+  border-right-color: transparent;
+  border-bottom-color: transparent;
+}
+[data-ui="paper"] .shadow-tile {
+  border-radius: 0.375rem;
+}
+[data-ui="paper"] .shadow-tile:hover {
+  background-image: linear-gradient(var(--paper-hover), var(--paper-hover));
+}
+[data-ui="paper"] :is(.rounded-xl.border.border-line, section.rounded-lg.border.border-line) {
+  border-color: transparent;
+  border-radius: 0.375rem;
+  background-color: var(--surface);
+  box-shadow: var(--tile-shadow);
+}
+/* The table reads like a database: no frame, rules above and below and between the columns. */
+[data-ui="paper"] .table-scroll {
+  border-top: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+}
+[data-ui="paper"] .table-scroll :is(th, td) {
+  border-color: var(--line-strong);
+}
+[data-ui="paper"] .table-scroll :is(th, td):not(:last-child) {
+  border-right: 1px solid var(--line-strong);
+}
+[data-ui="paper"] .table-scroll th {
+  font-weight: 400;
+}
+[data-ui="paper"] .table-scroll tbody tr:hover,
+[data-ui="paper"] .table-scroll tbody tr:hover > .bg-canvas {
+  background-color: var(--elevated);
+}
+/* Framed buttons are ghost buttons; a coloured one keeps its fill. */
+[data-ui="paper"] :is(button, select, a).border {
+  border-color: transparent;
+  border-radius: 0.25rem;
+}
+[data-ui="paper"] :is(button, select, a).border:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])) {
+  background-color: transparent;
+}
+[data-ui="paper"] :is(button, a).border:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])):not(:disabled):not([aria-pressed="true"]):hover {
+  background-color: var(--paper-hover);
+  color: var(--fg);
+}
+[data-ui="paper"] :is(button, a).border[aria-pressed="true"]:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])) {
+  background-color: var(--elevated);
+}
+[data-ui="paper"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea).border {
+  border-color: transparent;
+  border-radius: 0.375rem;
+  background-color: var(--elevated);
+}
+[data-ui="paper"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select).border:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--paper-blue) 45%, transparent);
+}
+[data-ui="paper"] :is([role="radiogroup"], div:has(> button[aria-pressed])).border {
+  border-color: transparent;
+  border-radius: 0.375rem;
+  background-color: var(--elevated);
+}
+[data-ui="paper"] :is(button[aria-pressed="true"]:not(.border), [role="radio"][aria-checked="true"]) {
+  border-radius: 0.25rem;
+  background-color: var(--surface);
+  box-shadow: 0 0 0 1px rgb(15 15 15 / 0.06), 0 1px 2px rgb(15 15 15 / 0.1);
+}
+[data-ui="paper"] [data-split] > button.border {
+  border-color: var(--line-strong);
+}
+[data-ui="paper"] [data-split] > button.border:first-of-type {
+  border-right-color: transparent;
+}
+[data-ui="paper"] :is([role="menu"], [role="dialog"], [role="listbox"]) {
+  border-color: transparent;
+  border-radius: 0.5rem;
+  box-shadow: var(--paper-menu);
+}
+[data-ui="paper"] header.sticky {
+  background-color: color-mix(in oklab, var(--canvas) 88%, transparent);
+}
+
+/*
+ * Creatio (Settings › Appearance): `data-ui="creatio"`. Creatio Freedom UI's
+ * own language, read off a Freedom UI page: Montserrat (bundled through
+ * @fontsource-variable/montserrat, imported in main.tsx), navy text, the
+ * dark violet wallpaper framing a light workspace (a static gradient behind
+ * `#root > div`), white 8 px cards with a hairline, toolbar buttons with no
+ * frame that turn light blue on hover, segmented controls as uppercase tabs
+ * with an orange-red underline, the chosen toggle a pastel pill, fields with
+ * an underline only, and the primary blue for focus.
+ */
+:root[data-ui="creatio"] {
+  --canvas: #f4f6f8;
+  --surface: #ffffff;
+  --elevated: #f2f5ff;
+  --line: #e3e6ea;
+  --line-strong: #c8c8c8;
+  --fg: #0d2e4e;
+  --fg-secondary: #1d3a58;
+  --fg-muted: #444444;
+  --fg-subtle: #5f6f80;
+  --fg-faint: #9aa5b1;
+  --crt-primary: #006ce0;
+  --crt-link: #004fd6;
+  --crt-selected: #e3e9f9;
+  --crt-tab: #ff4013;
+  --crt-wall: linear-gradient(120deg, #15163f 0%, #2a1c5e 38%, #4b1d5f 68%, #7a1f4f 100%);
+  --crt-menu: 0 4px 16px rgb(13 46 78 / 0.16), 0 0 0 1px rgb(13 46 78 / 0.06);
+  --tile-shadow: none;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-ui="creatio"] {
+    --canvas: #121826;
+    --surface: #1a2233;
+    --elevated: #213052;
+    --line: #263149;
+    --line-strong: #3a4766;
+    --fg: #e4ebf5;
+    --fg-secondary: #d3dcea;
+    --fg-muted: #b9c3d2;
+    --fg-subtle: #8d9ab0;
+    --fg-faint: #5d6a82;
+    --crt-primary: #3d8bff;
+    --crt-link: #7ab0ff;
+    --crt-selected: #26375f;
+    --crt-tab: #ff6a3d;
+    --crt-menu: 0 6px 20px rgb(0 0 0 / 0.5), 0 0 0 1px rgb(255 255 255 / 0.06);
+  }
+}
+[data-ui="creatio"] body {
+  background: var(--crt-wall);
+  font-family: "Montserrat Variable", Montserrat, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-weight: 500;
+}
+/* The workspace: the page itself, framed by the wallpaper on three sides. */
+[data-ui="creatio"] #root > div {
+  min-height: calc(100% - 0.75rem);
+  margin: 0.75rem 0.625rem 0;
+  border-radius: 0.875rem 0.875rem 0 0;
+  background-color: var(--canvas);
+}
+[data-ui="creatio"] header.sticky {
+  background-color: var(--surface);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0.875rem 0.875rem 0 0;
+}
+[data-ui="creatio"] .shadow-tile {
+  border-radius: 0.5rem;
+}
+[data-ui="creatio"] .shadow-tile[class*="border-l-"] {
+  border-top-color: var(--line);
+  border-right-color: var(--line);
+  border-bottom-color: var(--line);
+}
+[data-ui="creatio"] .shadow-tile:hover {
+  background-color: var(--elevated);
+}
+[data-ui="creatio"] :is(.rounded-xl.border.border-line, section.rounded-lg.border.border-line) {
+  border-radius: 0.5rem;
+  background-color: var(--surface);
+}
+[data-ui="creatio"] .table-scroll {
+  border-radius: 0.5rem;
+  background-color: var(--surface);
+}
+[data-ui="creatio"] .table-scroll :is(thead, .bg-canvas) {
+  background-color: var(--surface);
+}
+[data-ui="creatio"] .table-scroll th {
+  font-weight: 400;
+}
+[data-ui="creatio"] .table-scroll tbody tr:hover,
+[data-ui="creatio"] .table-scroll tbody tr:hover > .bg-canvas {
+  background-color: var(--elevated);
+}
+/* Toolbar buttons: no frame, light blue with the primary colour on hover. */
+[data-ui="creatio"] :is(button, select, a).border {
+  border-color: transparent;
+  border-radius: 0.25rem;
+}
+[data-ui="creatio"] :is(button, select, a).border:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])) {
+  background-color: transparent;
+}
+[data-ui="creatio"] :is(button, a).border:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])):not(:disabled):not([aria-pressed="true"]):hover {
+  background-color: var(--elevated);
+  color: var(--crt-primary);
+}
+[data-ui="creatio"] :is(button, a).border[aria-pressed="true"]:is(.bg-surface, .bg-elevated, .bg-canvas, :not([class*=" bg-"]):not([class^="bg-"])) {
+  border-radius: 999px;
+  background-color: var(--crt-selected);
+  color: var(--fg);
+}
+/* Segmented controls: Creatio's tabs, uppercase, the chosen one underlined. */
+[data-ui="creatio"] :is([role="radiogroup"], div:has(> button[aria-pressed])).border {
+  border-color: transparent;
+  background-color: transparent;
+}
+[data-ui="creatio"] :is([role="radiogroup"], div:has(> button[aria-pressed])).border > :is(button, [role="radio"]) {
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--crt-link);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+[data-ui="creatio"] :is([role="radiogroup"], div:has(> button[aria-pressed])).border > :is(button[aria-pressed="true"], [role="radio"][aria-checked="true"]) {
+  border-bottom-color: var(--crt-tab);
+  color: var(--fg);
+}
+[data-ui="creatio"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea).border {
+  border-color: transparent;
+  border-bottom-color: var(--line-strong);
+  border-radius: 0;
+  background-color: transparent;
+}
+[data-ui="creatio"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select).border:focus {
+  outline: none;
+  border-bottom: 2px solid var(--crt-primary);
+}
+[data-ui="creatio"] [data-split] > button.border:last-of-type {
+  border-left-color: color-mix(in oklab, currentColor 30%, transparent);
+}
+[data-ui="creatio"] :is([role="menu"], [role="dialog"], [role="listbox"]) {
+  border-color: transparent;
+  border-radius: 0.5rem;
+  box-shadow: var(--crt-menu);
+}
+
+/*
  * Hover and focus for the styles above. Their rules sit outside Tailwind's
  * layers, so they beat the components' own `hover:` utilities: every state a
  * style overrides at rest (a button's fill, a card's frame, the table's

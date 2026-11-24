@@ -1,6 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
+// The Creatio look's font (OFL), bundled: its @font-face rules load a file only once a rule uses it.
+import "@fontsource-variable/montserrat";
 import "./styles.css";
 import { applyRememberedUiStyle } from "./ui-style";
 

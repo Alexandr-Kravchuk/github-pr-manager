@@ -12,6 +12,9 @@ export const UI_STYLES: ReadonlyArray<{ value: UiStyle; label: string }> = [
   { value: "neobrutalism", label: "Neobrutalism" },
   { value: "bento", label: "Bento grid" },
   { value: "glassmorphism", label: "Glassmorphism" },
+  { value: "terminal", label: "Terminal" },
+  { value: "paper", label: "Paper" },
+  { value: "creatio", label: "Creatio" },
 ];
 
 export function isUiStyle(value: unknown): value is UiStyle {

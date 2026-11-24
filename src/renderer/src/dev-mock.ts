@@ -570,7 +570,7 @@ const snapshot: DashboardResponse = {
   version: "dev",
 };
 
-// `?ui=<style>` (neumorphism, claymorphism, neobrutalism, bento, glassmorphism) previews a look (Settings › Appearance).
+// `?ui=<style>` (neumorphism, claymorphism, neobrutalism, bento, glassmorphism, terminal, paper, creatio) previews a look (Settings › Appearance).
 const uiParam = new URLSearchParams(window.location.search).get("ui");
 const mockUiStyle = isUiStyle(uiParam) ? uiParam : "flat";
 

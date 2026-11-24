@@ -87,7 +87,16 @@ export interface SettingsHost {
 export type ThemePreference = "system" | "light" | "dark";
 
 /** The app's look, independent of light/dark (Settings › Appearance). */
-export type UiStyle = "flat" | "neumorphism" | "claymorphism" | "neobrutalism" | "bento" | "glassmorphism";
+export type UiStyle =
+  | "flat"
+  | "neumorphism"
+  | "claymorphism"
+  | "neobrutalism"
+  | "bento"
+  | "glassmorphism"
+  | "terminal"
+  | "paper"
+  | "creatio";
 
 /** The header's weather icon, chosen from the current weather (shared/weather.ts). */
 export type WeatherKind = "clear-day" | "clear-night" | "clouds" | "fog" | "rain" | "snow" | "thunder";
@@ -234,7 +243,10 @@ export interface Settings {
    * `claymorphism` (puffy pastel cards with big radii and inner shadows) or
    * `neobrutalism` (thick ink outlines, hard offset shadows, loud colours),
    * `bento` (a bento grid: borderless rounded cells, some twice as wide) or
-   * `glassmorphism` (frosted translucent cards over a colourful backdrop).
+   * `glassmorphism` (frosted translucent cards over a colourful backdrop),
+   * `terminal` (a monospace TUI: square boxes, inverse-video selection),
+   * `paper` (a Notion-like page: ghost buttons, serif headings) or
+   * `creatio` (Creatio Freedom UI: Montserrat, the violet wallpaper, tabs).
    */
   uiStyle?: UiStyle;
   /**

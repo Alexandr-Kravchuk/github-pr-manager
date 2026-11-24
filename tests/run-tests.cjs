@@ -1879,7 +1879,7 @@ test("validateSettings: the look is flat unless a known style, and reaches the p
   assert.strictEqual(cfg.validateSettings({ hosts: [] }).uiStyle, "flat");
   assert.strictEqual(cfg.validateSettings({ uiStyle: "glass", hosts: [] }).uiStyle, "flat");
   assert.strictEqual(cfg.validateSettings({ uiStyle: true, hosts: [] }).uiStyle, "flat");
-  for (const style of ["neumorphism", "claymorphism", "neobrutalism", "bento", "glassmorphism"]) {
+  for (const style of ["neumorphism", "claymorphism", "neobrutalism", "bento", "glassmorphism", "terminal", "paper", "creatio"]) {
     const s = cfg.validateSettings({ uiStyle: style, hosts: [] });
     assert.strictEqual(s.uiStyle, style);
     assert.strictEqual(cfg.toPublicConfig(s).uiStyle, style);
@@ -1890,7 +1890,17 @@ test("ui style: the switch takes the listed styles only, persists over its own c
   const { readFileSync } = require("node:fs");
   const v = require(path.join(__dirname, "../dist/main/main/ipc-validation.js"));
   const list = require(path.join(__dirname, "../dist/main/shared/ui-style.js")).UI_STYLES.map((s) => s.value);
-  assert.deepStrictEqual(list, ["flat", "neumorphism", "claymorphism", "neobrutalism", "bento", "glassmorphism"]);
+  assert.deepStrictEqual(list, [
+    "flat",
+    "neumorphism",
+    "claymorphism",
+    "neobrutalism",
+    "bento",
+    "glassmorphism",
+    "terminal",
+    "paper",
+    "creatio",
+  ]);
   for (const style of list) assert.strictEqual(v.validateUiStyle(style), style);
   assert.throws(() => v.validateUiStyle("glass"));
   assert.throws(() => v.validateUiStyle(true));

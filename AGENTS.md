@@ -945,8 +945,8 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   rewritten), and the app still pushes and posts the replies itself. Reviews,
   briefs, re-reviews and the after-merge run never run full.
 - **The look** (Settings › Appearance › Style, `Settings.uiStyle`): `flat`
-  (the default), `neumorphism`, `claymorphism`, `neobrutalism`, `bento` or
-  `glassmorphism` — one list in `shared/ui-style.ts` (`UI_STYLES`, Node-free,
+  (the default), `neumorphism`, `claymorphism`, `neobrutalism`, `bento`,
+  `glassmorphism`, `terminal`, `paper` or `creatio` — one list in `shared/ui-style.ts` (`UI_STYLES`, Node-free,
   read by settings validation, the IPC check, the Settings menu and the
   renderer) — a second axis next to
   light/dark, so each works with both themes. The renderer sets
@@ -972,7 +972,22 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   custom properties on that layer alone, stopped while the window is hidden or
   reduced motion is on — a CSS animation would re-blur every card each frame.
   The table's sticky actions column takes no fill (any fill or second blur
-  showed as a lighter stripe). The rules sit outside Tailwind's layers so they beat the
+  showed as a lighter stripe). Terminal: a monospace TUI — every corner
+  square but the avatars', single-line boxes, no shadows, what is on or
+  chosen in inverse video, double-line menus and dialogs; dark is phosphor
+  green with scanlines as a static background image on `body`. The font
+  makes text wider than the other looks', so the Cozy columns truncate
+  sooner. Paper: Notion-like warm greys, serif headings (`h1`–`h3` only),
+  framed buttons as ghost buttons with a grey hover, grey wells for fields
+  and segmented controls, and the Cozy table with rules between its columns.
+  Creatio: Creatio Freedom UI's language — Montserrat (bundled,
+  `@fontsource-variable/montserrat`, imported in `main.tsx`; its faces load
+  only once a rule names the family), navy text, the violet wallpaper as
+  `body`'s background framing `#root > div` as a rounded workspace,
+  frameless toolbar buttons with a light-blue hover, segmented controls as
+  uppercase tabs with an orange-red underline, underline-only fields. The
+  status colours (stripe, pills, the fuchsia "Needs you") stay Tailwind's in
+  every look. The rules sit outside Tailwind's layers so they beat the
   utilities; a new card or panel that should take part needs `shadow-tile`
   or the `rounded-xl border border-line` panel shape. The switch applies at
   once and persists over `style:set`, like the theme. In the plain-browser
