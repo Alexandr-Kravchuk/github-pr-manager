@@ -560,6 +560,59 @@
   background-color: var(--elevated);
   box-shadow: 0 1px 6px rgb(0 0 0 / 0.08);
 }
+/* A split button (`data-split`: the Claude button and the group heading's)
+   is two framed buttons that touch. The frame rules above round every button
+   on all four corners and grey its frame, which drew two separate pills — the
+   arrow a lone bubble beside the label. In every style the halves keep their
+   outer corners only, and here their frame keeps the action's colour. */
+[data-ui] [data-split] > button.border:first-of-type {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+[data-ui] [data-split] > button.border:last-of-type {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+[data-ui="glassmorphism"] [data-split] > button.border {
+  border-color: color-mix(in oklab, currentColor 40%, transparent);
+}
+/* One button, not two: the seam between the halves is a faint line in the
+   action's colour, not a second full frame, and in the raised looks the
+   shadow belongs to the pair — a shadow per half drew a gap between them.
+   Neobrutalism keeps its ink seam and hard shadows: that look is all edges. */
+/* The halves overlap by a pixel (-ml-px): the label's right edge goes, so
+   only the arrow's faint left edge draws the seam. */
+[data-split] > button.border:first-of-type {
+  border-right-color: transparent;
+}
+[data-split] > button.border:last-of-type {
+  border-left-color: color-mix(in oklab, currentColor 25%, transparent);
+}
+[data-ui="neobrutalism"] [data-split] > button.border:first-of-type {
+  border-right-width: 0;
+}
+[data-ui="neobrutalism"] [data-split] > button.border:last-of-type {
+  margin-left: 0;
+  border-left-color: var(--ink);
+}
+[data-ui="neumorphism"] [data-split] {
+  border-radius: 0.375rem;
+  box-shadow: var(--neu-raised);
+}
+[data-ui="claymorphism"] [data-split] {
+  border-radius: 0.875rem;
+  box-shadow: var(--clay-raised);
+}
+[data-ui="neobrutalism"] [data-split] {
+  border-radius: 0.375rem;
+  box-shadow: var(--brut-raised);
+}
+[data-ui]:is([data-ui="neumorphism"], [data-ui="claymorphism"], [data-ui="neobrutalism"]) [data-split] > button.border {
+  /* !important: each look's hover lift and press (below) are more specific
+     and would raise or shift one half on its own again. */
+  box-shadow: none !important;
+  transform: none !important;
+}
 /* Floating layers — the Claude and stack menus, the base-PR preview, the
    agent popover and the close dialog — sit over cards, not over the calm
    backdrop: at the cards' 7–50% fill the card under a menu read straight
@@ -1151,15 +1204,41 @@
 .claude-glow-busy {
   background: radial-gradient(120% 90% at 100% 0%, rgb(249 115 22 / 0.14), transparent 60%);
 }
-.claude-glow-waiting {
-  background: radial-gradient(120% 90% at 100% 0%, rgb(217 70 239 / 0.12), transparent 60%);
-}
 @media (prefers-color-scheme: dark) {
   .claude-glow-busy {
     background: radial-gradient(120% 90% at 100% 0%, rgb(249 115 22 / 0.2), transparent 60%);
   }
-  .claude-glow-waiting {
-    background: radial-gradient(120% 90% at 100% 0%, rgb(217 70 239 / 0.18), transparent 60%);
+}
+/*
+ * A session waiting for you takes the whole tile, not a corner: a fuchsia wash
+ * and a ring around it (`data-needs-you`, below) that stay lit. The tile's size pulse is ClaudeGlow's (`startPulse`, the Web
+ * Animations API on the tile): until a click in the tile, focused or not,
+ * paused only while the window is hidden or minimized.
+ */
+.claude-attention {
+  background:
+    radial-gradient(130% 100% at 100% 0%, rgb(217 70 239 / 0.22), transparent 65%),
+    rgb(217 70 239 / 0.07);
+}
+@media (prefers-color-scheme: dark) {
+  .claude-attention {
+    background:
+      radial-gradient(130% 100% at 100% 0%, rgb(217 70 239 / 0.26), transparent 65%),
+      rgb(217 70 239 / 0.09);
+  }
+}
+/* The ring is the tile's own outline, not a shadow on the wash: the wash sits
+   inside the tile's frame, whose thick accent edge on the left gave its inner
+   corners another radius than the outer ones — a ring there drew a second,
+   mismatched edge beside the stripe. An outline follows the tile's outer
+   corners in every look. */
+[data-needs-you] {
+  outline: 2px solid rgb(217 70 239 / 0.75);
+  outline-offset: 1px;
+}
+@media (prefers-color-scheme: dark) {
+  [data-needs-you] {
+    outline-color: rgb(232 121 249 / 0.8);
   }
 }
 @keyframes claude-glow {
@@ -1211,6 +1290,36 @@ body {
   select:not(:disabled),
   summary {
     cursor: pointer;
+  }
+}
+
+/* Dropdowns draw their own chevron. Chromium's native arrow sits a few
+   pixels from the right edge, and the rounder frames of the looks
+   (Settings › Appearance) made it look jammed into the corner. Every
+   one-line <select> in every look gets the same chevron with room on both
+   sides. Outside Tailwind's layers, so it beats a `px-*` utility; it sets
+   only `background-image`, never the `background` shorthand, so each look's
+   fill (`background-color`) stays. */
+select:not([multiple]):not([size]) {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 1.9rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.7rem center;
+  background-size: 0.8rem;
+}
+@media (prefers-color-scheme: dark) {
+  select:not([multiple]):not([size]) {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  }
+}
+[data-ui="neobrutalism"] select:not([multiple]):not([size]) {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23111' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+@media (prefers-color-scheme: dark) {
+  [data-ui="neobrutalism"] select:not([multiple]):not([size]) {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e8e8ea' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   }
 }
 

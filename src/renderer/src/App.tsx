@@ -45,6 +45,8 @@ import { WeatherBadge } from "./components/WeatherBadge";
 import { UpsourceCard, UpsourceTile } from "./components/UpsourceCard";
 import { isUpsource } from "../../shared/upsource";
 import { applyUiStyle } from "./ui-style";
+import { StyleOffer } from "./components/StyleOffer";
+import { NeedsYouPill, useNeedsYouPrs, usePulse, type ListedPr } from "./components/NeedsYouPill";
 import {
   DEFAULT_TABLE_SORT,
   parseColumnWidths,
@@ -314,6 +316,7 @@ export function App() {
   // with every other client on the same token.
   const lastForcedRefreshRef = useRef(0);
   const [whatsNew, setWhatsNew] = useState<{ version: string; url: string; highlightUntil: number } | null>(null);
+  const [styleOffer, setStyleOffer] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
 
   // Persisted view preferences, read once at mount (search stays transient).
@@ -434,6 +437,7 @@ export function App() {
       })
       .catch(() => {});
     window.api.getWhatsNew().then(setWhatsNew).catch(() => {});
+    window.api.getStyleOffer().then(setStyleOffer).catch(() => {});
     window.api.getDataCopy().then(setDataCopy).catch(() => {});
     void loadJiraStatus();
   }, [loadJiraStatus]);
@@ -992,6 +996,20 @@ export function App() {
 
   const allCollapsed =
     groups !== null && groups.length > 0 && groups.every((g) => collapsed.has(g.key));
+
+  // Every PR on the Roomy/Compact list with its group, for the "need you" pill.
+  const listedPrs = useMemo<ListedPr[]>(
+    () => (groups ? groups.flatMap((g) => g.prs.map((pr) => ({ pr, groupKey: g.key }))) : sorted.map((pr) => ({ pr, groupKey: null }))),
+    [groups, sorted],
+  );
+  const expandGroup = useCallback((key: string) => {
+    setCollapsed((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  }, []);
 
   const toggleGroup = useCallback((key: string) => {
     setCollapsed((prev) => {
@@ -1618,6 +1636,7 @@ export function App() {
                     <span className="rounded-full border border-line-strong px-2 py-0.5 text-xs text-fg-muted">
                       {g.prs.length}
                     </span>
+                    {isCollapsed && <FoldedNeedsYou prs={g.prs} />}
                     {isCollapsed && attention > 0 && (
                       <span
                         className="rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-medium text-red-600 dark:text-red-300"
@@ -1660,6 +1679,9 @@ export function App() {
           onToggleIgnore={toggleIgnore}
         />
       )}
+      {(viewMode === "roomy" || viewMode === "compact") && (
+        <NeedsYouOffscreen listed={listedPrs} collapsed={collapsed} onExpand={expandGroup} />
+      )}
       </BasePrContext.Provider>
       </StaleCloseContext.Provider>
       </AuthorFilterContext.Provider>
@@ -1675,6 +1697,21 @@ export function App() {
       </ClaudeDesktopContext.Provider>
       </ClaudeEnabledContext.Provider>
       </AgentContext.Provider>
+
+      {styleOffer && config && (
+        <StyleOffer
+          current={config.uiStyle ?? "flat"}
+          onPick={(style) => {
+            applyUiStyle(style);
+            window.api.setUiStyle(style).catch(() => {});
+            setConfig((c) => (c ? { ...c, uiStyle: style } : c));
+          }}
+          onClose={() => {
+            setStyleOffer(false);
+            window.api.dismissStyleOffer().catch(() => {});
+          }}
+        />
+      )}
 
       <div className="pointer-events-none fixed bottom-2 right-3 z-10 flex items-center gap-2 text-[11px]">
         {whatsNew && (
@@ -2156,5 +2193,37 @@ function HostPill({
     >
       {body}
     </button>
+  );
+}
+
+/** The pill, fed with the PRs that ask for you (inside the Claude contexts). */
+function NeedsYouOffscreen({
+  listed,
+  collapsed,
+  onExpand,
+}: {
+  listed: ListedPr[];
+  collapsed: ReadonlySet<string>;
+  onExpand: (groupKey: string) => void;
+}) {
+  const waiting = useNeedsYouPrs(listed);
+  return <NeedsYouPill waiting={waiting} collapsed={collapsed} onExpand={onExpand} />;
+}
+
+/** A collapsed group's count of PRs whose Claude session waits for you. */
+function FoldedNeedsYou({ prs }: { prs: PullRequest[] }) {
+  const listed = useMemo(() => prs.map((pr) => ({ pr, groupKey: null })), [prs]);
+  const n = useNeedsYouPrs(listed).length;
+  const badge = useRef<HTMLSpanElement>(null);
+  usePulse(badge, n > 0, 1.2);
+  if (n === 0) return null;
+  return (
+    <span
+      ref={badge}
+      className="inline-block rounded-full border border-fuchsia-500/50 bg-fuchsia-500/15 px-2 py-0.5 text-xs font-medium text-fuchsia-700 dark:text-fuchsia-300"
+      title={`${n} PR(s) here need you — a Claude session waits for your answer`}
+    >
+      ✋ {n}
+    </span>
   );
 }

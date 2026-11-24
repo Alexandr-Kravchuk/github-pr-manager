@@ -92,12 +92,15 @@ import {
   ignoredStatePath,
   loadWhatsNewRecord,
   saveWhatsNewRecord,
+  loadStyleOfferRecord,
+  saveStyleOfferRecord,
   loadSettings,
   persistSettings,
   seenStatePath,
 } from "./settings";
 import { checkForUpdatesNow, initAutoUpdater, setAutoUpdateEnabled } from "./updater";
 import { whatsNewFor } from "../shared/whats-new";
+import { styleOfferAtStart } from "../shared/style-offer";
 import { createWeatherService } from "./weather";
 import { locate } from "./locate";
 import { forgetLocation, readSavedLocation, saveLocation } from "./weather-location";
@@ -139,6 +142,8 @@ let agent: Agent | null = null;
 let agentPushTimer: NodeJS.Timeout | null = null;
 /** A packaged app's copy of the data folder, looked up once at start (data-copy.ts). */
 let dataCopy: DataCopy | null = null;
+/** Whether this run shows the one-time "Try a new look" card (shared/style-offer.ts). */
+let styleOffer = false;
 
 /**
  * Pushes the agent's state at most every 250 ms — a run reports a step per
@@ -1114,6 +1119,14 @@ function registerIpc(): void {
     acknowledgeVersion(app.getVersion());
   });
 
+  ipcMain.handle("app:getStyleOffer", async (): Promise<boolean> => styleOffer);
+
+  // Closed once, never offered again — not on this run, not on the next.
+  ipcMain.handle("app:dismissStyleOffer", async (): Promise<void> => {
+    styleOffer = false;
+    saveStyleOfferRecord({ done: true });
+  });
+
   ipcMain.handle("app:dataCopy", async (): Promise<DataCopy | null> => dataCopy);
 
   // No argument: only the folder main found is ever shown.
@@ -1238,6 +1251,18 @@ function startApp(): void {
 
   applyCsp();
   registerIpc();
+
+  // Before "What's new" is seeded: its record is what tells an update from a
+  // fresh install, which never gets the style offer.
+  const offerAtStart = styleOfferAtStart(loadStyleOfferRecord(), loadWhatsNewRecord() !== null);
+  styleOffer = offerAtStart.offer;
+  if (offerAtStart.write) {
+    try {
+      saveStyleOfferRecord(offerAtStart.write);
+    } catch (e) {
+      console.warn("[main] could not save the style offer record:", (e as Error).message);
+    }
+  }
 
   // Seed the acknowledged version on first run so "What's new" doesn't flash
   // on a fresh install.

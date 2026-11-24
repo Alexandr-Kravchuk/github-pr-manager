@@ -6,7 +6,7 @@
 
 import type { UiStyle } from "../../shared/types";
 import { isUiStyle } from "../../shared/ui-style";
-import { syncGlassDrift } from "./glass-drift";
+import { resetGlassDrift, syncGlassDrift } from "./glass-drift";
 
 const KEY = "prd:ui-style";
 
@@ -18,7 +18,11 @@ function setAttribute(style: UiStyle): void {
 }
 
 export function applyUiStyle(style: UiStyle): void {
+  // Startup applies the remembered look and then the config's, the same one:
+  // only a real switch starts the glass backdrop's drift over.
+  const before = document.documentElement.dataset.ui ?? "flat";
   setAttribute(style);
+  if (style === "glassmorphism" && before !== style) resetGlassDrift();
   try {
     localStorage.setItem(KEY, style);
   } catch {

@@ -1460,6 +1460,13 @@ export interface PrManagerApi {
   showDataCopy(): Promise<void>;
   /** Acknowledges the current version (hides "What's new"). */
   dismissWhatsNew(): Promise<void>;
+  /**
+   * Whether this run shows the one-time "Try a new look" card: an update into
+   * the styles, never a fresh install, until it is closed (shared/style-offer.ts).
+   */
+  getStyleOffer(): Promise<boolean>;
+  /** Closes the style offer for good. */
+  dismissStyleOffer(): Promise<void>;
   /** Subscribe to live snapshots. Returns an unsubscribe function. */
   onSnapshot(listener: (snapshot: DashboardResponse) => void): () => void;
   /**

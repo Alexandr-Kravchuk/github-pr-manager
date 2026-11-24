@@ -17983,6 +17983,50 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     });
   }
 
+  test("needs-you pulse: runs on while the window is shown (focus or not), stops on a click in the tile", () => {
+    const src = require("node:fs").readFileSync(path.join(__dirname, "../src/renderer/src/components/ClaudeButton.tsx"), "utf8");
+    const store = require("node:fs").readFileSync(path.join(__dirname, "../src/renderer/src/needs-you.ts"), "utf8");
+    assert.match(store, /function windowShown\(\): boolean \{\s*return !document\.hidden;/);
+    // The pill and a folded group's count pulse through the same gate.
+    const pillSrc = require("node:fs").readFileSync(path.join(__dirname, "../src/renderer/src/components/NeedsYouPill.tsx"), "utf8");
+    assert.match(pillSrc, /if \(!shown\) anim\.pause\(\);/);
+    assert.match(src, /if \(shown\) pulse\.current\?\.play\(\);\s*else pulse\.current\?\.pause\(\);/);
+    assert.match(src, /tile\.addEventListener\("pointerdown", answer, true\)/);
+    assert.match(src, /prefers-reduced-motion: reduce/);
+    // Off-screen tiles are pointed at, never scrolled to on their own.
+    const pill = require("node:fs").readFileSync(path.join(__dirname, "../src/renderer/src/components/NeedsYouPill.tsx"), "utf8");
+    const scrolls = pill.match(/scrollIntoView|scrollTo\(/g) ?? [];
+    assert.strictEqual(scrolls.length, 1, "one scroll, the one a pill click asks for");
+    assert.match(pill, /if \(!target\) return;/);
+  });
+
+  {
+    const so = require(path.join(__dirname, "../dist/main/shared/style-offer.js"));
+
+    test("style offer: a fresh install never sees it and settles it as done", () => {
+      assert.deepStrictEqual(so.styleOfferAtStart(null, false), { offer: false, write: { done: true } });
+    });
+
+    test("style offer: an update (a What's new record, no offer record) shows it until closed", () => {
+      assert.deepStrictEqual(so.styleOfferAtStart(null, true), { offer: true, write: null });
+      assert.deepStrictEqual(so.styleOfferAtStart({ done: true }, true), { offer: false, write: null });
+    });
+
+    test("style offer: a malformed record counts as none", () => {
+      assert.strictEqual(so.parseStyleOfferRecord(null), null);
+      assert.strictEqual(so.parseStyleOfferRecord({ done: "yes" }), null);
+      assert.deepStrictEqual(so.parseStyleOfferRecord({ done: true }), { done: true });
+    });
+
+    test("style offer: main decides it before seeding What's new and closes it for good", () => {
+      const src = require("node:fs").readFileSync(path.join(__dirname, "../src/main/main.ts"), "utf8");
+      const decide = src.indexOf("styleOfferAtStart(loadStyleOfferRecord()");
+      const seed = src.indexOf("if (loadWhatsNewRecord() === null) {");
+      assert.ok(decide > 0 && seed > decide, "the offer must be decided before What's new is seeded");
+      assert.match(src, /"app:dismissStyleOffer"[\s\S]{0,200}saveStyleOfferRecord\(\{ done: true \}\)/);
+    });
+  }
+
   {
     const wn = require(path.join(__dirname, "../dist/main/shared/whats-new.js"));
     const MIN = 60_000;

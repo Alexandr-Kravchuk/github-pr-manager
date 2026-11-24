@@ -1,4 +1,4 @@
-import { useCallback, useContext, useMemo, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
 import type { ClaudeSessionInfo, PullRequest } from "../../../shared/types";
@@ -28,6 +28,7 @@ import {
   shownSession,
 } from "../../../shared/claude-sessions";
 import { cn } from "../format";
+import { forgetAnswer, isAnswered, markAnswered, needsYouVersion, subscribeNeedsYou, subscribeShown, windowShown } from "../needs-you";
 import { useAnchoredMenu } from "./anchored-menu";
 import { ClaudeDesktopContext, ClaudeEnabledContext, ClaudeSessionsContext, CodexAvailableContext } from "./claude-context";
 
@@ -96,7 +97,7 @@ export function ClaudeButton({
   );
   const mainPadding = iconOnly ? "px-1" : compact ? "pl-1.5 pr-1" : "pl-2 pr-1.5";
   return (
-    <span className={cn("inline-flex shrink-0 whitespace-nowrap", className)}>
+    <span data-split className={cn("inline-flex shrink-0 whitespace-nowrap", className)}>
       <button
         type="button"
         onClick={() => (current ? focusSession(current.id) : launch())}
@@ -201,23 +202,113 @@ export function ClaudeButton({
 }
 
 /**
+ * The "needs you" pulse: the whole tile grows a little and settles back,
+ * again and again until the user clicks the tile or anything in it. It is
+ * the one animation in the renderer that runs on until something happens
+ * (AGENTS.md), so it runs only while the window is on screen — paused while
+ * hidden to the tray or minimized, focused or not — and only on transform, which the
+ * compositor applies to a cached layer.
+ *
+ * The tile scales about the centre of its Claude button, and the button
+ * scales back by the inverse about that same point, so the button neither
+ * moves nor changes size: it stays easy to hit. The tile is lifted above its
+ * neighbours while it pulses, or a grown tile slides under the next one.
+ */
+const PULSE_SCALE = 1.04;
+const PULSE_TIMING: KeyframeAnimationOptions = { duration: 900, iterations: Infinity, easing: "ease-in-out" };
+
+function startPulse(tile: HTMLElement, button: HTMLElement | null): { pause(): void; play(): void; stop(): void } {
+  const t = tile.getBoundingClientRect();
+  const anims: Animation[] = [];
+  if (button) {
+    const b = button.getBoundingClientRect();
+    tile.style.transformOrigin = `${b.left - t.left + b.width / 2}px ${b.top - t.top + b.height / 2}px`;
+    anims.push(
+      button.animate(
+        [{ transform: "scale(1)" }, { transform: `scale(${1 / PULSE_SCALE})` }, { transform: "scale(1)" }],
+        PULSE_TIMING,
+      ),
+    );
+  }
+  anims.push(
+    tile.animate([{ transform: "scale(1)" }, { transform: `scale(${PULSE_SCALE})` }, { transform: "scale(1)" }], PULSE_TIMING),
+  );
+  tile.style.zIndex = "5";
+  return {
+    pause: () => anims.forEach((a) => a.pause()),
+    play: () => anims.forEach((a) => a.play()),
+    stop: () => {
+      anims.forEach((a) => a.cancel());
+      tile.style.transformOrigin = "";
+      tile.style.zIndex = "";
+    },
+  };
+}
+
+/**
  * The card's glow while a Claude session works on the PR (orange) or waits for
- * the user (fuchsia), from the corner the button sits in. The parent needs
- * `relative isolate overflow-hidden`: `-z-10` keeps the glow under the text,
- * and `isolate` keeps it above the card's own background.
+ * the user (fuchsia). Working is a wash from the corner the button sits in.
+ * Waiting asks for the user, so it takes the whole tile: a fuchsia wash and an
+ * inset ring that stay lit, and the tile itself pulses in size until the user
+ * clicks it. The parent needs `relative isolate overflow-hidden`: `-z-10`
+ * keeps the glow under the text, and `isolate` keeps it above the card's own
+ * background.
  */
 export function ClaudeGlow({ pr }: { pr: PullRequest }) {
   const enabled = useContext(ClaudeEnabledContext);
   const allSessions = useContext(ClaudeSessionsContext);
   const session = useMemo(() => shownSession(sessionsForPr(pr, allSessions)), [pr, allSessions]);
   const glow = sessionGlow(session);
+  const shown = useSyncExternalStore(subscribeShown, windowShown);
+  const ref = useRef<HTMLSpanElement>(null);
+  const pulse = useRef<ReturnType<typeof startPulse> | null>(null);
+  const answered = useSyncExternalStore(subscribeNeedsYou, needsYouVersion);
+  const waitingId = enabled && glow === "waiting" ? session?.id : undefined;
+  if (session && glow !== "waiting") forgetAnswer(session.id);
+
+  // The ring: the tile's own outline (styles.css), lit for the whole wait.
+  useEffect(() => {
+    const tile = ref.current?.parentElement;
+    if (!waitingId || !tile) return;
+    tile.dataset.needsYou = "";
+    return () => {
+      delete tile.dataset.needsYou;
+    };
+  }, [waitingId]);
+
+  // Start on a wait the user hasn't answered; any click in the tile answers it.
+  useEffect(() => {
+    const tile = ref.current?.parentElement;
+    if (!waitingId || !tile || isAnswered(waitingId)) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    const p = startPulse(tile, tile.querySelector<HTMLElement>("[data-split]"));
+    pulse.current = p;
+    const answer = () => markAnswered(waitingId);
+    tile.addEventListener("pointerdown", answer, true);
+    return () => {
+      tile.removeEventListener("pointerdown", answer, true);
+      p.stop();
+      pulse.current = null;
+    };
+  }, [waitingId, answered]);
+
+  // Frames only while the window is on screen, focused or not.
+  useEffect(() => {
+    if (shown) pulse.current?.play();
+    else pulse.current?.pause();
+  }, [shown, waitingId, answered]);
+
   if (!enabled || !session || !glow) return null;
   // Keyed on the status, not on the push: the breaths replay only when it changes.
   return (
     <span
+      ref={ref}
       key={`${session.id}:${glow}`}
       aria-hidden
-      className={cn("claude-glow pointer-events-none absolute inset-0 -z-10", `claude-glow-${glow}`)}
+      className={cn(
+        "pointer-events-none absolute inset-0 -z-10",
+        glow === "waiting" ? "claude-attention" : "claude-glow claude-glow-busy",
+      )}
     />
   );
 }
@@ -476,7 +567,7 @@ export function GroupClaudeButton({
     },
   ];
   return (
-    <span className="inline-flex shrink-0 whitespace-nowrap">
+    <span data-split className="inline-flex shrink-0 whitespace-nowrap">
       <button
         type="button"
         onClick={() => (current ? focusSession(current.id) : launch(mainKind))}

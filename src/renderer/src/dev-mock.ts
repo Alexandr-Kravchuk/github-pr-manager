@@ -572,6 +572,7 @@ const snapshot: DashboardResponse = {
 
 // `?ui=<style>` (neumorphism, claymorphism, neobrutalism, bento, glassmorphism, terminal, paper, creatio) previews a look (Settings › Appearance).
 const uiParam = new URLSearchParams(window.location.search).get("ui");
+const styleOfferParam = new URLSearchParams(window.location.search).get("styleOffer") === "1";
 const mockUiStyle = isUiStyle(uiParam) ? uiParam : "flat";
 
 const settings: Settings = {
@@ -1263,6 +1264,9 @@ const api: PrManagerApi = {
     return WEATHER;
   },  getWhatsNew: async () => null,
   dismissWhatsNew: async () => {},
+  // `?styleOffer=1` previews the one-time "Try a new look" card.
+  getStyleOffer: async () => styleOfferParam,
+  dismissStyleOffer: async () => {},
   getDataCopy: async () => DATA_COPY,
   showDataCopy: async () => {},
   onSnapshot: (listener) => {

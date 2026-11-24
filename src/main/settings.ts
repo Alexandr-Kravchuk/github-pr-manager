@@ -4,6 +4,7 @@ import { app } from "electron";
 
 import { ConfigError, defaultSettings, keepUnknownSettings, toStoredSettings, validateSettings } from "../shared/config";
 import type { Settings } from "../shared/types";
+import { parseStyleOfferRecord, type StyleOfferRecord } from "../shared/style-offer";
 import { parseWhatsNewRecord, type WhatsNewRecord } from "../shared/whats-new";
 import { diag } from "./diag-log";
 
@@ -150,6 +151,26 @@ export function saveWhatsNewRecord(record: WhatsNewRecord): void {
 /** Persists the current version as acknowledged (hides "What's new"). */
 export function acknowledgeVersion(version: string): void {
   saveWhatsNewRecord({ acknowledgedVersion: version });
+}
+
+/** Path of the one-time style offer's record (shared/style-offer.ts) under userData. */
+export function styleOfferPath(): string {
+  return path.join(app.getPath("userData"), "style-offer.json");
+}
+
+/** The stored style-offer record, or null when there is none (or it is malformed). */
+export function loadStyleOfferRecord(): StyleOfferRecord | null {
+  try {
+    return parseStyleOfferRecord(JSON.parse(fs.readFileSync(styleOfferPath(), "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+export function saveStyleOfferRecord(record: StyleOfferRecord): void {
+  const file = styleOfferPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(record), "utf8");
 }
 
 /**

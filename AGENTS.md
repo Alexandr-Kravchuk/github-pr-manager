@@ -967,10 +967,17 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   from `md`, where it has two columns, or the span would invent one.
   Glassmorphism: a fixed backdrop of soft colour blobs and
   translucent cards, panels and the table with a backdrop blur. The blobs
-  (a fixed `.glass-backdrop` layer) drift very slowly, but in steps:
+  (a fixed `.glass-backdrop` layer) drift slowly, but in steps:
   `renderer/src/glass-drift.ts` moves them a few pixels once a second through
   custom properties on that layer alone, stopped while the window is hidden or
   reduced motion is on — a CSS animation would re-blur every card each frame.
+  Their path runs on the drift's own clock, not the wall clock: it advances
+  only while they move and is kept in localStorage (`prd:glass-drift-ms`), so
+  a hidden window or a restart resumes exactly where they stopped; only a
+  switch to Glassmorphism from another look (`applyUiStyle`) starts it over.
+  Every split button (`data-split`: the Claude button and the group
+  heading's) keeps the inner corners of its two halves square in every look,
+  since each look's frame rule rounds every button on all four corners.
   The table's sticky actions column takes no fill (any fill or second blur
   showed as a lighter stripe). Terminal: a monospace TUI — every corner
   square but the avatars', single-line boxes, no shadows, what is on or
@@ -992,7 +999,13 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   or the `rounded-xl border border-line` panel shape. The switch applies at
   once and persists over `style:set`, like the theme. In the plain-browser
   mock, `?ui=<style>` previews them (with `&buddy=review` for nine PRs, enough to
-  see the bento grid).
+  see the bento grid). After an update the styles are offered once in place
+  (`StyleOffer.tsx`, `?styleOffer=1` in the mock): each button applies its look
+  at once and the card stays open; closing it ends the offer for good.
+  `shared/style-offer.ts` decides at start, before "What's new" is seeded —
+  no What's new record means a fresh install, settled as done — and the record
+  lives in `userData/style-offer.json`, not in `whats-new.json` (rewritten
+  whole per version) or `settings.json`.
 - **No always-running animation in the renderer.** An `infinite` CSS animation —
   including Tailwind's `animate-pulse` / `-spin` / `-bounce` / `-ping` — keeps the
   compositor producing frames for as long as the app is open, and Electron
@@ -1004,9 +1017,28 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   treat ~33% as the observation that started this, not as a measured delta). Use
   a **finite** animation remounted via a React `key` when the underlying event
   fires — see `.live-beat` in `styles.css` (one
-  blink per snapshot) and `.claude-glow` (three breaths of a PR card's glow
-  when a Claude session on it starts working or waiting; only its own layer's
-  `opacity` animates, so nothing repaints per frame). Key it on something monotonic per event: `App.tsx` uses a
+  blink per snapshot), `.claude-glow` (three breaths of a PR card's corner
+  glow when a Claude session on it starts working) and `.claude-attention`
+  (a session waiting for you: a fuchsia wash over the whole tile and a ring
+  that is the tile's own outline, `data-needs-you` — an inset ring followed
+  the frame's inner corners, which the thick accent edge skews — both lit); only their own layer's `opacity` animates, so
+  nothing repaints per frame. **The one exception that runs on** is that
+  tile's size pulse (`startPulse` in `ClaudeButton.tsx`, a transform-only Web
+  Animation with `iterations: Infinity`): it pulses until a click in the tile
+  answers it (`needs-you.ts`, per session, cleared once it stops waiting) and
+  runs whether or not the window has focus — a window beside the app you work
+  in is where it is for — but is paused while the page is hidden (in the
+  tray, minimized), so it never draws for nobody. The tile scales about the centre of its Claude button and the
+  button scales back by the inverse, so "Needs you" stays still and easy to
+  hit. A test pins the pause; the guard scan below cannot see a Web
+  Animation, so a new one needs the same gate. Which PRs ask for you is one
+  rule, `renderer/src/needs-you.ts` (the shown session waits and its tile
+  wasn't clicked since); while such a tile is out of sight — scrolled away
+  or in a collapsed group — `NeedsYouPill` shows "✋ N need you ↓" and a
+  folded group's heading a fuchsia count, both pulsing in size the same way
+  (`usePulse`, same gate). Nothing scrolls by itself (with
+  several such tiles it would jump between them): a click on the pill goes
+  to the nearest one, below first, opening its group if folded. Key it on something monotonic per event: `App.tsx` uses a
   snapshot counter, because `snapshot.fetchedAt` is
   the *oldest* host's stamp and stalls. A guard test in `tests/run-tests.cjs`
   scans `.ts`/`.tsx`/`.css`/`.html` under `src/renderer` for
