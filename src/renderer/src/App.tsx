@@ -317,6 +317,8 @@ export function App() {
   const lastForcedRefreshRef = useRef(0);
   const [whatsNew, setWhatsNew] = useState<{ version: string; url: string; highlightUntil: number } | null>(null);
   const [styleOffer, setStyleOffer] = useState(false);
+  // The offer waits until the app can take its clicks (`waitUntilResponsive`).
+  const [styleOfferReady, setStyleOfferReady] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
 
   // Persisted view preferences, read once at mount (search stays transient).
@@ -993,6 +995,22 @@ export function App() {
     }
     return finalize(clusters);
   }, [sorted, groupBy, viewMode, sortBy]);
+
+  // The style offer is a set of buttons to click, so it waits for an app that
+  // answers clicks: past the first snapshot, and until main and the window
+  // both answer quickly (a start keeps main busy for seconds — the first poll,
+  // the session scan — and on macOS every click goes through main).
+  const hasData = data !== null;
+  useEffect(() => {
+    if (!styleOffer || styleOfferReady || !hasData) return;
+    let cancelled = false;
+    void waitUntilResponsive(() => cancelled).then((ok) => {
+      if (ok && !cancelled) setStyleOfferReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [styleOffer, styleOfferReady, hasData]);
 
   const allCollapsed =
     groups !== null && groups.length > 0 && groups.every((g) => collapsed.has(g.key));
@@ -1698,7 +1716,7 @@ export function App() {
       </ClaudeEnabledContext.Provider>
       </AgentContext.Provider>
 
-      {styleOffer && config && (
+      {styleOffer && styleOfferReady && config && (
         <StyleOffer
           current={config.uiStyle ?? "flat"}
           onPick={(style) => {
@@ -2226,4 +2244,32 @@ function FoldedNeedsYou({ prs }: { prs: PullRequest[] }) {
       ✋ {n}
     </span>
   );
+}
+
+/** A zero-delay timer of the window: late only while its thread is busy (no tie to the frame rate). */
+function nextTick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Resolves true once the app answers quickly enough to be clicked: three
+ * checks in a row, half a second apart, in which a round trip to main and a
+ * timer of the window both come back fast. False if `cancelled()` turns true;
+ * after a minute it gives up waiting and resolves true anyway.
+ */
+async function waitUntilResponsive(cancelled: () => boolean): Promise<boolean> {
+  const FAST_MS = 120;
+  const deadline = performance.now() + 60_000;
+  let fastInARow = 0;
+  while (fastInARow < 3 && performance.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 500));
+    if (cancelled()) return false;
+    const t0 = performance.now();
+    await window.api.getStyleOffer().catch(() => false);
+    const t1 = performance.now();
+    await nextTick();
+    const t2 = performance.now();
+    fastInARow = t1 - t0 < FAST_MS && t2 - t1 < FAST_MS ? fastInARow + 1 : 0;
+  }
+  return !cancelled();
 }

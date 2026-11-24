@@ -1,6 +1,9 @@
+import { useEffect, useState } from "react";
+
 import { UI_STYLES } from "../../../shared/ui-style";
-import type { UiStyle } from "../../../shared/types";
+import type { ThemePreference, UiStyle } from "../../../shared/types";
 import { cn } from "../format";
+import { ThemeToggle } from "./ThemeToggle";
 
 /** One line on each look, so a name like "Bento grid" says what it does. */
 const STYLE_HINT: Record<UiStyle, string> = {
@@ -31,6 +34,19 @@ export function StyleOffer({
   onPick: (style: UiStyle) => void;
   onClose: () => void;
 }) {
+  // Light / dark / system sits beside the style: each look is two looks, and
+  // this is where people see them. Applies at once, like Settings' toggle.
+  const [theme, setTheme] = useState<ThemePreference | null>(null);
+  useEffect(() => {
+    window.api
+      .getSettings()
+      .then((s) => setTheme(s.theme))
+      .catch(() => setTheme("system"));
+  }, []);
+  const changeTheme = (next: ThemePreference) => {
+    setTheme(next);
+    window.api.setTheme(next).catch(() => {});
+  };
   return (
     <div
       role="dialog"
@@ -52,8 +68,8 @@ export function StyleOffer({
         </button>
       </div>
       <p className="mb-3 text-xs text-fg-muted">
-        PR Dashboard now comes in {UI_STYLES.length} styles. Pick one and see it right away — you can switch any time in
-        Settings › Appearance.
+        PR Dashboard now comes in {UI_STYLES.length} styles. Pick one — and light, dark or your system's theme below —
+        and see it right away. You can switch any time in Settings › Appearance.
       </p>
       <div className="grid grid-cols-2 gap-1.5">
         {UI_STYLES.map((s) => (
@@ -74,7 +90,8 @@ export function StyleOffer({
           </button>
         ))}
       </div>
-      <div className="mt-3 flex justify-end">
+      <div className="mt-3 flex items-center justify-between gap-2">
+        {theme ? <ThemeToggle value={theme} onChange={changeTheme} /> : <span />}
         <button
           type="button"
           onClick={onClose}

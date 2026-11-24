@@ -1001,7 +1001,12 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   mock, `?ui=<style>` previews them (with `&buddy=review` for nine PRs, enough to
   see the bento grid). After an update the styles are offered once in place
   (`StyleOffer.tsx`, `?styleOffer=1` in the mock): each button applies its look
-  at once and the card stays open; closing it ends the offer for good.
+  at once and the card stays open; closing it ends the offer for good. It
+  appears only once the app takes clicks (`waitUntilResponsive` in
+  `App.tsx`: past the first snapshot, three quick round trips to main and
+  window timers in a row — a timer, not a frame: rAF follows the frame rate,
+  which a window that is not in front can lower) — a start keeps main busy for seconds, and on
+  macOS every click goes through main, so a card shown at once ignored them.
   `shared/style-offer.ts` decides at start, before "What's new" is seeded —
   no What's new record means a fresh install, settled as done — and the record
   lives in `userData/style-offer.json`, not in `whats-new.json` (rewritten
