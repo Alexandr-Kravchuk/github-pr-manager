@@ -72,7 +72,9 @@ export function ClaudeButton({
   const allSessions = useContext(ClaudeSessionsContext);
   const sessions = useMemo(() => sessionsForPr(pr, allSessions), [pr, allSessions]);
   const [state, run] = useLaunchState();
-  const menu = useAnchoredMenu(sessions.length > 0 ? SESSIONS_MENU_WIDTH_PX : MENU_WIDTH_PX);
+  // Anchored on the whole split button: the menu hangs under its left edge,
+  // and a click on either half is "inside" it.
+  const menu = useAnchoredMenu<HTMLSpanElement>(sessions.length > 0 ? SESSIONS_MENU_WIDTH_PX : MENU_WIDTH_PX);
   // Without `kind` main picks from the PR's state, exactly as the button shows.
   const launch = useCallback(
     (kind?: ClaudeLaunchKind, inTerminal?: boolean) => run(() => window.api.launchClaude(pr.id, kind, inTerminal)),
@@ -84,9 +86,13 @@ export function ClaudeButton({
   // `sessionsForPr` puts the one that most needs the user first.
   const shown = shownSession(sessions);
   const current = shown?.where === "background" ? undefined : shown;
-  const more = sessions.length > 1 ? ` ${sessions.length - 1} more in the menu.` : "";
-  const label = current
-    ? `Claude session ${describeSession(current)}. Click to switch to it.${more}`
+  // With several sessions on the PR the status can't say which one a click
+  // means, so the main part opens the menu that lists them all.
+  const choose = sessions.length > 1;
+  const label = choose
+    ? `${sessions.length} Claude sessions on this PR — click to choose one. Shown: ${describeSession(shown!)}.`
+    : current
+    ? `Claude session ${describeSession(current)}. Click to switch to it.`
     : `Start Claude in the repo folder to ${CLAUDE_LAUNCH_LABEL[kind]}${shown ? `. Running: ${describeSession(shown)}.` : ""}`;
   const tone = state === "done" ? KIND_CLASS.done : current ? SESSION_CLASS[current.status] : KIND_CLASS[kind];
   const text = state === "done" ? "Started" : current ? SESSION_STATUS_TEXT[current.status] : CLAUDE_BUTTON_TEXT[kind];
@@ -97,10 +103,12 @@ export function ClaudeButton({
   );
   const mainPadding = iconOnly ? "px-1" : compact ? "pl-1.5 pr-1" : "pl-2 pr-1.5";
   return (
-    <span data-split className={cn("inline-flex shrink-0 whitespace-nowrap", className)}>
+    <span ref={menu.buttonRef} data-split className={cn("inline-flex shrink-0 whitespace-nowrap", className)}>
       <button
         type="button"
-        onClick={() => (current ? focusSession(current.id) : launch())}
+        onClick={() => (choose ? menu.toggle() : current ? focusSession(current.id) : launch())}
+        aria-haspopup={choose ? "menu" : undefined}
+        aria-expanded={choose ? menu.open : undefined}
         disabled={state === "busy"}
         title={iconOnly ? `${text} — ${label}` : label}
         aria-label={label}
@@ -117,7 +125,6 @@ export function ClaudeButton({
         {!iconOnly && text}
       </button>
       <button
-        ref={menu.buttonRef}
         type="button"
         onClick={(e) => {
           e.stopPropagation();
@@ -515,7 +522,7 @@ export function GroupClaudeButton({
   const allSessions = useContext(ClaudeSessionsContext);
   const sessions = useMemo(() => sessionsForGroup(groupKey, allSessions), [groupKey, allSessions]);
   const [state, run] = useLaunchState();
-  const menu = useAnchoredMenu(SESSIONS_MENU_WIDTH_PX);
+  const menu = useAnchoredMenu<HTMLSpanElement>(SESSIONS_MENU_WIDTH_PX);
   const explainPrs = useMemo(() => groupLaunchPrs("explain", groupKey, prs), [groupKey, prs]);
   const reviewPrs = useMemo(() => groupLaunchPrs("review", groupKey, prs), [groupKey, prs]);
   const launch = useCallback(
@@ -542,12 +549,14 @@ export function GroupClaudeButton({
   const shown = shownSession(sessions);
   const current = shown?.where === "background" ? undefined : shown;
   const words = (s: ClaudeSessionInfo) => GROUP_STATUS_TEXT[groupKindOf(s, groupKey)][s.status];
-  const more = sessions.length > 1 ? ` ${sessions.length - 1} more in the menu.` : "";
+  const choose = sessions.length > 1;
   // With no session the main part starts what the group offers, Explain first.
   const mainKind: GroupLaunchKind = explainPrs ? "explain" : "review";
   const mainDisabled = !current && mainKind === "review" && !desktop;
-  const label = current
-    ? `${words(current)}: ${describeSession(current)}. Click to switch to it.${more}`
+  const label = choose
+    ? `${sessions.length} Claude sessions on this group — click to choose one. Shown: ${words(shown!)}: ${describeSession(shown!)}.`
+    : current
+    ? `${words(current)}: ${describeSession(current)}. Click to switch to it.`
     : mainKind === "explain"
       ? explainLabel
       : reviewLabel;
@@ -567,11 +576,13 @@ export function GroupClaudeButton({
     },
   ];
   return (
-    <span data-split className="inline-flex shrink-0 whitespace-nowrap">
+    <span ref={menu.buttonRef} data-split className="inline-flex shrink-0 whitespace-nowrap">
       <button
         type="button"
-        onClick={() => (current ? focusSession(current.id) : launch(mainKind))}
-        disabled={state === "busy" || mainDisabled}
+        onClick={() => (choose ? menu.toggle() : current ? focusSession(current.id) : launch(mainKind))}
+        aria-haspopup={choose ? "menu" : undefined}
+        aria-expanded={choose ? menu.open : undefined}
+        disabled={state === "busy" || (!choose && mainDisabled)}
         title={label}
         aria-label={label}
         className={cn(segment, "gap-1 rounded-l-md pl-1.5 pr-1")}
@@ -581,7 +592,6 @@ export function GroupClaudeButton({
         {text}
       </button>
       <button
-        ref={menu.buttonRef}
         type="button"
         onClick={menu.toggle}
         disabled={state === "busy"}

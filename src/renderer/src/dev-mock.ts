@@ -608,6 +608,16 @@ const CLAUDE_SESSIONS: ClaudeSessionInfo[] = [
     branch: "feature/eng-93373-deadline",
   },
   {
+    // A second session on the same PR: its button's main part opens the menu.
+    id: "00000000-0000-4000-8000-000000000007",
+    name: "🐟 ENG-93373 · Deadline docs",
+    status: "idle",
+    where: "desktop",
+    prKeys: [],
+    repoKeys: ["github.com/acme/clio"],
+    branch: "feature/eng-93373-deadline",
+  },
+  {
     id: "00000000-0000-4000-8000-000000000002",
     name: "✋🏻 ENG-93374 · Retry the webhook delivery",
     status: "waiting",

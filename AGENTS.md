@@ -174,7 +174,10 @@ Three layers:
   touches every PR it drove. Those records are re-listed every 60 s and only
   the last 14 days are read — thousands pile up. While a session holds a PR, the Claude button's main part
   switches to it — Desktop through `claude://claude.ai/epitaxy/<hostSessionId>`,
-  a CLI session through the iTerm2/Terminal tab on its tty — and launching a
+  a CLI session through the iTerm2/Terminal tab on its tty (with two or more
+  sessions on the PR or group the main part opens the menu that lists them
+  instead, since its status can't say which one a click means; the menu is
+  anchored on the whole split button) — and launching a
   second one moves to the menu, since two sessions on one PR edit the same
   branch; for the same reason the PR agent starts nothing on such a PR — not
   its plan, not a run you ask for or answer, not one that waited in its queue
