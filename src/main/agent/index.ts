@@ -9,7 +9,7 @@ import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
-import { AGENT_CLOSED, approvableReview, approvalStands, boardStage, cardKey, keyHead, NO_CHECKOUT_WHY, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
+import { AGENT_CLOSED, approvableRun, approvalStands, boardStage, cardKey, keyHead, NO_CHECKOUT_WHY, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -1073,16 +1073,18 @@ export function createAgent(deps: AgentDeps): Agent {
 
   /**
    * Your approval, on your click, resting on the agent's review of the PR's
-   * head that found nothing blocking and had nothing to post
-   * (`approvableReview`) — the Board's Approve, so a card whose review is done
-   * doesn't send you to GitHub for one button. The PR is read again first: it
+   * head that found nothing blocking and had nothing to post — the latest
+   * review of that head, whatever day it ran (`approvableRun`). The Board's
+   * Approve, so a card whose review is done doesn't send you to GitHub for
+   * one button. The PR is read again first: it
    * must still be open, at the head that review read, with the rule still
    * holding; what goes out is one line and the signature, on that head.
    */
   async function approveOnReview(item: AgentItemRecord, all: Settings): Promise<AgentActionResult> {
     const pr = snapshotPr(item.prId);
     if (!pr?.headOid) return { ok: false, error: "The PR isn't on the dashboard any more." };
-    if (!approvableReview(item, pr)) {
+    // The latest review of this head, as the Board offers it: an older one that a later run on the head replaced is not.
+    if (approvableRun(itemsOf(pr.id), pr)?.runId !== item.runId) {
       return { ok: false, error: "The agent's review isn't of the PR's head any more, or it found something that holds an approval back — review it again first." };
     }
     if (!deps.fetchPr) return { ok: false, error: "The app can't read the PR here." };

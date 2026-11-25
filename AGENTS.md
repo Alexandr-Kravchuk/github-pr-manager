@@ -474,7 +474,14 @@ Three layers:
   this very head ended with nothing to post and nothing that holds an approval
   back (`approvableReview` in `shared/agent-view.ts`: its own `prd-result`
   block, no Blocker, no Major, no question for the author) offers "Approve"
-  first (`approve`, only the run id over IPC): main checks the rule again,
+  first (`approve`, only the run id over IPC) and ranks with the other
+  one-click moves. The run is the head's latest review whatever day it ended
+  (`approvableRun`): the card otherwise reads today's runs only, so a review
+  that ended yesterday on the same head left "Let the agent re-review" and no
+  Approve; a later review of the head that posted, was cut short or that you
+  discarded means none (one closed before it ever ran doesn't count). Later
+  is by `startedAt`, since a Discard or an Approve stamps `finishedAt` again.
+  Main checks the rule again,
   reads the PR again — open, same head, your approval not already on it — and
   posts an APPROVE of that head with one line and the signature, logged as
   `run/approved`; the run is then marked published, so it is offered once.
