@@ -5,7 +5,7 @@ import path from "node:path";
 import { DEFAULT_AGENT_PROMPTS, languageRule } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, disputeSteps, gitBashPath, readPlanLines, shasNotOnPr, summarizePlan, type PublishStep, type PublishSummary } from "../../shared/agent-publish";
-import { describeToolUse, limitResetFromText, usageHold, type RunProgress, type UsageHold } from "../../shared/agent-stream";
+import { describeToolUse, limitResetFromText, MAX_USAGE_HOLD_MS, usageHold, type RunProgress, type UsageHold } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
@@ -563,9 +563,9 @@ export function createAgent(deps: AgentDeps): Agent {
     if (h.usage !== undefined && !(cap > 0 && h.usage >= cap)) return null;
     return { until, why: h.why, ...(h.usage !== undefined ? { usage: h.usage } : {}) };
   }
-  /** A new usage hold: the latest reading wins — it knows the windows as they are now. */
+  /** A new usage hold: the latest reading wins — it knows the windows as they are now. Never past `MAX_USAGE_HOLD_MS`. */
   function holdForUsage(hold: UsageHold): void {
-    const until = new Date(hold.until).toISOString();
+    const until = new Date(Math.min(hold.until, now().getTime() + MAX_USAGE_HOLD_MS)).toISOString();
     const was = store.data.usageHold;
     if (was && was.until === until && was.why === hold.why && was.usage === hold.usage) return;
     store.data.usageHold = { until, why: hold.why, ...(hold.usage !== undefined ? { usage: hold.usage } : {}) };
@@ -1828,11 +1828,12 @@ export function createAgent(deps: AgentDeps): Agent {
     } else {
       const error = result?.text || outcome.stderr.trim().split("\n").slice(-3).join(" ") || `exit ${outcome.exitCode}`;
       // Refused by Claude's subscription limit: the whole queue waits for its
-      // reset (the stream's own reading first, else the reset in the message),
-      // and this run is tried again then, not ten minutes on into the same wall.
+      // reset (the stream's own reading first, else the reset in Claude Code's
+      // error result — never the model's words, which a PR can dictate), and
+      // this run is tried again then, not ten minutes on into the same wall.
       const limit =
         (outcome.progress.rateLimit?.status === "rejected" ? usageHold(outcome.progress.rateLimit, 0, now().getTime()) : null) ??
-        limitResetFromText(`${result?.text ?? ""}\n${outcome.progress.lastText ?? ""}`, now());
+        (result?.isError ? limitResetFromText(result.text, now()) : null);
       // `fail` saves, logs and tells; the rest of this function only cleans up.
       if (limit && limit.until > now().getTime()) {
         holdForUsage(limit);

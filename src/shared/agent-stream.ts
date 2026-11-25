@@ -385,7 +385,13 @@ const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "
  * machine's), minutes left out on the hour.
  */
 const LIMIT_LINE =
-  /(?:You['’]ve hit your ([^·\n]+?)|You['’]re (out of usage credits))\s*·[^\n]*?\bresets\s+(?:([A-Za-z]{3})\s+(\d{1,2}),\s+(?:(\d{4}),\s+)?)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b(?:\s*\(([^)\n]+)\))?/i;
+  /^\s*(?:You['’]ve hit your ([^·\n]+?)|You['’]re (out of usage credits))\s*·[^\n]*?\bresets\s+(?:([A-Za-z]{3})\s+(\d{1,2}),\s+(?:(\d{4}),\s+)?)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b(?:\s*\(([^)\n]+)\))?(?:\s*·[^\n]*)?\s*$/i;
+
+/**
+ * The longest a usage hold may last: Claude's longest window is a week. A
+ * hold stops every run, so nothing — a reading, a line — holds past this.
+ */
+export const MAX_USAGE_HOLD_MS = 8 * 86_400_000;
 
 /** The wall clock in `timeZone` (the machine's own when absent) at `ms`. */
 function wallClock(ms: number, timeZone: string | undefined): { y: number; mo: number; d: number; h: number; mi: number; s: number } {
@@ -435,6 +441,11 @@ function knownZone(name: string | undefined): string | undefined {
  * When the limit in Claude Code's limit line resets, and which limit it is;
  * null for any other text, or a limit line with no reset in it. A time with
  * no date is the next time the clock shows it.
+ *
+ * Pass only the text of a result Claude Code marked `is_error` — never what
+ * the model said: a PR's diff or comments can make a session write this very
+ * line, and a hold stops every run. So the line must be the whole text, its
+ * year this one or the next, and its reset within `MAX_USAGE_HOLD_MS`.
  */
 export function limitResetFromText(text: string, now: Date): UsageHold | null {
   const m = LIMIT_LINE.exec(text);
@@ -453,6 +464,7 @@ export function limitResetFromText(text: string, now: Date): UsageHold | null {
     const mo = MONTHS.indexOf(monthName.toLowerCase()) + 1;
     const d = Number(dayText);
     if (mo === 0 || d < 1 || d > 31) return null;
+    if (yearText && Number(yearText) !== today.y && Number(yearText) !== today.y + 1) return null;
     until = fromWallClock(yearText ? Number(yearText) : today.y, mo, d, h, mi, zone);
     // "Jan 2" read in late December, from a Claude Code that left the year out.
     if (!yearText && until < nowMs - 86_400_000) until = fromWallClock(today.y + 1, mo, d, h, mi, zone);
@@ -460,7 +472,7 @@ export function limitResetFromText(text: string, now: Date): UsageHold | null {
     until = fromWallClock(today.y, today.mo, today.d, h, mi, zone);
     if (until <= nowMs) until = fromWallClock(today.y, today.mo, today.d + 1, h, mi, zone);
   }
-  if (!Number.isFinite(until)) return null;
+  if (!Number.isFinite(until) || until - nowMs > MAX_USAGE_HOLD_MS) return null;
   return { until, why: credits ? "Out of Claude usage credits" : `Claude's ${limit.trim()} reached` };
 }
 

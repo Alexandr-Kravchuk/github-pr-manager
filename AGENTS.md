@@ -814,7 +814,10 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   (Europe/Kyiv)" (a date past a day: "Nov 28, 10am", a year past New Year), in
   the result's text with `is_error` and `subtype: "success"`;
   `limitResetFromText` reads it in that zone, and the stream's own `rejected`
-  reading wins when there is one. Such a run is "Stopped by Claude's session
+  reading wins when there is one. Only that error result is read, never the
+  model's words: a PR can make a session write the line, and a hold stops
+  every run — so the line must be the whole text, its year this one or the
+  next, and no hold lasts past `MAX_USAGE_HOLD_MS` (8 days). Such a run is "Stopped by Claude's session
   limit" with its `retryAt` at the reset, not `RETRY_AFTER_MS` on, which only
   ran it into the same wall. The hold is `usageHold` in `state.json`, not
   memory — a restart used to start the queue straight into the limit — and

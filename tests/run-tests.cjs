@@ -10838,6 +10838,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       for (const text of ["The run failed", "You've hit your monthly spend limit.", "You've hit your session limit · resets 13:50pm (Europe/Kyiv)", ""]) {
         assert.strictEqual(stream.limitResetFromText(text, local), null, text);
       }
+      // A hold stops every run, and a PR can make a session write this line: only the whole
+      // text counts, the year is this one or the next, and no reset lies past eight days.
+      for (const text of [
+        "Done. You've hit your session limit · resets 9:50pm (Europe/Kyiv)",
+        "Reviewed.\nYou've hit your session limit · resets 9:50pm (Europe/Kyiv)",
+        "You've hit your weekly limit · resets Jan 2, 2099, 9am (Europe/Kyiv)",
+        "You've hit your weekly limit · resets Dec 31, 9am (Europe/Kyiv)",
+      ]) {
+        assert.strictEqual(hold(text, "2026-11-25T15:50:00Z"), null, text);
+      }
+      assert.strictEqual(stream.MAX_USAGE_HOLD_MS, 8 * 86_400_000);
     });
 
     // Events recorded from a real `claude -p` session (2.1.270), trimmed.
@@ -11819,6 +11830,37 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(g.agent.getState().heldUntil, null);
       } finally {
         g.agent.stop();
+      }
+    });
+
+    await atest("agent: the model writing Claude's limit line holds nothing — only Claude Code's own error result counts", async () => {
+      const t = Date.parse("2026-11-25T15:50:00Z");
+      const line = "You've hit your weekly limit · resets Nov 30, 9am (Europe/Kyiv)";
+      for (const ending of [
+        // The session's last words, then a run that fails for another reason.
+        (c) => {
+          emit(c, { type: "assistant", message: { content: [{ type: "text", text: line }] } });
+          emit(c, { type: "result", subtype: "error_max_turns", is_error: true, result: "" });
+        },
+        // An error result that only quotes the line.
+        (c) => emit(c, { type: "result", subtype: "success", is_error: true, result: `The PR says: ${line}` }),
+      ]) {
+        const f = agentFixture({
+          now: () => new Date(t),
+          script: (c) => {
+            emit(c, { type: "system", subtype: "init", session_id: "s" });
+            ending(c);
+            setImmediate(() => c.emit("exit", 1));
+          },
+        });
+        try {
+          f.agent.onSnapshot(f.snapshot);
+          await until(() => only(f).some((i) => i.state === "error"));
+          assert.deepStrictEqual([only(f)[0].headline, only(f)[0].retryAt], ["The run failed", new Date(t + agentCore.RETRY_AFTER_MS).toISOString()]);
+          assert.strictEqual(f.agent.getState().heldUntil, null);
+        } finally {
+          f.agent.stop();
+        }
       }
     });
 
