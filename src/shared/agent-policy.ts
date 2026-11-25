@@ -26,6 +26,12 @@ export interface AgentJob {
   createdAt: string;
   /** Drive: what it is driven for — "ci", "conflicts", "comments". */
   reasons?: string[];
+  /**
+   * Re-review: over your threads only — the head had its full review already
+   * (`reviewedHead`), so the author's answer on it, or a new request, is
+   * checked without the review skill's reviewers.
+   */
+  threadsOnly?: true;
 }
 
 /** Why a run on your PR: CI, a conflict, reviewers' comments — or "self", a self-review before reviewers see it. */
@@ -74,6 +80,14 @@ export interface PlanContext {
    * own. Absent: never, so a big PR gets its brief.
    */
   briefDone?: (pr: PullRequest) => boolean;
+  /**
+   * A full review or re-review of this head already went over it — the
+   * agent's own or one you asked for, by the agent's ledger. What the author
+   * does next on the same head (a thread answer, a new request) then gets a
+   * re-review of your threads only (`threadsOnly`): one full re-review per
+   * head, not one per answer. Absent: never — every re-review is full.
+   */
+  reviewedHead?: (pr: PullRequest) => boolean;
 }
 
 /** Why your PR gets no self-review now, or null when it should get one. */
@@ -348,7 +362,9 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     }
     // Reviewed before: a re-review once the author answers — a push, a reply in
     // a thread — or asks you again. The cursor (that moment) makes each answer
-    // its own ledger key, so a reply without a push is new work too.
+    // its own ledger key, so a reply without a push is new work too. A head
+    // gets one full re-review: once one went over it (`reviewedHead`), a later
+    // answer or request on that head is checked over your threads only.
     if (pr.viewerHasReviewed) {
       const rr = s.scenarios.rereview.mode;
       if (rr === "off") {
@@ -404,6 +420,8 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
         kind: "rereview",
         mode: rr,
         createdAt: pr.createdAt,
+        // The key stays the trigger's either way: a full run's own trigger never comes back as a light one.
+        ...(ctx.reviewedHead?.(pr) ? { threadsOnly: true as const } : {}),
       });
       continue;
     }

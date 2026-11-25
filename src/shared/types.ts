@@ -1193,6 +1193,13 @@ export interface AgentItem {
   /** A drive: what it was queued for — "ci", "conflicts", "comments". */
   reasons?: string[];
   /**
+   * A re-review over your threads only: its head had a full review or
+   * re-review already, so the skill runs with `rereview: "threads-only"` —
+   * your open threads checked against the author's answers, none of its
+   * reviewers. The agent plans it itself; one you ask for is always full.
+   */
+  threadsOnly?: true;
+  /**
    * A drive: where its push goes and what git looked like before the session
    * — the remote URL then (not a remote name the session could repoint), and
    * a fingerprint of the repository's git config and hooks and your global
