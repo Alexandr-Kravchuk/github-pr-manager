@@ -15454,10 +15454,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(driveM.redirectingKeys("file:/repo/.git/config\0core.bare\0", "/repo/wt", ["/repo/.git"]), []);
       // A push URL of its own, a credential program, a proxy — and anything an include brings in.
       const more = ["file:/repo/.git/config", "remote.origin.pushurl", "file:/repo/.git/config", "credential.helper", "file:/repo/.git/config", "http.proxy", "file:/repo/.git/config", "include.path", "file:/tmp/x", "user.name", ""].join("\0");
-      assert.deepStrictEqual(driveM.redirectingKeys(more, "/repo/wt", ["/repo/.git"], ["/home/me/.gitconfig"]), ["remote.origin.pushurl", "credential.helper", "http.proxy", "include.path", "user.name (from /tmp/x)"]);
+      // The label names the file as the platform resolves it (C:\tmp\x on Windows).
+      const tmpX = path.resolve("/tmp/x");
+      assert.deepStrictEqual(driveM.redirectingKeys(more, "/repo/wt", ["/repo/.git"], ["/home/me/.gitconfig"]), ["remote.origin.pushurl", "credential.helper", "http.proxy", "include.path", `user.name (from ${tmpX})`]);
       // The agent's clone: its own gh helpers are allowed by name and file, nothing else is.
       const allowed = (key, file) => key === "credential.helper" && file === path.resolve("/repo/.git/config");
-      assert.deepStrictEqual(driveM.redirectingKeys(more, "/repo/wt", ["/repo/.git"], ["/home/me/.gitconfig"], allowed), ["remote.origin.pushurl", "http.proxy", "include.path", "user.name (from /tmp/x)"]);
+      assert.deepStrictEqual(driveM.redirectingKeys(more, "/repo/wt", ["/repo/.git"], ["/home/me/.gitconfig"], allowed), ["remote.origin.pushurl", "http.proxy", "include.path", `user.name (from ${tmpX})`]);
       const wtHelper = ["file:/repo/.git/worktrees/w/config.worktree", "credential.helper", ""].join("\0");
       assert.deepStrictEqual(driveM.redirectingKeys(wtHelper, "/repo/wt", ["/repo/.git"], [], allowed), ["credential.helper"], "a helper from another repository file is still refused");
     });
@@ -15483,10 +15485,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const gitDir = wtM.worktreeGitDirFor(common, dir);
       assert.ok(gitDir && gitDir.startsWith(path.join(common, "worktrees")), String(gitDir));
       assert.deepStrictEqual(await wtM.recoverPlace(wtM.runGit, clone, dir), { commonDir: common, worktreeGitDir: gitDir });
-      // A rewritten .git file in the worktree doesn't move it.
-      nfsA.writeFileSync(path.join(dir, ".git"), `gitdir: ${path.join(base, "elsewhere")}\n`);
+      // A rewritten .git file in the worktree doesn't move it. Git for Windows hides
+      // that file, and opening a hidden file with "w" is EPERM there: rewrite in place.
+      const rewriteDotGit = (text) => {
+        const fd = nfsA.openSync(path.join(dir, ".git"), "r+");
+        try {
+          nfsA.ftruncateSync(fd, 0);
+          nfsA.writeSync(fd, text, 0);
+        } finally {
+          nfsA.closeSync(fd);
+        }
+      };
+      rewriteDotGit(`gitdir: ${path.join(base, "elsewhere")}\n`);
       assert.strictEqual(wtM.worktreeGitDirFor(common, dir), gitDir);
-      nfsA.writeFileSync(path.join(dir, ".git"), `gitdir: ${gitDir}\n`);
+      rewriteDotGit(`gitdir: ${gitDir}\n`);
       let w = await wtM.readLocalWork(wtM.runGit, dir, [prHead], gitDir, true);
       assert.deepStrictEqual(w, { ahead: 0, dirty: false, head: prHead });
       assert.deepStrictEqual(await wtM.readLocalWork(wtM.runGit, dir, [prHead], null, true), { ahead: null, dirty: null, head: null }, "no git folder named: nothing read through the worktree's own .git");
