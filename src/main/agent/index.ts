@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { DEFAULT_AGENT_PROMPTS, languageRule } from "../../shared/agent-defaults";
-import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
+import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, withAgentReview, type AgentJob, type AgentReview, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, disputeSteps, gitBashPath, readPlanLines, shasNotOnPr, summarizePlan, type PublishStep, type PublishSummary } from "../../shared/agent-publish";
 import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
@@ -789,24 +789,49 @@ export function createAgent(deps: AgentDeps): Agent {
     return run?.state === "error" && run.retryAt && Date.parse(run.retryAt) <= now().getTime() ? run : null;
   }
 
-  /** A brief of this head was written — the agent's own or one you asked for: the policy's `briefDone`. */
-  function briefDone(pr: Pick<PullRequest, "id" | "headOid">): boolean {
-    const key = jobKey(pr, "brief");
-    return [key, `${key}|asked`].some((k) => {
-      const state = store.data.ledger[k]?.state;
-      return state === "prepared" || state === "published";
-    });
+  /**
+   * A brief of this PR was written — on any head, the agent's own or one you
+   * asked for: the policy's `briefDone`. Once per PR: a push before the review
+   * sends the new head straight to the review (18 briefs in a day on Opus, four
+   * of one PR in half an hour), and `takeBrief` hands it the older brief.
+   */
+  function briefDone(pr: Pick<PullRequest, "id">): boolean {
+    const prefix = `${pr.id}|brief|`;
+    return Object.entries(store.data.ledger).some(([key, entry]) => key.startsWith(prefix) && (entry.state === "prepared" || entry.state === "published"));
+  }
+
+  /**
+   * The latest review of each PR the agent published — a review or a
+   * re-review, any event, a plain "Comment" too: when, and the head it went out
+   * on (its plan's commit while the card is kept, else its key's). From the
+   * ledger, which is never trimmed. The policy's `agentReviewed`.
+   */
+  function agentReviews(): Map<string, AgentReview> {
+    const byRun = new Map(store.data.items.map((i) => [i.runId, i]));
+    const out = new Map<string, AgentReview>();
+    for (const [key, entry] of Object.entries(store.data.ledger)) {
+      if (entry.state !== "published") continue;
+      const [prId, scenario] = key.split("|");
+      if (scenario !== "review" && scenario !== "rereview") continue;
+      const head = byRun.get(entry.runId)?.plan?.commitId ?? keyHead(key);
+      if (!head) continue;
+      const was = out.get(prId);
+      if (!was || entry.at > was.at) out.set(prId, { at: entry.at, head });
+    }
+    return out;
   }
 
   /**
    * The brief a big PR's review follows: its questions for the author go into
    * the review's prompt, its text onto the review's card — so what it found
    * stays readable once the review replaces it — and the brief itself closes.
-   * Null when no brief of that head waits.
+   * The PR's latest brief waiting, of this head or an earlier one: a brief is
+   * written once per PR, and the review is told to ask only the questions that
+   * still hold. Null when none waits.
    */
-  function takeBrief(prId: string, head: string | null): Pick<AgentItem, "carry" | "brief"> | null {
+  function takeBrief(prId: string): Pick<AgentItem, "carry" | "brief"> | null {
     const brief = store.data.items
-      .filter((i) => i.prId === prId && i.scenario === "brief" && i.state === "needsYou" && keyHead(i.key) === head)
+      .filter((i) => i.prId === prId && i.scenario === "brief" && i.state === "needsYou")
       .sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""))[0];
     if (!brief) return null;
     const questions = brief.result?.authorQuestions ?? [];
@@ -1240,6 +1265,7 @@ export function createAgent(deps: AgentDeps): Agent {
       if (!roots) rootsByClone.set(clone, (roots = orchestratorRoots(clone, claudeSettings)));
       return orchestratorRunFor(roots, pr.url);
     };
+    const reviewedByAgent = agentReviews();
     const plan = planJobs(snapshot.pullRequests, s, {
       // No checkout yet is no reason to wait when the agent may clone one: the run makes it.
       noCheckout: (pr) => (cloneOf(pr) || s.cloneMissing ? null : noCheckoutWhy(pr, claudeSettings)),
@@ -1250,6 +1276,7 @@ export function createAgent(deps: AgentDeps): Agent {
       },
       selfReviewed: (pr) => Boolean(store.data.ledger[jobKey(pr, "drive", "self")]) || (pr.headOid !== null && store.data.pushedHeads[pr.id] === pr.headOid),
       briefDone,
+      agentReviewed: (pr) => reviewedByAgent.get(pr.id) ?? null,
       reapproveState,
       baseOnlyState,
       orchestrated: (pr) => {
@@ -1288,7 +1315,7 @@ export function createAgent(deps: AgentDeps): Agent {
       if (retryOf) delete store.data.ledger[job.key];
       // A big PR's review follows its brief: closed first, so the review doesn't
       // merely supersede it, and what it found travels with the review.
-      const brief = job.scenario === "review" ? takeBrief(job.prId, keyHead(job.key)) : null;
+      const brief = job.scenario === "review" ? takeBrief(job.prId) : null;
       const headline = brief ? "Queued: review — after its brief" : retryOf ? `Queued: trying again — the last run failed (${retryOf.headline})` : queuedHeadline(job);
       const item = newItem(job, byId.get(job.prId)!, headline);
       if (brief) Object.assign(item, brief);
@@ -1371,8 +1398,9 @@ export function createAgent(deps: AgentDeps): Agent {
         }
       }
     }
-    // Re-reviews after a push alone: checked once per head whether only the base moved under your review.
-    for (const job of plan.baseChecks) startBaseOnlyCheck(job, byId.get(job.prId)!);
+    // Re-reviews after a push alone: checked once per head whether only the base
+    // moved under your review — or under the agent's, as the plan read it.
+    for (const job of plan.baseChecks) startBaseOnlyCheck(job, withAgentReview(byId.get(job.prId)!, reviewedByAgent.get(job.prId) ?? null));
     if (store.data.baseOnly) {
       for (const key of Object.keys(store.data.baseOnly)) {
         if (!byId.has(key.split("|")[0])) {

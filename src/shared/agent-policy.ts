@@ -70,10 +70,48 @@ export interface PlanContext {
    */
   noCheckout?: (pr: PullRequest) => string | null;
   /**
-   * A brief of this head was written — a big PR's review then follows on its
-   * own. Absent: never, so a big PR gets its brief.
+   * A brief of this PR was written — on this head or an earlier one: a big
+   * PR's review then follows on its own, and a new head gets no second brief.
+   * Absent: never, so a big PR gets its brief.
    */
   briefDone?: (pr: PullRequest) => boolean;
+  /**
+   * The latest review of this PR the agent published — any event, a plain
+   * "Comment" too — or null. It counts as your review where GitHub has none
+   * of yours (`withAgentReview`). Absent: never.
+   */
+  agentReviewed?: (pr: PullRequest) => AgentReview | null;
+}
+
+/** A review the agent published: when it went out, and the head it was of. */
+export interface AgentReview {
+  at: string;
+  head: string;
+}
+
+/**
+ * The PR as the re-review rules read it. GitHub's "you reviewed it"
+ * (`viewerHasReviewed`) counts an approval or a change request only, so after
+ * a review the agent published as a plain "Comment" every new head looked
+ * like a first review again — a brief and a whole review on each push (#295:
+ * six of each). Then the agent's review stands in for yours: its time and head
+ * become `viewerReviewedAt` / `viewerReviewedOid`, and a new head gets a
+ * re-review of what changed since. Your own review on GitHub wins whenever
+ * there is one. Only the plan reads this — the filters, the roles and the
+ * Board keep GitHub's answer. A Comment review of your own is not counted: one
+ * per reviewer is all `latestReviews` returns, a reply in someone's thread is
+ * such a review too, and a plain question would turn the whole review into a
+ * look at the latest changes only.
+ */
+export function withAgentReview(pr: PullRequest, review: AgentReview | null): PullRequest {
+  if (pr.viewerHasReviewed || !review) return pr;
+  return {
+    ...pr,
+    viewerHasReviewed: true,
+    viewerReviewedAt: review.at,
+    viewerReviewedHead: pr.headOid !== null && pr.headOid === review.head,
+    viewerReviewedOid: review.head,
+  };
 }
 
 /** Why your PR gets no self-review now, or null when it should get one. */
@@ -145,7 +183,8 @@ export function jobKey(pr: Pick<PullRequest, "id" | "headOid">, scenario: AgentS
  * The latest thing the author did after your review — a push, or an answer in
  * a thread — or null when nothing since. Your review is the latest
  * opinionated one (approve / request changes); after a plain "Comment" review
- * there is no time to compare with, and nothing triggers.
+ * there is no time to compare with, and nothing triggers — unless the agent
+ * published it, whose time the plan puts in (`withAgentReview`).
  */
 export function authorActivitySince(
   pr: Pick<PullRequest, "viewerReviewedAt" | "viewerReviewedHead" | "lastCommitPushedAt" | "authorRepliedAt">,
@@ -231,7 +270,8 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     for (const pr of prs) idle.set(pr.id, "The agent is off");
     return { jobs, merges, reapprovals, baseChecks, idle };
   }
-  for (const pr of prs) {
+  // `let`: the re-review rules below read the PR with the agent's own review in it (`withAgentReview`).
+  for (let pr of prs) {
     const skip = (reason: string) => idle.set(pr.id, reason);
     if (pr.isIgnored) {
       skip("Ignored");
@@ -348,7 +388,10 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     }
     // Reviewed before: a re-review once the author answers — a push, a reply in
     // a thread — or asks you again. The cursor (that moment) makes each answer
-    // its own ledger key, so a reply without a push is new work too.
+    // its own ledger key, so a reply without a push is new work too. A review
+    // the agent published counts as yours, a plain "Comment" too.
+    const agentReview = pr.viewerHasReviewed ? null : (ctx.agentReviewed?.(pr) ?? null);
+    if (agentReview) pr = withAgentReview(pr, agentReview);
     if (pr.viewerHasReviewed) {
       const rr = s.scenarios.rereview.mode;
       if (rr === "off") {
@@ -359,6 +402,13 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
       const since = authorActivitySince(pr);
       if (!asked && !since) {
         skip("Reviewed — nothing new from the author since");
+        continue;
+      }
+      // The agent's review went out on this very head and the author has done
+      // nothing since: a request still standing — a team's may outlive a
+      // member's review — asks for nothing that review didn't answer.
+      if (agentReview && !since && pr.viewerReviewedHead) {
+        skip("Reviewed by the agent on this head — nothing new from the author since");
         continue;
       }
       // Asked again with nothing new while your approval stands on this very
