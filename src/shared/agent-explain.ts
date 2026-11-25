@@ -123,7 +123,10 @@ export function explainBoard(prs: readonly PullRequest[], all: readonly PullRequ
 }
 
 function rankOf(e: BoardEntry): number {
-  return e.owner === "you" ? (KIND_RANK[e.stage.action?.kind ?? ""] ?? 5) : 0;
+  if (e.owner !== "you") return 0;
+  // A review the agent finished with nothing blocking is an approval in one click, not a review nobody started.
+  if (e.choices[0]?.act?.type === "approve") return KIND_RANK.reapprove;
+  return KIND_RANK[e.stage.action?.kind ?? ""] ?? 5;
 }
 
 /** The agent's: what runs now, then the line in its order. */
@@ -522,7 +525,8 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
           choices = [
             { label: "Approve", primary: true, does: "Posts your approval of this commit on GitHub under your name: one line, signed by the agent.", act: { type: "approve", runId } },
             ...(sessionOnIt ? [{ ...toSession, primary: false }] : []),
-            ...(canStart ? [{ ...letAgent, label: again ? "Re-review again" : "Review again" }] : []),
+            // A run that would clone first says so, as everywhere else.
+            ...(canStart ? [cloneFirst ? letAgent : { ...letAgent, label: again ? "Re-review again" : "Review again" }] : []),
             open(),
           ];
           next = "The author can merge once the other reviewers and CI allow it. If they push again, the agent reviews the new commits.";

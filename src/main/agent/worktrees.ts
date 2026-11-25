@@ -136,12 +136,15 @@ export async function removeWorktree(git: GitRunner, checkout: string, dir: stri
  * A worktree's own git folder, found from the clone's side: the
  * `<commonDir>/worktrees/<name>` entry whose `gitdir` names `<dir>/.git`. The
  * worktree's `.git` file is not asked — a session could have rewritten it to
- * send the app's git elsewhere. Null when no entry names it.
+ * send the app's git elsewhere. Null when no entry names it. Both sides go
+ * through the native realpath: git writes the long name, while a folder under
+ * a Windows 8.3 short name (`C:\Users\VB641~1.KUV`, which a user name with a
+ * dot gets) stays short through `fs.realpathSync`, and the two never matched.
  */
 export function worktreeGitDirFor(commonDir: string, dir: string): string | null {
   const real = (p: string) => {
     try {
-      return fs.realpathSync(p);
+      return fs.realpathSync.native(p);
     } catch {
       return path.resolve(p);
     }
