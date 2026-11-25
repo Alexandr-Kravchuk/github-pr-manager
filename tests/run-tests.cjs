@@ -17815,7 +17815,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
-    await atest("agent usage limit: a refusal holds the queue to its reset; Resume or Try now lets one run go first, the rest once Claude lets it through", async () => {
+    await atest("agent usage limit: a refused run goes back in line and on in its session; the queue waits for the reset; Resume or Try now lets one run go first", async () => {
       const resetsAt = Math.floor(Date.now() / 1000) + 3600;
       const reject = (c) => {
         emit(c, { type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt } });
@@ -17823,8 +17823,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         setImmediate(() => c.emit("exit", 1));
       };
       let spawned = 0;
+      const notes = [];
       const f = agentFixture({
         agent: { limits: { parallel: 3 } },
+        notify: (n) => notes.push(n.kind),
+        // `worktree add` makes its folder, as git would: a refused run goes on in it.
+        git: (args) => {
+          const at = args.indexOf("add");
+          if (at > 0 && args[at - 1] === "worktree") nfsA.mkdirSync(args[at + 3], { recursive: true });
+          return "";
+        },
         script: (c) => {
           spawned += 1;
           emit(c, { type: "system", subtype: "init", session_id: `s${spawned}` });
@@ -17836,40 +17844,53 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const settle = () => new Promise((r) => setTimeout(r, 50));
       try {
         f.agent.onSnapshot(f.snapshot);
-        await until(() => f.agent.getState().heldUntil !== null && only(f).some((i) => i.prId === "PR_R" && i.state === "error"));
+        const first = only(f)[0].runId;
+        await until(() => f.agent.getState().heldUntil !== null && byPr("PR_R")?.state === "queued");
         assert.strictEqual(f.agent.getState().heldUntil, new Date(resetsAt * 1000).toISOString());
+        // Refused, not failed: the same run is back in line, to go on in its session — no card, no toast.
+        const back = byPr("PR_R");
+        assert.deepStrictEqual([back.runId, back.resumeSession, back.headline, back.usageRefused], [first, true, "Queued: going on — after Claude's usage limit", undefined]);
+        assert.ok(!only(f).some((i) => i.state === "error" || i.state === "needsYou"), "no failure card");
+        assert.ok(!notes.includes("failed"), "no failure toast");
+        const ends = readLog(f).filter((l) => l.kind === "run" && l.runId === first).map((l) => [l.event, l.detail]);
+        assert.deepStrictEqual(ends.slice(-2), [["interrupted", "Interrupted — Claude's usage limit refused it"], ["resumed", "after Claude's usage limit refused it"]]);
 
         // Held: new runs queue and wait for the reset, whoever asked.
         f.snapshot.pullRequests.push(reviewPr({ id: "PR_B", number: 8 }), reviewPr({ id: "PR_C", number: 9 }), reviewPr({ id: "PR_D", number: 10 }));
         f.agent.onSnapshot(f.snapshot);
         await settle();
-        assert.deepStrictEqual(["PR_B", "PR_C", "PR_D"].map((id) => byPr(id)?.state), ["queued", "queued", "queued"]);
+        assert.deepStrictEqual(["PR_R", "PR_B", "PR_C", "PR_D"].map((id) => byPr(id)?.state), ["queued", "queued", "queued", "queued"]);
         assert.strictEqual(f.children.length, 1);
 
-        // Pause and Resume — what the user did to "restart" it — let go of the wait: one run goes first.
+        // Pause and Resume — what the user did to "restart" it — let go of the wait: one run goes first,
+        // the refused one, in its own session.
         await f.agent.act({ type: "pauseAgent" });
         await f.agent.act({ type: "resumeAgent" });
         assert.strictEqual(f.agent.getState().heldUntil, null);
         await until(() => f.children.length === 2);
-        // Still refused: the wait is back, and it cost one run, not three.
-        await until(() => f.agent.getState().heldUntil !== null);
+        const resumed = f.children[1];
+        assert.ok(back.sessionId);
+        assert.strictEqual(resumed.args[resumed.args.indexOf("--resume") + 1], back.sessionId, "the session it ran");
+        assert.strictEqual(resumed.cwd, back.worktree, "in the folder it ran in");
+        // Still refused: the wait is back, it cost one run, not three, and that run is in line again.
+        await until(() => f.agent.getState().heldUntil !== null && byPr("PR_R")?.state === "queued");
         await settle();
         assert.strictEqual(f.children.length, 2, "nothing else started on a refused first run");
-        assert.deepStrictEqual(["PR_C", "PR_D"].map((id) => byPr(id)?.state), ["queued", "queued"]);
+        assert.deepStrictEqual(["PR_B", "PR_C", "PR_D"].map((id) => byPr(id)?.state), ["queued", "queued", "queued"]);
 
         // Try now: again one run first …
         assert.deepStrictEqual(await f.agent.act({ type: "tryNow" }), { ok: true });
         await until(() => f.children.length === 3);
         await settle();
         assert.strictEqual(f.children.length, 3, "the rest wait for Claude's answer to the first");
-        const probe = only(f).find((i) => i.state === "working");
-        const other = ["PR_C", "PR_D"].find((id) => id !== probe.prId);
-        assert.strictEqual(byPr(other).state, "queued");
-        // … and once Claude lets it through, the rest start.
+        assert.strictEqual(byPr("PR_R").state, "working");
+        // … and once Claude lets it through, the rest start, up to the parallel limit.
         emit(f.children[2], { type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt } });
-        await until(() => byPr(other)?.state === "working");
+        await until(() => byPr("PR_B")?.state === "working" && byPr("PR_C")?.state === "working");
+        assert.strictEqual(byPr("PR_D").state, "queued");
         assert.strictEqual(f.agent.getState().heldUntil, null);
         assert.strictEqual(readLog(f).filter((l) => l.kind === "plan" && l.event === "usage-released").length, 2);
+        assert.ok(!notes.includes("failed"));
       } finally {
         f.agent.stop();
       }

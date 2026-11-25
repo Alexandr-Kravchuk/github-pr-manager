@@ -738,8 +738,13 @@ export function createAgent(deps: AgentDeps): Agent {
         item.interrupted = undefined;
         item.resumeSession = true;
         item.finishedAt = undefined;
-        item.headline = item.cuts ? "Queued: going on — its process was ended" : "Queued: going on — the app closed while it ran";
-        logRun(item, "resumed", { detail: item.cuts ? `after it was cut short (${item.cuts} in a row)` : "after a restart" });
+        item.headline = item.usageRefused
+          ? "Queued: going on — after Claude's usage limit"
+          : item.cuts
+            ? "Queued: going on — its process was ended"
+            : "Queued: going on — the app closed while it ran";
+        logRun(item, "resumed", { detail: item.usageRefused ? "after Claude's usage limit refused it" : item.cuts ? `after it was cut short (${item.cuts} in a row)` : "after a restart" });
+        item.usageRefused = undefined;
         continue;
       }
       const pr = snapshot.pullRequests.find((p) => p.id === item.prId);
@@ -1480,7 +1485,7 @@ export function createAgent(deps: AgentDeps): Agent {
     item.headline = runningHeadline(item);
     item.resumeSession = undefined;
     // What an earlier run of this item showed (Resume, an answer) gives way to this run's.
-    for (const k of ["output", "result", "plan", "planHash", "planEdited", "drive", "error", "published", "pushed", "interrupted", "follow"] as const) delete item[k];
+    for (const k of ["output", "result", "plan", "planHash", "planEdited", "drive", "error", "published", "pushed", "interrupted", "usageRefused", "follow"] as const) delete item[k];
     const answer = item.answer;
     item.answer = undefined;
     if (!resume) item.checkout = checkout ?? undefined;
@@ -1721,6 +1726,11 @@ export function createAgent(deps: AgentDeps): Agent {
     // rather than by you, by its time limit, or by finishing.
     const cut = entry.takeOver || entry.offStop || outcome.stopped || outcome.timedOut ? null : cutShort(outcome);
     if (!cut) item.cuts = undefined;
+    // Claude's usage limit refused it (its last reading "rejected", no answer):
+    // not the PR's failure and nothing for you to do. It goes back in line —
+    // held there until the limit resets — and on where it stopped.
+    const succeeded = Boolean(result && !result.isError && result.subtype === "success");
+    const refused = !cut && !entry.takeOver && !entry.offStop && !outcome.stopped && !outcome.timedOut && !succeeded && usageHoldUntil(outcome.progress.rateLimit) !== null;
     let publishNow = false;
     let pushNow = false;
     // Why the run-end thread check couldn't run, when it couldn't: the log tells it from "nothing held".
@@ -1764,6 +1774,10 @@ export function createAgent(deps: AgentDeps): Agent {
       item.cuts = (item.cuts ?? 0) + 1;
       if (item.cuts > CUT_RESUMES) fail(`Cut short ${item.cuts} times in a row`, `${cut} — run it again once that is sorted out`);
       else markInterrupted(item, item.finishedAt, cut);
+    } else if (refused) {
+      // Not counted as a cut: the hold, not a cap, keeps it from running into the limit again and again.
+      markInterrupted(item, item.finishedAt, "Claude's usage limit refused it");
+      item.usageRefused = true;
     } else if (result && !result.isError && result.subtype === "success") {
       item.state = "needsYou";
       // The card's summary, questions and findings; the rest is the full report.
@@ -1890,7 +1904,8 @@ export function createAgent(deps: AgentDeps): Agent {
     // worktree sweep could take its folder from under the session your
     // terminal is still opening — nor one cut short, whose recovery is the
     // next plan's (`recoverInterrupted`), nor one the agent's switching off ended.
-    if (!stopped && !entry.takeOver && !entry.offStop && !item.interrupted) {
+    // One the usage limit refused is put back in line by this very plan.
+    if (!stopped && !entry.takeOver && !entry.offStop && (!item.interrupted || item.usageRefused)) {
       const snapshot = deps.getSnapshot();
       if (snapshot) onSnapshot(snapshot);
     }

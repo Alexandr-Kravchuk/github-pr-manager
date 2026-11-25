@@ -1139,6 +1139,12 @@ export interface AgentItem {
    */
   interrupted?: boolean;
   /**
+   * Interrupted because Claude's usage limit refused it mid-way: not the PR's
+   * failure. It goes back in line at once, held there until the limit resets
+   * (or your Try now), and goes on like an interrupted run.
+   */
+  usageRefused?: true;
+  /**
    * How many runs of it in a row ended with their process cut short (Ctrl+C,
    * a shutdown, a workflow still running). Each goes on by itself like an
    * interrupted run, up to a cap; a run that ends any other way clears it.

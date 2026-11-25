@@ -788,7 +788,11 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   holds the queue — `held`/`released`; Claude's usage limit holds it, in
   memory, until the reset a run's "rejected" reading named, and only your
   Try now or Resume lets go of it early — `usage-released` — after which one
-  run goes first and the rest wait until Claude lets that one through — what a head's re-approve check
+  run goes first and the rest wait until Claude lets that one through; the
+  run the limit refused is no failure card: it is `interrupted`
+  (`usageRefused`, not counted as a cut), put back in line by the plan at
+  once and `resumed` in its own session like a run a restart cut short (a
+  drive starts over) — what a head's re-approve check
   found, `reapprove-check`, and whether a reviewed PR's new head was the same
   change on a new base, `base-check`), `action` (each `act`, i.e. each
   click, with its result) and `agent` (start, stop, `on`/`off`, `settings`
