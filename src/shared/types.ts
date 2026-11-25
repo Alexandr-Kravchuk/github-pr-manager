@@ -1293,6 +1293,11 @@ export type AgentAction =
   // The whole agent — two members, so a check for both narrows the rest.
   | { type: "pauseAgent" }
   | { type: "resumeAgent" }
+  /**
+   * Your limit was raised or reset: stop waiting out Claude's usage limit
+   * (`heldUntil`). One run goes first; a refusal brings the wait back.
+   */
+  | { type: "tryNow" }
   | { type: "hint"; runId: string; text: string }
   /** Your answer to a finished run's question: the same session goes on with it. */
   | { type: "answer"; runId: string; text: string }

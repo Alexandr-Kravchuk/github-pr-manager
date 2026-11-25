@@ -17815,6 +17815,70 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent usage limit: a refusal holds the queue to its reset; Resume or Try now lets one run go first, the rest once Claude lets it through", async () => {
+      const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+      const reject = (c) => {
+        emit(c, { type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt } });
+        emit(c, { type: "result", subtype: "success", is_error: true, result: "You've hit your session limit · resets 9:50pm" });
+        setImmediate(() => c.emit("exit", 1));
+      };
+      let spawned = 0;
+      const f = agentFixture({
+        agent: { limits: { parallel: 3 } },
+        script: (c) => {
+          spawned += 1;
+          emit(c, { type: "system", subtype: "init", session_id: `s${spawned}` });
+          // The first two are refused; from the third on Claude answers when the test says so.
+          if (spawned <= 2) reject(c);
+        },
+      });
+      const byPr = (id) => only(f).find((i) => i.prId === id && (i.state === "queued" || i.state === "working"));
+      const settle = () => new Promise((r) => setTimeout(r, 50));
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().heldUntil !== null && only(f).some((i) => i.prId === "PR_R" && i.state === "error"));
+        assert.strictEqual(f.agent.getState().heldUntil, new Date(resetsAt * 1000).toISOString());
+
+        // Held: new runs queue and wait for the reset, whoever asked.
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_B", number: 8 }), reviewPr({ id: "PR_C", number: 9 }), reviewPr({ id: "PR_D", number: 10 }));
+        f.agent.onSnapshot(f.snapshot);
+        await settle();
+        assert.deepStrictEqual(["PR_B", "PR_C", "PR_D"].map((id) => byPr(id)?.state), ["queued", "queued", "queued"]);
+        assert.strictEqual(f.children.length, 1);
+
+        // Pause and Resume — what the user did to "restart" it — let go of the wait: one run goes first.
+        await f.agent.act({ type: "pauseAgent" });
+        await f.agent.act({ type: "resumeAgent" });
+        assert.strictEqual(f.agent.getState().heldUntil, null);
+        await until(() => f.children.length === 2);
+        // Still refused: the wait is back, and it cost one run, not three.
+        await until(() => f.agent.getState().heldUntil !== null);
+        await settle();
+        assert.strictEqual(f.children.length, 2, "nothing else started on a refused first run");
+        assert.deepStrictEqual(["PR_C", "PR_D"].map((id) => byPr(id)?.state), ["queued", "queued"]);
+
+        // Try now: again one run first …
+        assert.deepStrictEqual(await f.agent.act({ type: "tryNow" }), { ok: true });
+        await until(() => f.children.length === 3);
+        await settle();
+        assert.strictEqual(f.children.length, 3, "the rest wait for Claude's answer to the first");
+        const probe = only(f).find((i) => i.state === "working");
+        const other = ["PR_C", "PR_D"].find((id) => id !== probe.prId);
+        assert.strictEqual(byPr(other).state, "queued");
+        // … and once Claude lets it through, the rest start.
+        emit(f.children[2], { type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt } });
+        await until(() => byPr(other)?.state === "working");
+        assert.strictEqual(f.agent.getState().heldUntil, null);
+        assert.strictEqual(readLog(f).filter((l) => l.kind === "plan" && l.event === "usage-released").length, 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("ipc: Try now names nothing — a run id or a time riding along is dropped", () => {
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "tryNow", runId: "x", until: 0 }), { type: "tryNow" });
+    });
+
     test("main.js wiring: the tray shows the agent hidden or not; Show agent opens its popover; toasts the agent took are left out", () => {
       const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
       assert.match(src, /showAgent: \(\) => showAgent\(\)/);

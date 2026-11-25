@@ -785,7 +785,10 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   state change of an item), `board`
   (a card's column or button changed: `seen` on the first look, `move`,
   `action`, `left`), `plan` (why the agent leaves a PR alone — `idle` — what
-  holds the queue — `held`/`released` — what a head's re-approve check
+  holds the queue — `held`/`released`; Claude's usage limit holds it, in
+  memory, until the reset a run's "rejected" reading named, and only your
+  Try now or Resume lets go of it early — `usage-released` — after which one
+  run goes first and the rest wait until Claude lets that one through — what a head's re-approve check
   found, `reapprove-check`, and whether a reviewed PR's new head was the same
   change on a new base, `base-check`), `action` (each `act`, i.e. each
   click, with its result) and `agent` (start, stop, `on`/`off`, `settings`

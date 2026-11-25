@@ -434,7 +434,7 @@ interface Running {
 }
 
 /** What starts a session — refused while the agent is off; everything else is your own click and works. */
-const STARTS_A_RUN: ReadonlySet<AgentAction["type"]> = new Set(["enqueue", "retry", "reviewAnyway", "answer"]);
+const STARTS_A_RUN: ReadonlySet<AgentAction["type"]> = new Set(["enqueue", "retry", "reviewAnyway", "answer", "tryNow"]);
 
 export function createAgent(deps: AgentDeps): Agent {
   const now = deps.now ?? (() => new Date());
@@ -452,7 +452,16 @@ export function createAgent(deps: AgentDeps): Agent {
   });
   const running = new Map<string, Running>();
   let idle: Record<string, string> = {};
+  /** Claude's usage limit holds new runs back until then (ms) — read from a run's "rejected" reading, in memory only. */
   let heldUntil: number | null = null;
+  /**
+   * Set once you let go of that hold before its time (Try now, Resume): your
+   * limit was raised or reset, which no reading tells the app. One run goes
+   * first (`runId`, null until it starts) and the rest wait until Claude lets
+   * it through — a limit that still holds then costs one run, not a run per
+   * parallel slot, and its "rejected" reading brings the hold back.
+   */
+  let usageProbe: { runId: string | null } | null = null;
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
 
@@ -667,9 +676,26 @@ export function createAgent(deps: AgentDeps): Agent {
       if (on && !r.paused) pauseRun(item, r);
       else if (!on && r.paused && r.byAgentPause) resumeRun(item, r);
     }
+    // Resume is "start runs again": a usage hold it can't see past would leave it doing nothing.
+    if (!on) releaseUsageHold();
     void store.save();
     changed();
     if (!on) tick();
+  }
+
+  /**
+   * Lets go of Claude's usage-limit hold before its time, on your word (Try
+   * now, Resume): a limit raised or reset sends no reading, so the hold would
+   * otherwise last to the time the refusal named. One run then finds out
+   * (`usageProbe`).
+   */
+  function releaseUsageHold(): void {
+    if (heldUntil === null) return;
+    const live = now().getTime() < heldUntil;
+    heldUntil = null;
+    if (!live) return;
+    usageProbe = { runId: null };
+    store.log({ at: stamp(), kind: "plan", event: "usage-released", detail: "you let go of Claude's usage-limit wait: one run goes first" });
   }
 
   /**
@@ -1664,7 +1690,14 @@ export function createAgent(deps: AgentDeps): Agent {
         }
         entry.progress = progress;
         const hold = usageHoldUntil(progress.rateLimit);
-        if (hold !== null) heldUntil = hold;
+        if (hold !== null) {
+          heldUntil = hold;
+          usageProbe = null;
+        } else if (usageProbe?.runId === item.runId && (progress.rateLimit !== null || progress.toolCalls > 0)) {
+          // Claude let the first run after a released hold through: the rest may start.
+          usageProbe = null;
+          setImmediate(tick);
+        }
         changed();
       },
       deps.spawner,
@@ -2799,6 +2832,8 @@ export function createAgent(deps: AgentDeps): Agent {
       return noteHold(queued.length > 0 ? `Claude usage limit until ${new Date(heldUntil).toISOString()}` : null);
     }
     heldUntil = null;
+    // The first run after a released hold ended before Claude said anything (its checkout failed, say): the next one finds out.
+    if (usageProbe?.runId && !store.data.items.some((i) => i.runId === usageProbe!.runId && i.state === "working")) usageProbe.runId = null;
     const snapshot = deps.getSnapshot();
     const byId = new Map((snapshot?.pullRequests ?? []).map((p) => [p.id, p]));
     /** Why queued runs wait this tick — a full house of parallel runs is the queue working, not a hold. */
@@ -2835,6 +2870,12 @@ export function createAgent(deps: AgentDeps): Agent {
         holds.add(`#${pr!.number}: your Claude session is on it`);
         continue;
       }
+      // After a usage hold you let go of: this run goes first, the rest once Claude lets it through.
+      if (usageProbe?.runId) {
+        holds.add("Claude's usage limit: the first run since you let go of the wait must get through");
+        break;
+      }
+      if (usageProbe) usageProbe.runId = item.runId;
       void run(item, pr, all).catch((e) => console.warn(`[agent] run failed: ${(e as Error).message}`));
     }
     noteHold(holds.size > 0 ? [...holds].sort().join("; ") : null);
@@ -2936,6 +2977,12 @@ export function createAgent(deps: AgentDeps): Agent {
     const snapshot = deps.getSnapshot();
     if (action.type === "pauseAgent" || action.type === "resumeAgent") {
       setPaused(action.type === "pauseAgent");
+      return { ok: true };
+    }
+    if (action.type === "tryNow") {
+      releaseUsageHold();
+      changed();
+      tick();
       return { ok: true };
     }
     if (action.type === "approveAgain") return approveAgain(action.prId, all);

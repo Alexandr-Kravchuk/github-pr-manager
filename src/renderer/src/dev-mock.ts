@@ -1026,7 +1026,8 @@ function mockAgentState(): AgentState {
     runsToday: 6,
     perDay: 30,
     parallel: 2,
-    heldUntil: null,
+    // `?held=1`: Claude's usage limit holds the queue for the next hour (the Board's Try now).
+    heldUntil: new URLSearchParams(window.location.search).has("held") ? new Date(Date.now() + 3_600_000).toISOString() : null,
     headerChip: true,
     trayState: true,
     paused: false,
@@ -1054,7 +1055,13 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
   const at = new Date().toISOString();
   if (action.type === "pauseAgent" || action.type === "resumeAgent") {
     const paused = action.type === "pauseAgent";
-    agentState = { ...agentState, paused, running: agentState.running.map((r) => ({ ...r, paused })) };
+    agentState = { ...agentState, paused, running: agentState.running.map((r) => ({ ...r, paused })), ...(paused ? {} : { heldUntil: null }) };
+    for (const l of agentListeners) l(agentState);
+    return { ok: true };
+  }
+  // Try now: the usage-limit wait ends (main lets one run go first).
+  if (action.type === "tryNow") {
+    agentState = { ...agentState, heldUntil: null };
     for (const l of agentListeners) l(agentState);
     return { ok: true };
   }
