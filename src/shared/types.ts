@@ -1103,6 +1103,12 @@ export interface AgentItem {
   /** The failed run this one tries again, by its runId — a run that is a try again is not tried a third time. */
   retryOf?: string;
   /**
+   * You let it clone the PR's repository ("Clone and review"): it had no
+   * checkout, and Settings › Agent doesn't let the agent clone by itself. The
+   * clone is the agent's own and stays, so later runs there need no new yes.
+   */
+  clone?: true;
+  /**
    * A drive's result from before the app last started: what it would push
    * and its session going on with your answer are checked against what the
    * app took in memory before the session, which a restart drops — so it can
@@ -1271,6 +1277,13 @@ export interface AgentState {
    * run brings it back. Out of Your turn and out of every "ready for you" count.
    */
   setAside?: Record<string, string>;
+  /**
+   * The PRs (by id) whose repository has no checkout the agent may work in,
+   * while Settings › Agent doesn't let it clone one by itself: every button on
+   * their cards that starts a run asks for the clone too ("Clone and review").
+   * Empty while that setting is on.
+   */
+  noCheckout?: string[];
 }
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */
@@ -1286,8 +1299,12 @@ export type AgentAction =
   /** Keep your comment, or drop it, in a thread where the author pushed back — applied when the review is sent. */
   | { type: "dispute"; runId: string; replyTo: number; choice: "keep" | "drop" }
   | { type: "merge"; runId: string; method?: MergeMethod }
-  /** `before`: the queued run it goes in front of; null or absent, the end of the queue. */
-  | { type: "enqueue"; prId: string; before?: string | null }
+  /**
+   * `before`: the queued run it goes in front of; null or absent, the end of the queue.
+   * `clone`: you said yes to the agent cloning the PR's repository for it, when
+   * it has no checkout and Settings › Agent doesn't let it clone by itself.
+   */
+  | { type: "enqueue"; prId: string; before?: string | null; clone?: true }
   /** Your approval again, on a PR it already stands on, to answer a review request made after it. */
   | { type: "approveAgain"; prId: string }
   /** Your approval of the PR, resting on the agent's review of its head that found nothing blocking (`approvableReview`). */

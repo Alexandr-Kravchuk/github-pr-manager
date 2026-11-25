@@ -11249,6 +11249,162 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: with cloning off, Clone and review is your yes for this repository — the run clones it, says so, and the clone serves later plans", async () => {
+      let release;
+      const gate = new Promise((r) => (release = r));
+      const made = [];
+      const gitImpl = async (args) => {
+        const sub = gitSub(args);
+        if (sub[0] === "clone") {
+          await gate;
+          const target = sub[sub.length - 1];
+          made.push(target);
+          nfsA.mkdirSync(path.join(target, ".git"), { recursive: true });
+          nfsA.writeFileSync(path.join(target, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
+        }
+        return "";
+      };
+      const f = agentFixture({ checkout: false, script: () => {}, git: gitImpl, agent: { cloneMissing: false } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.match(f.agent.getState().idle.PR_R, /^No checkout of a\/b — /);
+        // Without the yes it is refused as before; with it, taken.
+        assert.strictEqual((await f.agent.act({ type: "enqueue", prId: "PR_R" })).ok, false);
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R", clone: true }), { ok: true });
+        const item = () => f.agent.getState().items[0];
+        assert.strictEqual(item().clone, true, "the yes rides on the run");
+        await until(() => item().headline === "Cloning a/b first");
+        assert.strictEqual(f.children.length, 0, "no session before the clone is there");
+        release();
+        await until(() => f.children.length === 1);
+        const clone = path.join(f.dir, "agent", "clones", "github.com", "a", "b");
+        assert.deepStrictEqual(made, [`${clone}.partial`], "the agent's own clone, in its own folder");
+        assert.strictEqual(item().checkout, clone);
+        assert.notStrictEqual(item().headline, "Cloning a/b first", "the card says what the run does once the clone is there");
+        // The setting is still off, yet the next plan finds the clone: no new yes for this repository.
+        f.agent.onSnapshot(f.snapshot);
+        assert.doesNotMatch(f.agent.getState().idle.PR_R ?? "", /^No checkout/);
+      } finally {
+        release();
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: the app closed while a clone you said yes to was being made — at the next start it goes on with the same yes", async () => {
+      const cloneInto = (sub) => {
+        const target = sub[sub.length - 1];
+        nfsA.mkdirSync(path.join(target, ".git"), { recursive: true });
+        nfsA.writeFileSync(path.join(target, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
+      };
+      // The first start: your yes is queued, and the app closes while the run clones —
+      // written as the closing leaves such a run: cut short, no session, no worktree.
+      // (Not a real hanging clone: the clone in the making is shared in the process, and
+      // the next start below is the same process.)
+      const f = agentFixture({ checkout: false, script: () => {}, agent: { cloneMissing: false } });
+      await f.agent.act({ type: "pauseAgent" });
+      f.agent.onSnapshot(f.snapshot);
+      assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R", clone: true }), { ok: true });
+      f.agent.stop();
+      const file = path.join(f.dir, "agent", "state.json");
+      const saved = JSON.parse(nfsA.readFileSync(file, "utf8"));
+      const cut = saved.items.find((i) => i.clone === true);
+      Object.assign(cut, { state: "needsYou", interrupted: true, headline: "Interrupted — the app closed while it ran", startedAt: cut.queuedAt, finishedAt: cut.queuedAt });
+      saved.paused = false;
+      nfsA.writeFileSync(file, JSON.stringify(saved));
+      const runId = cut.runId;
+      // The next start: the PR is known again, and the run goes on — not refused for the missing checkout.
+      const g = agentFixture({ home: f.dir, checkout: false, script: () => {}, agent: { cloneMissing: false }, git: async (args) => (gitSub(args)[0] === "clone" && cloneInto(gitSub(args)), "") });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length === 1);
+        const items = g.agent.getState().items;
+        assert.strictEqual(items.find((i) => i.runId === runId).state, "done", "the cut-short one closes");
+        const again = items.find((i) => i.runId !== runId);
+        assert.deepStrictEqual([again.clone, again.checkout], [true, path.join(f.dir, "agent", "clones", "github.com", "a", "b")]);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: main lists the PRs with no checkout while it may not clone by itself — none with the setting on or once cloned", async () => {
+      const f = agentFixture({ checkout: false, script: () => {}, agent: { cloneMissing: false } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual(f.agent.getState().noCheckout, ["PR_R"]);
+        f.setAgent({ enabled: true, cloneMissing: true });
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual(f.agent.getState().noCheckout, [], "the agent clones by itself: nothing to ask");
+        f.setAgent({ enabled: false, cloneMissing: false });
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual(f.agent.getState().noCheckout, [], "off: no button starts it anyway");
+      } finally {
+        f.agent.stop();
+      }
+      // A clone of the agent's own counts as a checkout.
+      const g = agentFixture({ checkout: false, script: () => {}, agent: { cloneMissing: false } });
+      try {
+        const clone = path.join(g.dir, "agent", "clones", "github.com", "a", "b", ".git");
+        nfsA.mkdirSync(clone, { recursive: true });
+        nfsA.writeFileSync(path.join(clone, "config"), "");
+        g.agent.onSnapshot(g.snapshot);
+        assert.deepStrictEqual(g.agent.getState().noCheckout, []);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: a run the plan queued that finds no checkout is not tried again by itself — the plan holds that PR back", async () => {
+      let present = true;
+      const f = agentFixture({ checkout: () => present, script: () => {}, agent: { cloneMissing: false } });
+      try {
+        // Queued while the checkout was there; its folder is gone before the run starts.
+        await f.agent.act({ type: "pauseAgent" });
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.agent.getState().items[0].state, "queued");
+        present = false;
+        await f.agent.act({ type: "resumeAgent" });
+        await until(() => f.agent.getState().items[0].state === "error");
+        const item = f.agent.getState().items[0];
+        assert.match(item.headline, /^No checkout of a\/b/);
+        assert.strictEqual(item.retryAt, undefined);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a clone you said yes to that failed is tried again with the same yes", async () => {
+      let fails = true;
+      const f = agentFixture({
+        checkout: false,
+        script: () => {},
+        agent: { cloneMissing: false },
+        git: async (args) => {
+          const sub = gitSub(args);
+          if (sub[0] === "clone") {
+            if (fails) throw new Error("git clone: fatal: unable to access — the VPN is down");
+            const target = sub[sub.length - 1];
+            nfsA.mkdirSync(path.join(target, ".git"), { recursive: true });
+            nfsA.writeFileSync(path.join(target, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
+          }
+          return "";
+        },
+      });
+      try {
+        f.agent.onSnapshot({ ...f.snapshot });
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R", clone: true }), { ok: true });
+        await until(() => f.agent.getState().items.some((i) => i.state === "error"));
+        const failed = f.agent.getState().items.find((i) => i.state === "error");
+        assert.strictEqual(failed.headline, "Could not clone a/b");
+        fails = false;
+        assert.deepStrictEqual(await f.agent.act({ type: "retry", runId: failed.runId }), { ok: true }, "not refused for the missing checkout");
+        const again = f.agent.getState().items.find((i) => i.runId !== failed.runId && i.state !== "done");
+        assert.strictEqual(again.clone, true);
+        await until(() => f.children.length === 1);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
     await atest("agent: with cloning on, a run you ask for on a repository with no checkout is taken — the run clones it", async () => {
       const f = agentFixture({ checkout: false, script: () => {}, tickMs: 1e9 });
       try {
@@ -11931,7 +12087,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         xPr({ id: "W" }),
       ];
       const items = [
-        sIt({ prId: "X", scenario: "drive", state: "error", headline: "No checkout of a/b", error: "git said no" }),
+        // A failure of its own: one for want of a checkout offers the clone (its own test).
+        sIt({ prId: "X", scenario: "drive", state: "error", headline: "Could not check out the PR", error: "git said no" }),
         sIt({ prId: "M", scenario: "merge", state: "needsYou", key: "M|merge|h" }),
         sIt({ prId: "A", scenario: "review", state: "working" }),
       ];
@@ -11948,7 +12105,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         "a merge in one click, then a failure, then a review nobody started",
       );
       const x = b.entries[1];
-      assert.strictEqual(x.now, "The agent couldn't finish: no checkout of a/b.");
+      assert.strictEqual(x.now, "The agent couldn't finish: could not check out the PR.");
       assert.strictEqual(x.read.error, "git said no", "what went wrong is there to read");
       assert.deepStrictEqual(x.choices.map((c) => [c.label, c.act?.type, Boolean(c.primary)]), [
         ["Try again", "retry", true],
@@ -12243,6 +12400,68 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(red.next, "CI runs again on your push. Once you archive the session, the agent can take this PR again.");
     });
 
+    test("agent board words: no checkout of the repository — the agent offers to clone it and start, one button", () => {
+      // The case of crt-file-import-app#2: "Let the agent review" was offered and refused for the missing checkout.
+      const view2 = require(path.join(__dirname, "../dist/main/shared/agent-view.js"));
+      const why = (repo) => `${view2.NO_CHECKOUT_WHY}${repo} — clone it with \`git clone https://github.com/${repo}.git ~/Projects/x\`, set its folder in Settings › Claude, or let the agent clone it (Settings › Agent)`;
+      const board = (pr, o = {}, items = []) => ex.explainBoard([pr], [pr], xState(items, o), { today: sToday, idle: { [pr.id]: why(pr.repo) } }).entries[0];
+      const shape = (e) => e.choices.map((c) => [c.label, Boolean(c.primary)]);
+      const review = board(xPr({ id: "P", repo: "acme/import", roles: ["reviewer"], requestedOfMe: true }));
+      assert.deepStrictEqual(shape(review), [["Clone and review", true], ["Review on GitHub myself", false]]);
+      assert.deepStrictEqual(review.choices[0].act, { type: "enqueue", prId: "P", clone: true }, "only the PR and the yes — main reads where from and where to");
+      assert.strictEqual(review.ask, "Let the agent clone acme/import and review it — or do it yourself.");
+      assert.match(review.choices[0].does, /^The agent clones acme\/import into a folder of its own — not your projects; it keeps the clone for its later runs there — then reviews it/);
+      assert.match(review.now, /^Your review is requested — the agent didn't review it: no checkout of acme\/import/);
+      const again = board(xPr({ id: "Q", roles: ["reviewer", "reviewed"], requestedOfMe: true, viewerHasReviewed: true, myReReviewDue: true }));
+      assert.strictEqual(again.choices[0].label, "Clone and re-review");
+      const red = board(xPr({ id: "R", ciState: "failure", failingChecks: [{ name: "build" }] }));
+      assert.deepStrictEqual(shape(red), [["Clone and fix", true], ["Open on GitHub", false]]);
+      assert.deepStrictEqual(red.choices[0].act, { type: "enqueue", prId: "R", clone: true });
+      // The agent off: nothing that starts it, clone or not.
+      assert.ok(!board(xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true }), { enabled: false }).choices.some((c) => c.act));
+      // Any other reason keeps the plain button.
+      const plain = ex.explainBoard([xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true })], [xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true })], xState([]), { today: sToday, idle: { P: "Nothing for the agent" } }).entries[0];
+      assert.deepStrictEqual(plain.choices[0].act, { type: "enqueue", prId: "P" });
+      // A run that failed for want of a checkout: trying again asks for the clone.
+      const RID = "00000000-0000-4000-8000-000000000002";
+      const failed = xOne(xPr({ id: "F", roles: ["reviewer"], requestedOfMe: true }), [sIt({ runId: RID, prId: "F", key: "F|review|aaa", scenario: "review", state: "error", headline: why("a/b") })]);
+      assert.strictEqual(failed.stage.action.kind, "fix");
+      assert.deepStrictEqual(failed.choices.map((c) => [c.label, c.act]), [
+        ["Clone and try again", { type: "enqueue", prId: "F", clone: true }],
+        ["Leave it", { type: "skip", runId: RID }],
+      ]);
+    });
+
+    test("agent board words: main's list of PRs with no checkout reaches every column — Re-review now and Self-review again ask for the clone too", () => {
+      const shape = (e) => e.choices.map((c) => [c.label, c.act ?? null]);
+      // Waiting on the author: no idle reason there, only main's list says so.
+      const theirs = xPr({ id: "W", roles: ["reviewed"], viewerHasReviewed: true, viewerReviewedAt: sAgo(60) });
+      const waitingTheirs = xOne(theirs, [], { noCheckout: ["W"] });
+      assert.strictEqual(waitingTheirs.owner, "others");
+      assert.deepStrictEqual(shape(waitingTheirs), [["Clone and re-review", { type: "enqueue", prId: "W", clone: true }]]);
+      assert.deepStrictEqual(shape(xOne(theirs)), [["Re-review now", { type: "enqueue", prId: "W" }]], "with a checkout: as before");
+      // Your PR waiting on reviewers.
+      const mine = xOne(xPr({ id: "M" }), [], { noCheckout: ["M"] });
+      assert.strictEqual(mine.owner, "others");
+      assert.deepStrictEqual(shape(mine), [["Clone and self-review", { type: "enqueue", prId: "M", clone: true }]]);
+      // Your turn goes by the list too, whatever the idle reason says.
+      const asked = xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true });
+      assert.strictEqual(xOne(asked, [], { noCheckout: ["P"] }).choices[0].label, "Clone and review");
+      assert.strictEqual(xOne(asked, [], { noCheckout: [] }).choices[0].label, "Let the agent review");
+      // A run that failed for want of a checkout: the list says how it stands now, not the failure's old headline.
+      const RID = "00000000-0000-4000-8000-000000000003";
+      const failedRun = sIt({ runId: RID, prId: "F", key: "F|review|aaa", scenario: "review", state: "error", headline: "No checkout of a/b — set its folder in Settings › Claude, or let the agent clone it (Settings › Agent)", retryAt: new Date(sNow + 600_000).toISOString() });
+      const f = xPr({ id: "F", roles: ["reviewer"], requestedOfMe: true });
+      const stillNone = xOne(f, [failedRun], { noCheckout: ["F"] });
+      assert.strictEqual(stillNone.choices[0].label, "Clone and try again");
+      const setSince = xOne(f, [failedRun], { noCheckout: [] });
+      assert.deepStrictEqual(setSince.choices[0].act, { type: "retry", runId: RID }, "a checkout set since: Try again, no clone promised");
+      assert.strictEqual(setSince.choices[0].label, "Try again");
+      // Its retryAt (from an older build) promises nothing: the plan holds a PR with no checkout back.
+      assert.doesNotMatch(stillNone.now, /tries again by itself/);
+      assert.strictEqual(stillNone.ask, "See what went wrong, then try again — or leave it.");
+    });
+
     test("agent board words: your PR from a fork — no button that starts the agent, which never pushes there", () => {
       // The case of #47: conflicts, the branch in a fork; "Let the agent fix it" was offered and always refused.
       const conflict = xOne(xPr({ isCrossRepository: true, hasConflicts: true }));
@@ -12336,6 +12555,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual([e.read.summary, e.read.findings.length], ["All nine findings fixed.", 1], "what it found is on the card, not an empty one");
       assert.strictEqual(e.stage.note, "Reviewed — nothing to post");
       assert.strictEqual(view.approvableRun([run()], pr).runId, RID);
+      // No checkout the agent may make by itself now: Approve stays first, and running it again says it clones.
+      const noCheckout = xOne(pr, [run()], { noCheckout: ["P"] });
+      assert.deepStrictEqual(noCheckout.choices.slice(0, 2).map((c) => [c.label, c.act?.type, c.act?.clone ?? false]), [["Approve", "approve", false], ["Clone and re-review", "enqueue", true]]);
       // The latest review of the head decides, whatever its day.
       const later = (o) => run({ runId: "00000000-0000-4000-8000-000000000294", startedAt: sAgo(10), finishedAt: sAgo(5), ...o });
       const posted = later({ published: true, headline: "Published: comment" });
@@ -17539,6 +17761,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "moveQueued", runId: RID }), { type: "moveQueued", runId: RID, before: null });
       assert.throws(() => ipcAgent.validateAgentAction({ type: "moveQueued", runId: RID, before: "../x" }));
       assert.throws(() => ipcAgent.validateAgentAction({ type: "enqueue", prId: "PR_kw1", before: 5 }));
+    });
+
+    test("ipc: Clone and review carries a yes to the clone — never where from or where to", () => {
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "enqueue", prId: "PR_kw1", clone: true }), { type: "enqueue", prId: "PR_kw1", clone: true });
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "enqueue", prId: "PR_kw1", clone: true, url: "https://evil/x.git", dir: "C:\\x" }), { type: "enqueue", prId: "PR_kw1", clone: true });
+      for (const clone of [false, "yes", 1, "https://github.com/a/b.git"]) {
+        assert.throws(() => ipcAgent.validateAgentAction({ type: "enqueue", prId: "PR_kw1", clone }), /clone/, String(clone));
+      }
     });
 
     await atest("agent queue: Run next and a drop in front of a run decide what starts next; Skip keeps a queued PR out", async () => {

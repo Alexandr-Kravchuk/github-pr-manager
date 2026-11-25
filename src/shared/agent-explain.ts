@@ -8,7 +8,7 @@
 import { resultCard, type RunAsk, type RunFinding } from "./agent-result";
 import type { PublishSummary } from "./agent-publish";
 import { currentStep } from "./agent-stream";
-import { approvableReview, isOwnSessionWhy, queueOrder, runFor, stageColumns, stageLine, type BoardStage, type StageCard, type StageContext } from "./agent-view";
+import { approvableReview, isNoCheckoutWhy, isOwnSessionWhy, queueOrder, runFor, stageColumns, stageLine, type BoardStage, type StageCard, type StageContext } from "./agent-view";
 import type { AgentAction, AgentItem, AgentState, PullRequest } from "./types";
 
 /** Whose move it is: yours, the agent's, someone else's (the author, reviewers), or nobody's. */
@@ -175,6 +175,14 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
   // (main refuses the enqueue), so no button may offer one.
   const fork = lane === "mine" && pr?.isCrossRepository === true;
   const canStart = state.enabled && !stage.sdlc && !sessionOnIt && !fork;
+  // No checkout of its repository, and the agent may not clone one by itself:
+  // every button that starts it asks for that clone too — this repository
+  // only. Main's list says so for every column, as things stand now; without
+  // it (an older state), the plan's reason in Your turn.
+  const repo = pr?.repo ?? item?.repo ?? "";
+  const lacksCheckout = state.noCheckout ? state.noCheckout.includes(prId) : isNoCheckoutWhy(stage.why);
+  const cloneFirst = canStart && lacksCheckout;
+  const cloned = `The agent clones ${repo} into a folder of its own — not your projects; it keeps the clone for its later runs there`;
   const open = (label = lane === "review" ? "Review on GitHub myself" : "Open on GitHub"): BoardChoice => ({ label, does: "Opens the PR in your browser.", url });
   // Beside your own session the way back to it comes first — "carry on there" with no way there was a dead end.
   const toSession: BoardChoice = { label: "Open your Claude session", primary: true, does: "Switches to the Claude session that is working on this PR.", control: "session" };
@@ -227,13 +235,25 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
             ? `Waiting for ${pending.join(", ")} to review.`
             : "Waiting for reviewers.";
       next = "Once they approve and CI is green, Merge comes to Your turn. If they comment, the agent answers what it can and asks you the rest.";
-      if (canStart) choices = [{ label: "Self-review again", does: "The agent reviews it again now, before the reviewers do; its fixes come to you to push.", act: { type: "enqueue", prId } }];
+      if (canStart) {
+        choices = [
+          cloneFirst
+            ? { label: "Clone and self-review", does: `${cloned} — then reviews it again now, before the reviewers do; its fixes come to you to push.`, act: { type: "enqueue", prId, clone: true } }
+            : { label: "Self-review again", does: "The agent reviews it again now, before the reviewers do; its fixes come to you to push.", act: { type: "enqueue", prId } },
+        ];
+      }
     } else {
       waitingOn = "The author";
       const verdict = pr?.viewerApproved ? "You approved it" : pr?.viewerHasReviewed ? "You asked for changes" : pr?.roles.includes("reviewed") ? "You commented" : "It waits for its author";
       now = `${verdict}${pr && pr.unresolvedThreads > 0 ? ` · ${plural(pr.unresolvedThreads, "thread")} open` : ""} — the author's turn.`;
       next = "When the author pushes or answers you, the agent re-reviews it by itself and brings you the result.";
-      if (canStart) choices = [{ label: "Re-review now", does: "The agent looks at it again right away instead of waiting for the author.", act: { type: "enqueue", prId } }];
+      if (canStart) {
+        choices = [
+          cloneFirst
+            ? { label: "Clone and re-review", does: `${cloned} — then looks at it again right away instead of waiting for the author.`, act: { type: "enqueue", prId, clone: true } }
+            : { label: "Re-review now", does: "The agent looks at it again right away instead of waiting for the author.", act: { type: "enqueue", prId } },
+        ];
+      }
     }
   } else if (stage.column === "done") {
     owner = "done";
@@ -436,12 +456,18 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
       }
       case "fix": {
         // A run the agent planned itself is tried once more on its own (`retryAt`); a second failure is yours.
-        const retryAt = item?.retryAt ? new Date(item.retryAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : null;
+        // Not one with no checkout: the plan holds that PR back, so the try never comes (an older state may still carry one).
+        const retryAt = item?.retryAt && !isNoCheckoutWhy(item.headline) ? new Date(item.retryAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : null;
         now = `The agent couldn't finish: ${lower(item?.headline ?? "it stopped")}${retryAt ? ` — it tries again by itself at ${retryAt}` : item?.retryOf ? " — the second time in a row" : ""}.`;
         ask = retryAt ? "Nothing needed — or see what went wrong and try again now." : "See what went wrong, then try again — or leave it.";
         const inClaude = stage.action?.label === "Open in Claude";
+        // No checkout the agent may make by itself now: trying again asks for the clone. Going by
+        // main's list, not the failure's old headline — a checkout set since needs no clone.
+        const cloneAgain = !inClaude && canStart && (state.noCheckout ? lacksCheckout : isNoCheckoutWhy(item?.headline));
         choices = [
-          { label: stage.action?.label ?? "Try again", primary: true, does: inClaude ? "Opens the session in your terminal where it stopped." : "Starts it over with a fresh session.", act: inClaude ? { type: "continue", runId } : { type: "retry", runId } },
+          cloneAgain
+            ? { label: "Clone and try again", primary: true, does: `${cloned} — then starts it over with a fresh session.`, act: { type: "enqueue", prId, clone: true } }
+            : { label: stage.action?.label ?? "Try again", primary: true, does: inClaude ? "Opens the session in your terminal where it stopped." : "Starts it over with a fresh session.", act: inClaude ? { type: "continue", runId } : { type: "retry", runId } },
           ...(inClaude ? [{ label: "Try again", does: "Starts it over with a fresh session.", act: { type: "retry", runId } } as BoardChoice] : []),
           { label: "Leave it", does: "The agent won't try this commit again.", act: { type: "skip", runId } },
         ];
@@ -452,7 +478,13 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
       case "rereview": {
         const again = kind === "rereview";
         const who = again ? (pr?.myReReviewDue ? "The author answered your review" : "Your review was asked for again") : pr?.requestedOfMe ? "Your review is requested" : "Your team's review is requested";
-        const letAgent: BoardChoice = { label: again ? "Let the agent re-review" : "Let the agent review", does: "The agent starts now; its draft comes back here. Nothing is posted until you send it.", act: { type: "enqueue", prId } };
+        const letAgent: BoardChoice = cloneFirst
+          ? {
+              label: again ? "Clone and re-review" : "Clone and review",
+              does: `${cloned} — then ${again ? "re-reviews" : "reviews"} it; its draft comes back here. Nothing is posted until you send it.`,
+              act: { type: "enqueue", prId, clone: true },
+            }
+          : { label: again ? "Let the agent re-review" : "Let the agent review", does: "The agent starts now; its draft comes back here. Nothing is posted until you send it.", act: { type: "enqueue", prId } };
         // The agent's review of this very head found nothing blocking and had nothing to post: the approval is one click here, not a trip to GitHub.
         if (item && approvableReview(item, pr)) {
           const left = read.findings.length;
@@ -461,7 +493,8 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
           choices = [
             { label: "Approve", primary: true, does: "Posts your approval of this commit on GitHub under your name: one line, signed by the agent.", act: { type: "approve", runId } },
             ...(sessionOnIt ? [{ ...toSession, primary: false }] : []),
-            ...(canStart ? [{ ...letAgent, label: again ? "Re-review again" : "Review again" }] : []),
+            // A run that would clone first says so, as everywhere else.
+            ...(canStart ? [cloneFirst ? letAgent : { ...letAgent, label: again ? "Re-review again" : "Review again" }] : []),
             open(),
           ];
           next = "The author can merge once the other reviewers and CI allow it. If they push again, the agent reviews the new commits.";
@@ -469,7 +502,11 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         }
         const why = stage.why ? ` — the agent didn't ${again ? "re-review" : "review"} it: ${lower(stage.why)}` : "";
         now = `${who}${why}.`;
-        ask = canStart ? `Let the agent ${again ? "re-review" : "review"} it — or do it yourself.` : sessionOnIt ? "Carry on in your Claude session — the agent stays off this PR while it is open." : "Review it on GitHub.";
+        ask = canStart
+          ? cloneFirst
+            ? `Let the agent clone ${repo} and ${again ? "re-review" : "review"} it — or do it yourself.`
+            : `Let the agent ${again ? "re-review" : "review"} it — or do it yourself.`
+          : sessionOnIt ? "Carry on in your Claude session — the agent stays off this PR while it is open." : "Review it on GitHub.";
         choices = canStart ? [{ ...letAgent, primary: true }, open()] : sessionOnIt ? [toSession, open()] : [{ ...open(), primary: true }];
         next = canStart ? "The draft comes back to Your turn." : `The author sees your review on GitHub.${sessionOnIt ? ` ${SESSION_NEXT}` : ""}`;
         break;
@@ -478,14 +515,21 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         const why = stage.why ? ` The agent: ${lower(stage.why)}.` : "";
         now = `${now}.${why}`;
         ask = canStart
-          ? "Let the agent fix it — or fix it yourself."
+          ? cloneFirst
+            ? `Let the agent clone ${repo} and fix it — or fix it yourself.`
+            : "Let the agent fix it — or fix it yourself."
           : sessionOnIt
             ? "Carry on in your Claude session — the agent stays off this PR while it is open."
             : fork
               ? "Fix it in your clone and push to your fork — or reopen the PR from a branch of this repository, and the agent can take it."
               : "Fix it on GitHub or in your clone.";
         choices = canStart
-          ? [{ label: "Let the agent fix it", primary: true, does: "The agent fixes it in a separate checkout; you see the commits before anything is pushed.", act: { type: "enqueue", prId } }, open()]
+          ? [
+              cloneFirst
+                ? { label: "Clone and fix", primary: true, does: `${cloned} — then fixes it in a separate checkout; you see the commits before anything is pushed.`, act: { type: "enqueue", prId, clone: true } }
+                : { label: "Let the agent fix it", primary: true, does: "The agent fixes it in a separate checkout; you see the commits before anything is pushed.", act: { type: "enqueue", prId } },
+              open(),
+            ]
           : sessionOnIt
             ? [toSession, open()]
             : [{ ...open(), primary: true }];

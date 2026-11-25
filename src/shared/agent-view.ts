@@ -17,6 +17,20 @@ export function isOwnSessionWhy(why: string | null | undefined): boolean {
   return typeof why === "string" && why.toLowerCase().includes(OWN_SESSION_WHY.toLowerCase());
 }
 
+/**
+ * How the reason starts when the agent has no checkout of the PR's repository
+ * and may not clone one by itself (Settings › Agent › "Clone a repository it
+ * has no checkout of" off) — the plan's idle reason and a run's failure. On it
+ * the Board offers "Clone and review": a clone of the agent's own, for that
+ * repository only, on your click.
+ */
+export const NO_CHECKOUT_WHY = "No checkout of ";
+
+/** True when `why` says the agent has no checkout of the PR's repository. */
+export function isNoCheckoutWhy(why: string | null | undefined): boolean {
+  return typeof why === "string" && why.startsWith(NO_CHECKOUT_WHY);
+}
+
 // How the agent's state reads on the dashboard: where each PR stands on the
 // Board and what its card, the chip, the tray and a notification say about
 // it. Node-free (the renderer value-imports it) and pure, so the rules are
