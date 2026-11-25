@@ -623,17 +623,19 @@ export function mapPr(
     if (r.state !== "APPROVED" || r.author?.__typename !== "User" || r.author.login === authorLogin) continue;
     const reading = readApproval(r.body);
     if (!reading.feedback) continue;
-    const read = r.reactions?.nodes.some((reaction) =>
+    const authorEyes = (r.reactions?.nodes ?? []).filter((reaction) =>
       authorLogin != null && reaction.content === "EYES" &&
-      reaction.user?.login.toLowerCase() === authorLogin.toLowerCase() &&
-      // Invalid/missing dates fail closed; edited feedback requires a new acknowledgement.
-      Date.parse(reaction.createdAt) >= Date.parse(r.updatedAt ?? ""));
+      reaction.user?.login.toLowerCase() === authorLogin.toLowerCase());
+    // Invalid/missing dates fail closed; edited feedback requires a new acknowledgement.
+    const read = authorEyes.some((reaction) => Date.parse(reaction.createdAt) >= Date.parse(r.updatedAt ?? ""));
     if (read) continue;
     reviewFeedback.push({
       reviewId: r.id ?? null,
       login: r.author.login,
       url: r.url ?? null,
       submittedAt: r.submittedAt,
+      updatedAt: r.updatedAt ?? null,
+      ackBeforeEdit: authorEyes.length > 0,
       points: reading.points,
       excerpt: reading.excerpt,
     });

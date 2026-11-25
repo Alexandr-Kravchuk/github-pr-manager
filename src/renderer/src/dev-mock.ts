@@ -560,6 +560,8 @@ FIXTURES.agent = [
         login: "octo-lead",
         url: "https://github.com/acme/dashboard/pull/68#pullrequestreview-1",
         submittedAt: new Date(Date.now() - 40 * 60e3).toISOString(),
+        updatedAt: new Date(Date.now() - 40 * 60e3).toISOString(),
+        ackBeforeEdit: false,
         excerpt: "Review mode: full (six lenses). Decision: approve (minor issues). The logic is focused and has shared-level tests. One low-confidence Major and two Minors below.",
         points: [
           { severity: "major", text: "low confidence — `src/shared/agent-view.ts:566` - approvableRun picks the latest run by finishedAt, which later actions stamp again." },

@@ -490,6 +490,9 @@ export function resultAction(item: AgentItem, lane: BoardLane, headOid: string |
       }
       // Nothing to push, yet answers for the reviewers: they go out by themselves.
       if (n === 0 && replies > 0) return { kind: "send", label: replies === 1 ? "Send reply" : `Send ${replies} replies` };
+      // An approval's feedback checked and nothing in it held: an answer, not a failure — the
+      // feedback card (GitHub's say-so) comes back with the run's words, and Mark as read on it.
+      if (n === 0 && (item.reasons?.length ?? 0) > 0 && item.reasons!.every((r) => r === "feedback")) return null;
       // It ran to the end and has nothing to push: it couldn't do it.
       return item.drive ? fix() : null;
     }
@@ -955,6 +958,9 @@ export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item:
     return `The agent finished ${pr}`;
   }
   const action = resultAction(item, laneOfScenario(item.scenario), headOid);
+  if (!action && item.scenario === "drive" && (item.reasons?.length ?? 0) > 0 && item.reasons!.every((r) => r === "feedback")) {
+    return `Approval feedback checked, nothing to change: ${pr}`;
+  }
   switch (action?.kind) {
     case "send":
       if (item.scenario === "drive") return `${action.label === "Send reply" ? "Reply" : "Replies"} to reviewers ready to send: ${pr}`;

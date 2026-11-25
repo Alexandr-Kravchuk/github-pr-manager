@@ -180,12 +180,15 @@ export function driveReasons(pr: PullRequest, s: AgentSettings): DriveReason[] {
 
 /**
  * What a run you ask for on your PR works on — a button, Run again, a run the
- * app's closing cut short: what the plan would drive it for now, the feedback
- * in an approval too, and with nothing of that a self-review.
+ * app's closing cut short: what the plan would drive it for now, and with
+ * nothing of that a self-review. An approval's feedback only with
+ * `withFeedback` — the feedback card's own button, or the Run again / recovery
+ * of a run that was asked for it — and only while it is still unread: no other
+ * run takes an approval's text as work.
  */
-export function askedDriveReasons(pr: PullRequest, s: AgentSettings): DriveReason[] {
+export function askedDriveReasons(pr: PullRequest, s: AgentSettings, withFeedback = false): DriveReason[] {
   const out = driveReasons(pr, s);
-  if (pr.hasUnaddressedReviewFeedback) out.push("feedback");
+  if (withFeedback && pr.hasUnaddressedReviewFeedback) out.push("feedback");
   return out.length > 0 ? out : ["self"];
 }
 

@@ -483,14 +483,24 @@ Three layers:
   put 👀 on that review) is Your turn, never "With reviewers": "Approved with
   feedback" lists each approval's points and offers "Mark as read 👀"
   (`markFeedbackRead`, only the PR id over IPC: main reads the PR again and
-  puts EYES on every review of `reviewFeedback` in that read, logged as
-  `run/feedback-read`), "Let the agent address it" (an asked drive with the
-  `feedback` reason — `askedDriveReasons`; the plan never starts one for it by
-  itself) and the review on GitHub. Which text is feedback is
+  puts EYES only on what the card showed — the snapshot's `reviewFeedback`,
+  by review id and `updatedAt`; a review new or edited since refuses the
+  whole click and the Board reads the PR again, since the 👀 says "I read
+  this"; your 👀 from before a review's last edit is taken off first
+  (`ackBeforeEdit`), as GitHub doesn't give a reaction twice; logged as
+  `run/feedback-read`), "Let the agent address it" (`enqueue` with
+  `feedback: true` — the only ask that adds the `feedback` reason,
+  `askedDriveReasons`; Run again and a recovered run keep it only if they had
+  it, and the plan never starts one by itself; always Shadow, since an
+  approval's text is anyone's words; its own prompt, and rules that name only
+  the approvals the card showed; a run that changed nothing is the card's
+  answer, not a failure) and the review on GitHub. Which text is feedback is
   `shared/approval-feedback.ts` (`readApproval`, Node-free): a plain yes, the
-  app's own approvals (they carry `CLEAN_APPROVAL_MARKER`; older ones are
-  matched by their one line) and a creatio-code-review approval that lists no
-  finding as a severity list item are clean; any other prose is feedback. An
+  app's own approvals (one of its one-line texts first, and nothing after it
+  longer than a signature) and a creatio-code-review approval that lists no
+  finding as a severity list item (its folded checklists aside) are clean;
+  any other prose is feedback, a folded `<details>` included. `reviewFeedback`
+  is in the poller's snapshot hash, so the card follows an edit. An
   approved PR of yours that still waits names what holds it
   (`approvedHold`: a required review, a team, CI, behind base, open threads,
   or GitHub not calling it mergeable yet) instead of "Waiting for reviewers".

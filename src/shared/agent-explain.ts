@@ -569,13 +569,18 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         const who = pr ? feedbackFrom(pr) : [];
         const points = fb.flatMap((f) => f.points);
         now = `${who.length > 0 ? who.join(", ") : "A reviewer"} approved with feedback in the approval's text${points.length > 0 ? ` (${plural(points.length, "point")})` : ""}. Merge waits until you mark it read.`;
+        // The agent checked it on your ask and changed nothing: what it found is the card's answer.
+        if (item?.scenario === "drive" && item.reasons?.includes("feedback") && item.state === "needsYou" && !(item.drive?.commits.length)) {
+          now += ` The agent checked it and changed nothing${summary ? `: ${lower(summary)}` : "."}`;
+        }
         read.summary = fb.map((f) => (fb.length > 1 ? `${f.login}: ${f.excerpt}` : f.excerpt)).filter(Boolean).join("\n\n") || null;
         read.findings = points.map((p) => ({ severity: p.severity, text: p.text, where: "" }));
         ask = canStart ? "Read it, then mark it read — or let the agent check each point first." : "Read it, then mark it read.";
         const reviewUrl = fb.find((f) => f.url)?.url ?? url;
+        // Always Shadow (main): what the agent makes of a reviewer's text waits for your Push.
         const letAgent: BoardChoice = cloneFirst
-          ? { label: "Clone and address it", does: `${cloned} — then checks each point against the code and fixes the ones that hold; you see the commits before anything is pushed.`, act: { type: "enqueue", prId, clone: true } }
-          : { label: "Let the agent address it", does: "The agent checks each point against the code and fixes the ones that hold, in a separate checkout; you see the commits before anything is pushed.", act: { type: "enqueue", prId } };
+          ? { label: "Clone and address it", does: `${cloned} — then checks each point against the code and fixes the ones that hold; you see the commits before anything is pushed.`, act: { type: "enqueue", prId, clone: true, feedback: true } }
+          : { label: "Let the agent address it", does: "The agent checks each point against the code and fixes the ones that hold, in a separate checkout; you see the commits before anything is pushed.", act: { type: "enqueue", prId, feedback: true } };
         choices = [
           {
             label: stage.action?.label ?? "Mark as read 👀",

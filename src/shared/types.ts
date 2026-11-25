@@ -554,6 +554,10 @@ export interface ReviewFeedback {
   /** The review on GitHub. */
   url: string | null;
   submittedAt: string | null;
+  /** Its last edit — "Mark as read" marks only the version the card showed. */
+  updatedAt: string | null;
+  /** You put 👀 on it before its last edit: that 👀 counts for nothing, and is taken off before a new one. */
+  ackBeforeEdit: boolean;
   /** The points its format lists (creatio-code-review's findings); empty for prose. */
   points: FeedbackPoint[];
   /** The text as GitHub shows it, cut short. */
@@ -1333,8 +1337,10 @@ export type AgentAction =
    * `before`: the queued run it goes in front of; null or absent, the end of the queue.
    * `clone`: you said yes to the agent cloning the PR's repository for it, when
    * it has no checkout and Settings › Agent doesn't let it clone by itself.
+   * `feedback`: on your PR, the run works on the feedback in its approvals too
+   * (the "Approved with feedback" card's button) — never asked by another button.
    */
-  | { type: "enqueue"; prId: string; before?: string | null; clone?: true }
+  | { type: "enqueue"; prId: string; before?: string | null; clone?: true; feedback?: true }
   /** Your approval again, on a PR it already stands on, to answer a review request made after it. */
   | { type: "approveAgain"; prId: string }
   /** 👀 on the approvals of your PR whose text carries feedback (`PullRequest.reviewFeedback`): you read them. */

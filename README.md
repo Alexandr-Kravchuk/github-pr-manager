@@ -22,7 +22,8 @@ reviewed — and highlights what needs attention:
   approval holds the PR only when it lists findings (Blocker / Major / Minor
   items) — their points are shown. On the Board such a PR is in **Your turn**
   as "Approved with feedback", with **Mark as read 👀** (the app adds the 👀
-  for you), **Let the agent address it**, or the review on GitHub.
+  for you, on the approvals the card shows only), **Let the agent address it**
+  (its commits always wait for your Push), or the review on GitHub.
 - 💬 **unresolved comments** — how many threads still need to be resolved;
 - review state (approved / changes requested / review required), drafts, author, last update.
 

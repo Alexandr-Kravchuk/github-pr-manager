@@ -229,7 +229,15 @@ export function validateAgentAction(value: unknown): AgentAction {
     const b = before();
     // A yes to cloning the PR's repository — never where from or where to: main reads both from the PR.
     if (v.clone !== undefined && v.clone !== true) throw new Error("agentAction: clone is a yes or nothing.");
-    return { type: "enqueue", prId: validatePrId(v.prId), ...(b ? { before: b } : {}), ...(v.clone === true ? { clone: true as const } : {}) };
+    // A yes to the approval's feedback as the run's work — never its text: main reads that from GitHub.
+    if (v.feedback !== undefined && v.feedback !== true) throw new Error("agentAction: feedback is a yes or nothing.");
+    return {
+      type: "enqueue",
+      prId: validatePrId(v.prId),
+      ...(b ? { before: b } : {}),
+      ...(v.clone === true ? { clone: true as const } : {}),
+      ...(v.feedback === true ? { feedback: true as const } : {}),
+    };
   }
   // What goes out is main's own line on the PR's head: only the PR is named.
   if (v.type === "approveAgain") return { type: "approveAgain", prId: validatePrId(v.prId) };
