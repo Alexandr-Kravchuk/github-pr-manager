@@ -108,7 +108,10 @@ export function explainBoard(prs: readonly PullRequest[], all: readonly PullRequ
 }
 
 function rankOf(e: BoardEntry): number {
-  return e.owner === "you" ? (KIND_RANK[e.stage.action?.kind ?? ""] ?? 5) : 0;
+  if (e.owner !== "you") return 0;
+  // A review the agent finished with nothing blocking is an approval in one click, not a review nobody started.
+  if (e.choices[0]?.act?.type === "approve") return KIND_RANK.reapprove;
+  return KIND_RANK[e.stage.action?.kind ?? ""] ?? 5;
 }
 
 /** The agent's: what runs now, then the line in its order. */

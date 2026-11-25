@@ -12320,6 +12320,37 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.approvableReview(run(), pr), true);
     });
 
+    test("agent board words: the agent's review of this head from an earlier day still carries the card and its Approve", () => {
+      // The case of creatio-ai-app-development-toolkit#293: the re-review ended yesterday with nothing to post, on the head the PR still has.
+      const RID = "00000000-0000-4000-8000-000000000293";
+      const pr = xPr({ id: "P", headOid: "h", roles: ["reviewer", "reviewed"], requestedOfMe: true, viewerHasReviewed: true, myReReviewDue: true, updatedAt: sAgo(60) });
+      const card = { summary: "All nine findings fixed.", asks: [], authorQuestions: [], structured: true, findings: [{ severity: "minor", text: "m", where: "README.md:8" }] };
+      const yesterday = sAgo(26 * 60);
+      const run = (o = {}) => sIt({ runId: RID, key: "P|rereview|h|asked", scenario: "rereview", state: "done", headline: "Reviewed — nothing to post", result: card, finishedAt: yesterday, ...o });
+      const shape = (e) => e.choices.map((c) => [c.label, c.act?.type ?? null, Boolean(c.primary)]);
+      const e = xOne(pr, [run()]);
+      assert.deepStrictEqual([e.owner, e.stage.action.kind], ["you", "rereview"]);
+      assert.deepStrictEqual(shape(e), [["Approve", "approve", true], ["Re-review again", "enqueue", false], ["Review on GitHub myself", null, false]]);
+      assert.deepStrictEqual(e.choices[0].act, { type: "approve", runId: RID });
+      assert.strictEqual(e.now, "The author answered your review — the agent re-reviewed this commit and found nothing blocking (1 point below); it had nothing to post.");
+      assert.deepStrictEqual([e.read.summary, e.read.findings.length], ["All nine findings fixed.", 1], "what it found is on the card, not an empty one");
+      assert.strictEqual(e.stage.note, "Reviewed — nothing to post");
+      assert.strictEqual(view.approvableRun([run()], pr).runId, RID);
+      // The latest review of the head decides, whatever its day.
+      const later = (o) => run({ runId: "00000000-0000-4000-8000-000000000294", finishedAt: sAgo(5), ...o });
+      const posted = later({ published: true, headline: "Published: comment" });
+      assert.strictEqual(view.approvableRun([run(), posted], pr), null, "a later review of the head posted something");
+      assert.ok(!xOne(pr, [run(), posted]).choices.some((c) => c.act?.type === "approve"));
+      assert.strictEqual(view.approvableRun([run(), later({ interrupted: true, headline: "Stopped by you" })], pr), null, "a later one cut short");
+      assert.strictEqual(view.approvableRun([run(), later({ headline: "Superseded by a newer run" })], pr).runId, RID, "an item closed as housekeeping is no review");
+      assert.strictEqual(view.approvableRun([run({ key: "P|rereview|old|asked" })], pr), null, "a review of another head");
+      assert.ok(!xOne(pr, [run({ key: "P|rereview|old|asked" })]).choices.some((c) => c.act?.type === "approve"));
+      // An approval in one click comes before a review nobody started, though that one waits longer.
+      const other = xPr({ id: "Q", roles: ["reviewer"], requestedOfMe: true, updatedAt: sAgo(600) });
+      const board = xBoard([other, pr], [run()]);
+      assert.deepStrictEqual(board.entries.filter((x) => x.owner === "you").map((x) => [x.prId, x.choices[0].act?.type]), [["P", "approve"], ["Q", "enqueue"]]);
+    });
+
     test("agent board words: a review nobody started is the agent's to start — unless the agent is off", () => {
       const pr = xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true });
       const e = xOne(pr);

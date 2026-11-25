@@ -548,6 +548,25 @@ export function approvableReview(item: AgentItem | null | undefined, pr: PullReq
   return !res.findings.some((f) => f.severity === "blocker" || f.severity === "major");
 }
 
+/**
+ * The agent's latest review of the PR's current head, whatever day it ran,
+ * when your approval may rest on it (`approvableReview`) — the run a review
+ * card asked of you carries. A card otherwise reads today's runs only, so a
+ * review that ended yesterday on the very same head left it with "Let the
+ * agent re-review", nothing to read and no Approve, though nothing changed
+ * since. The latest review of the head decides: one after it that posted,
+ * prepared something or was cut short leaves no approval to rest on.
+ */
+export function approvableRun(items: readonly AgentItem[], pr: PullRequest): AgentItem | null {
+  if (!pr.headOid) return null;
+  let latest: AgentItem | null = null;
+  for (const i of items) {
+    if ((i.scenario !== "review" && i.scenario !== "rereview") || isQuiet(i) || keyHead(i.key) !== pr.headOid) continue;
+    if (!latest || (i.finishedAt ?? i.queuedAt) > (latest.finishedAt ?? latest.queuedAt)) latest = i;
+  }
+  return latest && approvableReview(latest, pr) ? latest : null;
+}
+
 /** Your PR is ready to merge as GitHub sees it. */
 function githubReady(pr: PullRequest): boolean {
   return !pr.isDraft && pr.canBeMerged && !pr.awaitingReview && pr.ciState !== "failure" && !pr.hasConflicts;
@@ -633,7 +652,9 @@ export function boardStage(pr: PullRequest | null, items: readonly AgentItem[], 
   if (isReviewDue(pr) && approvalStands(pr)) return card("done", pr.viewerReviewedAt ?? pr.updatedAt, null, { askedAgain: true });
   if (isReviewDue(pr)) {
     const again = pr.viewerHasReviewed || pr.myReReviewDue;
-    return card("you", pr.updatedAt, { kind: again ? "rereview" : "review", label: "Open on GitHub" });
+    // The agent's review of this very head carries the card whatever day it ran: what it found, and the Approve that rests on it.
+    const review = approvableRun(items, pr);
+    return card("you", pr.updatedAt, { kind: again ? "rereview" : "review", label: "Open on GitHub" }, review ? { item: review, note: review.headline } : {});
   }
   if (pr.viewerApproved) {
     const on = pr.viewerReviewedAt ?? pr.updatedAt;
