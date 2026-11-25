@@ -855,7 +855,15 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   holds its slot (a clone can take minutes). A drive's session has no
   network and a blobless clone lacks old file contents, so before a drive in
   such a clone the app runs the base diffs and the merge of the base
-  (`prefetchForDrive`) and git fetches what they read. The clone and all
+  (`prefetchForDrive`) and git fetches what they read. With the setting off,
+  the PR waits with a reason that starts `NO_CHECKOUT_WHY`
+  (`shared/agent-view.ts`), and its Board card asks instead: "Clone and
+  review" (re-review, fix; "Clone and try again" on a run that failed for
+  it) sends `enqueue` with `clone: true` — a yes, never a URL or a folder —
+  and the run carries it as `item.clone`, kept by Run again. It is a yes for
+  that one repository: the clone is the agent's own and stays, so later
+  plans find it with the setting still off. While a run clones, its card
+  says "Cloning <repo> first". The clone and all
   git work in it — a run's worktree, a drive's base fetch and prefetch, the
   re-approve and base-only checks (`gitFor`) — run under `runGitLong`
   (30 min, not `runGit`'s 2): a large repository over a slow VPN would

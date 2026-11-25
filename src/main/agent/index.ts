@@ -9,7 +9,7 @@ import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
-import { AGENT_CLOSED, approvableReview, approvalStands, boardStage, cardKey, keyHead, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
+import { AGENT_CLOSED, approvableReview, approvalStands, boardStage, cardKey, keyHead, NO_CHECKOUT_WHY, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -399,12 +399,16 @@ function samePath(a: string, b: string): boolean {
   return norm(a) === norm(b);
 }
 
-/** Why the agent can't work on a PR's code — with the command that clones it where the agent looks. */
+/**
+ * Why the agent can't work on a PR's code — with the command that clones it
+ * where the agent looks. It starts with `NO_CHECKOUT_WHY`: the Board offers
+ * "Clone and review" on it.
+ */
 const noCheckoutWhy = (pr: PullRequest, claude: ClaudeSettings | null | undefined): string => {
   const clone = cloneCommand(pr, claude);
   return clone
-    ? `No checkout of ${pr.repo} — clone it with \`${clone}\`, set its folder in Settings › Claude, or let the agent clone it (Settings › Agent)`
-    : `No checkout of ${pr.repo} — set its folder in Settings › Claude, or let the agent clone it (Settings › Agent)`;
+    ? `${NO_CHECKOUT_WHY}${pr.repo} — clone it with \`${clone}\`, set its folder in Settings › Claude, or let the agent clone it (Settings › Agent)`
+    : `${NO_CHECKOUT_WHY}${pr.repo} — set its folder in Settings › Claude, or let the agent clone it (Settings › Agent)`;
 };
 
 /** A host to leave alone for now: its last fetch failed, or its GitHub budget is nearly spent. */
@@ -1422,8 +1426,9 @@ export function createAgent(deps: AgentDeps): Agent {
     if (item.scenario !== "afterMerge" && !resume) {
       if (!pr) return;
       checkout = knownCheckout(pr, all.claude);
-      // None yet: cloned below, once the run holds its slot — a clone can take minutes.
-      if (!checkout && !s.cloneMissing) return fail(noCheckoutWhy(pr, all.claude));
+      // None yet: cloned below, once the run holds its slot — a clone can take
+      // minutes. By the agent's setting, or because you said yes for this run.
+      if (!checkout && !s.cloneMissing && !item.clone) return fail(noCheckoutWhy(pr, all.claude));
       if (checkout) {
         remote = remoteFor(checkout, pr);
         if (!remote) return fail(`No remote of ${checkout} points at ${pr.repo}`);
@@ -1445,11 +1450,16 @@ export function createAgent(deps: AgentDeps): Agent {
     changed();
 
     if (!resume && pr && item.scenario !== "afterMerge" && !checkout) {
+      // Said on the card while it lasts: a large repository over a VPN takes minutes.
+      item.headline = `Cloning ${pr.repo} first`;
+      changed();
       try {
         checkout = await ensureAgentClone(slowGit, deps.dir, pr);
       } catch (e) {
         return fail(`Could not clone ${pr.repo}`, (e as Error).message);
       }
+      item.headline = runningHeadline(item);
+      changed();
       remote = remoteFor(checkout, pr);
       if (!remote) return fail(`No remote of ${checkout} points at ${pr.repo}`);
       item.checkout = checkout;
@@ -2825,16 +2835,18 @@ export function createAgent(deps: AgentDeps): Agent {
     scenario: AgentScenario,
     reasons?: string[],
     before?: string | null,
-    from?: Pick<AgentItem, "carry" | "brief">,
+    from?: Pick<AgentItem, "carry" | "brief" | "clone">,
   ): AgentActionResult {
     if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
       return { ok: false, error: "The agent is already on this PR." };
     }
     const live = yourSessionOn(pr);
     if (live) return { ok: false, error: sessionOnItError(live) };
-    // Every run you can ask for works on the PR's code: without a clone it would only fail.
+    // Every run you can ask for works on the PR's code: without a clone it would
+    // only fail — unless the agent may clone it, by its setting or your yes now.
     const claude = loadAll()?.claude;
-    if (!claude || (!knownCheckout(pr, claude) && !settings()?.cloneMissing)) return { ok: false, error: `${noCheckoutWhy(pr, claude)}.` };
+    const checkout = claude ? knownCheckout(pr, claude) : null;
+    if (!claude || (!checkout && !settings()?.cloneMissing && !from?.clone)) return { ok: false, error: `${noCheckoutWhy(pr, claude)}.` };
     const key = `${pr.id}|${scenario}|${pr.headOid ?? "-"}|asked`;
     delete store.data.ledger[key];
     // Asked by you: in the scenario's own mode, and never more than Shadow when that is off.
@@ -2862,6 +2874,8 @@ export function createAgent(deps: AgentDeps): Agent {
     }
     if (from?.carry?.length) item.carry = from.carry;
     if (from?.brief?.trim()) item.brief = from.brief;
+    // Your yes counts only while there is nothing to work in: a checkout found since needs none.
+    if (from?.clone && !checkout) item.clone = true;
     supersede(item);
     void store.save();
     changed();
@@ -2930,6 +2944,8 @@ export function createAgent(deps: AgentDeps): Agent {
     if (action.type === "enqueue") {
       const pr = snapshot?.pullRequests.find((p) => p.id === action.prId);
       if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+      // "Clone and review": your yes to the agent cloning this PR's repository.
+      const clone = action.clone ? { clone: true as const } : undefined;
       if (pr.roles.includes("author")) {
         // Left to its orchestrator run, even when you ask: two agents on one branch edit and push over each other.
         const run = orchestrated(pr, all.claude);
@@ -2937,12 +2953,12 @@ export function createAgent(deps: AgentDeps): Agent {
         if (pr.isCrossRepository) return { ok: false, error: "Its branch is in a fork — the agent pushes only to branches of the repository itself." };
         // Nothing broken: a self-review of its head, before reviewers see it.
         const reasons = driveReasons(pr, all.agent);
-        return enqueueAsked(pr, all.agent, "drive", reasons.length > 0 ? reasons : ["self"], action.before);
+        return enqueueAsked(pr, all.agent, "drive", reasons.length > 0 ? reasons : ["self"], action.before, clone);
       }
       if (!pr.roles.includes("reviewer") && !pr.roles.includes("reviewed")) return { ok: false, error: "The agent works on PRs you review or your own." };
-      if (pr.viewerHasReviewed) return enqueueAsked(pr, all.agent, "rereview", undefined, action.before);
+      if (pr.viewerHasReviewed) return enqueueAsked(pr, all.agent, "rereview", undefined, action.before, clone);
       const brief = isBigPr(pr, all.agent);
-      return enqueueAsked(pr, all.agent, brief ? "brief" : "review", undefined, action.before);
+      return enqueueAsked(pr, all.agent, brief ? "brief" : "review", undefined, action.before, clone);
     }
     const item = findItem(action.runId);
     if (!item) return { ok: false, error: "That run is gone." };
@@ -3116,8 +3132,9 @@ export function createAgent(deps: AgentDeps): Agent {
         const found = item.scenario === "drive" ? driveReasons(pr, all.agent) : undefined;
         const reasons = found && found.length === 0 ? ["self"] : found;
         // The old result goes only once the new run is in the queue: a refusal
-        // (the agent is already on the PR) leaves it where it was.
-        const queued = enqueueAsked(pr, all.agent, item.scenario, reasons);
+        // (the agent is already on the PR) leaves it where it was. Your yes to
+        // a clone goes with it — a clone that failed is tried again.
+        const queued = enqueueAsked(pr, all.agent, item.scenario, reasons, undefined, item.clone ? { clone: true } : undefined);
         if (queued.ok) await closeAs(item, AGENT_CLOSED.rerun);
         return queued;
       }
