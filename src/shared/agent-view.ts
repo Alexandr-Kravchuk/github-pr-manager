@@ -80,7 +80,8 @@ export function finishedOn(item: Pick<AgentItem, "finishedAt">, today: string): 
 }
 
 /** What a run is doing, as the chip and the tray say it — "Drafting review #911", "Fixing CI on #142". */
-export function itemVerb(item: Pick<AgentItem, "scenario" | "reasons">): string {
+export function itemVerb(item: Pick<AgentItem, "scenario" | "reasons" | "threadsOnly">): string {
+  if (item.scenario === "rereview" && item.threadsOnly) return "Checking threads on";
   if (item.scenario !== "drive") return SCENARIO_VERB[item.scenario];
   const r = item.reasons ?? [];
   if (r.includes("self")) return "Self-reviewing";
@@ -785,14 +786,14 @@ function count(n: number, one: string, many = `${one}s`): string {
 }
 
 /** What the agent is doing on a PR, in the words of the card, the tray and a list row. */
-export function workLine(item: Pick<AgentItem, "scenario" | "reasons">): string {
+export function workLine(item: Pick<AgentItem, "scenario" | "reasons" | "threadsOnly">): string {
   switch (item.scenario) {
     case "review":
       return "Drafting your review";
     case "brief":
       return "Reading a big PR for a brief";
     case "rereview":
-      return "Re-reviewing — the author answered";
+      return item.threadsOnly ? "Checking the author's answers in your threads" : "Re-reviewing — the author answered";
     case "merge":
       return "Merging";
     case "reapprove":

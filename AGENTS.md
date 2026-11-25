@@ -237,7 +237,26 @@ Three layers:
   you ask for that finds the same says "Already approved on this head".
   Asked again after a change request of yours on that same head, the
   re-review runs by itself (`planJobs`, once per head and request): the
-  request is the author's "look again". A review the agent published counts
+  request is the author's "look again". A head gets one full re-review,
+  not one per answer (#294 got two full runs, ~$2.2 each, on one commit
+  five minutes apart): once a full review or re-review went over it — the
+  agent's own or yours, running or ended prepared or published, by the
+  ledger (`reviewedHead` in `PlanContext`, `reviewedHeads` in
+  `main/agent/index.ts`; not a failed or dismissed run, nor one still
+  waiting on you, whose card the next run replaces) — the author's next
+  answer or request on that head is planned as a run over your threads
+  only (`threadsOnly` on the job and the item). Its ledger key is the
+  trigger's as before, so a full run's own trigger never comes back light.
+  It runs the same skill with the skill's own `rereview: "threads-only"`
+  and `statusComment: false` (`THREADS_ONLY_RULE` in the session's rules):
+  your open threads checked against the head and the replies, none of the
+  workflow's reviewers, no Blocker hunt on a head your review covers. The
+  log says which in `run/queued` and `run/started` (`data.rereview`:
+  `full` / `threads`, and the queued line's own words); the card says
+  "Checking the author's answers in your threads", the chip "Checking
+  threads on #N". A push is a new head, so a full re-review again; one you
+  ask for is always full, while an interrupted run over the threads that
+  starts over (`recoverInterrupted`) stays one. A review the agent published counts
   as yours in the plan, whatever its event (`agentReviewed` in `PlanContext`,
   from the ledger's published review and re-review keys, with the head the
   review went out on; `withAgentReview` puts its time and head in place of

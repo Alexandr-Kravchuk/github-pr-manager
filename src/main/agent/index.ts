@@ -172,12 +172,14 @@ export function describeReasons(reasons: readonly string[]): string {
   return words.length > 1 ? `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}` : (words[0] ?? "");
 }
 
-function queuedHeadline(job: Pick<AgentJob, "scenario" | "key" | "reasons">): string {
+function queuedHeadline(job: Pick<AgentJob, "scenario" | "key" | "reasons" | "threadsOnly">): string {
   switch (job.scenario) {
     case "brief":
       return "Queued: a brief first — a big PR; the review follows";
-    case "rereview":
-      return job.key.includes("|asked@") ? "Queued: re-review — you were asked again" : "Queued: re-review — the author answered";
+    case "rereview": {
+      const why = job.key.includes("|asked@") ? "you were asked again" : "the author answered";
+      return job.threadsOnly ? `Queued: re-review of your threads only — ${why}; this head had its full re-review` : `Queued: re-review — ${why}`;
+    }
     case "drive":
       return job.reasons?.includes("self")
         ? "Queued: self-review before reviewers"
@@ -205,7 +207,8 @@ function workingHeadline(scenario: AgentScenario): string {
 }
 
 /** A running item's line: what it drives for, or what its scenario does. */
-function runningHeadline(item: Pick<AgentItem, "scenario" | "reasons">): string {
+function runningHeadline(item: Pick<AgentItem, "scenario" | "reasons" | "threadsOnly">): string {
+  if (item.threadsOnly) return "Re-reviewing your threads";
   if (item.reasons?.includes("self")) return "Self-reviewing before reviewers";
   if (item.reasons?.length && item.reasons.every((r) => r === "comments")) return "Checking reviewers' comments";
   return item.reasons?.length ? `Driving — ${describeReasons(item.reasons)}` : workingHeadline(item.scenario);
@@ -270,7 +273,18 @@ interface RulesPr {
   stack?: string | null;
   /** A full-context drive: the user's own Claude setup is loaded (`fullContextDrive`). */
   full?: boolean;
+  /** A re-review over the user's threads only (`AgentItem.threadsOnly`). */
+  threadsOnly?: boolean;
 }
+
+/**
+ * A re-review over your threads only: the review skill's own mode for it
+ * (`rereview: "threads-only"` — your open threads verified against the head and
+ * the author's replies, none of its reviewers, no Blocker hunt on a head your
+ * review covers) and no "Reviewing now" comment for an answer in a thread.
+ */
+export const THREADS_ONLY_RULE =
+  'This head had its full review already: this run is only about the author\'s answers in your threads and the request to look again. Run the review skill with rereview: "threads-only" and statusComment: false — it checks your open threads against the head commit and the replies, without its reviewers — and raise nothing new about code your earlier review covered.';
 
 /** What a run on your own PR is for, on top of the drive rules. */
 function driveFocus(reasons: readonly string[]): string {
@@ -298,7 +312,8 @@ function scenarioRules(
   const stack = pr?.stack ?? null;
   const plan =
     "You run unattended as the user's PR agent. First write your plan as a task list with TaskCreate — one short task per step — and keep it current with TaskUpdate as you go, so the user can follow along. (A skill that runs as a Workflow shows its own phases; then no task list is needed.)" +
-    (stack ? ` ${stack}` : "");
+    (stack ? ` ${stack}` : "") +
+    (scenario === "rereview" && pr?.threadsOnly ? ` ${THREADS_ONLY_RULE}` : "");
   const never =
     "Never push, and never try to work around a refused tool call: if something is refused, say what you would have done and continue without it.";
   const jira =
@@ -729,7 +744,9 @@ export function createAgent(deps: AgentDeps): Agent {
       }
       const found = item.scenario === "drive" ? driveReasons(pr, s) : undefined;
       // Cut short while it cloned: your yes to the clone goes on with it, or it would be refused for the missing checkout.
-      const queued = enqueueAsked(pr, s, item.scenario, found && found.length === 0 ? ["self"] : (found ?? item.reasons), undefined, item.clone ? { clone: true } : undefined);
+      // A run over the threads only stays one: going on is not a new full re-review of a head that had its own.
+      const carried = { ...(item.clone ? { clone: true as const } : {}), ...(item.threadsOnly ? { threadsOnly: true as const } : {}) };
+      const queued = enqueueAsked(pr, s, item.scenario, found && found.length === 0 ? ["self"] : (found ?? item.reasons), undefined, Object.keys(carried).length > 0 ? carried : undefined);
       void closeAs(item, queued.ok ? AGENT_CLOSED.rerun : item.headline);
     }
   }
@@ -871,6 +888,29 @@ export function createAgent(deps: AgentDeps): Agent {
   }
 
   /**
+   * The heads ("<prId>|<head>") a full review or re-review already went over,
+   * by the ledger — the agent's own or one you asked for: running now, or
+   * ended prepared or published. Not a run that failed or that you took out of
+   * the queue, and not one still waiting on you (a plan to send, a question):
+   * the next run on its PR replaces that card, so it has to be a full one
+   * again. A re-review over the threads only is planned only on such a head,
+   * so its own entry adds nothing new. The policy's `reviewedHead`, read once
+   * per plan.
+   */
+  function reviewedHeads(): Set<string> {
+    const runs = new Map(store.data.items.map((i) => [i.runId, i]));
+    const out = new Set<string>();
+    for (const [key, entry] of Object.entries(store.data.ledger)) {
+      const [prId, scenario, head] = key.split("|");
+      if ((scenario !== "review" && scenario !== "rereview") || !head || head === "-") continue;
+      if (entry.state !== "started" && entry.state !== "prepared" && entry.state !== "published") continue;
+      if (entry.state === "prepared" && runs.get(entry.runId)?.state === "needsYou") continue;
+      out.add(`${prId}|${head}`);
+    }
+    return out;
+  }
+
+  /**
    * The brief a big PR's review follows: its questions for the author go into
    * the review's prompt, its text onto the review's card — so what it found
    * stays readable once the review replaces it — and the brief itself closes.
@@ -917,7 +957,7 @@ export function createAgent(deps: AgentDeps): Agent {
       ? `Your Claude session "${x.name}" is on this PR, paused in Claude Desktop — carry on there, or archive it first.`
       : `Your Claude session "${x.name}" is on this PR — carry on there, or end it first.`;
 
-  function newItem(job: Pick<AgentJob, "key" | "prId" | "prNumber" | "repo" | "url" | "scenario" | "mode" | "reasons">, pr: PullRequest, headline: string): AgentItemRecord {
+  function newItem(job: Pick<AgentJob, "key" | "prId" | "prNumber" | "repo" | "url" | "scenario" | "mode" | "reasons" | "threadsOnly">, pr: PullRequest, headline: string): AgentItemRecord {
     const item: AgentItemRecord = {
       runId: randomUUID(),
       key: job.key,
@@ -933,6 +973,7 @@ export function createAgent(deps: AgentDeps): Agent {
       headline,
       queuedAt: stamp(),
       ...(job.reasons ? { reasons: job.reasons } : {}),
+      ...(job.threadsOnly ? { threadsOnly: true as const } : {}),
     };
     store.data.items.push(item);
     // An offer (a merge, an approval to give again) is never queued: it waits for your click from the start.
@@ -942,6 +983,8 @@ export function createAgent(deps: AgentDeps): Agent {
       data: {
         mode: job.mode,
         ...(job.reasons ? { reasons: job.reasons } : {}),
+        // A full re-review, or one over your threads only — the log tells them apart.
+        ...(job.scenario === "rereview" ? { rereview: job.threadsOnly ? "threads" : "full" } : {}),
         asked: job.key.endsWith("|asked"),
         size: { additions: pr.additions, deletions: pr.deletions, files: pr.changedFiles },
       },
@@ -1316,6 +1359,7 @@ export function createAgent(deps: AgentDeps): Agent {
       return orchestratorRunFor(roots, pr.url);
     };
     const reviewedByAgent = agentReviews();
+    const reviewed = reviewedHeads();
     const plan = planJobs(snapshot.pullRequests, s, {
       // No checkout yet is no reason to wait when the agent may clone one: the run makes it.
       noCheckout: (pr) => (cloneOf(pr) || s.cloneMissing ? null : noCheckoutWhy(pr, claudeSettings)),
@@ -1327,6 +1371,7 @@ export function createAgent(deps: AgentDeps): Agent {
       selfReviewed: (pr) => Boolean(store.data.ledger[jobKey(pr, "drive", "self")]) || (pr.headOid !== null && store.data.pushedHeads[pr.id] === pr.headOid),
       briefDone,
       agentReviewed: (pr) => reviewedByAgent.get(pr.id) ?? null,
+      reviewedHead: (pr) => pr.headOid !== null && reviewed.has(`${pr.id}|${pr.headOid}`),
       reapproveState,
       baseOnlyState,
       now: now(),
@@ -1679,6 +1724,7 @@ export function createAgent(deps: AgentDeps): Agent {
         effort: s.effort,
         isolation: full ? "full" : "restricted",
         ...(item.reasons ? { reasons: item.reasons } : {}),
+        ...(item.scenario === "rereview" ? { rereview: item.threadsOnly ? "threads" : "full" } : {}),
         // How long it stood in the queue (a resumed run's queue time is its first run's).
         ...(!resume ? { waitedMs: Math.max(0, Date.parse(item.startedAt ?? stamp()) - Date.parse(item.queuedAt)) } : {}),
       },
@@ -1717,6 +1763,7 @@ export function createAgent(deps: AgentDeps): Agent {
           number: item.prNumber,
           ...(kind === "drive" && pr && remote ? { baseRef: `${remote}/${pr.baseRefName}` } : {}),
           ...(item.reasons ? { reasons: item.reasons } : {}),
+          ...(item.threadsOnly ? { threadsOnly: true } : {}),
           stack: pr ? stackRules(pr, item.scenario) : null,
           ...(full ? { full: true } : {}),
         }, s.language),
@@ -2952,7 +2999,7 @@ export function createAgent(deps: AgentDeps): Agent {
     scenario: AgentScenario,
     reasons?: string[],
     before?: string | null,
-    from?: Pick<AgentItem, "carry" | "brief" | "clone">,
+    from?: Pick<AgentItem, "carry" | "brief" | "clone" | "threadsOnly">,
   ): AgentActionResult {
     if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
       return { ok: false, error: "The agent is already on this PR." };
@@ -2980,10 +3027,12 @@ export function createAgent(deps: AgentDeps): Agent {
                 ? "on"
                 : "shadow"
             : on(s.scenarios.review.mode);
+    // Over the threads only just for an interrupted run that was one (`recoverInterrupted`): one you ask for is full.
+    const threadsOnly = scenario === "rereview" && from?.threadsOnly ? (true as const) : undefined;
     const what =
-      { brief: "a brief", rereview: "re-review", drive: reasons?.includes("self") ? "self-review" : `drive — ${describeReasons(reasons ?? [])}` }[scenario as string] ?? "review";
+      { brief: "a brief", rereview: threadsOnly ? "re-review of your threads only" : "re-review", drive: reasons?.includes("self") ? "self-review" : `drive — ${describeReasons(reasons ?? [])}` }[scenario as string] ?? "review";
     const others = store.data.items.filter((i) => i.state === "queued");
-    const item = newItem({ key, prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario, mode, reasons }, pr, `Queued: ${what} (asked by you)`);
+    const item = newItem({ key, prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario, mode, reasons, threadsOnly }, pr, `Queued: ${what} (asked by you)`);
     // Dropped in front of a queued run: it takes that place.
     if (before) {
       const rank = rankBefore(others, before);

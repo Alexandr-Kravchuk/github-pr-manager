@@ -11895,6 +11895,66 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: one full re-review per head (#294) — the author's answer on the head it re-reviewed gets a run over the threads only", async () => {
+      const iso = (min) => new Date(Date.now() + min * 60_000).toISOString();
+      // creatio-ai-app-development-toolkit#294: asked again on e54f58b — a full re-review — then the author answered on that same head.
+      const pr = { ...reviewPr({ viewerHasReviewed: true, role: "reviewer", requestedOfMe: true, headOid: "e54f58b" }), viewerReviewedAt: iso(-60), viewerReviewedHead: true, viewerApproved: false, authorRepliedAt: null };
+      // The author's answers land minutes ahead: no settling wait, so each one's run starts at once.
+      const f = agentFixture({ pr, script: succeed("Re-reviewed."), agent: { limits: { settleMinutes: 0 } } });
+      const rules = (c) => c.args[c.args.indexOf("--append-system-prompt") + 1];
+      const queued = () =>
+        nfsA
+          .readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8")
+          .trim()
+          .split("\n")
+          .map((l) => JSON.parse(l))
+          .filter((e) => e.kind === "run" && e.event === "queued");
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).length === 1 && only(f)[0].state === "done");
+        const full = only(f)[0];
+        assert.deepStrictEqual([full.key, full.threadsOnly], ["PR_R|rereview|e54f58b|asked@-", undefined], "the head's first re-review is full");
+        assert.doesNotMatch(rules(f.children[0]), /threads-only/);
+        // The author answers on the same head: the plan's next run is over the threads only.
+        f.snapshot.pullRequests[0] = { ...pr, roles: ["reviewed"], requestedOfMe: false, authorRepliedAt: iso(1) };
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).length === 2 && only(f)[1].state === "done");
+        const light = only(f)[1];
+        assert.match(light.key, /^PR_R\|rereview\|e54f58b\|reply@/);
+        assert.strictEqual(light.threadsOnly, true);
+        assert.ok(rules(f.children[1]).includes(agentCore.THREADS_ONLY_RULE));
+        assert.match(rules(f.children[1]), /rereview: "threads-only" and statusComment: false/);
+        // The log and the Board tell the two apart.
+        assert.deepStrictEqual(
+          queued().map((e) => [e.data.rereview, e.detail]),
+          [
+            ["full", "Queued: re-review — you were asked again"],
+            ["threads", "Queued: re-review of your threads only — the author answered; this head had its full re-review"],
+          ],
+        );
+        assert.strictEqual(view.workLine(light), "Checking the author's answers in your threads");
+        assert.strictEqual(view.workLine(full), "Re-reviewing — the author answered");
+        assert.strictEqual(view.itemVerb(light), "Checking threads on");
+        // Asked again on that head: threads only too.
+        f.snapshot.pullRequests[0] = { ...pr, authorRepliedAt: iso(2) };
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).length === 3 && only(f)[2].state === "done");
+        assert.deepStrictEqual([only(f)[2].threadsOnly, queued()[2].data.rereview], [true, "threads"]);
+        // A push: a new head gets its full re-review.
+        f.snapshot.pullRequests[0] = { ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false, headOid: "f00ba12" }), viewerReviewedAt: iso(-60), viewerReviewedHead: false, lastCommitPushedAt: iso(3), authorRepliedAt: null };
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).length === 4 && only(f)[3].state === "done");
+        assert.deepStrictEqual([view.keyHead(only(f)[3].key), only(f)[3].threadsOnly, queued()[3].data.rereview], ["f00ba12", undefined, "full"]);
+        // You ask for one yourself on a head the agent went over: yours is always full.
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: pr.id }), { ok: true });
+        await until(() => only(f).length === 5 && only(f)[4].state === "done");
+        assert.deepStrictEqual([only(f)[4].key, only(f)[4].threadsOnly], ["PR_R|rereview|f00ba12|asked", undefined]);
+        assert.doesNotMatch(rules(f.children[4]), /threads-only/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
 
     await atest("agent act: pause, hint and resume reach the running session; Stop leaves a note, not a decision", async () => {
       const f = agentFixture({ script: keepWorking });
@@ -12696,6 +12756,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         running: [{ runId, paused: false, progress: { steps: [{ id: "1", subject: "Read the diff", status: "completed" }, { id: "2", subject: "Check the answers", status: "in_progress" }], activity: "Read x.ts" } }],
       });
       assert.deepStrictEqual([working.owner, working.now, working.progress], ["agent", "The agent is re-reviewing it.", { step: "Check the answers", done: 1, total: 2, activity: "Read x.ts" }]);
+      // Over the threads only (that commit had its full re-review), the card says so.
+      const light = xOne(xPr({ roles: ["reviewer"] }), [sIt({ runId, state: "working", scenario: "rereview", threadsOnly: true })], { running: [{ runId, paused: false, progress: { steps: [], activity: null } }] });
+      assert.strictEqual(light.now, "The agent is checking the author's answers in your threads.");
       assert.deepStrictEqual(working.choices.map((c) => c.act.type), ["stop"]);
       assert.match(working.next, /Nothing is posted on GitHub until you send it/);
       const queued = xBoard([xPr({ id: "Q1", roles: ["reviewer"] }), xPr({ id: "Q2", roles: ["reviewer"] })], [sIt({ prId: "Q1", state: "queued", queuedAt: sAgo(10) }), sIt({ prId: "Q2", state: "queued", queuedAt: sAgo(5) })]).entries;
@@ -14894,6 +14957,47 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(policy.withAgentReview(none, null), none);
       assert.strictEqual(policy.authorActivitySince(seen), at(6), "a push after the agent's review is the author's answer");
       assert.strictEqual(policy.authorActivitySince(none), null, "without it there is nothing to compare with");
+    });
+
+    test("agent policy: one full re-review per head — what the author does next on a head a full one went over is checked over your threads only", () => {
+      // creatio-ai-app-development-toolkit#294 on 2026-11-24: asked again on e54f58b at 00:48, the author answered at 00:53 —
+      // two full re-reviews of the same commit, ~$2.2 each.
+      const at = (m) => `2026-11-25T00:${m}:00Z`;
+      const pr294 = (o = {}) => ({
+        ...reviewPr({ viewerHasReviewed: true, role: "reviewer", requestedOfMe: true, headOid: "e54f58b" }),
+        viewerReviewedAt: at(30),
+        viewerReviewedHead: true,
+        viewerApproved: false,
+        lastCommitPushedAt: at(20),
+        authorRepliedAt: null,
+        ...o,
+      });
+      const answered = (o = {}) => pr294({ roles: ["reviewed"], requestedOfMe: false, authorRepliedAt: at(53), ...o });
+      // The agent's ledger, as the policy sees it: the heads a full review or re-review went over.
+      const ledger = (...heads) => ({ ...noSessions, reviewedHead: (pr) => heads.includes(pr.headOid) });
+      const cases = [
+        // [what, pr, ctx, [ledger key's cursor, threads only]]
+        ["asked again, no full re-review of this head yet: full", pr294(), ledger(), ["asked@-", false]],
+        ["no ledger in the context at all: full, as before", pr294(), noSessions, ["asked@-", false]],
+        ["the ledger knows only an older head: full", pr294(), ledger("84f5d22"), ["asked@-", false]],
+        ["#294: the author answered on the head re-reviewed in full: threads only", answered(), ledger("e54f58b"), [`reply@${at(53)}`, true]],
+        ["asked again on that head, after an answer: threads only", pr294({ authorRepliedAt: at(55) }), ledger("e54f58b"), [`asked@${at(55)}`, true]],
+        ["asked again on that head, nothing else: threads only", pr294(), ledger("e54f58b"), ["asked@-", true]],
+        ["a push since: a new head gets its full re-review", answered({ headOid: "f00ba12", viewerReviewedHead: false, lastCommitPushedAt: at(58), authorRepliedAt: null }), ledger("e54f58b"), [`reply@${at(58)}`, false]],
+      ];
+      for (const [what, pr, ctx, [cursor, light]] of cases) {
+        const jobs = policy.planJobs([pr], agentOn(), ctx).jobs;
+        assert.deepStrictEqual(
+          jobs.map((j) => [j.scenario, j.kind, j.key, j.threadsOnly === true]),
+          [["rereview", "rereview", `PR_R|rereview|${pr.headOid}|${cursor}`, light]],
+          what,
+        );
+      }
+      // The key is the trigger's either way: the full run's own trigger never comes back as a light run of its own.
+      assert.strictEqual(policy.planJobs([answered()], agentOn(), ledger()).jobs[0].key, policy.planJobs([answered()], agentOn(), ledger("e54f58b")).jobs[0].key);
+      // A first review is never light: the ledger counts only for a PR you reviewed before.
+      const first = policy.planJobs([reviewPr({ headOid: "e54f58b" })], agentOn(), ledger("e54f58b")).jobs;
+      assert.deepStrictEqual(first.map((j) => [j.scenario, j.threadsOnly]), [["review", undefined]]);
     });
 
     test("agent policy: a PR with no clone of its repository gets no run — it waits and says why; offers need none", () => {
@@ -17396,6 +17500,28 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         } finally {
           g.agent.stop();
         }
+      }
+    });
+
+    await atest("agent: an interrupted re-review over the threads only that starts over stays one — not a full re-review of a head that had its own", async () => {
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const runId = "00000000-0000-4000-8000-0000000000d2";
+      const st = agentStore.emptyStore("2026-11-05");
+      st.items = [
+        { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", state: "working", headline: "h", queuedAt: "2026-11-05T00:00:00Z", runId, key: "PR_R|rereview|aaa111|reply@2026-11-05T00:00:00Z", scenario: "rereview", threadsOnly: true, sessionId: "11111111-1111-4111-8111-111111111111", worktree: path.join(home, "gone") },
+      ];
+      agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
+      const g = agentFixture({ home, script: keepWorking });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length > 0);
+        const again = only(g).find((i) => i.key === "PR_R|rereview|aaa111|asked");
+        const queued = readLog(g).find((l) => l.event === "queued" && l.runId === again.runId);
+        assert.deepStrictEqual([again.threadsOnly, queued.detail, queued.data.rereview], [true, "Queued: re-review of your threads only (asked by you)", "threads"]);
+        const rules = g.children[0].args[g.children[0].args.indexOf("--append-system-prompt") + 1];
+        assert.ok(rules.includes(agentCore.THREADS_ONLY_RULE));
+      } finally {
+        g.agent.stop();
       }
     });
 
