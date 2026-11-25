@@ -13384,6 +13384,199 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: "C:/x.js" }, gpr, null).allow, false, "no guard file, no workflow");
     });
 
+    // Every refusal is a step the model spends re-reading its context (2026-11-25:
+    // 469 refused tool calls in 68 runs). A refusal says what to do instead — and
+    // stays a refusal: hints never change a decision.
+    {
+      const HINT_PLUGIN = "C:/Users/me/.claude/plugins/cache/x/creatio-development/1.7.142";
+      const HINT_HELPER = `${HINT_PLUGIN}/skills/creatio-code-review/scripts/rereview-context.cjs`;
+      const hintRun = {
+        ...readRun,
+        wrapperPath: "C:/T/prd-agent/r/bin/pr-review-publish.sh",
+        workflowDirs: [HINT_PLUGIN],
+        preflight: { helpers: [HINT_HELPER], installedPlugins: "C:/Users/me/.claude/plugins/installed_plugins.json", tmpDir: "C:/Users/me/AppData/Roaming/PR Dashboard/agent/runs/r/tmp" },
+      };
+      const W = "/c/T/prd-agent/r/bin/pr-review-publish.sh";
+      const refusedWith = (kind, tool, input, why, run = hintRun) => {
+        const d = guard.checkToolUse(kind, tool, input, gpr, run);
+        assert.strictEqual(d.allow, false, `${tool} ${JSON.stringify(input)} stays refused`);
+        if (why) assert.match(d.reason, why, `${tool} ${JSON.stringify(input)}`);
+        return d.reason;
+      };
+      const bashRefused = (command, why, kind = "review", run = hintRun) => refusedWith(kind, "Bash", { command }, why, run);
+
+      test("agent guard hints: a program a read-only run doesn't run says which tool to use instead", () => {
+        for (const [command, why] of [
+          ['ls "C:/Users/me/.claude/plugins/cache/x/creatio-development/1.7.142/skills/creatio-code-review/"', /Bash runs gh, twg, the publish wrapper, the review preflight's node only\. Instead of ls: find files with the Glob tool/],
+          ['cat "C:/wt/docs/notes.md"', /Instead of cat: read a file with the Read tool \(offset and limit/],
+          ['cat "C:/T/prd-agent/r/bin/pr-review-publish.sh"', /that is the app's publish wrapper — run it, don't read it — usage: pr-review-publish\.sh/],
+          ['grep -n summary "C:/wt/x.json"', /Instead of grep: search with the Grep tool/],
+          ["jq -r .x C:/wt/a.json", /shape gh's JSON with its own --jq/],
+          ["sleep 120", /reports to you by itself when it ends/],
+          ["cmd /c dir", /run the program itself, as one plain command/],
+          ["python -m json.tool x", /no script or program from the PR's repository/],
+        ]) bashRefused(command, why);
+        // The preflight's node: told the two calls, with this run's helper and payload folder.
+        for (const command of ["node --version", `node "C:/T/prd-agent/r/out/run-preflight.cjs"`, `node -e "require('${HINT_HELPER}')"`]) {
+          bashRefused(command, /node runs only the review preflight here, as node "C:\/Users\/me\/\.claude\/plugins\/cache\/x\/creatio-development\/1\.7\.142\/skills\/creatio-code-review\/scripts\/rereview-context\.cjs" < "C:\/T\/prd-agent\/r\/out\/<request>\.json"/);
+        }
+        // Without a preflight, node runs nothing at all.
+        bashRefused("node --version", /Instead of node: nothing else runs here/, "review", readRun);
+        // A shell around the wrapper: run the wrapper itself.
+        bashRefused(`bash ${W} --help`, /run the publish wrapper itself, not through bash — usage: pr-review-publish\.sh review\|comment/);
+        // A brief runs no wrapper and no preflight: it isn't told of them.
+        assert.doesNotMatch(bashRefused("ls", /Bash runs gh, twg only/, "brief", readRun), /wrapper|preflight/);
+      });
+
+      test("agent guard hints: shell syntax says what to drop, and which programs don't run either", () => {
+        const piped = bashRefused("gh api user --jq .login 2>&1 | head -20", /^Shell operators \(pipes, redirection, chaining\) are not allowed in agent runs — run one plain command\./);
+        assert.match(piped, /drop 2>&1 and 2>\/dev\/null/);
+        assert.match(piped, /no pipes — shape JSON with gh's --jq; a result too long to show is saved to a file you can Read/);
+        assert.match(piped, /instead of head: read a file with the Read tool/);
+        assert.doesNotMatch(piped, /instead of gh/, "gh runs: only what doesn't is named");
+        const chained = bashRefused('gh api user --jq .login; ls "C:/T/prd-agent/r/bin/"', /one command per call/);
+        assert.match(chained, /instead of ls: find files with the Glob tool/);
+        assert.doesNotMatch(bashRefused('cd "C:/wt" && gh pr view 12 --json title', /no cd — commands already run in the run's working folder/), /instead of cd/, "said once");
+        bashRefused("ls ~/.claude/workflows/ 2>/dev/null", /Unquoted \{ \} ~ #.*~ isn't expanded — write the full path.*instead of ls.*no named workflows.*\*\.workflow\.js/);
+        bashRefused('ls "$HOME/.claude/workflows/"', /^Expansion .*no \$VARIABLES — write the value out/);
+        bashRefused("cat <<'EOF' > /tmp/q.graphql", /no heredocs — write a file with the Write tool/);
+        // An operator inside quotes is the command's own: no hint about it.
+        assert.doesNotMatch(bashRefused("gh api repos/acme/widgets/pulls/12/files --jq '.[] | .filename' | head", /no pipes/), /one command per call/);
+        // A drive runs other programs: it is told only what to drop.
+        const drive = bashRefused("npm run typecheck 2>&1 | tail -15", /drop 2>&1/, "drive", { workDir: "C:/wt" });
+        assert.doesNotMatch(drive, /Bash runs gh/);
+        bashRefused('git -C "C:/wt" log --oneline -1', /drop -C <dir>/, "drive", { workDir: "C:/wt" });
+      });
+
+      test("agent guard hints: git in a read-only run names the gh reads that work — and each one passes the guard", () => {
+        const reason = bashRefused('git -C "C:/wt" diff a1b2..c3d4 --stat', /so no git; use gh: /);
+        for (const named of [
+          "gh pr view 12 --json headRefOid,baseRefOid,commits",
+          "gh pr diff 12",
+          `gh api repos/acme/widgets/pulls/12/files --paginate --jq '.[] | select(.filename == "PATH") | .patch'`,
+          "gh api 'repos/acme/widgets/contents/PATH?ref=SHA' -H 'Accept: application/vnd.github.raw'",
+        ]) {
+          assert.ok(reason.includes(named), `the hint names ${named}`);
+          const cmd = named.replace(/PATH/g, "src/a.ts").replace(/SHA/g, "abc123");
+          assert.deepStrictEqual(guard.checkBash("review", cmd, gpr), { allow: true }, cmd);
+          assert.ok(guard.ruleAllows(ad.DEFAULT_AGENT_TOOLS.review, cmd), `the default review tools let ${cmd} run`);
+        }
+        // A brief's default tools have no gh api: its hint doesn't send it there.
+        assert.doesNotMatch(bashRefused("git log --oneline -3", /gh pr diff 12/, "brief", readRun), /gh api/);
+        // gh pr diff takes no paths: the one file's patch is named instead.
+        bashRefused("gh pr diff 12 --patch -- src/a.ts", /takes no file paths.*gh api repos\/acme\/widgets\/pulls\/12\/files --paginate/);
+        bashRefused("gh api repos/acme/widgets/contents/CONTEXT.md --ref abc123 --jq .content", /A ref goes in the quoted path: 'repos\/<owner>\/<repo>\/contents\/PATH\?ref=SHA'/);
+        bashRefused("gh api repos/acme/widgets/git/trees/abc -X GET -f recursive=1", /drop -X, and put query parameters in the quoted path/);
+        bashRefused("gh api repos/acme/widgets/pulls/12/files --paginate --jq '.[] | .patch' --template '{{.}}'", /--jq already prints a string as it is: drop --template/);
+        bashRefused("GH_HOST=github.com gh api user --jq .login", /gh already points at this PR's host and repository: run the command without GH_HOST=…/);
+      });
+
+      test("agent guard hints: the publish wrapper is run, never read or asked for --help, and posts no status comment", () => {
+        const run = { ...hintRun, outDir: "C:\\T\\prd-agent\\r\\out" };
+        bashRefused(`${W} --help`, /^PUBLISH-REJECTED: usage: pr-review-publish\.sh .* — the app's own wrapper: it records each write and posts nothing; write every file under C:\/T\/prd-agent\/r\/out\/ and pass its absolute path\./, "review", run);
+        bashRefused(W, /the app's own wrapper/, "review", run);
+        bashRefused(`${W} status acme/widgets 12 C:/T/prd-agent/r/out/status.md`, /^PUBLISH-REJECTED: the app's wrapper posts no status comment — skip it and go on \(start the review workflow with statusComment: false\)/, "review", run);
+        assert.doesNotMatch(bashRefused(`${W} delete acme/widgets 12 x`, /^PUBLISH-REJECTED: usage/, "review", run), /records each write/, "a wrong call gets the usage alone");
+        refusedWith("review", "Read", { file_path: "C:/T/prd-agent/r/bin/pr-review-publish.sh" }, /is outside them\. That is the app's publish wrapper: run it, don't read it — usage: /);
+      });
+
+      test("agent guard hints: named workflows, and the preflight's request written to the wrong folder", () => {
+        refusedWith("review", "Glob", { pattern: "*.js", path: "C:/Users/me/.claude/workflows" }, /is outside them\. Agent runs have no named workflows \(nothing from ~\/\.claude\/workflows\)/);
+        refusedWith("review", "Glob", { pattern: "~/.claude/workflows/*.js" }, /don't glob under ~\. Agent runs have no named workflows/);
+        refusedWith("review", "Workflow", { name: "creatio-code-review-workflow" }, /by its script path — the skill's \*\.workflow\.js, inside C:\/Users\/me\/\.claude\/plugins\/cache\/x\/creatio-development\/1\.7\.142 — not by name/);
+        // The preflight's agent writes its request where TEMP points: told to write it under the payload folder.
+        refusedWith(
+          "rereview",
+          "Write",
+          { file_path: "C:\\Users\\me\\AppData\\Roaming\\PR Dashboard\\agent\\runs\\r\\tmp\\rereview-request.json", content: "{}" },
+          /writes payload files under C:\/T\/prd-agent\/r\/out and nothing else\. The review preflight's request goes there too — node runs only the review preflight here, as node ".*rereview-context\.cjs" < "C:\/T\/prd-agent\/r\/out\/<request>\.json"/,
+        );
+        assert.doesNotMatch(refusedWith("review", "Write", { file_path: "C:/wt/src/x.ts", content: "" }, /payload files under/), /preflight/, "a write elsewhere is told nothing about the preflight");
+      });
+
+      test("agent rules: a restricted run is told its tools up front — only commands the guard and its tools let through", () => {
+        const folder = { wrapperPath: "C:\\T\\prd-agent\\r\\bin\\pr-review-publish.sh", outDir: "C:\\T\\prd-agent\\r\\out" };
+        const workflow = "C:\\Users\\me\\.claude\\plugins\\cache\\x\\creatio-development\\1.7.142\\skills\\creatio-code-review\\creatio-code-review-workflow.workflow.js";
+        const review = agentCore.agentRules("review", "on", folder, { repo: "Acme/Widgets", number: 12 }, "en", { allowedTools: ad.DEFAULT_AGENT_TOOLS.review, workflows: [workflow] });
+        for (const said of [
+          /Bash runs one plain command per call: gh, twg, the publish wrapper only — no ls, cat, grep, node, sleep, cd or git; no pipes, redirection, 2>&1, ; or &&; quote any \* \? \{ \} ~ #\./,
+          /Files: Read \(offset\/limit for a part\), Glob, Grep\./,
+          /gh pr diff 12 \(--name-only for its files\)/,
+          /rows with @tsv, never \\t/,
+          /twg's -o takes json, jsonl, yaml or text/,
+          /A result too long to show is saved to a file you are told of: Read that file/,
+          /Named workflows don't exist here: .* Workflow\(\{ scriptPath: "C:\/Users\/me\/\.claude\/plugins\/cache\/x\/creatio-development\/1\.7\.142\/skills\/creatio-code-review\/creatio-code-review-workflow\.workflow\.js", args \}\)/,
+          /The publish wrapper \(run it — never with --help, never read it\): \/c\/T\/prd-agent\/r\/bin\/pr-review-publish\.sh review\|comment Acme\/Widgets 12 FILE\.json · reply\|escalate Acme\/Widgets 12 COMMENT-ID FILE\.txt · resolve THREAD-ID; every FILE written under C:\/T\/prd-agent\/r\/out\//,
+          /start the review workflow with statusComment: false/,
+        ]) assert.match(review, said);
+        // Every command the rules name passes the guard for this PR, and the run's own tools.
+        for (const named of [
+          "gh pr view 12 --json headRefOid,baseRefOid,commits",
+          "gh pr diff 12",
+          `gh api repos/Acme/Widgets/pulls/12/files --paginate --jq '.[] | select(.filename == "PATH") | .patch'`,
+          "gh api 'repos/Acme/Widgets/contents/PATH?ref=SHA' -H 'Accept: application/vnd.github.raw'",
+        ]) {
+          assert.ok(review.includes(named), `the rules name ${named}`);
+          const cmd = named.replace(/PATH/g, "src/a.ts").replace(/SHA/g, "abc123");
+          assert.deepStrictEqual(guard.checkBash("review", cmd, gpr), { allow: true }, cmd);
+          assert.ok(guard.ruleAllows(ad.DEFAULT_AGENT_TOOLS.review, cmd), cmd);
+        }
+        // A wrapper call as the rules spell it passes too.
+        assert.deepStrictEqual(guard.checkBash("review", "/c/T/prd-agent/r/bin/pr-review-publish.sh review Acme/Widgets 12 C:/T/prd-agent/r/out/review.json", gpr, { ...folder }), { allow: true });
+        // A brief's tools have no gh api, no wrapper and no workflow: none of them is named.
+        const brief = agentCore.agentRules("brief", "on", null, { repo: "Acme/Widgets", number: 12 }, "en", { allowedTools: ad.DEFAULT_AGENT_TOOLS.brief, workflows: [] });
+        assert.match(brief, /gh pr diff 12/);
+        assert.doesNotMatch(brief, /gh api|publish wrapper|Workflow\(/);
+        // A drive may use git and other programs: told only the shell rules, and its wrapper line is its own.
+        const drive = agentCore.agentRules("drive", "shadow", folder, { repo: "Acme/Widgets", number: 12, reasons: ["ci"] }, "en", { allowedTools: ad.DEFAULT_AGENT_TOOLS.drive, workflows: [] });
+        assert.match(drive, /no cd \(you are in the worktree\) and no git -C/);
+        assert.doesNotMatch(drive, /no ls, cat|Instead of git|statusComment/);
+        // Without tools (a full-context drive, older callers): no tool rules at all.
+        assert.doesNotMatch(agentCore.agentRules("review", "on", folder, { repo: "Acme/Widgets", number: 12 }), /Tools here/);
+        // It rides on every step of every run: kept short.
+        const added = review.length - agentCore.agentRules("review", "on", folder, { repo: "Acme/Widgets", number: 12 }).length;
+        assert.ok(added < 2200, `the tool rules add ${added} characters`);
+      });
+    }
+
+    test("agent plugins: the workflow scripts of the skills a prompt names — an agent run has no named workflows", () => {
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-wf-"));
+      const skill = path.join(root, "skills", "creatio-code-review");
+      nfsA.mkdirSync(skill, { recursive: true });
+      nfsA.writeFileSync(path.join(skill, "creatio-code-review-workflow.workflow.js"), "");
+      nfsA.writeFileSync(path.join(skill, "SKILL.md"), "");
+      nfsA.mkdirSync(path.join(root, "skills", "code-delivery"), { recursive: true });
+      nfsA.writeFileSync(path.join(root, "skills", "code-delivery", "code-delivery-verify.workflow.js"), "");
+      const cat = [{ name: "creatio-development", installPath: root }];
+      assert.deepStrictEqual(plugins.skillWorkflows("/creatio-development:creatio-code-review https://x/pull/1 — a re-review", cat), [path.join(skill, "creatio-code-review-workflow.workflow.js")]);
+      assert.deepStrictEqual(plugins.skillWorkflows("/creatio-code-review https://x/pull/1", cat), [], "an unresolved bare name names no plugin");
+      assert.deepStrictEqual(plugins.skillWorkflows("/creatio-development:nope x", cat), [], "no such skill folder");
+      assert.deepStrictEqual(plugins.skillWorkflows("/other:creatio-code-review x", cat), [], "another plugin's skill");
+      nfsA.rmSync(root, { recursive: true, force: true });
+    });
+
+    test("agent runner: --add-dir opens the session's own folders — exactly what the guard lets it read, made in advance", () => {
+      const base = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-sf-"));
+      const roots = [path.join(base, "projects"), path.join(base, "tmp", "claude")];
+      const cwd = path.join(base, "wt", "agent-x-12");
+      nfsA.mkdirSync(cwd, { recursive: true });
+      const sid = "6250ec40-5c65-407c-8b04-61b1dba8fae7";
+      const dirs = runner.sessionFolders(roots, cwd, sid);
+      const name = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+      for (const root of roots) assert.ok(dirs.includes(path.join(root, name, sid)), `${root}: ${dirs.join(", ")}`);
+      for (const d of dirs) assert.ok(nfsA.statSync(d).isDirectory(), `${d} exists for --add-dir`);
+      // The guard reads in them — the Workflow's journal the session was refused — and in no other session's.
+      const run = { workDir: cwd, readDirs: [cwd], sessionId: sid, sessionRoots: roots };
+      for (const d of dirs) {
+        assert.deepStrictEqual(guard.checkToolUse("review", "Read", { file_path: path.join(d, "subagents", "workflows", "wf_1", "journal.jsonl") }, gpr, run), { allow: true }, d);
+      }
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: path.join(roots[0], name, "11111111-2222-3333-4444-555555555555", "x.jsonl") }, gpr, run).allow, false, "another session's folder");
+      assert.deepStrictEqual(runner.sessionFolders(roots, cwd, "../.."), [], "only a session id's characters name a folder");
+      const args = runner.buildClaudeArgs({ cwd, sessionId: sid, kind: "review", prompt: "p", appendSystemPrompt: "r", allowedTools: ["Read"], pluginDirs: [], model: "", effort: "", settingsFile: "s.json", timeoutMs: 1, addDirs: dirs });
+      for (const d of dirs) assert.strictEqual(args[args.indexOf(d) - 1], "--add-dir", d);
+      nfsA.rmSync(base, { recursive: true, force: true });
+    });
+
     test("capture: the review's wrapper records a checked call and posts nothing", () => {
       const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-cap-"));
       const outDir = path.join(runDir, "out");

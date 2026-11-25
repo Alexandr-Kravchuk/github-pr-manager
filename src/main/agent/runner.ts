@@ -6,7 +6,7 @@ import path from "node:path";
 import { applyStreamEvent, initialProgress, parseStreamLine, type RunProgress } from "../../shared/agent-stream";
 import { launcherEnv } from "../../shared/claude-launch";
 import { PREFLIGHT_HELPER, type GuardPreflight, type GuardRun } from "../../shared/agent-guard";
-import { claudeConfigDir } from "../claude-sessions";
+import { claudeConfigDir, projectDirName } from "../claude-sessions";
 import type { AgentRunKind } from "../../shared/types";
 
 // One agent session: `claude -p` with stream-json both ways, isolated from the
@@ -51,7 +51,7 @@ export interface RunSpec {
    * More folders the session's file tools may use (`--add-dir`): a review's
    * payload folder, and the plugins' own folders — a skill's Workflow reads its
    * bundled script from there, and `--restricted` confines file access to the
-   * working folders.
+   * working folders — and the session's own folders (`sessionFolders`).
    */
   addDirs?: string[];
   /** More environment for the session (a drive run's push block). */
@@ -181,6 +181,40 @@ export function claudeSessionRoots(env: Record<string, string | undefined>, plat
   const tmp = env.CLAUDE_CODE_TMPDIR?.trim();
   const temps = tmp ? [tmp] : platform === "win32" ? [osTempDir(env, platform)] : [osTempDir(env, platform), "/tmp"];
   return [...new Set([path.join(config, "projects"), ...temps.map((t) => path.join(t, "claude"))])];
+}
+
+/**
+ * The session's own folders under those roots, `<root>/<project>/<sessionId>`,
+ * made in advance, for `--add-dir`. `--restricted` confines the file tools to
+ * the working folders, so the session couldn't Read its own Workflow's journal
+ * (`…/subagents/workflows/wf_<id>/journal.jsonl`) or a background task's output,
+ * though Claude Code tells it to and the guard (`sessionRoots`) lets it. Only
+ * this session's folders, never a root: the guard already narrows reads to
+ * them, and Claude Code's own rule stays as narrow. The project folder is the
+ * working folder's path with every other character than a letter or digit
+ * made `-` (`projectDirName`), as written and as its real path.
+ */
+export function sessionFolders(roots: readonly string[], cwd: string, sessionId: string): string[] {
+  if (!/^[A-Za-z0-9-]{8,}$/.test(sessionId)) return [];
+  const names = new Set([projectDirName(cwd)]);
+  try {
+    names.add(projectDirName(fs.realpathSync.native(cwd)));
+  } catch {
+    // Not there (yet): the name as written is the one Claude Code takes.
+  }
+  const dirs: string[] = [];
+  for (const root of roots) {
+    for (const name of names) {
+      const dir = path.join(root, name, sessionId);
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        dirs.push(dir);
+      } catch {
+        // A root that can't be written to holds nothing of this session's.
+      }
+    }
+  }
+  return dirs;
 }
 
 /** The temp folder a process started with `env` takes — `os.tmpdir()`'s own rule, for that environment rather than this one. */
