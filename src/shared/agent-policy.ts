@@ -1,5 +1,5 @@
 import { brokenLayerBelow, STACK_REBASE_HINT } from "./agent-stack";
-import { OWN_SESSION_WHY } from "./agent-view";
+import { MERGE_HOLDS, OWN_SESSION_WHY } from "./agent-view";
 import type { AgentRunKind, AgentScenario, AgentSettings, PullRequest } from "./types";
 
 export type { AgentScenario };
@@ -122,13 +122,9 @@ export function mergeBlocker(pr: PullRequest, s: AgentSettings): string | null {
   if (pr.blockedByStack) return "Waits for the PR below it in the stack";
   if (pr.hasConflicts) return "Has conflicts";
   if (pr.ciState === "failure") return "CI is red";
-  if (pr.ciState === "pending") return "CI is still running";
-  if (pr.awaitingReview) return "Waiting for reviewers";
-  // Named before the catch-all, so an idle card says what holds the merge.
-  if (pr.hasUnaddressedReviewFeedback) return "An approval's feedback is yet to be marked read";
-  if (pr.requiredReviewPending) return "A required review is missing";
-  if (pr.isBehindBase) return "Behind its base branch";
-  if (!pr.canBeMerged) return "Not mergeable yet";
+  // The rest in the one order the Board's "With reviewers" card names them too (`MERGE_HOLDS`).
+  const hold = MERGE_HOLDS.find((h) => h.blocker && h.holds(pr));
+  if (hold?.blocker) return hold.blocker(pr);
   if (m.requireAllReviewers && pr.reviewers.some((r) => r.reviewState === "pending" || r.reviewState === "changes_requested")) return "Not every requested reviewer approved";
   if (m.requireThreadsResolved && pr.unresolvedThreads > 0) return `${pr.unresolvedThreads} unresolved thread${pr.unresolvedThreads === 1 ? "" : "s"}`;
   if (m.requireChecksGreen && pr.checks.length > 0 && pr.ciState !== "success") return "Not every check is green";

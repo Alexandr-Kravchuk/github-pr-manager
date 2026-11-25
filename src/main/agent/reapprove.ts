@@ -7,6 +7,7 @@
 // signature, or a review request.
 
 import { signedBody, type PublishRequest } from "../../shared/agent-publish";
+import { APP_APPROVAL_LINES } from "../../shared/approval-feedback";
 import { baseMerges, dismissedApprovals, reapprovalBody, type ReviewTimelineNode } from "../../shared/agent-reapprove";
 import { isPlainBranch, safeGit, withNoHooks } from "./drive";
 import { ghError, hostFlag, type GhRunner } from "./publish";
@@ -337,21 +338,16 @@ export async function checkReapproval(gh: GhRunner, pr: ReapprovalTarget, scenar
   };
 }
 
-/**
- * The text of an approval the app posts: one line and the signature. The
- * author's dashboard reads that shape as nothing to act on (`readApproval` in
- * `shared/approval-feedback.ts`) — keep the lines in step with its `APP_LINES`.
- */
-function approvalBody(line: string, signature: string): string {
-  return signedBody(line, signature);
-}
+// The app's approval lines come from `APP_APPROVAL_LINES` (shared/approval-feedback.ts),
+// the same source the author's dashboard reads them by: one line and the signature
+// is nothing to act on there.
 
 /** Your approval again, on the head it now has: one line and the signature. */
 export function reapproveRequest(repo: string, number: number, head: string, oldHead: string, signature: string): PublishRequest {
   return {
     label: "approval",
     endpoint: `repos/${repo}/pulls/${number}/reviews`,
-    body: { event: "APPROVE", commit_id: head, body: approvalBody(reapprovalBody(oldHead), signature) },
+    body: { event: "APPROVE", commit_id: head, body: signedBody(reapprovalBody(oldHead), signature) },
   };
 }
 
@@ -381,7 +377,7 @@ export function approveAgainRequest(repo: string, number: number, head: string, 
   return {
     label: "approval",
     endpoint: `repos/${repo}/pulls/${number}/reviews`,
-    body: { event: "APPROVE", commit_id: head, body: approvalBody(`Approved again: nothing changed since my approval of \`${head.slice(0, 7)}\`.`, signature) },
+    body: { event: "APPROVE", commit_id: head, body: signedBody(APP_APPROVAL_LINES.approvedAgain(head), signature) },
   };
 }
 
@@ -393,7 +389,7 @@ export function approveRequest(repo: string, number: number, head: string, signa
   return {
     label: "approval",
     endpoint: `repos/${repo}/pulls/${number}/reviews`,
-    body: { event: "APPROVE", commit_id: head, body: approvalBody(`Approved \`${head.slice(0, 7)}\`: nothing blocking is left.`, signature) },
+    body: { event: "APPROVE", commit_id: head, body: signedBody(APP_APPROVAL_LINES.approved(head), signature) },
   };
 }
 

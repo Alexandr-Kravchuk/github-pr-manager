@@ -9,9 +9,11 @@ import { resultCard, type RunAsk, type RunFinding } from "./agent-result";
 import type { PublishSummary } from "./agent-publish";
 import { currentStep } from "./agent-stream";
 import {
+  answersReviewers,
   approvableReview,
   approvedHold,
   feedbackFrom,
+  isFeedbackOnly,
   isNoCheckoutWhy,
   isOwnSessionWhy,
   queueOrder,
@@ -147,8 +149,8 @@ function doing(item: AgentItem): string {
       const r = item.reasons ?? [];
       if (r.includes("self")) return "self-reviewing your PR before reviewers see it";
       if (r.includes("comments") && r.length === 1) return "answering the reviewers' comments";
-      if (r.includes("feedback") && r.length === 1) return "checking the feedback in the approval";
-      if (r.length === 2 && r.includes("comments") && r.includes("feedback")) return "answering the reviewers' comments and the approval's feedback";
+      if (isFeedbackOnly(r)) return "checking the feedback in the approval";
+      if (answersReviewers(r)) return "answering the reviewers' comments and the approval's feedback";
       if (r.includes("conflicts")) return "resolving the conflict";
       return "fixing the failing CI";
     }
@@ -449,7 +451,7 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
             ? "the failing CI"
             : reasons.includes("conflicts")
               ? "the conflict"
-              : reasons.length === 1 && reasons[0] === "feedback"
+              : isFeedbackOnly(reasons)
                 ? "what the approval's feedback asked"
                 : "what reviewers asked";
         const replies = plan && !item?.published ? plan.replies.length : 0;

@@ -9,7 +9,21 @@ import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
-import { AGENT_CLOSED, approvableReview, approvalStands, boardStage, cardKey, keyHead, NO_CHECKOUT_WHY, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
+import {
+  AGENT_CLOSED,
+  answersReviewers,
+  approvableReview,
+  approvalStands,
+  boardStage,
+  cardKey,
+  isFeedbackOnly,
+  keyHead,
+  NO_CHECKOUT_WHY,
+  queueOrder,
+  quietUntil,
+  rankBefore,
+  todayKey,
+} from "../../shared/agent-view";
 import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -167,7 +181,6 @@ export function runKindOf(scenario: AgentScenario): AgentRunKind {
 
 const REASON_TEXT: Record<string, string> = { ci: "failing CI", conflicts: "conflicts", comments: "review comments", feedback: "an approval's feedback", self: "self-review" };
 
-/** Only what reviewers wrote — comments, an approval's feedback — no CI, no conflict: their own words and prompt. */
 /**
  * A run on the feedback in your PR's approvals and nothing else. Not a setting:
  * the rules (`driveFocus`) name the approvals the card showed and how to treat
@@ -175,8 +188,6 @@ const REASON_TEXT: Record<string, string> = { ci: "failing CI", conflicts: "conf
  */
 const APPROVAL_FEEDBACK_PROMPT =
   "Check the feedback in the approvals of {url} that your rules name, against the head commit: fix the points that hold as commits, and say why the others don't. Answer no thread and post nothing.";
-
-const answersReviewers = (reasons: readonly string[] | undefined) => (reasons?.length ?? 0) > 0 && reasons!.every((r) => r === "comments" || r === "feedback");
 
 /** "failing CI and review comments" */
 export function describeReasons(reasons: readonly string[]): string {
@@ -194,7 +205,7 @@ function queuedHeadline(job: Pick<AgentJob, "scenario" | "key" | "reasons">): st
       return job.reasons?.includes("self")
         ? "Queued: self-review before reviewers"
         : answersReviewers(job.reasons)
-          ? job.reasons!.includes("comments")
+          ? job.reasons?.includes("comments")
             ? "Queued: reviewers' comments to check"
             : "Queued: an approval's feedback to check"
           : `Queued: drive — ${describeReasons(job.reasons ?? [])}`;
@@ -221,7 +232,7 @@ function workingHeadline(scenario: AgentScenario): string {
 /** A running item's line: what it drives for, or what its scenario does. */
 function runningHeadline(item: Pick<AgentItem, "scenario" | "reasons">): string {
   if (item.reasons?.includes("self")) return "Self-reviewing before reviewers";
-  if (answersReviewers(item.reasons)) return item.reasons!.includes("comments") ? "Checking reviewers' comments" : "Checking the approval's feedback";
+  if (answersReviewers(item.reasons)) return item.reasons?.includes("comments") ? "Checking reviewers' comments" : "Checking the approval's feedback";
   return item.reasons?.length ? `Driving — ${describeReasons(item.reasons)}` : workingHeadline(item.scenario);
 }
 
@@ -286,6 +297,28 @@ interface RulesPr {
   full?: boolean;
   /** A `feedback` drive: the approvals the Board showed (`PullRequest.reviewFeedback`) — the only ones it may read. */
   feedback?: ReadonlyArray<Pick<ReviewFeedback, "login" | "reviewId">>;
+}
+
+/** What a run asked for again carries over from the one it replaces: your yes to a clone, the approvals its card showed. */
+function carried(item: Pick<AgentItem, "clone" | "feedbackShown">): Pick<AgentItem, "clone" | "feedbackShown"> | undefined {
+  if (!item.clone && !item.feedbackShown) return undefined;
+  return { ...(item.clone ? { clone: true as const } : {}), ...(item.feedbackShown ? { feedbackShown: item.feedbackShown } : {}) };
+}
+
+/**
+ * The approvals a feedback drive may read: those on the PR now that the card
+ * showed at your ask (`feedbackShown`), by review id and version — one that
+ * came or changed after the click is left out. An item from before the list
+ * was kept reads the PR's list as it is.
+ */
+export function feedbackToRead(
+  item: Pick<AgentItem, "feedbackShown">,
+  pr: Pick<PullRequest, "reviewFeedback"> | null | undefined,
+): Array<Pick<ReviewFeedback, "login" | "reviewId">> {
+  const now = pr?.reviewFeedback ?? [];
+  const shown = item.feedbackShown;
+  const keep = shown ? now.filter((f) => shown.some((s) => s.reviewId === f.reviewId && s.updatedAt === f.updatedAt)) : now;
+  return keep.map((f) => ({ login: f.login, reviewId: f.reviewId }));
 }
 
 /**
@@ -404,7 +437,7 @@ export function promptFor(item: Pick<AgentItem, "scenario" | "reasons">, claude:
     const r = item.reasons ?? [];
     if (r.includes("self")) return claude.agentPrompts.selfReview || DEFAULT_AGENT_PROMPTS.selfReview;
     // An approval's feedback alone has no thread to answer: its own prompt, not the thread-by-thread one.
-    if (r.length > 0 && r.every((x) => x === "feedback")) return APPROVAL_FEEDBACK_PROMPT;
+    if (isFeedbackOnly(r)) return APPROVAL_FEEDBACK_PROMPT;
     if (answersReviewers(r)) return claude.agentPrompts.validateComments || DEFAULT_AGENT_PROMPTS.validateComments;
     return claude.prompts.drive || DEFAULT_CLAUDE_PROMPTS.drive;
   }
@@ -764,7 +797,7 @@ export function createAgent(deps: AgentDeps): Agent {
       }
       const reasons = item.scenario === "drive" ? askedDriveReasons(pr, s, item.reasons?.includes("feedback") ?? false) : item.reasons;
       // Cut short while it cloned: your yes to the clone goes on with it, or it would be refused for the missing checkout.
-      const queued = enqueueAsked(pr, s, item.scenario, reasons, undefined, item.clone ? { clone: true } : undefined);
+      const queued = enqueueAsked(pr, s, item.scenario, reasons, undefined, carried(item));
       void closeAs(item, queued.ok ? AGENT_CLOSED.rerun : item.headline);
     }
   }
@@ -1198,23 +1231,28 @@ export function createAgent(deps: AgentDeps): Agent {
         const who = [...new Set(unseen.map((f) => f.login))].join(", ");
         return { ok: false, error: `New or changed feedback from ${who} since the card was drawn — read it first; nothing was marked.` };
       }
-      const done: string[] = [];
+      // Every write that went out under your name, in order, logged once whatever the end.
+      const wrote: string[] = [];
+      const finish = (res: AgentActionResult): AgentActionResult => {
+        if (wrote.length > 0) {
+          const detail = `On your click: ${wrote.join("; ")}${res.ok ? "" : ` — then ${res.error}`}`;
+          store.log({ at: stamp(), kind: "run", event: "feedback-read", prId: pr.id, prNumber: pr.number, repo: pr.repo, headOid: pr.headOid ?? undefined, detail });
+        }
+        return res;
+      };
       for (const f of feedback) {
         if (f.ackBeforeEdit) {
           const off = unmarkReadRequest(f.reviewId!);
           const gone = await gh(ghApiArgs(off, pr.url), { input: JSON.stringify(off.body) });
-          if (gone.code !== 0) return { ok: false, error: `GitHub refused to take your old 👀 off ${f.login}'s edited approval: ${ghError(gone)}` };
+          if (gone.code !== 0) return finish({ ok: false, error: `GitHub refused to take your old 👀 off ${f.login}'s edited approval: ${ghError(gone)}` });
+          wrote.push(`old 👀 off ${f.login}'s approval`);
         }
         const req = markReadRequest(f.reviewId!);
         const res = await gh(ghApiArgs(req, pr.url), { input: JSON.stringify(req.body) });
-        if (res.code !== 0) {
-          if (done.length > 0) store.log({ at: stamp(), kind: "run", event: "feedback-read", prId: pr.id, prNumber: pr.number, repo: pr.repo, headOid: pr.headOid ?? undefined, detail: `Marked read on your click: ${done.join(", ")} — then GitHub refused ${f.login}'s` });
-          return { ok: false, error: `GitHub refused the 👀 on ${f.login}'s approval: ${ghError(res)}` };
-        }
-        done.push(f.login);
+        if (res.code !== 0) return finish({ ok: false, error: `GitHub refused the 👀 on ${f.login}'s approval: ${ghError(res)}` });
+        wrote.push(`👀 on ${f.login}'s approval`);
       }
-      store.log({ at: stamp(), kind: "run", event: "feedback-read", prId: pr.id, prNumber: pr.number, repo: pr.repo, headOid: pr.headOid ?? undefined, detail: `Marked read (👀) on your click: the approval${done.length === 1 ? "" : "s"} of ${done.join(", ")}` });
-      return { ok: true };
+      return finish({ ok: true });
     } finally {
       markingRead.delete(prId);
     }
@@ -1736,7 +1774,7 @@ export function createAgent(deps: AgentDeps): Agent {
           ...(kind === "drive" && pr && remote ? { baseRef: `${remote}/${pr.baseRefName}` } : {}),
           ...(item.reasons ? { reasons: item.reasons } : {}),
           // The approvals on the card now: one marked read since the click is left out.
-          ...(item.reasons?.includes("feedback") ? { feedback: (pr?.reviewFeedback ?? []).map((f) => ({ login: f.login, reviewId: f.reviewId })) } : {}),
+          ...(item.reasons?.includes("feedback") ? { feedback: feedbackToRead(item, pr) } : {}),
           stack: pr ? stackRules(pr, item.scenario) : null,
           ...(full ? { full: true } : {}),
         }, s.language),
@@ -2950,7 +2988,7 @@ export function createAgent(deps: AgentDeps): Agent {
     scenario: AgentScenario,
     reasons?: string[],
     before?: string | null,
-    from?: Pick<AgentItem, "carry" | "brief" | "clone">,
+    from?: Pick<AgentItem, "carry" | "brief" | "clone" | "feedbackShown">,
   ): AgentActionResult {
     if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
       return { ok: false, error: "The agent is already on this PR." };
@@ -2994,6 +3032,8 @@ export function createAgent(deps: AgentDeps): Agent {
     if (from?.brief?.trim()) item.brief = from.brief;
     // Your yes counts only while there is nothing to work in: a checkout found since needs none.
     if (from?.clone && !checkout) item.clone = true;
+    // The approvals the card showed at your ask: a run again keeps the list it was asked on.
+    if (reasons?.includes("feedback")) item.feedbackShown = from?.feedbackShown ?? (pr.reviewFeedback ?? []).map((f) => ({ reviewId: f.reviewId, updatedAt: f.updatedAt }));
     supersede(item);
     void store.save();
     changed();
@@ -3251,7 +3291,7 @@ export function createAgent(deps: AgentDeps): Agent {
         // The old result goes only once the new run is in the queue: a refusal
         // (the agent is already on the PR) leaves it where it was. Your yes to
         // a clone goes with it — a clone that failed is tried again.
-        const queued = enqueueAsked(pr, all.agent, item.scenario, reasons, undefined, item.clone ? { clone: true } : undefined);
+        const queued = enqueueAsked(pr, all.agent, item.scenario, reasons, undefined, carried(item));
         if (queued.ok) await closeAs(item, AGENT_CLOSED.rerun);
         return queued;
       }

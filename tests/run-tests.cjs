@@ -2482,6 +2482,12 @@ test("approval body: the app's own approvals are nothing for the author — its 
   ]) {
     assert.strictEqual(af.approvalBodyNeedsAttention(`${line}\n\n${sig}`), false, line);
   }
+  // What main posts reads back as the app's own: writer and reader share one source of lines.
+  const mr = require(path.join(__dirname, "../dist/main/main/agent/reapprove.js"));
+  const head = "0123456789abcdef0123456789abcdef01234567";
+  for (const req of [mr.approveRequest("a/b", 1, head, sig), mr.approveAgainRequest("a/b", 1, head, sig), mr.reapproveRequest("a/b", 1, head, "fedcba9876543210", sig)]) {
+    assert.strictEqual(af.approvalBodyNeedsAttention(req.body.body), false, req.body.body);
+  }
   assert.strictEqual(af.approvalBodyNeedsAttention(`Approved \`abc1234\`: nothing blocking is left.\n\n${"Please also rename the helper and add a test. ".repeat(10)}`), true, "a one-liner with more than a signature after it is prose");
   assert.strictEqual(af.approvalBodyNeedsAttention(`Rename x first.\nApproved \`abc1234\`: nothing blocking is left.\n\n${sig}`), true, "the app's line not first: prose");
   assert.strictEqual(af.approvalBodyNeedsAttention("<!-- only a hidden line -->"), false, "nothing a reader sees");
@@ -2491,24 +2497,38 @@ test("approval body: a folded section is read — its summary shows, and the fol
   assert.strictEqual(af.approvalBodyNeedsAttention("<details><summary>2 things to fix before merging</summary>\nx\n</details>"), true);
   assert.match(af.readApproval("LGTM\n<details><summary>Nits</summary>rename foo</details>").excerpt, /Nits/);
 });
-test("approval body: creatio-code-review's approval that lists no finding is clean; one that lists findings is feedback, with its points", () => {
+test("approval body: creatio-code-review's approval is clean only on a sign of no finding; every list item is a point, folded or not", () => {
+  // A lenient round raises only Blockers and never approves with one: its meta line's mode is the sign.
   assert.strictEqual(af.readApproval(CREATIO_LENIENT).feedback, false, "severity words in prose are not findings");
   const r = af.readApproval(CREATIO_MINOR);
   assert.strictEqual(r.feedback, true);
-  assert.deepStrictEqual(
-    r.points,
-    [
-      { severity: "major", text: "low confidence — `src/shared/agent-view.ts:566` - approvableRun picks the latest run by finishedAt." },
-      { severity: "minor", text: "`src/main/agent/index.ts:1078` - the refusal has no main-process test." },
-    ],
-    "the folded checklist is not a point",
-  );
+  assert.deepStrictEqual(r.points, [
+    { severity: "major", text: "low confidence — `src/shared/agent-view.ts:566` - approvableRun picks the latest run by finishedAt." },
+    { severity: "minor", text: "`src/main/agent/index.ts:1078` - the refusal has no main-process test." },
+    { severity: "minor", text: "wording in a table that is folded away" },
+  ]);
   assert.ok(!r.excerpt.includes("<!--") && r.excerpt.startsWith("Review mode: full"), "the excerpt is what a reader sees");
-  // Its own words for an approval with points count, even with none listed as items.
-  assert.strictEqual(af.readApproval("Decision: approve (minor issues). Two Minors in the summary.\n<!-- creatio-code-review -->").feedback, true);
+  const full = (text) => `Review mode: full (six lenses).\n\n${text}\n\n<!-- creatio-code-review:meta v=1 mode=full -->\n<!-- creatio-code-review -->`;
+  // Fails closed: a full review's prose, a bullet that names no severity, a folded bullet — each is feedback.
+  assert.strictEqual(af.readApproval(full("The change is focused. Consider renaming the helper.")).feedback, true, "prose with no sign of no finding");
+  const noSeverity = af.readApproval(full("Decision: approve.\n\n- feedbackList uses the run-time snapshot (index.ts)"));
+  assert.deepStrictEqual([noSeverity.feedback, noSeverity.points], [true, [{ severity: "note", text: "feedbackList uses the run-time snapshot (index.ts)" }]]);
+  assert.strictEqual(af.readApproval(full("Decision: approve (no findings).\n\n<details><summary>More</summary>\n\n- rename x\n\n</details>")).feedback, true, "a folded bullet");
+  assert.strictEqual(af.readApproval(full("Decision: approve (no findings).\n\n- AC-1: covered")).feedback, true, "its own words don't outweigh a listed item");
+  // Its own "no findings", with nothing listed: clean.
+  assert.strictEqual(af.readApproval(full("Decision: approve (no findings). The change does what the task asks.")).feedback, false);
+  // Its own words for an approval with points count, even with none listed as items — lenient or not.
+  assert.strictEqual(af.readApproval("Decision: approve (minor issues). Two Minors in the summary.\n<!-- creatio-code-review:meta v=1 mode=lenient -->").feedback, true);
   // The same text without its marker is prose: feedback, no points.
   const bare = af.readApproval(CREATIO_LENIENT.replace(/<!--[\s\S]*?-->/g, ""));
   assert.deepStrictEqual([bare.feedback, bare.points], [true, []]);
+});
+test("approval body: text a reviewer writes can't make reading it slow — unclosed comments, a body past GitHub's cap", () => {
+  const t0 = Date.now();
+  assert.strictEqual(af.readApproval("LGTM " + "<!-- ".repeat(50_000)).feedback, false, "an unclosed comment hides the rest, as GitHub shows it");
+  assert.strictEqual(af.readApproval("x".repeat(200_000) + "<!-- creatio-code-review").feedback, true);
+  af.readApproval("<details>".repeat(30_000));
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
 });
 test("mapPr: reviewFeedback names each approval with feedback — its review id, link and points; 👀 or a clean format leaves it out", () => {
   const nodes = [
@@ -2519,7 +2539,7 @@ test("mapPr: reviewFeedback names each approval with feedback — its review id,
   assert.strictEqual(pr.hasUnaddressedReviewFeedback, true);
   assert.deepStrictEqual(
     pr.reviewFeedback.map((f) => [f.reviewId, f.login, f.url, f.updatedAt, f.ackBeforeEdit, f.points.length]),
-    [["PRR_1", "rev", "https://github.com/a/b/pull/1#pullrequestreview-1", "2026-10-01T10:00:00Z", false, 2]],
+    [["PRR_1", "rev", "https://github.com/a/b/pull/1#pullrequestreview-1", "2026-10-01T10:00:00Z", false, 3]],
   );
   const read = { ...nodes[0], reactions: { nodes: [{ content: "EYES", createdAt: "2026-10-01T10:05:00Z", user: { login: "auth" } }] } };
   const after = github.mapPr(rawPr({ latestOpinionatedReviews: { nodes: [read, nodes[1]] } }), "GH", ["author"], "auth");
@@ -7968,6 +7988,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     ));
   test("hashSnapshot: approval-body feedback alone triggers a snapshot", () =>
     assert.notStrictEqual(poller.hashSnapshot(hsnap()), poller.hashSnapshot(hsnap({ hasUnaddressedReviewFeedback: true }))));
+  test("hashSnapshot: the feedback card follows its approvals — an edit, an old 👀, another approval; the same list doesn't re-emit", () => {
+    const fb = (o = {}) => ({ reviewId: "PRR_A", login: "anna", url: null, submittedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", ackBeforeEdit: false, points: [], excerpt: "x", ...o });
+    const base = (list) => poller.hashSnapshot(hsnap({ hasUnaddressedReviewFeedback: true, reviewFeedback: list }));
+    const one = base([fb()]);
+    assert.strictEqual(one, base([fb()]), "nothing changed");
+    assert.notStrictEqual(one, base([fb({ updatedAt: "2026-01-02T00:00:00Z" })]), "edited — an edit doesn't bump the PR's updatedAt");
+    assert.notStrictEqual(one, base([fb({ ackBeforeEdit: true })]), "an old 👀 on it");
+    assert.notStrictEqual(one, base([fb(), fb({ reviewId: "PRR_B", login: "oleg" })]), "a second approval with feedback");
+  });
   // The comment count is the unread channel's raw input and renders nowhere, so
   // with the setting off a change in it alone must not drive a push. Narrow on
   // purpose: a real new comment also bumps `updatedAt`, which stays hashed
@@ -10770,6 +10799,35 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(policy.askedDriveReasons({ ...pr, hasUnaddressedReviewFeedback: false }, s, true), ["self"], "marked read since: nothing left of it");
       assert.strictEqual(policy.mergeBlocker(pr, s), "An approval's feedback is yet to be marked read");
     });
+    test("agent policy: the agent's idle reason and the Board's card name the same hold first, whatever two hold together", () => {
+      const holdsView = require(path.join(__dirname, "../dist/main/shared/agent-view.js"));
+      const s = agentOn();
+      // The holds both places name: the first of any two is the same one in both.
+      const set = {
+        ci: { ciState: "pending" },
+        reviewers: { awaitingReview: true },
+        required: { requiredReviewPending: true },
+        behind: { isBehindBase: true },
+      };
+      const approved = (o) => ({ ...reviewPr({ role: "author" }), hasHumanApproval: true, canBeMerged: false, awaitingReview: false, reviewers: [{ login: "oleg", reviewState: "approved" }], ...o });
+      const keys = Object.keys(set);
+      for (const a of keys) {
+        for (const b of keys) {
+          const pr = approved({ ...set[a], ...set[b] });
+          const first = holdsView.MERGE_HOLDS.find((h) => h.holds(pr));
+          assert.strictEqual(policy.mergeBlocker(pr, s), first.blocker(pr), `${a}+${b}`);
+          assert.strictEqual(holdsView.approvedHold(pr).short, first.card(pr).short, `${a}+${b}`);
+        }
+      }
+      assert.strictEqual(policy.mergeBlocker(approved({ requiredReviewPending: true }), s), "A required review is missing");
+      assert.strictEqual(policy.mergeBlocker(approved({ isBehindBase: true }), s), "Behind its base branch");
+      assert.strictEqual(policy.mergeBlocker(approved({}), s), "Not mergeable yet");
+      // Open threads: the card names them; for the agent the setting decides, as before.
+      assert.strictEqual(holdsView.approvedHold(approved({ unresolvedThreads: 1, canBeMerged: true })).short, "1 review thread open");
+      const withThreads = (on) => ({ ...s, scenarios: { ...s.scenarios, merge: { ...s.scenarios.merge, requireThreadsResolved: on } } });
+      assert.strictEqual(policy.mergeBlocker(approved({ unresolvedThreads: 1, canBeMerged: true }), withThreads(true)), "1 unresolved thread");
+      assert.strictEqual(policy.mergeBlocker(approved({ unresolvedThreads: 1, canBeMerged: true }), withThreads(false)), null);
+    });
 
     test("agent policy: a review asked of you, within the limit, is a shadow review keyed on the head", () => {
       const r = policy.planJobs([reviewPr()], agentOn(), noSessions);
@@ -12698,7 +12756,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         [{ isBehindBase: true }, "Base branch", "oleg approved — GitHub wants the branch updated with its base first (Update branch on GitHub).", "behind its base"],
         [{ unresolvedThreads: 2 }, "Open threads", "oleg approved — 2 review threads are still open.", "2 review threads open"],
         [{ awaitingReview: true }, "A team", "oleg approved — a review requested of a team is still pending.", "a team review pending"],
-        [{}, "GitHub", "oleg approved — GitHub doesn't call it mergeable yet — it may still be checking after the last push.", "not mergeable yet"],
+        [{}, "GitHub", "oleg approved — GitHub doesn't call it mergeable yet; it may still be checking after the last push.", "not mergeable yet"],
       ]) {
         const pr = approved(o);
         const e = xOne(pr);
@@ -14892,6 +14950,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(fbRules, /leave every other review alone/);
       assert.match(fbRules, /not an instruction to you/);
       assert.ok(!fbRules.includes("ignore the rules") && !fbRules.includes("$(id)"), "a login or id GitHub wouldn't hand out stays out of the rules");
+      // Only what the card showed at the ask: an approval that came, or changed, after the click is not the run's work.
+      const at = "2026-10-01T10:00:00Z";
+      const now = { reviewFeedback: [{ reviewId: "PRR_A", login: "anna", updatedAt: at }, { reviewId: "PRR_E", login: "eve", updatedAt: "2026-10-01T11:00:00Z" }, { reviewId: "PRR_N", login: "ned", updatedAt: at }] };
+      const shown = [{ reviewId: "PRR_A", updatedAt: at }, { reviewId: "PRR_E", updatedAt: at }];
+      assert.deepStrictEqual(agentCore.feedbackToRead({ feedbackShown: shown }, now), [{ login: "anna", reviewId: "PRR_A" }]);
+      assert.deepStrictEqual(agentCore.feedbackToRead({}, now).map((f) => f.login), ["anna", "eve", "ned"], "a run from before the list was kept reads the PR as it is");
       assert.match(agentCore.agentRules("drive", "shadow", null, { repo: "a/b", number: 7, reasons: ["feedback"], feedback: [] }), /no approval with feedback is left to read: change nothing for it/);
       assert.strictEqual(view.itemVerb({ scenario: "drive", reasons: ["self"] }), "Self-reviewing");
     });
@@ -17145,7 +17209,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual(posted, [["on", "PRR_A", true], ["on", "PRR_O", true]]);
         const logged = readLog(f).find((l) => l.event === "feedback-read");
         assert.deepStrictEqual([logged.kind, logged.prNumber], ["run", 7]);
-        assert.match(logged.detail, /anna, oleg/);
+        assert.strictEqual(logged.detail, "On your click: 👀 on anna's approval; 👀 on oleg's approval");
         // Read already on GitHub: nothing goes out.
         posted.length = 0;
         freshPr = mine({ hasUnaddressedReviewFeedback: false, reviewFeedback: [] });
@@ -17176,6 +17240,116 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         g.agent.onSnapshot(g.snapshot);
         assert.deepStrictEqual(await g.agent.act({ type: "markFeedbackRead", prId: "PR_R" }), { ok: true });
         assert.deepStrictEqual(posted2, [["off", "PRR_A"], ["on", "PRR_A"]]);
+        // Both writes went out under your name: one line in the log says both.
+        assert.match(readLog(g).find((l) => l.event === "feedback-read").detail, /old 👀 off anna's approval; 👀 on anna's approval$/);
+      } finally {
+        g.agent.stop();
+      }
+      // Refused before anything goes out: a PR not yours, a PR closed since, a second click while the first runs.
+      const notMine = agentFixture({ pr: { ...mine(), roles: ["reviewer"] }, script: keepWorking, fetchPr: async () => ({ pr: mine(), state: "OPEN", viewer: "me" }) });
+      try {
+        notMine.agent.onSnapshot(notMine.snapshot);
+        assert.match((await notMine.agent.act({ type: "markFeedbackRead", prId: "PR_R" })).error, /Only the approvals of your own PRs can be marked read/);
+      } finally {
+        notMine.agent.stop();
+      }
+      let answer;
+      const slow = new Promise((r) => (answer = r));
+      const posted3 = [];
+      const h = agentFixture({
+        pr: mine(),
+        script: keepWorking,
+        fetchPr: () => slow,
+        gh: async (args, opts) => (posted3.push(args), { code: 0, stdout: "{}", stderr: "" }),
+      });
+      try {
+        h.agent.onSnapshot(h.snapshot);
+        const first = h.agent.act({ type: "markFeedbackRead", prId: "PR_R" });
+        assert.match((await h.agent.act({ type: "markFeedbackRead", prId: "PR_R" })).error, /being marked read already/);
+        answer({ pr: mine(), state: "MERGED", viewer: "me" });
+        assert.match((await first).error, /The PR was merged already/);
+        assert.deepStrictEqual(posted3.filter((a) => a[1] === "graphql"), [], "nothing went out");
+      } finally {
+        h.agent.stop();
+      }
+    });
+
+    await atest("agent run again: the approval's feedback stays only on a run asked for it, while it is unread — a CI drive never gains it", async () => {
+      const at = "2026-10-01T10:00:00Z";
+      const fbList = [{ reviewId: "PRR_A", login: "anna", url: null, submittedAt: at, updatedAt: at, ackBeforeEdit: false, points: [], excerpt: "Please rename x" }];
+      const pr = { ...reviewPr({ role: "author", requestedOfMe: false }), hasHumanApproval: true, hasUnaddressedReviewFeedback: true, reviewFeedback: fbList };
+      const f = agentFixture({ pr, script: () => {}, agent: { scenarios: { selfReview: { mode: "off" }, driveCi: { mode: "on" }, driveComments: { mode: "on" } } } });
+      const queued = () => only(f).find((i) => i.state === "queued");
+      try {
+        await f.agent.act({ type: "pauseAgent" });
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R", feedback: true }), { ok: true });
+        const first = queued();
+        assert.deepStrictEqual(first.feedbackShown, [{ reviewId: "PRR_A", updatedAt: at }], "what the card showed at the ask");
+        // Run again while it is unread: the feedback, in Shadow, on the same approvals.
+        await f.agent.act({ type: "skip", runId: first.runId });
+        assert.deepStrictEqual(await f.agent.act({ type: "retry", runId: first.runId }), { ok: true });
+        const again = queued();
+        assert.deepStrictEqual([again.reasons, again.mode, again.feedbackShown], [["feedback"], "shadow", first.feedbackShown]);
+        // Marked read since: nothing of it is left, so a self-review. (The fixture's snapshot is what main reads.)
+        await f.agent.act({ type: "skip", runId: again.runId });
+        f.snapshot.pullRequests = [{ ...pr, hasUnaddressedReviewFeedback: false, reviewFeedback: [] }];
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual(await f.agent.act({ type: "retry", runId: again.runId }), { ok: true });
+        const read = queued();
+        assert.deepStrictEqual([read.reasons, read.feedbackShown], [["self"], undefined]);
+        // Red CI with the feedback unread: a CI drive, and its Run again, stay on the CI.
+        await f.agent.act({ type: "skip", runId: read.runId });
+        f.snapshot.pullRequests = [{ ...pr, ciState: "failure" }];
+        f.agent.onSnapshot(f.snapshot);
+        await tickOnce();
+        if (!queued()) assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        const ci = queued();
+        assert.deepStrictEqual(ci.reasons, ["ci"]);
+        await f.agent.act({ type: "skip", runId: ci.runId });
+        assert.deepStrictEqual(await f.agent.act({ type: "retry", runId: ci.runId }), { ok: true });
+        assert.deepStrictEqual(queued().reasons, ["ci"]);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent restart: a cut-short feedback drive comes back with its feedback, in Shadow; a cut-short CI drive doesn't gain it; a review keeps its own", async () => {
+      const at = "2026-10-01T10:00:00Z";
+      const fbList = [{ reviewId: "PRR_A", login: "anna", url: null, submittedAt: at, updatedAt: at, ackBeforeEdit: false, points: [], excerpt: "Please rename x" }];
+      const feedbackPr = { ...reviewPr({ role: "author", requestedOfMe: false, id: "PR_F", number: 11 }), hasHumanApproval: true, hasUnaddressedReviewFeedback: true, reviewFeedback: fbList };
+      const ciPr = { ...feedbackPr, ...reviewPr({ role: "author", requestedOfMe: false, id: "PR_C", number: 12 }), hasHumanApproval: true, hasUnaddressedReviewFeedback: true, reviewFeedback: fbList, ciState: "failure" };
+      const reviewItPr = reviewPr({ id: "PR_V", number: 13 });
+      const prs = [feedbackPr, ciPr, reviewItPr];
+      const scenarios = { scenarios: { selfReview: { mode: "off" }, driveCi: { mode: "on" }, driveComments: { mode: "on" } } };
+      // The first start: three runs queued, and the app closes before any of them ran.
+      const f = agentFixture({ pr: feedbackPr, script: () => {}, agent: scenarios });
+      await f.agent.act({ type: "pauseAgent" });
+      f.snapshot.pullRequests = prs;
+      f.agent.onSnapshot(f.snapshot);
+      await tickOnce();
+      assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_F", feedback: true }), { ok: true });
+      for (const id of ["PR_C", "PR_V"]) if (!only(f).some((i) => i.prId === id)) assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: id }), { ok: true });
+      f.agent.stop();
+      const file = path.join(f.dir, "agent", "state.json");
+      const saved = JSON.parse(nfsA.readFileSync(file, "utf8"));
+      const cut = new Map();
+      for (const it of saved.items) {
+        Object.assign(it, { state: "needsYou", interrupted: true, headline: "Interrupted — the app closed while it ran", startedAt: it.queuedAt, finishedAt: it.queuedAt });
+        cut.set(it.prId, it.runId);
+      }
+      saved.paused = false;
+      nfsA.writeFileSync(file, JSON.stringify(saved));
+      // The next start: each goes on as it was asked.
+      const g = agentFixture({ home: f.dir, pr: feedbackPr, script: () => {}, agent: scenarios });
+      try {
+        g.snapshot.pullRequests = prs;
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => ["PR_F", "PR_C", "PR_V"].every((id) => g.agent.getState().items.some((i) => i.prId === id && i.runId !== cut.get(id))));
+        const next = (id) => g.agent.getState().items.find((i) => i.prId === id && i.runId !== cut.get(id));
+        assert.deepStrictEqual([next("PR_F").reasons, next("PR_F").mode, next("PR_F").feedbackShown], [["feedback"], "shadow", [{ reviewId: "PRR_A", updatedAt: at }]]);
+        assert.deepStrictEqual(next("PR_C").reasons, ["ci"], "the feedback is unread there too, but nobody asked for it");
+        assert.deepStrictEqual([next("PR_V").scenario, next("PR_V").reasons], ["review", undefined]);
       } finally {
         g.agent.stop();
       }

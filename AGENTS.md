@@ -493,17 +493,30 @@ Three layers:
   `askedDriveReasons`; Run again and a recovered run keep it only if they had
   it, and the plan never starts one by itself; always Shadow, since an
   approval's text is anyone's words; its own prompt, and rules that name only
-  the approvals the card showed; a run that changed nothing is the card's
-  answer, not a failure) and the review on GitHub. Which text is feedback is
-  `shared/approval-feedback.ts` (`readApproval`, Node-free): a plain yes, the
-  app's own approvals (one of its one-line texts first, and nothing after it
-  longer than a signature) and a creatio-code-review approval that lists no
-  finding as a severity list item (its folded checklists aside) are clean;
-  any other prose is feedback, a folded `<details>` included. `reviewFeedback`
-  is in the poller's snapshot hash, so the card follows an edit. An
-  approved PR of yours that still waits names what holds it
-  (`approvedHold`: a required review, a team, CI, behind base, open threads,
-  or GitHub not calling it mergeable yet) instead of "Waiting for reviewers".
+  the approvals the card showed at the ask — kept on the item as
+  `feedbackShown` and read back through `feedbackToRead`, so one that came
+  or changed after the click is not its work; a run that changed nothing is
+  the card's answer, not a failure — `isFeedbackOnly` / `answersReviewers`
+  in `shared/agent-view.ts` say which runs those are) and the review on
+  GitHub. Which text is feedback is `shared/approval-feedback.ts`
+  (`readApproval`, Node-free): a plain yes, the app's own approvals (one of
+  `APP_APPROVAL_LINES` first — the same source main posts them from — and
+  nothing after it longer than a signature) and a creatio-code-review
+  approval with a positive sign that it had no finding — no list item at all,
+  folded or not, and either `mode=lenient` in its meta line (a lenient round
+  raises only Blockers and never approves with one) or its own "approve (no
+  findings)" — are clean. Every other text is feedback, a folded `<details>`
+  included, and every list item of a creatio-code-review approval is a point
+  (`note` when it names no severity), since nothing makes its publisher name
+  one. Hidden comments are stripped in one indexOf pass and a body is read to
+  GitHub's 65,536-character cap. `reviewFeedback` is in the poller's snapshot
+  hash, so the card follows an edit. An approved PR of yours that still waits
+  names what holds it (`approvedHold`) instead of "Waiting for reviewers", in
+  the one order the agent's idle reason (`mergeBlocker`) names it too —
+  `MERGE_HOLDS` in `shared/agent-view.ts`: CI running, a reviewer or team,
+  the feedback (never on that card: such a PR is Your turn), a required
+  review, behind base, open threads (the card only; for the agent the
+  threads setting decides), or GitHub not calling it mergeable yet.
   Every Your-turn card has "Not now" (`notNow`,
   only the PR id goes over IPC): main stores the card's `cardKey` — the PR's
   head, `updatedAt`, CI and conflict state, and its latest run — in

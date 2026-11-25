@@ -565,7 +565,8 @@ export interface ReviewFeedback {
 }
 
 export interface FeedbackPoint {
-  severity: "blocker" | "major" | "minor";
+  /** The severity the item names; "note" when it names none — still a point, never dropped. */
+  severity: "blocker" | "major" | "minor" | "note";
   text: string;
 }
 
@@ -1142,6 +1143,13 @@ export interface AgentItem {
    * clone is the agent's own and stays, so later runs there need no new yes.
    */
   clone?: true;
+  /**
+   * A drive on an approval's feedback: the approvals the card showed when you
+   * asked (review id and version). Its rules name only those that still read
+   * the same — feedback that came or changed after your click is not its work.
+   * Run again and a recovered run keep the list.
+   */
+  feedbackShown?: Array<{ reviewId: string | null; updatedAt: string | null }>;
   /**
    * A drive's result from before the app last started: what it would push
    * and its session going on with your answer are checked against what the
