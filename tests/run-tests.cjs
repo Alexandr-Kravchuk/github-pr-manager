@@ -14856,6 +14856,46 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(policy.planJobs([first()], cfg.validateAgent(undefined), ctx).wakeAt, null, "the agent off plans nothing, wakes for nothing");
     });
 
+    test("agent policy: a review the agent published — a plain Comment too — counts as yours: a new head gets a re-review of what changed, not a brief and a first review again (#295)", () => {
+      const at = (h) => `2026-07-0${h}T00:00:00Z`;
+      // A big PR — over the limit, so a first review of it would start with a brief.
+      const pr = (o = {}) => ({ ...reviewPr({ additions: 900, headOid: o.headOid ?? "bbb222", role: o.role ?? "reviewer", requestedOfMe: o.requestedOfMe ?? true }), lastCommitPushedAt: at(6), authorRepliedAt: null, ...o });
+      const agentComment = { at: at(5), head: "aaa111" };
+      const rows = [
+        // [what, PR, the agent's review, more of the plan's context, settings, jobs as [scenario, key], idle, base checks]
+        ["#295: the agent's Comment review, then a push and the review asked again", pr(), agentComment, {}, null, [["rereview", `PR_R|rereview|bbb222|asked@${at(6)}`]], undefined, []],
+        ["no review of the agent's: a first review, its brief first", pr(), null, {}, null, [["brief", "PR_R|brief|bbb222"]], undefined, []],
+        ["a push alone: first checked for the same change on a new base", pr({ role: "reviewed", requestedOfMe: false }), agentComment, { baseOnlyState: () => "unchecked" }, null, [], "Reviewed — checking whether only the base changed under your review", ["PR_R|rereview|bbb222|base"]],
+        ["a push alone that changed the code: the re-review", pr({ role: "reviewed", requestedOfMe: false }), agentComment, { baseOnlyState: () => "changed" }, null, [["rereview", `PR_R|rereview|bbb222|reply@${at(6)}`]], undefined, []],
+        ["only the base changed: nothing to re-review", pr({ role: "reviewed", requestedOfMe: false }), agentComment, { baseOnlyState: () => "same" }, null, [], "Reviewed — only the base changed under your review since", []],
+        ["an answer in a thread since the agent's review", pr({ role: "reviewed", requestedOfMe: false, authorRepliedAt: at(7) }), agentComment, {}, null, [["rereview", `PR_R|rereview|bbb222|reply@${at(7)}`]], undefined, []],
+        ["the agent's review is of this head and a request still stands: nothing it didn't answer", pr({ headOid: "aaa111", lastCommitPushedAt: at(4) }), agentComment, {}, null, [], "Reviewed by the agent on this head — nothing new from the author since", []],
+        ["the agent's review is of this head, not asked again", pr({ headOid: "aaa111", lastCommitPushedAt: at(4), role: "reviewed", requestedOfMe: false }), agentComment, {}, null, [], "Reviewed — nothing new from the author since", []],
+        ["re-reviews off: no re-review — and no first review either", pr(), agentComment, {}, agentOn({ scenarios: { rereview: { mode: "off" } } }), [], "Reviewed — re-reviews are off", []],
+        // Your own review on GitHub wins: its time (3) makes the push (4) new, the agent's later one (5) would not.
+        ["your own review on GitHub comes first", pr({ viewerHasReviewed: true, viewerReviewedAt: at(3), viewerReviewedOid: "zzz999", role: "reviewed", requestedOfMe: false, lastCommitPushedAt: at(4) }), agentComment, {}, null, [["rereview", `PR_R|rereview|bbb222|reply@${at(4)}`]], undefined, []],
+      ];
+      for (const [what, p, review, extra, settings, jobs, idle, baseChecks] of rows) {
+        const r = policy.planJobs([p], settings ?? agentOn(), { ...noSessions, agentReviewed: () => review, ...extra });
+        assert.deepStrictEqual(r.jobs.map((j) => [j.scenario, j.key]), jobs, what);
+        assert.strictEqual(r.idle.get("PR_R"), idle, what);
+        assert.deepStrictEqual(r.baseChecks.map((j) => j.key), baseChecks, what);
+      }
+      // What the re-review rules read: the agent's time and head in place of yours — the roles and the verdict untouched.
+      const seen = policy.withAgentReview(pr(), agentComment);
+      assert.deepStrictEqual(
+        [seen.viewerHasReviewed, seen.viewerReviewedAt, seen.viewerReviewedOid, seen.viewerReviewedHead, seen.viewerApproved, seen.roles],
+        [true, at(5), "aaa111", false, false, ["reviewer"]],
+      );
+      assert.strictEqual(policy.withAgentReview(pr({ headOid: "aaa111" }), agentComment).viewerReviewedHead, true);
+      const own = pr({ viewerHasReviewed: true, viewerReviewedAt: at(3) });
+      assert.strictEqual(policy.withAgentReview(own, agentComment), own, "yours stands as it is");
+      const none = pr();
+      assert.strictEqual(policy.withAgentReview(none, null), none);
+      assert.strictEqual(policy.authorActivitySince(seen), at(6), "a push after the agent's review is the author's answer");
+      assert.strictEqual(policy.authorActivitySince(none), null, "without it there is nothing to compare with");
+    });
+
     test("agent policy: a PR with no clone of its repository gets no run — it waits and says why; offers need none", () => {
       const none = { ...noSessions, noCheckout: (pr) => `No checkout of ${pr.repo} — set its folder in Settings › Claude` };
       const r = policy.planJobs([reviewPr()], agentOn(), none);
@@ -17619,6 +17659,75 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         const [brief, review] = only(f);
         assert.match(brief.key, /\|brief\|aaa111\|asked$/);
         assert.deepStrictEqual([brief.headline, review.scenario], [view.AGENT_CLOSED.reviewed, "review"]);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent brief: written once per PR — a new head before any review gets no second brief; its review takes the older brief's questions", async () => {
+      const big = reviewPr({ additions: 5000 });
+      const text = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: ["Why drop the cache?"], asks: [] }) + "\n```";
+      const f = agentFixture({ pr: big, script: succeed(text), agent: { scenarios: { review: { mode: "off" } } } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.scenario === "brief" && i.state === "needsYou"));
+        // A push while reviews are off: the brief stands for the PR, none is written for the new head.
+        f.snapshot.pullRequests[0] = reviewPr({ additions: 5000, headOid: "bbb222" });
+        f.agent.onSnapshot(f.snapshot);
+        await new Promise((r) => setTimeout(r, 50));
+        assert.strictEqual(f.children.length, 1, "no second brief");
+        assert.strictEqual(f.agent.getState().idle.PR_R, "Reviews are off — a big PR gets its brief only");
+        // Reviews on: the new head's review follows that brief, its questions in the prompt.
+        f.setAgent({ enabled: true, scenarios: { review: { mode: "shadow" } } });
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+        const [brief, review] = only(f);
+        assert.deepStrictEqual([brief.scenario, brief.state, brief.headline], ["brief", "done", view.AGENT_CLOSED.reviewed]);
+        assert.deepStrictEqual([review.scenario, review.key, review.carry], ["review", `${big.id}|review|bbb222`, ["Why drop the cache?"]]);
+        assert.match(review.brief, /^Brief\./);
+        assert.match(f.children[1].written, /questions for its author[\s\S]*Why drop the cache\?/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: #295 — a review the agent published as a plain Comment is your review: the next push gets a re-review of the changes, no brief and no first review again", async () => {
+      const big = reviewPr({ additions: 5000 });
+      const brief = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: [], asks: [] }) + "\n```";
+      // The brief, then the review it is followed by (a Comment), then whatever runs after the push.
+      const scripts = [succeed(brief), reviewWithPlan("COMMENT"), succeed("Re-reviewed.")];
+      let runs = 0;
+      let head = "aaa111";
+      const posted = [];
+      const f = agentFixture({
+        pr: big,
+        script: (c) => scripts[runs++](c),
+        captureScript: captureJs,
+        // The push lands a minute ahead: no settling wait, so the re-review it brings starts at once.
+        agent: { limits: { settleMinutes: 0 } },
+        fetchPr: async () => ({ pr: { ...big, headOid: head }, state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => (posted.push({ args, body: JSON.parse(opts.input) }), { code: 0, stdout: "{}", stderr: "" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.scenario === "review" && i.state === "needsYou"));
+        const review = only(f).find((i) => i.scenario === "review");
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: review.runId }), { ok: true });
+        assert.deepStrictEqual(posted.map((p) => p.body.event), ["COMMENT"], "GitHub keeps no approve or change request of yours");
+        // The author pushes and asks again; GitHub still says you haven't reviewed it.
+        head = "bbb222";
+        const pushedAt = new Date(Date.now() + 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+        f.snapshot.pullRequests[0] = { ...reviewPr({ additions: 5000, headOid: head }), lastCommitPushedAt: pushedAt };
+        assert.strictEqual(f.snapshot.pullRequests[0].viewerHasReviewed, false);
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 3);
+        const next = only(f)[2];
+        assert.deepStrictEqual([next.scenario, next.key], ["rereview", `${big.id}|rereview|bbb222|asked@${pushedAt}`]);
+        assert.ok(!only(f).some((i) => i.key.startsWith(`${big.id}|brief|bbb222`) || i.key.startsWith(`${big.id}|review|bbb222`)), "neither a brief nor a first review of the new head");
+        await until(() => only(f)[2].state !== "queued" && only(f)[2].state !== "working");
+        f.agent.onSnapshot(f.snapshot);
+        await new Promise((r) => setTimeout(r, 50));
+        assert.strictEqual(f.children.length, 3, "and the same head runs nothing again");
       } finally {
         f.agent.stop();
       }

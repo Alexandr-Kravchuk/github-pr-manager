@@ -237,12 +237,31 @@ Three layers:
   you ask for that finds the same says "Already approved on this head".
   Asked again after a change request of yours on that same head, the
   re-review runs by itself (`planJobs`, once per head and request): the
-  request is the author's "look again". A review asked of you starts without
-  a click on a big PR too: its brief comes first, and once that brief of the
-  head is written (`briefDone`) the plan queues the review, which takes the
-  brief over (`takeBrief`: the brief closes, its questions for the author go
-  into the review's prompt and its text onto the review's card, and the brief
-  alone sends no toast). "Draft a review" is left for a brief no review
+  request is the author's "look again". A review the agent published counts
+  as yours in the plan, whatever its event (`agentReviewed` in `PlanContext`,
+  from the ledger's published review and re-review keys, with the head the
+  review went out on; `withAgentReview` puts its time and head in place of
+  `viewerReviewedAt` / `viewerReviewedOid` while GitHub has no approval or
+  change request of yours): GitHub's `viewerHasReviewed` reads
+  `latestOpinionatedReviews` and never sees a plain "Comment", so every push
+  to such a PR was a first review again, brief and all — six of each on one
+  PR in a day. Now a new head gets a re-review of what changed, the
+  base-only check compares with the agent's head, and a request that still
+  stands on the very head the agent's review answered, with nothing from the
+  author since, runs nothing. Only the plan reads it: the roles, `To review` /
+  `Reviewed`, `isReviewDue` and `Hide my approvals` keep GitHub's answer. A
+  Comment review of your own is not counted — `latestReviews` keeps one per
+  reviewer, a reply in someone's thread is such a review too, and a plain
+  question would shrink the whole review to a look at the latest changes. A
+  review asked of you starts without a click on a big PR too: its brief comes
+  first, and once a brief of the PR is written — on any head, once per PR
+  (`briefDone`) — the plan queues the review, which takes the brief over
+  (`takeBrief`, the PR's latest brief still waiting, an older head's too: the
+  brief closes, its questions for the author go into the review's prompt,
+  which asks only those that still hold, and its text onto the review's card,
+  and the brief alone sends no toast). A push before the review sends the new
+  head straight to the review, never to a second brief; a brief you ask for
+  runs as before. "Draft a review" is left for a brief no review
   followed — reviews off, or the request gone. A run the agent planned
   itself that fails (`fail`: a checkout the network refused, a crashed
   session) is tried once more by itself `RETRY_AFTER_MS` later (`retryAt`
