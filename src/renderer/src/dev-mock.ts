@@ -10,7 +10,7 @@
  */
 import { isUiStyle } from "../../shared/ui-style";
 import { toUpsourcePrs } from "../../shared/upsource";
-import { OWN_SESSION_WHY, rankBefore } from "../../shared/agent-view";
+import { NO_CHECKOUT_WHY, OWN_SESSION_WHY, rankBefore } from "../../shared/agent-view";
 import type {
   AgentAction,
   AgentItem,
@@ -527,6 +527,19 @@ FIXTURES.agent = [
     reviewDecision: "CHANGES_REQUESTED",
     reviewers: [{ login: "me", avatarUrl: "", reviewState: "changes_requested" }],
   }),
+  // A review asked of you in a repository you never cloned, with the agent's own
+  // cloning off: its card offers "Clone and review".
+  pr({
+    id: "mock-no-checkout-pr",
+    repo: "acme/file-import-app",
+    number: 2,
+    url: "https://github.com/acme/file-import-app/pull/2",
+    title: "ENG-106645 Start an Excel import from Settings",
+    issueKey: "ENG-106645",
+    roles: ["reviewer"],
+    requestedOfMe: true,
+    author: { login: "teammate", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4" },
+  }),
 ];
 
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
@@ -1001,6 +1014,8 @@ function mockAgentState(): AgentState {
             ? OWN_SESSION_WHY
             : p.id === "mock-approvable-pr"
               ? "Its last run on this head ended: Reviewed — nothing to post"
+              : p.id === "mock-no-checkout-pr"
+              ? `${NO_CHECKOUT_WHY}${p.repo} — clone it with \`git clone https://github.com/${p.repo}.git ~/Projects/file-import-app\`, set its folder in Settings › Claude, or let the agent clone it (Settings › Agent)`
               : p.roles.includes("author")
               ? "Yours: nothing for the agent yet"
               : p.isDraft
@@ -1022,6 +1037,8 @@ function mockAgentState(): AgentState {
     orchestrated: Object.fromEntries(
       [byNumber(139)].filter((p): p is PullRequest => Boolean(p)).map((p) => [p.id, { key: "ENG-93412", stage: "fixing review" }]),
     ),
+    // The agent's own cloning is off, and nothing of acme/file-import-app is checked out.
+    noCheckout: prs.filter((p) => p.repo === "acme/file-import-app").map((p) => p.id),
   };
 }
 
@@ -1070,6 +1087,13 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
   if (action.type === "enqueue") {
     const pr = snapshot.pullRequests.find((p) => p.id === action.prId);
     if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+    const lacks = agentState.noCheckout?.includes(pr.id) ?? false;
+    if (lacks && !action.clone) return { ok: false, error: `${agentState.idle[pr.id] ?? `${NO_CHECKOUT_WHY}${pr.repo}`}.` };
+    // Cloned: every PR of the repository has a checkout now, and the plan no longer waits on it.
+    if (lacks) {
+      const left = (agentState.noCheckout ?? []).filter((id) => snapshot.pullRequests.find((p) => p.id === id)?.repo !== pr.repo);
+      agentState = { ...agentState, noCheckout: left, idle: { ...agentState.idle, [pr.id]: "Nothing for the agent" } };
+    }
     const rank = action.before ? rankBefore(items.filter((i) => i.state === "queued"), action.before) : undefined;
     items.push({
       ...(rank !== undefined ? { rank } : {}),
