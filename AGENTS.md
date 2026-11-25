@@ -220,7 +220,20 @@ Three layers:
   and a merge is only ever offered. Those defaults fill only settings with
   no agent saved at all: in saved ones a posting scenario's mode that is
   missing or unknown is Shadow (`validateAgent`), since falling back to On
-  would post and approve under your name unchosen), `agent-stream.ts` (a run's
+  would post and approve under your name unchosen. Model and effort are per
+  kind of run too (`runModels`, Settings › Agent › "Per kind of run"):
+  `runModelFor` takes the kind's own, else the agent's `model`/`effort`, else
+  Claude Code's default, and `run/started` logs what the run got. A brief
+  defaults to Sonnet, the rest to the agent's; an absent field reads as the
+  default, a saved empty one as the agent's, and a model is a name only
+  (`isModelName`: it goes on a command line). "Reviewers on Sonnet"
+  (`sonnetReviewers`, on by default) adds `SONNET_REVIEWERS_RULE` to the
+  rules of the runs that start the review workflow (`runsReviewWorkflow`: a
+  review, a re-review, a self-review): the creatio-code-review workflow takes
+  `reviewerModel: "sonnet"` and then runs each reviewer as the plugin's
+  `<reviewer>-sonnet` agent, pinned in its frontmatter, since the Workflow
+  runtime's `agent()` has no model option; a host env with
+  `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` overrides that pin), `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (where a
   PR stands — `boardStage`: the column is whose move it is, the agent's
@@ -833,7 +846,8 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   has `at`, `kind`, `event`; most have `prId`/`prNumber`/`repo`/`runId`, a
   change has `from`/`to` and `ms` (how long the `from` side lasted), the rest is
   in `data`. Kinds: `run` (a run's own steps — `queued` with mode, reasons and
-  PR size; `started` with its folder, model and queue wait; its end,
+  PR size; `started` with its folder, the model and effort it was started
+  with (`reviewerModel` when its reviewers went to Sonnet) and queue wait; its end,
   `needsYou`/`done`/`failed`, with time, turns, cost, tokens, tool calls,
   refused tools and stderr's tail; `interrupted` when its process was ended
   under it; `superseded` when the PR got a new head under it, with the same

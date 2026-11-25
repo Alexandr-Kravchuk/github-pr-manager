@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { isUiStyle } from "./ui-style";
 import {
   AGENT_BOUNDS,
+  AGENT_EFFORTS,
   DEFAULT_AGENT_PROMPTS,
   DEFAULT_AGENT_SETTINGS,
   DEFAULT_AGENT_SIGNATURE,
@@ -10,6 +11,7 @@ import {
   DEFAULT_AGENT_TOOLS,
   isAgentLanguage,
   isClockTime,
+  isModelName,
   migrateTools,
   PREVIOUS_DEFAULT_AGENT_PROMPTS,
   type AgentBoundKey,
@@ -346,8 +348,12 @@ export function validateAgent(raw: unknown): AgentSettings {
   const clock = (v: unknown, fallback: string): string => (typeof v === "string" && isClockTime(v) ? v : fallback);
   const list = (v: unknown): string[] | null =>
     Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim()) : null;
+  // Absent: the default; saved empty: the fallback (Claude Code's, or the agent's). A name only — it goes on a command line.
+  const modelName = (v: unknown, fallback: string): string =>
+    typeof v === "string" && (v.trim() === "" || isModelName(v.trim())) ? v.trim() : fallback;
 
   const obj = o(raw);
+  const runModels = o(obj.runModels);
   const sc = o(obj.scenarios);
   const review = o(sc.review);
   const brief = o(sc.brief);
@@ -377,7 +383,15 @@ export function validateAgent(raw: unknown): AgentSettings {
   return {
     enabled: bool(obj.enabled, d.enabled),
     model: str(obj.model),
-    effort: oneOf(obj.effort, ["", "low", "medium", "high"] as const, d.effort),
+    effort: oneOf(obj.effort, AGENT_EFFORTS, d.effort),
+    runModels: Object.fromEntries(
+      AGENT_RUN_KINDS.map((kind) => {
+        const r = o(runModels[kind]);
+        const dk = d.runModels[kind];
+        return [kind, { model: modelName(r.model, dk.model), effort: oneOf(r.effort, AGENT_EFFORTS, dk.effort) }];
+      }),
+    ) as AgentSettings["runModels"],
+    sonnetReviewers: bool(obj.sonnetReviewers, d.sonnetReviewers),
     language: isAgentLanguage(obj.language) ? obj.language : d.language,
     worktreeDir: str(obj.worktreeDir),
     removeWorktree: bool(obj.removeWorktree, d.removeWorktree),
@@ -436,11 +450,7 @@ export function validateAgent(raw: unknown): AgentSettings {
       enabled: bool(diagrams.enabled, d.diagrams.enabled),
       minLines: num(diagrams.minLines, "diagramMinLines", d.diagrams.minLines),
       post: bool(diagrams.post, d.diagrams.post),
-      // Absent: the default model; saved empty: Claude Code's default. A name only — it goes on a command line.
-      model:
-        typeof diagrams.model === "string" && (diagrams.model.trim() === "" || /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,79}$/.test(diagrams.model.trim()))
-          ? diagrams.model.trim()
-          : d.diagrams.model,
+      model: modelName(diagrams.model, d.diagrams.model),
     },
     companion: {
       headerChip: bool(companion.headerChip, d.companion.headerChip),
