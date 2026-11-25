@@ -173,9 +173,12 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
   const fork = lane === "mine" && pr?.isCrossRepository === true;
   const canStart = state.enabled && !stage.sdlc && !sessionOnIt && !fork;
   // No checkout of its repository, and the agent may not clone one by itself:
-  // the button that starts it asks for that clone too — this repository only.
+  // every button that starts it asks for that clone too — this repository
+  // only. Main's list says so for every column, as things stand now; without
+  // it (an older state), the plan's reason in Your turn.
   const repo = pr?.repo ?? item?.repo ?? "";
-  const cloneFirst = canStart && isNoCheckoutWhy(stage.why);
+  const lacksCheckout = state.noCheckout ? state.noCheckout.includes(prId) : isNoCheckoutWhy(stage.why);
+  const cloneFirst = canStart && lacksCheckout;
   const cloned = `The agent clones ${repo} into a folder of its own — not your projects; it keeps the clone for its later runs there`;
   const open = (label = lane === "review" ? "Review on GitHub myself" : "Open on GitHub"): BoardChoice => ({ label, does: "Opens the PR in your browser.", url });
   // Beside your own session the way back to it comes first — "carry on there" with no way there was a dead end.
@@ -229,13 +232,25 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
             ? `Waiting for ${pending.join(", ")} to review.`
             : "Waiting for reviewers.";
       next = "Once they approve and CI is green, Merge comes to Your turn. If they comment, the agent answers what it can and asks you the rest.";
-      if (canStart) choices = [{ label: "Self-review again", does: "The agent reviews it again now, before the reviewers do; its fixes come to you to push.", act: { type: "enqueue", prId } }];
+      if (canStart) {
+        choices = [
+          cloneFirst
+            ? { label: "Clone and self-review", does: `${cloned} — then reviews it again now, before the reviewers do; its fixes come to you to push.`, act: { type: "enqueue", prId, clone: true } }
+            : { label: "Self-review again", does: "The agent reviews it again now, before the reviewers do; its fixes come to you to push.", act: { type: "enqueue", prId } },
+        ];
+      }
     } else {
       waitingOn = "The author";
       const verdict = pr?.viewerApproved ? "You approved it" : pr?.viewerHasReviewed ? "You asked for changes" : pr?.roles.includes("reviewed") ? "You commented" : "It waits for its author";
       now = `${verdict}${pr && pr.unresolvedThreads > 0 ? ` · ${plural(pr.unresolvedThreads, "thread")} open` : ""} — the author's turn.`;
       next = "When the author pushes or answers you, the agent re-reviews it by itself and brings you the result.";
-      if (canStart) choices = [{ label: "Re-review now", does: "The agent looks at it again right away instead of waiting for the author.", act: { type: "enqueue", prId } }];
+      if (canStart) {
+        choices = [
+          cloneFirst
+            ? { label: "Clone and re-review", does: `${cloned} — then looks at it again right away instead of waiting for the author.`, act: { type: "enqueue", prId, clone: true } }
+            : { label: "Re-review now", does: "The agent looks at it again right away instead of waiting for the author.", act: { type: "enqueue", prId } },
+        ];
+      }
     }
   } else if (stage.column === "done") {
     owner = "done";
@@ -438,12 +453,14 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
       }
       case "fix": {
         // A run the agent planned itself is tried once more on its own (`retryAt`); a second failure is yours.
-        const retryAt = item?.retryAt ? new Date(item.retryAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : null;
+        // Not one with no checkout: the plan holds that PR back, so the try never comes (an older state may still carry one).
+        const retryAt = item?.retryAt && !isNoCheckoutWhy(item.headline) ? new Date(item.retryAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : null;
         now = `The agent couldn't finish: ${lower(item?.headline ?? "it stopped")}${retryAt ? ` — it tries again by itself at ${retryAt}` : item?.retryOf ? " — the second time in a row" : ""}.`;
         ask = retryAt ? "Nothing needed — or see what went wrong and try again now." : "See what went wrong, then try again — or leave it.";
         const inClaude = stage.action?.label === "Open in Claude";
-        // It failed for want of a checkout the agent may not make by itself: trying again asks for the clone.
-        const cloneAgain = !inClaude && canStart && isNoCheckoutWhy(item?.headline);
+        // No checkout the agent may make by itself now: trying again asks for the clone. Going by
+        // main's list, not the failure's old headline — a checkout set since needs no clone.
+        const cloneAgain = !inClaude && canStart && (state.noCheckout ? lacksCheckout : isNoCheckoutWhy(item?.headline));
         choices = [
           cloneAgain
             ? { label: "Clone and try again", primary: true, does: `${cloned} — then starts it over with a fresh session.`, act: { type: "enqueue", prId, clone: true } }

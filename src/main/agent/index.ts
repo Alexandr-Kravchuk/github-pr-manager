@@ -609,6 +609,8 @@ export function createAgent(deps: AgentDeps): Agent {
   }
   /** The badges of the last plan: your PRs an SDLC run drives. */
   let sdlcBadges: Record<string, { key: string; stage: string | null }> = {};
+  /** The last plan's PRs with no checkout the agent may work in (`AgentState.noCheckout`). */
+  let noCheckoutIds: string[] = [];
 
   /** A newer run on a PR replaces what waited there in its lane: an older review, an older drive. */
   function supersede(fresh: AgentItemRecord): void {
@@ -720,7 +722,8 @@ export function createAgent(deps: AgentDeps): Agent {
         continue;
       }
       const found = item.scenario === "drive" ? driveReasons(pr, s) : undefined;
-      const queued = enqueueAsked(pr, s, item.scenario, found && found.length === 0 ? ["self"] : (found ?? item.reasons));
+      // Cut short while it cloned: your yes to the clone goes on with it, or it would be refused for the missing checkout.
+      const queued = enqueueAsked(pr, s, item.scenario, found && found.length === 0 ? ["self"] : (found ?? item.reasons), undefined, item.clone ? { clone: true } : undefined);
       void closeAs(item, queued.ok ? AGENT_CLOSED.rerun : item.headline);
     }
   }
@@ -1189,6 +1192,7 @@ export function createAgent(deps: AgentDeps): Agent {
     if (!s?.enabled) {
       idle = Object.fromEntries(snapshot.pullRequests.map((p) => [p.id, "The agent is off"]));
       sdlcBadges = {};
+      noCheckoutIds = [];
       stopRunsForOff();
       // Switched on again, the journal starts from where things stand then.
       loggedIdle = null;
@@ -1254,6 +1258,11 @@ export function createAgent(deps: AgentDeps): Agent {
       },
     });
     sdlcBadges = badges;
+    // Every card's button that starts a run asks for the clone on these — not
+    // only Your turn's, whose idle reason says so: "Re-review now" and
+    // "Self-review again" were refused for it. Looked up only while the agent
+    // may not clone by itself, once per repository (`cloneOf`).
+    noCheckoutIds = s.cloneMissing ? [] : snapshot.pullRequests.filter((pr) => !cloneOf(pr)).map((pr) => pr.id);
     idle = Object.fromEntries(plan.idle);
     sweepWorktrees();
     const byId = new Map(snapshot.pullRequests.map((p) => [p.id, p]));
@@ -1393,8 +1402,9 @@ export function createAgent(deps: AgentDeps): Agent {
       item.finishedAt = stamp();
       // Tried once more by itself a while later — most failures are the network
       // or a clone busy for a moment. Not your own ask (yours to repeat), not a
-      // run that is a try again already, not one cut short again and again.
-      if (RETRIED.has(item.scenario) && !item.key.endsWith("|asked") && !item.retryOf && !headline.startsWith("Cut short")) {
+      // run that is a try again already, not one cut short again and again, and
+      // not one with no checkout: the plan holds such a PR back, so the try would never come.
+      if (RETRIED.has(item.scenario) && !item.key.endsWith("|asked") && !item.retryOf && !headline.startsWith("Cut short") && !headline.startsWith(NO_CHECKOUT_WHY)) {
         item.retryAt = new Date(now().getTime() + RETRY_AFTER_MS).toISOString();
       }
       // Recorded even when the run never started, or every tick would queue the
@@ -3188,6 +3198,7 @@ export function createAgent(deps: AgentDeps): Agent {
         suggestOn: s?.scenarios.review.mode === "shadow" && store.data.acceptedUnchanged >= s.limits.promoteAfter,
         orchestrated: sdlcBadges,
         setAside: liveSetAside(),
+        noCheckout: noCheckoutIds,
       };
     },
     ownSessionIds: () => new Set(store.data.items.filter((i) => i.state === "working" && i.sessionId).map((i) => i.sessionId!)),

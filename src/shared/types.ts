@@ -1277,6 +1277,13 @@ export interface AgentState {
    * run brings it back. Out of Your turn and out of every "ready for you" count.
    */
   setAside?: Record<string, string>;
+  /**
+   * The PRs (by id) whose repository has no checkout the agent may work in,
+   * while Settings › Agent doesn't let it clone one by itself: every button on
+   * their cards that starts a run asks for the clone too ("Clone and review").
+   * Empty while that setting is on.
+   */
+  noCheckout?: string[];
 }
 
 /** What the renderer may ask of the agent. It names a run or a PR by id — never a path or a command. */

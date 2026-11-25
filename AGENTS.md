@@ -857,13 +857,19 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   such a clone the app runs the base diffs and the merge of the base
   (`prefetchForDrive`) and git fetches what they read. With the setting off,
   the PR waits with a reason that starts `NO_CHECKOUT_WHY`
-  (`shared/agent-view.ts`), and its Board card asks instead: "Clone and
-  review" (re-review, fix; "Clone and try again" on a run that failed for
-  it) sends `enqueue` with `clone: true` — a yes, never a URL or a folder —
-  and the run carries it as `item.clone`, kept by Run again. It is a yes for
-  that one repository: the clone is the agent's own and stays, so later
+  (`shared/agent-view.ts`), and every Board button that starts a run asks
+  instead: "Clone and review" (re-review, fix, self-review; "Clone and try
+  again" on a failed run) sends `enqueue` with `clone: true` — a yes, never
+  a URL or a folder — and the run carries it as `item.clone`, kept by Run
+  again and by a run the app's closing cut short while it cloned
+  (`recoverInterrupted`). Which PRs lack a checkout comes from main as
+  `AgentState.noCheckout`, worked out each plan only while the setting is
+  off: the plan's idle reason reaches Your turn only, and "Re-review now" /
+  "Self-review again" in the waiting column were refused for it. It is a yes
+  for that one repository: the clone is the agent's own and stays, so later
   plans find it with the setting still off. While a run clones, its card
-  says "Cloning <repo> first". The clone and all
+  says "Cloning <repo> first". A run that finds no checkout gets no
+  `retryAt`: the plan holds such a PR back, so the try would never come. The clone and all
   git work in it — a run's worktree, a drive's base fetch and prefetch, the
   re-approve and base-only checks (`gitFor`) — run under `runGitLong`
   (30 min, not `runGit`'s 2): a large repository over a slow VPN would

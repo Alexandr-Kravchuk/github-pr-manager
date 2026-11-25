@@ -11290,6 +11290,88 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: the app closed while a clone you said yes to was being made — at the next start it goes on with the same yes", async () => {
+      const cloneInto = (sub) => {
+        const target = sub[sub.length - 1];
+        nfsA.mkdirSync(path.join(target, ".git"), { recursive: true });
+        nfsA.writeFileSync(path.join(target, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/a/b.git\n');
+      };
+      // The first start: your yes is queued, and the app closes while the run clones —
+      // written as the closing leaves such a run: cut short, no session, no worktree.
+      // (Not a real hanging clone: the clone in the making is shared in the process, and
+      // the next start below is the same process.)
+      const f = agentFixture({ checkout: false, script: () => {}, agent: { cloneMissing: false } });
+      await f.agent.act({ type: "pauseAgent" });
+      f.agent.onSnapshot(f.snapshot);
+      assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R", clone: true }), { ok: true });
+      f.agent.stop();
+      const file = path.join(f.dir, "agent", "state.json");
+      const saved = JSON.parse(nfsA.readFileSync(file, "utf8"));
+      const cut = saved.items.find((i) => i.clone === true);
+      Object.assign(cut, { state: "needsYou", interrupted: true, headline: "Interrupted — the app closed while it ran", startedAt: cut.queuedAt, finishedAt: cut.queuedAt });
+      saved.paused = false;
+      nfsA.writeFileSync(file, JSON.stringify(saved));
+      const runId = cut.runId;
+      // The next start: the PR is known again, and the run goes on — not refused for the missing checkout.
+      const g = agentFixture({ home: f.dir, checkout: false, script: () => {}, agent: { cloneMissing: false }, git: async (args) => (gitSub(args)[0] === "clone" && cloneInto(gitSub(args)), "") });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length === 1);
+        const items = g.agent.getState().items;
+        assert.strictEqual(items.find((i) => i.runId === runId).state, "done", "the cut-short one closes");
+        const again = items.find((i) => i.runId !== runId);
+        assert.deepStrictEqual([again.clone, again.checkout], [true, path.join(f.dir, "agent", "clones", "github.com", "a", "b")]);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: main lists the PRs with no checkout while it may not clone by itself — none with the setting on or once cloned", async () => {
+      const f = agentFixture({ checkout: false, script: () => {}, agent: { cloneMissing: false } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual(f.agent.getState().noCheckout, ["PR_R"]);
+        f.setAgent({ enabled: true, cloneMissing: true });
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual(f.agent.getState().noCheckout, [], "the agent clones by itself: nothing to ask");
+        f.setAgent({ enabled: false, cloneMissing: false });
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual(f.agent.getState().noCheckout, [], "off: no button starts it anyway");
+      } finally {
+        f.agent.stop();
+      }
+      // A clone of the agent's own counts as a checkout.
+      const g = agentFixture({ checkout: false, script: () => {}, agent: { cloneMissing: false } });
+      try {
+        const clone = path.join(g.dir, "agent", "clones", "github.com", "a", "b", ".git");
+        nfsA.mkdirSync(clone, { recursive: true });
+        nfsA.writeFileSync(path.join(clone, "config"), "");
+        g.agent.onSnapshot(g.snapshot);
+        assert.deepStrictEqual(g.agent.getState().noCheckout, []);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: a run the plan queued that finds no checkout is not tried again by itself — the plan holds that PR back", async () => {
+      let present = true;
+      const f = agentFixture({ checkout: () => present, script: () => {}, agent: { cloneMissing: false } });
+      try {
+        // Queued while the checkout was there; its folder is gone before the run starts.
+        await f.agent.act({ type: "pauseAgent" });
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.agent.getState().items[0].state, "queued");
+        present = false;
+        await f.agent.act({ type: "resumeAgent" });
+        await until(() => f.agent.getState().items[0].state === "error");
+        const item = f.agent.getState().items[0];
+        assert.match(item.headline, /^No checkout of a\/b/);
+        assert.strictEqual(item.retryAt, undefined);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
     await atest("agent: a clone you said yes to that failed is tried again with the same yes", async () => {
       let fails = true;
       const f = agentFixture({
@@ -12348,6 +12430,36 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ["Clone and try again", { type: "enqueue", prId: "F", clone: true }],
         ["Leave it", { type: "skip", runId: RID }],
       ]);
+    });
+
+    test("agent board words: main's list of PRs with no checkout reaches every column — Re-review now and Self-review again ask for the clone too", () => {
+      const shape = (e) => e.choices.map((c) => [c.label, c.act ?? null]);
+      // Waiting on the author: no idle reason there, only main's list says so.
+      const theirs = xPr({ id: "W", roles: ["reviewed"], viewerHasReviewed: true, viewerReviewedAt: sAgo(60) });
+      const waitingTheirs = xOne(theirs, [], { noCheckout: ["W"] });
+      assert.strictEqual(waitingTheirs.owner, "others");
+      assert.deepStrictEqual(shape(waitingTheirs), [["Clone and re-review", { type: "enqueue", prId: "W", clone: true }]]);
+      assert.deepStrictEqual(shape(xOne(theirs)), [["Re-review now", { type: "enqueue", prId: "W" }]], "with a checkout: as before");
+      // Your PR waiting on reviewers.
+      const mine = xOne(xPr({ id: "M" }), [], { noCheckout: ["M"] });
+      assert.strictEqual(mine.owner, "others");
+      assert.deepStrictEqual(shape(mine), [["Clone and self-review", { type: "enqueue", prId: "M", clone: true }]]);
+      // Your turn goes by the list too, whatever the idle reason says.
+      const asked = xPr({ id: "P", roles: ["reviewer"], requestedOfMe: true });
+      assert.strictEqual(xOne(asked, [], { noCheckout: ["P"] }).choices[0].label, "Clone and review");
+      assert.strictEqual(xOne(asked, [], { noCheckout: [] }).choices[0].label, "Let the agent review");
+      // A run that failed for want of a checkout: the list says how it stands now, not the failure's old headline.
+      const RID = "00000000-0000-4000-8000-000000000003";
+      const failedRun = sIt({ runId: RID, prId: "F", key: "F|review|aaa", scenario: "review", state: "error", headline: "No checkout of a/b — set its folder in Settings › Claude, or let the agent clone it (Settings › Agent)", retryAt: new Date(sNow + 600_000).toISOString() });
+      const f = xPr({ id: "F", roles: ["reviewer"], requestedOfMe: true });
+      const stillNone = xOne(f, [failedRun], { noCheckout: ["F"] });
+      assert.strictEqual(stillNone.choices[0].label, "Clone and try again");
+      const setSince = xOne(f, [failedRun], { noCheckout: [] });
+      assert.deepStrictEqual(setSince.choices[0].act, { type: "retry", runId: RID }, "a checkout set since: Try again, no clone promised");
+      assert.strictEqual(setSince.choices[0].label, "Try again");
+      // Its retryAt (from an older build) promises nothing: the plan holds a PR with no checkout back.
+      assert.doesNotMatch(stillNone.now, /tries again by itself/);
+      assert.strictEqual(stillNone.ask, "See what went wrong, then try again — or leave it.");
     });
 
     test("agent board words: your PR from a fork — no button that starts the agent, which never pushes there", () => {

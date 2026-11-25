@@ -542,7 +542,7 @@ FIXTURES.agent = [
   }),
 ];
 
-const mood =new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
+const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
 // `?jiraAuth=token` / `?jiraAuth=twg` shows the rejected-credentials banner and
 // the matching Settings state, which a working mock never reaches.
 // `?weather=rain` (any WeatherKind) previews the header's weather icon;
@@ -1037,6 +1037,8 @@ function mockAgentState(): AgentState {
     orchestrated: Object.fromEntries(
       [byNumber(139)].filter((p): p is PullRequest => Boolean(p)).map((p) => [p.id, { key: "ENG-93412", stage: "fixing review" }]),
     ),
+    // The agent's own cloning is off, and nothing of acme/file-import-app is checked out.
+    noCheckout: prs.filter((p) => p.repo === "acme/file-import-app").map((p) => p.id),
   };
 }
 
@@ -1085,10 +1087,13 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
   if (action.type === "enqueue") {
     const pr = snapshot.pullRequests.find((p) => p.id === action.prId);
     if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
-    const why = agentState.idle[pr.id];
-    if (why?.startsWith(NO_CHECKOUT_WHY) && !action.clone) return { ok: false, error: `${why}.` };
-    // Cloned: the plan no longer waits on it.
-    if (action.clone) agentState = { ...agentState, idle: { ...agentState.idle, [pr.id]: "Nothing for the agent" } };
+    const lacks = agentState.noCheckout?.includes(pr.id) ?? false;
+    if (lacks && !action.clone) return { ok: false, error: `${agentState.idle[pr.id] ?? `${NO_CHECKOUT_WHY}${pr.repo}`}.` };
+    // Cloned: every PR of the repository has a checkout now, and the plan no longer waits on it.
+    if (lacks) {
+      const left = (agentState.noCheckout ?? []).filter((id) => snapshot.pullRequests.find((p) => p.id === id)?.repo !== pr.repo);
+      agentState = { ...agentState, noCheckout: left, idle: { ...agentState.idle, [pr.id]: "Nothing for the agent" } };
+    }
     const rank = action.before ? rankBefore(items.filter((i) => i.state === "queued"), action.before) : undefined;
     items.push({
       ...(rank !== undefined ? { rank } : {}),

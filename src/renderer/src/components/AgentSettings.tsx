@@ -143,7 +143,7 @@ function GeneralSection({ agent, setAgent, inputCls }: SectionProps) {
           checked={agent.cloneMissing}
           onChange={(cloneMissing) => setAgent((a) => ({ ...a, cloneMissing }))}
           title="Clone a repository it has no checkout of"
-          hint="A PR whose repository isn't in your projects folder gets a lightweight clone of the agent's own (no file contents until a run needs them), in the app's data folder. Off: such a PR waits until you set its folder in Settings › Claude."
+          hint="A PR whose repository isn't in your projects folder gets a lightweight clone of the agent's own (no file contents until a run needs them), in the app's data folder. Off: such a PR waits until you set its folder in Settings › Claude, and its card asks before the agent clones that one repository (Clone and review)."
         />
         <div>
           <span className="block text-xs font-medium text-fg-muted">Repositories</span>
