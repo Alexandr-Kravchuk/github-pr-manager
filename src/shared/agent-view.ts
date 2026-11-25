@@ -555,13 +555,17 @@ export function approvableReview(item: AgentItem | null | undefined, pr: PullReq
  * review that ended yesterday on the very same head left it with "Let the
  * agent re-review", nothing to read and no Approve, though nothing changed
  * since. The latest review of the head decides: one after it that posted,
- * prepared something or was cut short leaves no approval to rest on.
+ * prepared something, was cut short or that you discarded leaves no approval
+ * to rest on. Only one closed before it ever ran (dropped from the queue,
+ * superseded while waiting) is no review and doesn't count.
  */
 export function approvableRun(items: readonly AgentItem[], pr: PullRequest): AgentItem | null {
   if (!pr.headOid) return null;
   let latest: AgentItem | null = null;
   for (const i of items) {
-    if ((i.scenario !== "review" && i.scenario !== "rereview") || isQuiet(i) || keyHead(i.key) !== pr.headOid) continue;
+    if ((i.scenario !== "review" && i.scenario !== "rereview") || keyHead(i.key) !== pr.headOid) continue;
+    // A discarded draft keeps `startedAt` (`closeAs`): what it found still stands against the earlier review.
+    if (isQuiet(i) && !i.startedAt) continue;
     if (!latest || (i.finishedAt ?? i.queuedAt) > (latest.finishedAt ?? latest.queuedAt)) latest = i;
   }
   return latest && approvableReview(latest, pr) ? latest : null;

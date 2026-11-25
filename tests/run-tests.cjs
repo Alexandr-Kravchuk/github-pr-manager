@@ -12342,7 +12342,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.approvableRun([run(), posted], pr), null, "a later review of the head posted something");
       assert.ok(!xOne(pr, [run(), posted]).choices.some((c) => c.act?.type === "approve"));
       assert.strictEqual(view.approvableRun([run(), later({ interrupted: true, headline: "Stopped by you" })], pr), null, "a later one cut short");
-      assert.strictEqual(view.approvableRun([run(), later({ headline: "Superseded by a newer run" })], pr).runId, RID, "an item closed as housekeeping is no review");
+      assert.strictEqual(view.approvableRun([run(), later({ headline: "Superseded by a newer run" })], pr).runId, RID, "an item closed before it ever ran is no review");
+      assert.strictEqual(view.approvableRun([run(), later({ headline: "Dismissed" })], pr).runId, RID, "nor one you took out of the queue");
+      const discarded = later({ headline: "Dismissed", startedAt: sAgo(20), plan: plan(), result: { ...card, findings: [{ severity: "major", text: "x", where: "" }] } });
+      assert.strictEqual(view.approvableRun([run(), discarded], pr), null, "a later review you discarded still found what it found");
+      assert.ok(!xOne(pr, [run(), discarded]).choices.some((c) => c.act?.type === "approve"));
       assert.strictEqual(view.approvableRun([run({ key: "P|rereview|old|asked" })], pr), null, "a review of another head");
       assert.ok(!xOne(pr, [run({ key: "P|rereview|old|asked" })]).choices.some((c) => c.act?.type === "approve"));
       // An approval in one click comes before a review nobody started, though that one waits longer.
