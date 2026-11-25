@@ -431,6 +431,10 @@ interface Running {
   byAgentPause: boolean;
   /** Stopped because the agent was switched off. */
   offStop: boolean;
+  /** Stopped because the PR got this new head while it ran (`stopMovedRuns`). */
+  headMoved?: string;
+  /** Going on with your answer: a new head doesn't stop it — your answer would go with it. */
+  answered?: boolean;
 }
 
 /** What starts a session — refused while the agent is off; everything else is your own click and works. */
@@ -453,6 +457,8 @@ export function createAgent(deps: AgentDeps): Agent {
   const running = new Map<string, Running>();
   let idle: Record<string, string> = {};
   let heldUntil: number | null = null;
+  /** When the last plan's first PR waiting to settle has (`PlanResult.wakeAt`): the tick plans again then. */
+  let replanAt: number | null = null;
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
 
@@ -726,6 +732,49 @@ export function createAgent(deps: AgentDeps): Agent {
       const queued = enqueueAsked(pr, s, item.scenario, found && found.length === 0 ? ["self"] : (found ?? item.reasons), undefined, item.clone ? { clone: true } : undefined);
       void closeAs(item, queued.ok ? AGENT_CLOSED.rerun : item.headline);
     }
+  }
+
+  /** The runs a new head of their PR stops: they read that head. A drive commits on top of it and goes on. */
+  const STOP_ON_NEW_HEAD: ReadonlySet<AgentScenario> = new Set(["review", "brief", "rereview"]);
+
+  /**
+   * A review, brief or re-review whose PR got a new head while it ran stops at
+   * once, not at its end: what it would post is about a head that is gone, and
+   * GitHub would refuse it ("new commits since this review") after a whole run.
+   * The run's end closes it — the agent's own as superseded, one you asked for
+   * asked again on the new head (`askAgainOnNewHead`). Not one going on with
+   * your answer: your answer would go with it.
+   */
+  function stopMovedRuns(snapshot: DashboardResponse | null): void {
+    if (!snapshot) return;
+    for (const [runId, r] of running) {
+      if (r.headMoved || r.offStop || r.takeOver || r.answered) continue;
+      const item = findItem(runId);
+      if (!item || item.state !== "working" || !STOP_ON_NEW_HEAD.has(item.scenario)) continue;
+      const was = keyHead(item.key);
+      const head = snapshot.pullRequests.find((p) => p.id === item.prId)?.headOid ?? null;
+      if (!was || !head || head === was) continue;
+      r.headMoved = head;
+      r.handle.stop();
+    }
+  }
+
+  /**
+   * A run you asked for whose PR got a new head while it ran starts over on
+   * that head, as one the app's closing cut short does (`recoverInterrupted`):
+   * your ask goes first, so a review or brief the agent queued on its own for
+   * the new head closes. The line the old run closes with.
+   */
+  function askAgainOnNewHead(item: AgentItemRecord, s: AgentSettings): string {
+    const pr = snapshotPr(item.prId);
+    if (!pr) return "Stopped — the PR got a new head";
+    if (FRESH_REVIEW.has(item.scenario)) {
+      for (const other of store.data.items) {
+        if (other !== item && other.prId === item.prId && other.state === "queued" && FRESH_REVIEW.has(other.scenario) && !other.key.endsWith("|asked")) void closeAs(other, AGENT_CLOSED.superseded);
+      }
+    }
+    const queued = enqueueAsked(pr, s, item.scenario, item.reasons, undefined, item.clone ? { clone: true } : undefined);
+    return queued.ok ? AGENT_CLOSED.rerun : `Stopped — the PR got a new head; ${queued.error}`;
   }
 
   /**
@@ -1195,6 +1244,7 @@ export function createAgent(deps: AgentDeps): Agent {
       idle = Object.fromEntries(snapshot.pullRequests.map((p) => [p.id, "The agent is off"]));
       sdlcBadges = {};
       noCheckoutIds = [];
+      replanAt = null;
       stopRunsForOff();
       // Switched on again, the journal starts from where things stand then.
       loggedIdle = null;
@@ -1252,6 +1302,8 @@ export function createAgent(deps: AgentDeps): Agent {
       briefDone,
       reapproveState,
       baseOnlyState,
+      now: now(),
+      known: (key) => Boolean(store.data.ledger[key]),
       orchestrated: (pr) => {
         const run = sdlcRun(pr);
         if (!run) return null;
@@ -1260,6 +1312,9 @@ export function createAgent(deps: AgentDeps): Agent {
       },
     });
     sdlcBadges = badges;
+    // A PR waiting to settle starts once it has, not at the next poll: the
+    // poller reports only a snapshot that changed, and a quiet PR doesn't.
+    replanAt = plan.wakeAt ? Date.parse(plan.wakeAt) : null;
     // Every card's button that starts a run asks for the clone on these — not
     // only Your turn's, whose idle reason says so: "Re-review now" and
     // "Self-review again" were refused for it. Looked up only while the agent
@@ -1612,7 +1667,7 @@ export function createAgent(deps: AgentDeps): Agent {
       ...(preflight ? [path.dirname(preflight.installedPlugins), preflight.tmpDir] : []),
     ];
 
-    const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false, byAgentPause: false, offStop: false };
+    const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false, byAgentPause: false, offStop: false, ...(answer ? { answered: true } : {}) };
     const handle = startRun(
       {
         cwd: dir,
@@ -1717,6 +1772,13 @@ export function createAgent(deps: AgentDeps): Agent {
       item.state = "done";
       item.headline = "Stopped — the agent was switched off";
       store.data.ledger[item.key].state = "failed";
+    } else if (entry.headMoved) {
+      // The PR got a new head under it (`stopMovedRuns`): nothing it found is
+      // yours to read — it was about a head that is gone. What you asked for
+      // starts over on the new head.
+      item.state = "done";
+      store.data.ledger[item.key].state = "failed";
+      item.headline = item.key.endsWith("|asked") ? askAgainOnNewHead(item, s) : AGENT_CLOSED.superseded;
     } else if (outcome.stopped) {
       item.state = "done";
       item.headline = "Stopped by you";
@@ -1811,12 +1873,15 @@ export function createAgent(deps: AgentDeps): Agent {
     // `fail` changes the state behind TypeScript's back; read it afresh.
     const ended = item.state as AgentItem["state"];
     if (ended !== "error") {
-      logRun(item, item.interrupted ? "interrupted" : ended, {
+      logRun(item, item.interrupted ? "interrupted" : entry.headMoved ? "superseded" : ended, {
         sessionId,
         detail: clip(item.headline),
+        ...(entry.headMoved ? { headOid: entry.headMoved } : {}),
         ...(typeof endStats.ms === "number" ? { ms: endStats.ms } : {}),
         data: {
           ...endStats,
+          // What it was spent on: the head it read, gone by its end.
+          ...(entry.headMoved ? { was: keyHead(item.key) } : {}),
           // What it prepared: the review it would post, the commits, the questions it left you.
           ...(item.plan ? { plan: describePlan(item.plan), comments: item.plan.comments.length, replies: item.plan.replies.length, escalations: item.plan.escalations.length } : {}),
           ...(item.drive ? { commits: item.drive.commits.length } : {}),
@@ -2771,6 +2836,18 @@ export function createAgent(deps: AgentDeps): Agent {
     if (!all || !s?.enabled) {
       if (!s?.enabled) stopRunsForOff();
       return;
+    }
+    // Read every tick, not only on a snapshot: the poller's latest read, whether or not it reported a change.
+    stopMovedRuns(deps.getSnapshot());
+    // A PR the last plan waited on to settle has: planned again now. That plan ends in a tick of its own.
+    if (replanAt !== null && now().getTime() >= replanAt) {
+      replanAt = null;
+      const snapshot = deps.getSnapshot();
+      if (snapshot) {
+        onSnapshot(snapshot);
+        changed();
+        return;
+      }
     }
     const day = localDay(now());
     if (store.data.day !== day) {

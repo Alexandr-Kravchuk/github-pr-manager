@@ -1,5 +1,5 @@
 import { brokenLayerBelow, STACK_REBASE_HINT } from "./agent-stack";
-import { OWN_SESSION_WHY } from "./agent-view";
+import { localClock, OWN_SESSION_WHY } from "./agent-view";
 import type { AgentRunKind, AgentScenario, AgentSettings, PullRequest } from "./types";
 
 export type { AgentScenario };
@@ -74,6 +74,42 @@ export interface PlanContext {
    * own. Absent: never, so a big PR gets its brief.
    */
   briefDone?: (pr: PullRequest) => boolean;
+  /** The clock a PR's settling is measured against (`settlesUntil`). Absent: the real one. */
+  now?: Date;
+  /**
+   * The ledger has this job already — it ran, failed or was dismissed: the
+   * plan hands it on unsettled, so the PR's reason says how it went rather
+   * than that the agent waits to start it. Absent: none is known.
+   */
+  known?: (key: string) => boolean;
+}
+
+/** The start of the idle reason of a PR the agent waits on to settle. */
+export const SETTLING_WHY = "Waiting for the PR to settle";
+
+/**
+ * Until when a review, brief or re-review the agent would plan itself waits
+ * for the PR to settle, or null when it has: authors — and their own agents —
+ * push every 10–30 minutes, and a run on a head replaced while it ran is a
+ * whole run for nothing. Settled is `settleMinutes` with no push, no answer of
+ * the author's in a thread and no review asked for. A time further ahead than
+ * the wait itself (a committer's clock gone wrong — the push time falls back
+ * to the commit's date) says nothing, or it would hold the PR for as long.
+ */
+export function settlesUntil(
+  pr: Pick<PullRequest, "lastCommitPushedAt" | "authorRepliedAt" | "reviewRequestedAt">,
+  s: AgentSettings,
+  now: Date,
+): Date | null {
+  const wait = s.limits.settleMinutes * 60_000;
+  if (!(wait > 0)) return null;
+  const t = now.getTime();
+  let latest = -Infinity;
+  for (const at of [pr.lastCommitPushedAt, pr.authorRepliedAt, pr.reviewRequestedAt]) {
+    const v = at ? Date.parse(at) : NaN;
+    if (Number.isFinite(v) && v <= t + wait && v > latest) latest = v;
+  }
+  return latest + wait > t ? new Date(latest + wait) : null;
 }
 
 /** Why your PR gets no self-review now, or null when it should get one. */
@@ -102,6 +138,8 @@ export interface PlanResult {
   baseChecks: AgentJob[];
   /** Why each PR the agent leaves alone is idle — shown on the Board's Idle column. */
   idle: Map<string, string>;
+  /** When the first PR waiting to settle has (ISO), or null: the agent plans again then, not at the next poll. */
+  wakeAt: string | null;
 }
 
 /**
@@ -227,12 +265,28 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
   const reapprovals: AgentJob[] = [];
   const baseChecks: AgentJob[] = [];
   const idle = new Map<string, string>();
+  let wakeAt: Date | null = null;
   if (!s.enabled) {
     for (const pr of prs) idle.set(pr.id, "The agent is off");
-    return { jobs, merges, reapprovals, baseChecks, idle };
+    return { jobs, merges, reapprovals, baseChecks, idle, wakeAt: null };
   }
+  const clock = ctx.now ?? new Date();
   for (const pr of prs) {
     const skip = (reason: string) => idle.set(pr.id, reason);
+    /**
+     * A review, brief or re-review the agent would start on its own waits for
+     * the PR to settle: false (with its reason) while it still moves. Drives
+     * and offers never wait; nor does a run you ask for — it is no plan's —
+     * nor a job the ledger already has, whose reason is the ledger's.
+     */
+    const settled = (key: string): boolean => {
+      if (ctx.known?.(key)) return true;
+      const until = settlesUntil(pr, s, clock);
+      if (!until) return true;
+      skip(`${SETTLING_WHY} — no push, reply or review request for ${s.limits.settleMinutes} min; the agent starts at ${localClock(until.toISOString())}`);
+      if (!wakeAt || until < wakeAt) wakeAt = until;
+      return false;
+    };
     if (pr.isIgnored) {
       skip("Ignored");
       continue;
@@ -394,8 +448,10 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
           continue;
         }
       }
+      const rereviewKey = jobKey(pr, "rereview", `${asked ? "asked" : "reply"}@${since ?? "-"}`);
+      if (!settled(rereviewKey)) continue;
       jobs.push({
-        key: jobKey(pr, "rereview", `${asked ? "asked" : "reply"}@${since ?? "-"}`),
+        key: rereviewKey,
         prId: pr.id,
         prNumber: pr.number,
         repo: pr.repo,
@@ -422,6 +478,7 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     // to the review. Nothing waits for a click in between.
     const big = isBigPr(pr, s);
     if (big && s.scenarios.brief.mode !== "off" && !ctx.briefDone?.(pr)) {
+      if (!settled(jobKey(pr, "brief"))) continue;
       jobs.push({ key: jobKey(pr, "brief"), prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario: "brief", kind: "brief", mode: "on", createdAt: pr.createdAt });
       continue;
     }
@@ -430,6 +487,7 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
       skip(big && s.scenarios.brief.mode !== "off" ? "Reviews are off — a big PR gets its brief only" : "Reviews are off");
       continue;
     }
+    if (!settled(jobKey(pr, "review"))) continue;
     jobs.push({ key: jobKey(pr, "review"), prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario: "review", kind: "review", mode, createdAt: pr.createdAt });
   }
   // A session works in a clone of the PR's repository: without one the PR
@@ -442,7 +500,9 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     return !why;
   });
   runnable.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  return { jobs: runnable, merges, reapprovals, baseChecks, idle };
+  // TypeScript can't see the closure assign it.
+  const wake = wakeAt as Date | null;
+  return { jobs: runnable, merges, reapprovals, baseChecks, idle, wakeAt: wake ? wake.toISOString() : null };
 }
 
 /** `{url}` filled in; an empty template falls back to the given default. */

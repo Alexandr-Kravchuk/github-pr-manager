@@ -249,7 +249,27 @@ Three layers:
   on the failed item, `dueRetry` in the plan; the new run carries
   `retryOf` and is not tried a third time) while the plan still wants that
   head — not a run you asked for, not one cut short again and again; the
-  card, the toast and the PR's reason say when. A PR's reason when it is
+  card, the toast and the PR's reason say when. A review, brief or
+  re-review the agent plans itself waits for the PR to settle first —
+  authors and their own agents push every 10–30 minutes, and a day's log
+  had a third of the runs review a head replaced during the run or right
+  after it: `settlesUntil` in `planJobs` holds it until the PR has had no
+  push, author's reply in a thread and review request (`reviewRequestedAt`,
+  the latest `ReviewRequestedEvent`, of anyone — read in the hydrate) for
+  Settings › Agent › Limits' `settleMinutes` (15; 0 is off). The push time
+  falls back to the commit's date, so a time further ahead than the wait
+  counts for nothing. The PR's reason then says until when
+  (`SETTLING_WHY`), a job the ledger already has keeps the ledger's reason
+  (`known`), and the plan's `wakeAt` — the first PR to settle — has the
+  tick plan again then, since a quiet PR brings no new snapshot. A drive, an
+  offer and a run you ask for never wait. And a review, brief or re-review
+  whose PR gets a new head while it runs is stopped at once
+  (`stopMovedRuns`, on every tick, from the poller's latest read): the
+  agent's own closes as superseded with `run/superseded` (what it cost, the
+  head it read as `was`) and no toast; one you asked for starts over as
+  asked on the new head, as after a restart (`recoverInterrupted`); a drive
+  goes on — it commits on top — and so does a run going on with your
+  answer. A PR's reason when it is
   idle comes from what the head's run really did (`ledgerIdle`): "Running"
   only while it is live, else how it ended, and every run's end plans
   again at once — except one taken over, cut short or ended by the
@@ -778,7 +798,8 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   PR size; `started` with its folder, model and queue wait; its end,
   `needsYou`/`done`/`failed`, with time, turns, cost, tokens, tool calls,
   refused tools and stderr's tail; `interrupted` when its process was ended
-  under it; `diagrams`; `published`/`pushed`/`merged`/`reapproved`/`reasked`
+  under it; `superseded` when the PR got a new head under it, with the same
+  stats and the head it read (`was`); `diagrams`; `published`/`pushed`/`merged`/`reapproved`/`reasked`
   and their `not-*` refusals; `approved-again` (no run: your Approve again);
   `approved` (your Approve on a review that found nothing blocking);
   `offered` for an offer; `notice`), `item` (every

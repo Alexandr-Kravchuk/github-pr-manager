@@ -249,7 +249,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: "agentLimits",
     tab: "agent",
     title: "Limits",
-    keywords: ["limit", "runs at a time", "parallel", "runs per day", "stop a run", "minutes", "quiet hours", "night", "suggest", "shadow to on"],
+    keywords: ["limit", "runs at a time", "parallel", "runs per day", "stop a run", "minutes", "quiet hours", "night", "suggest", "shadow to on", "settle", "wait", "push", "debounce", "new head", "superseded"],
   },
   {
     id: "agentPermissions",
