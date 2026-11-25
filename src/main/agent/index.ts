@@ -29,7 +29,8 @@ import type {
   Settings,
 } from "../../shared/types";
 import { builtOn, chooseMergeMethod, mergeArgs } from "./merge";
-import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
+import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, skillWorkflows, USER_SKILLS_PLUGIN, type InstalledPlugin } from "./plugins";
+import { sessionToolRules, type ToolRulesRun } from "../../shared/agent-guard";
 import {
   ghApiArgs,
   ghError,
@@ -50,7 +51,7 @@ import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, redirectingKeys, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
-import { claudeSessionRoots, cutShort, preflightFor, runTempEnv, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
+import { claudeSessionRoots, cutShort, preflightFor, runTempEnv, freshHooksDir, hookCommand, sessionFolders, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
 import { approveAgainRequest, approveRequest, checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
 import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
@@ -252,17 +253,26 @@ export const RESUME_PROMPT = "The app running you closed while you worked and ha
 /** …and of one with a publish wrapper, whose folder the app makes afresh. */
 export const RESUME_PROMPT_WRAPPER = `${RESUME_PROMPT} Whatever you recorded through the publish wrapper before is gone: if you had recorded your review, replies or resolves already, record them again — once.`;
 
-/** The rules every agent session gets on top of its prompt. */
-/** The rules every agent session gets on top of its prompt — ending with how to close its final message for the card. */
+/**
+ * The rules every agent session gets on top of its prompt — ending with how to
+ * close its final message for the card. `tools` (a restricted run's own
+ * `--allowedTools` and the skill workflows its prompt names) adds what the
+ * guard refuses and what works instead (`sessionToolRules`), so the session
+ * doesn't learn each rule from a refused call.
+ */
 export function agentRules(
   scenario: AgentScenario,
   mode: "shadow" | "on",
   folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null = null,
   pr: RulesPr | null = null,
   language: AgentLanguage = "en",
+  tools: Pick<ToolRulesRun, "allowedTools" | "workflows"> | null = null,
 ): string {
   const sonnet = pr?.sonnetReviewers && runsReviewWorkflow(scenario, pr.reasons) ? ` ${SONNET_REVIEWERS_RULE}` : "";
-  return `${scenarioRules(scenario, mode, folder, pr)}${sonnet} ${resultRuleFor(scenario)} ${languageRule(language)}`;
+  const toolRules = tools
+    ? ` ${sessionToolRules(runKindOf(scenario), { ...tools, pr: pr ? { repo: pr.repo, number: pr.number } : null, ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}) })}`
+    : "";
+  return `${scenarioRules(scenario, mode, folder, pr)}${sonnet}${toolRules} ${resultRuleFor(scenario)} ${languageRule(language)}`;
 }
 
 /** The PR a session's rules name: its place, a drive's base, why it runs — and, in a GitHub stack, its layer (`stackRules`). */
@@ -1696,6 +1706,8 @@ export function createAgent(deps: AgentDeps): Agent {
     // This kind's own model and effort, else the agent's (Settings › Agent).
     const used = runModelFor(s, kind);
     const sonnetReviewers = s.sonnetReviewers && runsReviewWorkflow(item.scenario, item.reasons);
+    // Where Claude Code files what this session spills over (a long tool result, a Workflow's journal, a background task's output).
+    const sessionRoots = claudeSessionRoots({ ...launcherEnv(process.env), ...tempEnv });
     writeGuardFile(guardFile, full ? {
       mode: "full",
       ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),
@@ -1711,7 +1723,7 @@ export function createAgent(deps: AgentDeps): Agent {
       // home folder, gh's or ssh's keys, this app's settings.
       readDirs: [dir, ...(folder ? [folder.outDir] : []), ...pluginDirs],
       sessionId,
-      sessionRoots: claudeSessionRoots({ ...launcherEnv(process.env), ...tempEnv }),
+      sessionRoots,
       // A skill's Workflow may run its script from the plugins this run mounted — never one from the PR.
       workflowDirs: pluginDirs,
       ...(preflight ? { preflight } : {}),
@@ -1743,11 +1755,15 @@ export function createAgent(deps: AgentDeps): Agent {
     const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(preflight ? ["Bash(node *)"] : [])])];
     // Read-only runs may read the plugins' folders (a skill's Workflow reads its script from there); a run that edits never gets them.
     // The preflight's file and payload folders too — the guard narrows them to installed_plugins.json and the helper's own folders.
+    // And the session's own folders, which the guard already lets it read: `--restricted` refused its Workflow's journal.
     const addDirs = [
       ...(folder ? [folder.outDir] : []),
       ...pluginDirs,
       ...(preflight ? [path.dirname(preflight.installedPlugins), preflight.tmpDir] : []),
+      ...(full ? [] : sessionFolders(sessionRoots, dir, sessionId)),
     ];
+    // The skill workflows the prompt names, by path: an agent run has no named workflows.
+    const workflows = skillWorkflows(mine.prompt, [...plugins(), ...mine.pluginDirs.map((d) => ({ name: USER_SKILLS_PLUGIN, installPath: d }))]);
 
     const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false, byAgentPause: false, offStop: false, ...(answer ? { answered: true } : {}) };
     const handle = startRun(
@@ -1775,7 +1791,7 @@ export function createAgent(deps: AgentDeps): Agent {
           stack: pr ? stackRules(pr, item.scenario) : null,
           ...(full ? { full: true } : {}),
           ...(sonnetReviewers ? { sonnetReviewers: true } : {}),
-        }, s.language),
+        }, s.language, full ? null : { allowedTools, workflows }),
         allowedTools,
         // Full context: your own plugins load as in your sessions; the skills this run mounted come on top.
         pluginDirs: full ? mine.pluginDirs : pluginDirs,

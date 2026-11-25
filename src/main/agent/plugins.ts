@@ -94,6 +94,33 @@ export function mountUserSkills(
   return { prompt: out, pluginDirs: [mountDir] };
 }
 
+/**
+ * The Workflow scripts (`skills/<skill>/*.workflow.js`) of the skills a
+ * resolved prompt names as `/plugin:skill`, for the run's rules. A skill such
+ * as creatio-code-review says to start its workflow by name first, which
+ * relies on its installer copying the script into `~/.claude/workflows` — a
+ * folder `--restricted` doesn't load, so an agent run has no named workflows
+ * (only Claude Code's built-in ones) and every run spent its first Workflow
+ * call on "not found". With the path in its rules it starts by path at once,
+ * the only way the guard lets a workflow run (`checkWorkflow`). Never throws.
+ */
+export function skillWorkflows(prompt: string, plugins: ReadonlyArray<Pick<InstalledPlugin, "name" | "installPath">>): string[] {
+  const out = new Set<string>();
+  for (const m of prompt.matchAll(SLASH_REF)) {
+    const [, , plugin, skill] = m;
+    if (!skill) continue;
+    for (const p of plugins.filter((x) => x.name === plugin)) {
+      const dir = path.join(p.installPath, "skills", skill);
+      try {
+        for (const f of fs.readdirSync(dir).sort()) if (f.endsWith(".workflow.js")) out.add(path.join(dir, f));
+      } catch {
+        // No such skill folder: nothing to name.
+      }
+    }
+  }
+  return [...out];
+}
+
 export function resolveSkillRefs(prompt: string, plugins: readonly InstalledPlugin[]): { prompt: string; pluginDirs: string[] } {
   const dirs = new Set<string>();
   const out = prompt.replace(SLASH_REF, (match, lead: string, a: string, b?: string) => {

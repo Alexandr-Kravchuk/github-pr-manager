@@ -978,7 +978,11 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   `projects` in its config folder, `claude` in its temp folder), where it
   spills a tool result too long to show and a background Workflow's output
   and tells the session to read them; another session's folder there is
-  refused. `~`, `..`, a colon past the drive letter and an absolute Glob
+  refused. `--restricted` refused that folder on its own (the session
+  reading its Workflow's `journal.jsonl` to see why it stopped), so a
+  restricted run also passes it with `--add-dir` (`sessionFolders`:
+  `<root>/<projectDirName(cwd)>/<sessionId>`, made in advance — this
+  session's only, never a root). `~`, `..`, a colon past the drive letter and an absolute Glob
   pattern or brace alternative outside those folders are refused. The hook
   passes `realRead` (links and junctions followed, Git Bash `/c/…` read as
   `C:\…`, 8.3 short names resolved), so a link the PR's branch carries is
@@ -1024,6 +1028,32 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   your shared one keeps the payloads of every other review of the last day.
   Without this every review aborted at the preflight (`preflight-unverified`)
   and was reported as "Reviewed — nothing to post".
+- **A refused call is a wasted step, so the rules say what works first and a
+  refusal says what to do instead.** Each refusal costs a step that re-reads
+  the whole context (2026-11-25: 469 refused calls in 68 runs, ~16% of the
+  main sessions' context tokens). `sessionToolRules`
+  (`shared/agent-guard.ts`, appended by `agentRules` to a restricted run's
+  system prompt from its own `--allowedTools` and the workflows its prompt
+  names) says up front: one plain command per call, which programs a
+  read-only run's Bash runs, Read/Glob/Grep instead of `ls`/`cat`/`grep`,
+  the `gh` reads that replace git — only commands both the guard and the
+  run's tools let through (`ruleAllows`; a test runs each through
+  `checkBash`) — `twg -o json`, reading a spilled result rather than running
+  the command again, the publish wrapper's usage (`PUBLISH_USAGE`: never
+  `--help`, never read; it posts no status comment, so `statusComment:
+  false`), and each skill workflow by its script path. That last one is why
+  every review's first Workflow call said `not found. Available:
+  deep-research`: the creatio-code-review skill says to start its workflow
+  by name, a name its installer copies into `~/.claude/workflows`, which
+  `--restricted` doesn't load — and the guard refuses names anyway
+  (`checkWorkflow`). `skillWorkflows` (`main/agent/plugins.ts`) finds the
+  `*.workflow.js` of the skills the prompt names. A Workflow's own agents
+  don't get the rules, so every refusal carries its hint too
+  (`readOnlyRefusal`, `refusedSyntax`, and the git, gh, wrapper, read and
+  preflight-request refusals). Hints only explain: no decision depends on
+  them, and the tests assert each hinted call stays refused — add a hint
+  where the refusal is, never an allow. The rules ride on every step of
+  every run: keep them short.
 - **Except a drive on your own PR, with full context** (Settings › Agent ›
   "Your PRs: full context", `permissions.fullContextDrive`, on by default).
   Its diff and comments are yours and your reviewers', so it runs with your
