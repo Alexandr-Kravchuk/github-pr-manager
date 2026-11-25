@@ -158,6 +158,7 @@ export const AGENT_BOUNDS = {
   parallel: { min: 1, max: 8 },
   perDay: { min: 1, max: 500 },
   maxMinutes: { min: 5, max: 240 },
+  settleMinutes: { min: 0, max: 240 },
   promoteAfter: { min: 1, max: 100 },
   logRetentionDays: { min: 1, max: 365 },
   diagramMinLines: { min: 0, max: 100_000 },
@@ -203,6 +204,9 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
     perDay: 30,
     maxMinutes: 30,
     quietHours: { enabled: false, from: "20:00", to: "08:00" },
+    // Authors (and their own agents) push every 10–30 min: a review of a head
+    // replaced while it ran is a whole run for nothing.
+    settleMinutes: 15,
     promoteAfter: 10,
   },
   permissions: { tools: DEFAULT_AGENT_TOOLS, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: true, fullContextDrive: true },

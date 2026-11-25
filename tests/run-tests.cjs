@@ -5778,6 +5778,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.ok(!/reviewThreads\(first:/.test(sent.hydrate.query));
   });
 
+  await atest("fetchHost: reads when a review was last asked for — one request event per PR", async () => {
+    const { sent, result } = await runFetchHost({ authored: [rawPr({ id: "PR_a", timelineItems: { nodes: [{ createdAt: "2026-07-08T00:00:00Z" }] } })] });
+    assert.match(sent.hydrate.query, /timelineItems\(last: 1, itemTypes: \[REVIEW_REQUESTED_EVENT\]\) \{ nodes \{ \.\.\. on ReviewRequestedEvent \{ createdAt \} \} \}/);
+    assert.strictEqual(result.pullRequests[0].reviewRequestedAt, "2026-07-08T00:00:00Z");
+  });
+
   // The full selection is what GitHub bills for: 30 points per search carrying
   // it on github.com whatever it matched, against 1 for a search of ids. Nine
   // searches made a tick cost 270 points; the searches must stay ids-only and
@@ -9005,6 +9011,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       ]);
       assert.deepStrictEqual(ids("mermaid"), ["agentDiagrams"]);
       assert.deepStrictEqual(ids("quiet hours"), ["agentLimits"]);
+      assert.deepStrictEqual(ids("settle"), ["agentLimits"]);
       assert.deepStrictEqual(ids("worktree"), ["agent"]);
       assert.deepStrictEqual(ids("squash"), ["agentScenarios"]);
       assert.deepStrictEqual(ids("tray icon"), ["agentCompanion"]);
@@ -9025,6 +9032,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(a.scenarios.merge.mode, "offer", "a merge waits for your click, always");
       assert.strictEqual(a.cloneMissing, true);
       assert.deepStrictEqual([a.scenarios.review.maxLines, a.scenarios.review.maxFiles, a.limits.parallel, a.limits.perDay], [400, 15, 2, 30]);
+      // A PR waits 15 quiet minutes before the agent reviews it on its own; bounds 0 (off) to 240, clamped like every number.
+      assert.strictEqual(a.limits.settleMinutes, 15);
+      const settle = (v) => cfg.validateAgent({ limits: { settleMinutes: v } }).limits.settleMinutes;
+      assert.deepStrictEqual([settle(0), settle(-5), settle(999), settle("30"), settle(7.6), settle("x"), settle(undefined)], [0, 0, 240, 30, 8, 15, 15]);
       for (const rule of a.permissions.tools.review) assert.ok(!/push|Edit|Write/.test(rule), `review must not write: ${rule}`);
     });
 
@@ -11672,6 +11683,90 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: a review it started itself stops the moment the PR gets a new head — superseded, logged; the new head is reviewed once it settles", async () => {
+      let t = Date.parse("2026-11-25T12:00:00Z");
+      const titles = [];
+      // A short tick: the stop and the wake-up are the tick's, not a snapshot's.
+      const f = agentFixture({ now: () => new Date(t), script: keepWorking, tickMs: 20, notify: (n) => titles.push(n.kind) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1 && only(f)[0].state === "working" && f.agent.getState().running.length === 1);
+        // The author pushes again a minute ago: the poller's latest read has it, no snapshot reported yet.
+        f.snapshot.pullRequests[0] = { ...f.snapshot.pullRequests[0], headOid: "bbb222", lastCommitPushedAt: new Date(t - 60_000).toISOString() };
+        await until(() => only(f)[0].state === "done");
+        const [old] = only(f);
+        assert.deepStrictEqual([old.key, old.headline], ["PR_R|review|aaa111", view.AGENT_CLOSED.superseded]);
+        const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+        assert.strictEqual(state.ledger["PR_R|review|aaa111"].state, "failed");
+        const line = readLog(f).find((l) => l.kind === "run" && l.event === "superseded");
+        assert.ok(line, "the run's end says why it ended");
+        assert.deepStrictEqual([line.headOid, line.data.was, typeof line.data.ms === "number" || typeof line.ms === "number"], ["bbb222", "aaa111", true]);
+        assert.deepStrictEqual(titles, [], "nothing to tell you: it was the agent's own");
+        // The new head was pushed a minute ago: it waits 14 more, and the Board says until when.
+        await until(() => (f.agent.getState().idle.PR_R ?? "").startsWith(policy.SETTLING_WHY));
+        assert.match(f.agent.getState().idle.PR_R, / the agent starts at \d\d:\d\d$/);
+        t += 13 * 60_000;
+        await new Promise((r) => setTimeout(r, 100));
+        assert.deepStrictEqual([f.children.length, only(f).length], [1, 1], "not before it settled");
+        // Settled: the tick plans again by itself — no new snapshot came.
+        t += 60_000;
+        await until(() => f.children.length === 2);
+        assert.strictEqual(only(f)[1].key, "PR_R|review|bbb222");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a review you asked for whose PR gets a new head stops and starts over on that head, at once", async () => {
+      let t = Date.parse("2026-11-25T12:00:00Z");
+      const f = agentFixture({ pr: reviewPr({ requestedOfMe: false }), now: () => new Date(t), script: keepWorking, tickMs: 20 });
+      try {
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => f.children.length === 1 && f.agent.getState().running.length === 1);
+        f.snapshot.pullRequests[0] = { ...f.snapshot.pullRequests[0], headOid: "bbb222", lastCommitPushedAt: new Date(t).toISOString() };
+        // Yours never waits for the PR to settle.
+        await until(() => f.children.length === 2);
+        const [old, again] = only(f);
+        assert.deepStrictEqual([old.key, old.state, old.headline], ["PR_R|review|aaa111|asked", "done", view.AGENT_CLOSED.rerun]);
+        assert.deepStrictEqual([again.key, again.scenario], ["PR_R|review|bbb222|asked", "review"]);
+        assert.ok(readLog(f).some((l) => l.kind === "run" && l.event === "superseded" && l.headOid === "bbb222"));
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a new head leaves a drive running, and a session going on with your answer", async () => {
+      const f = agentFixture({ pr: { ...reviewPr({ role: "author" }), ciState: "failure" }, script: keepWorking, tickMs: 20 });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1 && f.agent.getState().running.length === 1);
+        assert.strictEqual(only(f)[0].scenario, "drive");
+        f.snapshot.pullRequests[0] = { ...f.snapshot.pullRequests[0], headOid: "bbb222" };
+        await new Promise((r) => setTimeout(r, 150));
+        assert.deepStrictEqual([only(f)[0].state, f.children.length], ["working", 1], "a drive commits on top of the head and goes on");
+      } finally {
+        f.agent.stop();
+      }
+      // A brief that asked you something, going on with your answer: your answer would go with a stop.
+      const asks = "Prose.\n\n```prd-result\n" + JSON.stringify({ summary: "A decision for you.", asks: [{ question: "Keep the old API?", options: ["Yes", "No"] }], findings: [] }) + "\n```";
+      let runs = 0;
+      const g = agentFixture({ pr: reviewPr({ additions: 900 }), agent: { scenarios: { review: { mode: "off" } } }, script: (c) => (++runs === 1 ? succeed(asks)(c) : keepWorking(c)), tickMs: 20 });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => only(g)[0]?.state === "needsYou");
+        const brief = only(g)[0];
+        assert.strictEqual(brief.scenario, "brief");
+        nfsA.mkdirSync(brief.worktree, { recursive: true });
+        assert.deepStrictEqual(await g.agent.act({ type: "answer", runId: brief.runId, text: "Yes" }), { ok: true });
+        await until(() => g.children.length === 2 && g.agent.getState().running.length === 1);
+        g.snapshot.pullRequests[0] = { ...g.snapshot.pullRequests[0], headOid: "bbb222" };
+        await new Promise((r) => setTimeout(r, 150));
+        assert.strictEqual(only(g)[0].state, "working", "your answer goes on");
+      } finally {
+        g.agent.stop();
+      }
+    });
+
     await atest("agent: a failure you asked for, or one the PR no longer wants, isn't tried again", async () => {
       let t = Date.parse("2026-11-10T10:00:00Z");
       const f = agentFixture({ pr: reviewPr({ requestedOfMe: false }), now: () => new Date(t), script: (c) => setImmediate(() => c.emit("exit", 1)) });
@@ -11778,7 +11873,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await atest("agent: a re-review you asked for covers the author's answers before it — only a later answer starts another", async () => {
       const iso = (min) => new Date(Date.now() + min * 60_000).toISOString();
       const pr = { ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), viewerReviewedAt: iso(-60), viewerReviewedHead: true, authorRepliedAt: null };
-      const f = agentFixture({ pr, script: succeed("Re-reviewed.") });
+      // An answer after your ask is a minute old here: no wait for the PR to settle (its own test has that).
+      const f = agentFixture({ pr, script: succeed("Re-reviewed."), agent: { limits: { settleMinutes: 0 } } });
       try {
         f.agent.onSnapshot(f.snapshot);
         assert.strictEqual(only(f).length, 0, "nothing new from the author: no re-review of its own");
@@ -14706,6 +14802,58 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const answered = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true, viewerReviewedHead: true, authorRepliedAt: at(7) })], agentOn(), noSessions).jobs[0];
       assert.strictEqual(answered.key, `PR_R|rereview|aaa111|asked@${at(7)}`, "an answer in a thread since your review is new work on the same head");
       assert.match(policy.planJobs([rv({ authorRepliedAt: at(7) })], agentOn({ scenarios: { rereview: { mode: "off" } } }), noSessions).idle.get("PR_R"), /re-reviews are off/);
+    });
+
+    test("mapPr: when a review was last asked for — the latest review-request event, of anyone", () => {
+      const events = (...at) => ({ timelineItems: { nodes: at.map((createdAt) => ({ createdAt })) } });
+      assert.strictEqual(github.mapPr(rawPr(events("2026-07-08T00:00:00Z")), "GH", ["reviewer"], "me").reviewRequestedAt, "2026-07-08T00:00:00Z");
+      assert.strictEqual(github.mapPr(rawPr(events("2026-07-08T00:00:00Z", "2026-07-09T00:00:00Z")), "GH", ["reviewer"], "me").reviewRequestedAt, "2026-07-09T00:00:00Z", "last: the newest");
+      assert.strictEqual(github.mapPr(rawPr(events()), "GH", ["reviewer"], "me").reviewRequestedAt, null);
+      assert.strictEqual(github.mapPr(rawPr(), "GH", ["reviewer"], "me").reviewRequestedAt, null, "an older read without the field");
+    });
+
+    test("agent policy: what the agent would review on its own waits until the PR settles — no push, author's reply or review request for settleMinutes", () => {
+      const t0 = Date.parse("2026-11-25T12:00:00Z");
+      const ago = (min) => new Date(t0 - min * 60_000).toISOString();
+      const ctx = { ...noSessions, now: new Date(t0) };
+      const clock = (min) => view.localClock(ago(-min));
+      const quiet = { lastCommitPushedAt: ago(60), authorRepliedAt: null, reviewRequestedAt: ago(60) };
+      const first = (o = {}, over = {}) => ({ ...reviewPr(over), ...quiet, ...o });
+      const again = (o = {}) => ({ ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), ...quiet, viewerReviewedAt: ago(120), viewerReviewedHead: false, ...o });
+      const mine = (o = {}) => ({ ...reviewPr({ role: "author" }), ciState: "failure", ...quiet, ...o });
+      // [what, PR, settings, ctx extra, the job it plans or null, when the plan wakes (minutes from now) or null]
+      const rows = [
+        ["quiet for an hour: the review starts", first(), {}, {}, "review", null],
+        ["pushed 5 min ago: waits 10 more", first({ lastCommitPushedAt: ago(5) }), {}, {}, null, 10],
+        ["a review asked for a minute ago", first({ reviewRequestedAt: ago(1) }), {}, {}, null, 14],
+        ["the author answered in a thread 14 min ago", first({ authorRepliedAt: ago(14) }), {}, {}, null, 1],
+        ["the latest of the three counts", first({ lastCommitPushedAt: ago(12), authorRepliedAt: ago(3), reviewRequestedAt: ago(8) }), {}, {}, null, 12],
+        ["exactly settleMinutes ago is settled", first({ lastCommitPushedAt: ago(15) }), {}, {}, "review", null],
+        ["the wait is a setting", first({ lastCommitPushedAt: ago(20) }), { limits: { settleMinutes: 30 } }, {}, null, 10],
+        ["0 switches it off", first({ lastCommitPushedAt: ago(0) }), { limits: { settleMinutes: 0 } }, {}, "review", null],
+        ["a big PR's brief waits too", first({ lastCommitPushedAt: ago(2) }, { additions: 900 }), {}, {}, null, 13],
+        ["a re-review on the author's reply waits too", again({ authorRepliedAt: ago(4) }), {}, {}, null, 11],
+        ["…and runs once the reply is old enough", again({ authorRepliedAt: ago(40) }), {}, {}, "rereview", null],
+        ["a re-request waits like a first one", again({ roles: ["reviewer"], requestedOfMe: true, reviewRequestedAt: ago(2) }), {}, {}, null, 13],
+        ["a time far ahead of the clock says nothing", first({ lastCommitPushedAt: ago(-600) }), {}, {}, "review", null],
+        ["a little ahead counts from that time", first({ lastCommitPushedAt: ago(-5) }), {}, {}, null, 20],
+        ["a job the ledger knows is handed on: its reason is the ledger's", first({ lastCommitPushedAt: ago(1) }), {}, { known: (k) => k === "PR_R|review|aaa111" }, "review", null],
+        ["a drive never waits", mine({ lastCommitPushedAt: ago(1) }), {}, {}, "drive", null],
+      ];
+      for (const [what, pr, over, extra, scenario, wake] of rows) {
+        const r = policy.planJobs([pr], agentOn(over), { ...ctx, ...extra });
+        assert.deepStrictEqual(r.jobs.map((j) => j.scenario), scenario ? [scenario] : [], what);
+        assert.strictEqual(r.wakeAt, wake === null ? null : ago(-wake), what);
+        if (scenario) continue;
+        const minutes = (over.limits?.settleMinutes ?? 15);
+        assert.strictEqual(r.idle.get("PR_R"), `${policy.SETTLING_WHY} — no push, reply or review request for ${minutes} min; the agent starts at ${clock(wake)}`, what);
+      }
+      // Several PRs waiting: the plan wakes for the first to settle.
+      const two = policy.planJobs([first({ lastCommitPushedAt: ago(2) }), first({ lastCommitPushedAt: ago(9) }, { id: "PR_S" })], agentOn(), ctx);
+      assert.strictEqual(two.wakeAt, ago(-6));
+      // Without a clock of its own the plan reads the real one: a PR quiet since July is settled.
+      assert.strictEqual(policy.planJobs([first({ lastCommitPushedAt: "2026-07-07T00:00:00Z", reviewRequestedAt: null })], agentOn(), noSessions).jobs.length, 1);
+      assert.strictEqual(policy.planJobs([first()], cfg.validateAgent(undefined), ctx).wakeAt, null, "the agent off plans nothing, wakes for nothing");
     });
 
     test("agent policy: a PR with no clone of its repository gets no run — it waits and says why; offers need none", () => {

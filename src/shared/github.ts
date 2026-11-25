@@ -54,7 +54,11 @@ import type {
  * pulls `comments(last: 1)`, so GitHub bills about 1 point per 100 threads per
  * PR — measured, a 25-PR read by id costs 30 points. That is why this fragment
  * travels only in the hydrate (`buildHydrateQuery`), once per distinct PR, and
- * never inside a search. Node count stays far below the 500 000 limit
+ * never inside a search. `timelineItems(last: 1, itemTypes:
+ * [REVIEW_REQUESTED_EVENT])` adds one node per PR: when a review was last asked
+ * for, of anyone (`reviewRequestedAt`) — the PR agent waits for a PR to settle
+ * after a request as after a push, and no review or request carries that time.
+ * Node count stays far below the 500 000 limit
  * (≈ 25 × 100 × 1 thread comments + 25 × 30 check contexts per read).
  *
  * Deliberately out here rather than as a `#` comment inside the template: every
@@ -93,6 +97,7 @@ fragment PrFields on PullRequest {
     totalCount
     nodes { requestedReviewer { __typename ... on User { login avatarUrl } } }
   }
+  timelineItems(last: 1, itemTypes: [REVIEW_REQUESTED_EVENT]) { nodes { ... on ReviewRequestedEvent { createdAt } } }
   # 15 is load-bearing — see the note above this fragment before changing it.
   latestOpinionatedReviews(first: 15) {
     nodes {
@@ -350,6 +355,8 @@ interface RawPr {
     // requestedReviewer is a union (User/Team/…); only Users have `login`.
     nodes: Array<{ requestedReviewer: { __typename: string; login?: string; avatarUrl?: string } | null }>;
   };
+  // The latest review request, of anyone (`reviewRequestedAt`). Optional: fixtures and older cached reads may lack it.
+  timelineItems?: { nodes: Array<{ createdAt?: string } | null> };
   latestOpinionatedReviews: {
     nodes: Array<{
       author: { __typename: string; login: string; avatarUrl: string } | null;
@@ -833,6 +840,7 @@ export function mapPr(
     isCrossRepository: pr.isCrossRepository === true,
     authorRepliedAt,
     reviewerRepliedAt,
+    reviewRequestedAt: pr.timelineItems?.nodes[pr.timelineItems.nodes.length - 1]?.createdAt ?? null,
     mergeMethods: mapMergeMethods(pr.repository),
     // Set by fetchHost when the personal review-request search found it.
     requestedOfMe: false,

@@ -384,6 +384,16 @@ function LimitsSection({ agent, setAgent, inputCls }: SectionProps) {
           <span className="text-sm text-fg-subtle">and</span>
           <input type="time" value={l.quietHours.to} disabled={!l.quietHours.enabled} onChange={(e) => e.target.value && quiet({ to: e.target.value })} className={cn(inputCls, "mt-0 w-28")} />
         </div>
+        <div>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-fg-secondary">
+            Wait for a PR to settle before reviewing it on its own:
+            <Num bound="settleMinutes" value={l.settleMinutes} onChange={(settleMinutes) => patch({ settleMinutes })} unit="min with no push, reply or review request" />
+          </div>
+          <p className="mt-1 text-xs text-fg-faint">
+            Reviews, briefs and re-reviews the agent starts itself; 0 starts them at once. A run on a head the author replaces is stopped either way. What you ask
+            for never waits.
+          </p>
+        </div>
         <div className="flex flex-wrap items-center gap-2 text-sm text-fg-secondary">
           Suggest switching a scenario from Shadow to On after
           <Num bound="promoteAfter" value={l.promoteAfter} onChange={(promoteAfter) => patch({ promoteAfter })} unit="results accepted unchanged" />

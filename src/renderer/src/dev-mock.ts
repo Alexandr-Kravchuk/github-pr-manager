@@ -56,6 +56,7 @@ function pr(overrides: Partial<PullRequest>): PullRequest {
     isCrossRepository: false,
     authorRepliedAt: null,
     reviewerRepliedAt: null,
+    reviewRequestedAt: null,
     issueKey: null,
     issueSummary: null,
     parentKey: null,

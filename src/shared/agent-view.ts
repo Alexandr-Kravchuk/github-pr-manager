@@ -124,7 +124,8 @@ export function quietUntil(now: Date, quiet: AgentSettings["limits"]["quietHours
   return inside ? quiet.to : null;
 }
 
-function localClock(iso: string): string {
+/** "HH:MM" of an ISO time, on this machine's clock. */
+export function localClock(iso: string): string {
   const d = new Date(iso);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }

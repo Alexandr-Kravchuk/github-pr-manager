@@ -403,6 +403,12 @@ export interface AgentSettings {
     maxMinutes: number;
     /** No new run starts between `from` and `to` ("HH:MM", may wrap past midnight). */
     quietHours: { enabled: boolean; from: string; to: string };
+    /**
+     * A review, brief or re-review the agent plans itself waits until the PR
+     * has had no push, author's reply or review request for this many minutes
+     * (`settlesUntil` in agent-policy.ts); 0 starts it at once. What you ask for never waits.
+     */
+    settleMinutes: number;
     /** Suggest switching a scenario from shadow to on after this many results accepted unchanged. */
     promoteAfter: number;
   };
@@ -654,6 +660,11 @@ export interface PullRequest {
   authorRepliedAt: string | null;
   /** The latest comment by someone else that ends an unresolved thread. */
   reviewerRepliedAt: string | null;
+  /**
+   * When a review was last asked for on this PR, of anyone — a first request
+   * or a re-request. The PR agent waits for a PR to settle after it.
+   */
+  reviewRequestedAt: string | null;
   /**
    * A review is asked of you by name (`review-requested:@me`), as opposed to of
    * a team you are in — both give the `reviewer` role. The agent takes team

@@ -426,6 +426,7 @@ export function validateAgent(raw: unknown): AgentSettings {
         from: clock(quiet.from, d.limits.quietHours.from),
         to: clock(quiet.to, d.limits.quietHours.to),
       },
+      settleMinutes: num(limits.settleMinutes, "settleMinutes", d.limits.settleMinutes),
       promoteAfter: num(limits.promoteAfter, "promoteAfter", d.limits.promoteAfter),
     },
     permissions: { tools, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: bool(permissions.pushOwnBranch, d.permissions.pushOwnBranch),
