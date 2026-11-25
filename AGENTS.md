@@ -256,9 +256,15 @@ Three layers:
   agent's own or yours, running or ended prepared or published, by the
   ledger (`reviewedHead` in `PlanContext`, `reviewedHeads` in
   `main/agent/index.ts`; not a failed or dismissed run, nor one still
-  waiting on you, whose card the next run replaces) — the author's next
+  waiting on you, whose card the next run replaces, nor a run over the
+  threads only, which read none of the code; a "started" entry counts only
+  while its run is still queued or working) — the author's next
   answer or request on that head is planned as a run over your threads
-  only (`threadsOnly` on the job and the item). Its ledger key is the
+  only (`threadsOnly` on the job and the item). A light run planned while
+  the full one still ran checks again as it starts (`fullyReviewed`: a full
+  run of the head ended prepared or published) and runs full when none got
+  through — the full one hit a usage limit or was stopped — logged as
+  `widened` on its `run/started`. Its ledger key is the
   trigger's as before, so a full run's own trigger never comes back light.
   It runs the same skill with the skill's own `rereview: "threads-only"`
   and `statusComment: false` (`THREADS_ONLY_RULE` in the session's rules):
@@ -949,7 +955,9 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   (`main/agent/hook.ts`) reads back every field of the guard file — a `subs`,
   `workDir`, `readDirs`, `sessionId` or `sessionRoots` that is there but
   malformed gives no file access at all, since a missing `subs` means every
-  wrapper subcommand, and a folder list keeps absolute paths only — and
+  wrapper subcommand, and a folder list keeps absolute paths only (the run's
+  `allowedTools` there feed refusal hints alone, never a decision, so a bad
+  entry is dropped rather than refused) — and
   follows a drive's write through links (`checkRealWrite`): `checkDriveWrite`
   alone is lexical, and a link committed in the branch would lead it out of
   the worktree. A merge

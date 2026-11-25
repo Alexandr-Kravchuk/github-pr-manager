@@ -328,6 +328,8 @@ export interface UsageHold {
   why: string;
   /** Set when the agent's cap, not the limit itself, holds: the window's share in percent — a cap raised past it lets go. */
   usage?: number;
+  /** The limit that refused a run, by name ("Claude's session limit") — what a run it stopped says it was stopped by. */
+  limitName?: string;
 }
 
 /** Claude Code's own names for its windows, as its limit messages say them. */
@@ -355,7 +357,8 @@ const LIMIT_NAMES: Record<string, string> = {
 export function usageHold(rateLimit: UsageReading | null, capPercent: number, nowMs: number): UsageHold | null {
   if (!rateLimit) return null;
   if (rateLimit.status === "rejected" && rateLimit.resetsAt) {
-    return { until: rateLimit.resetsAt * 1000, why: `Claude's ${LIMIT_NAMES[rateLimit.type ?? ""] ?? "usage limit"} reached` };
+    const limitName = `Claude's ${LIMIT_NAMES[rateLimit.type ?? ""] ?? "usage limit"}`;
+    return { until: rateLimit.resetsAt * 1000, why: `${limitName} reached`, limitName };
   }
   if (!(capPercent > 0)) return null;
   let hold: UsageHold | null = null;
@@ -473,7 +476,9 @@ export function limitResetFromText(text: string, now: Date): UsageHold | null {
     if (until <= nowMs) until = fromWallClock(today.y, today.mo, today.d + 1, h, mi, zone);
   }
   if (!Number.isFinite(until) || until - nowMs > MAX_USAGE_HOLD_MS) return null;
-  return { until, why: credits ? "Out of Claude usage credits" : `Claude's ${limit.trim()} reached` };
+  if (credits) return { until, why: "Out of Claude usage credits" };
+  const limitName = `Claude's ${limit.trim()}`;
+  return { until, why: `${limitName} reached`, limitName };
 }
 
 /** The current step: the one in progress, else the first not done. */

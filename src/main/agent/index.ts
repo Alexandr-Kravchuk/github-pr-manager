@@ -898,10 +898,15 @@ export function createAgent(deps: AgentDeps): Agent {
    * asked for: the policy's `briefDone`. Once per PR: a push before the review
    * sends the new head straight to the review (18 briefs in a day on Opus, four
    * of one PR in half an hour), and `takeBrief` hands it the older brief.
+   * The PR ids, from one pass over the ledger per plan — it is never trimmed.
    */
-  function briefDone(pr: Pick<PullRequest, "id">): boolean {
-    const prefix = `${pr.id}|brief|`;
-    return Object.entries(store.data.ledger).some(([key, entry]) => key.startsWith(prefix) && (entry.state === "prepared" || entry.state === "published"));
+  function briefedPrs(): Set<string> {
+    const out = new Set<string>();
+    for (const [key, entry] of Object.entries(store.data.ledger)) {
+      const [prId, scenario] = key.split("|");
+      if (scenario === "brief" && (entry.state === "prepared" || entry.state === "published")) out.add(prId);
+    }
+    return out;
   }
 
   /**
@@ -931,21 +936,52 @@ export function createAgent(deps: AgentDeps): Agent {
    * ended prepared or published. Not a run that failed or that you took out of
    * the queue, and not one still waiting on you (a plan to send, a question):
    * the next run on its PR replaces that card, so it has to be a full one
-   * again. A re-review over the threads only is planned only on such a head,
-   * so its own entry adds nothing new. The policy's `reviewedHead`, read once
-   * per plan.
+   * again. A "started" entry counts only while its run is still queued or
+   * working — one that ended any other way left it "started" with nothing
+   * behind it — and a run over the threads only never counts: it read none of
+   * the code. The policy's `reviewedHead`, read once per plan; a run planned
+   * light on a full run still going is checked again when it starts
+   * (`fullyReviewed`).
    */
   function reviewedHeads(): Set<string> {
     const runs = new Map(store.data.items.map((i) => [i.runId, i]));
     const out = new Set<string>();
     for (const [key, entry] of Object.entries(store.data.ledger)) {
       const [prId, scenario, head] = key.split("|");
-      if ((scenario !== "review" && scenario !== "rereview") || !head || head === "-") continue;
-      if (entry.state !== "started" && entry.state !== "prepared" && entry.state !== "published") continue;
-      if (entry.state === "prepared" && runs.get(entry.runId)?.state === "needsYou") continue;
+      if (!countsAsFullReview(scenario, head, entry, runs.get(entry.runId), true)) continue;
       out.add(`${prId}|${head}`);
     }
     return out;
+  }
+
+  /**
+   * Whether a ledger entry is a full review or re-review of its head that got
+   * somewhere: prepared (and not still waiting on you) or published — or, with
+   * `running`, started and still queued or working. Never a run over the
+   * threads only.
+   */
+  function countsAsFullReview(scenario: string | undefined, head: string | undefined, entry: LedgerEntry, item: AgentItemRecord | undefined, running: boolean): boolean {
+    if ((scenario !== "review" && scenario !== "rereview") || !head || head === "-") return false;
+    if (item?.threadsOnly) return false;
+    if (entry.state === "started") return running && (item?.state === "queued" || item?.state === "working");
+    if (entry.state === "prepared") return item?.state !== "needsYou";
+    return entry.state === "published";
+  }
+
+  /**
+   * A full review or re-review of this head ended prepared or published — the
+   * check a run planned over the threads only passes as it starts. Its plan may
+   * have counted a full run still going that then failed (a usage limit, its
+   * time limit, a stop): without this, every later answer on the head would
+   * run light and the head never get its full re-review.
+   */
+  function fullyReviewed(prId: string, head: string, except: string): boolean {
+    const runs = new Map(store.data.items.map((i) => [i.runId, i]));
+    return Object.entries(store.data.ledger).some(([key, entry]) => {
+      if (key === except) return false;
+      const [id, scenario, h] = key.split("|");
+      return id === prId && h === head && countsAsFullReview(scenario, h, entry, runs.get(entry.runId), false);
+    });
   }
 
   /**
@@ -1398,6 +1434,7 @@ export function createAgent(deps: AgentDeps): Agent {
     };
     const reviewedByAgent = agentReviews();
     const reviewed = reviewedHeads();
+    const briefed = briefedPrs();
     const plan = planJobs(snapshot.pullRequests, s, {
       // No checkout yet is no reason to wait when the agent may clone one: the run makes it.
       noCheckout: (pr) => (cloneOf(pr) || s.cloneMissing ? null : noCheckoutWhy(pr, claudeSettings)),
@@ -1407,7 +1444,7 @@ export function createAgent(deps: AgentDeps): Agent {
         return d && d.attempts >= s.scenarios.driveCi.maxAttempts ? `Yours — the agent tried ${d.attempts} time${d.attempts === 1 ? "" : "s"}; over to you` : null;
       },
       selfReviewed: (pr) => Boolean(store.data.ledger[jobKey(pr, "drive", "self")]) || (pr.headOid !== null && store.data.pushedHeads[pr.id] === pr.headOid),
-      briefDone,
+      briefDone: (pr) => briefed.has(pr.id),
       agentReviewed: (pr) => reviewedByAgent.get(pr.id) ?? null,
       reviewedHead: (pr) => pr.headOid !== null && reviewed.has(`${pr.id}|${pr.headOid}`),
       reapproveState,
@@ -1614,6 +1651,16 @@ export function createAgent(deps: AgentDeps): Agent {
       }
     }
 
+    // Planned over the threads only while a full run of this head was still
+    // going: if none got through since, this run is the head's full one.
+    let widened = false;
+    if (item.threadsOnly && !resume) {
+      const head = keyHead(item.key);
+      if (!head || !fullyReviewed(item.prId, head, item.key)) {
+        item.threadsOnly = undefined;
+        widened = true;
+      }
+    }
     store.data.ledger[item.key] = { state: "started", at: stamp(), runId: item.runId };
     store.data.runsToday += 1;
     item.state = "working";
@@ -1734,6 +1781,9 @@ export function createAgent(deps: AgentDeps): Agent {
     const sonnetReviewers = s.sonnetReviewers && runsReviewWorkflow(item.scenario, item.reasons);
     // Where Claude Code files what this session spills over (a long tool result, a Workflow's journal, a background task's output).
     const sessionRoots = claudeSessionRoots({ ...launcherEnv(process.env), ...tempEnv });
+    // The wrapper's own rule, and Write — which the guard holds to the payload folder.
+    // The preflight's node, which the guard holds to the helper's two calls.
+    const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(preflight ? ["Bash(node *)"] : [])])];
     writeGuardFile(guardFile, full ? {
       mode: "full",
       ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),
@@ -1753,6 +1803,8 @@ export function createAgent(deps: AgentDeps): Agent {
       // A skill's Workflow may run its script from the plugins this run mounted — never one from the PR.
       workflowDirs: pluginDirs,
       ...(preflight ? { preflight } : {}),
+      // For the guard's hints only: what a refusal suggests instead must be a call these let through.
+      allowedTools,
     });
     writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url, guardFile));
     item.sessionId = sessionId;
@@ -1771,14 +1823,13 @@ export function createAgent(deps: AgentDeps): Agent {
         isolation: full ? "full" : "restricted",
         ...(item.reasons ? { reasons: item.reasons } : {}),
         ...(item.scenario === "rereview" ? { rereview: item.threadsOnly ? "threads" : "full" } : {}),
+        // Planned over the threads only, but no full run of the head got through: this one is full.
+        ...(widened ? { widened: true } : {}),
         // How long it stood in the queue (a resumed run's queue time is its first run's).
         ...(!resume ? { waitedMs: Math.max(0, Date.parse(item.startedAt ?? stamp()) - Date.parse(item.queuedAt)) } : {}),
       },
     });
 
-    // The wrapper's own rule, and Write — which the guard holds to the payload folder.
-    // The preflight's node, which the guard holds to the helper's two calls.
-    const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(preflight ? ["Bash(node *)"] : [])])];
     // Read-only runs may read the plugins' folders (a skill's Workflow reads its script from there); a run that edits never gets them.
     // The preflight's file and payload folders too — the guard narrows them to installed_plugins.json and the helper's own folders.
     // And the session's own folders, which the guard already lets it read: `--restricted` refused its Workflow's journal.
@@ -1843,10 +1894,16 @@ export function createAgent(deps: AgentDeps): Agent {
         if (progress.activity && progress.activity !== entry.progress?.activity) {
           entry.recent = [...entry.recent, { at: stamp(), text: progress.activity }].slice(-RECENT_MAX);
         }
+        const reading = progress.rateLimit;
+        const fresh = reading !== entry.progress?.rateLimit;
         entry.progress = progress;
-        // The cap as the run started; `usageHoldNow` reads it as it is now.
-        const hold = usageHold(progress.rateLimit, s.limits.usageCap, now().getTime());
-        if (hold) holdForUsage(hold);
+        // A new usage reading only, against the cap as it is now — as
+        // `usageHoldNow` reads it: the cap the run started with would write a
+        // hold a raised cap drops on the next tick, and again on every event.
+        if (fresh && reading) {
+          const hold = usageHold(reading, settings()?.limits.usageCap ?? s.limits.usageCap, now().getTime());
+          if (hold) holdForUsage(hold);
+        }
         changed();
       },
       deps.spawner,
@@ -1999,7 +2056,7 @@ export function createAgent(deps: AgentDeps): Agent {
       // `fail` saves, logs and tells; the rest of this function only cleans up.
       if (limit && limit.until > now().getTime()) {
         holdForUsage(limit);
-        fail(limit.why.endsWith(" reached") ? `Stopped by ${limit.why.slice(0, -" reached".length)}` : limit.why, error, limit.until);
+        fail(limit.limitName ? `Stopped by ${limit.limitName}` : limit.why, error, limit.until);
       } else {
         fail("The run failed", error);
       }

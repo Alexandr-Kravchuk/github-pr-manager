@@ -10778,8 +10778,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       // The seven-day window past 75% reads "allowed_warning" (recorded from claude 2.1.314).
       assert.strictEqual(stream.usageHold({ status: "allowed_warning", resetsAt: 1794592800 }, 80, now), null);
       assert.strictEqual(stream.usageHold({ status: "allowed", resetsAt: 1794592800 }, 80, now), null);
-      assert.deepStrictEqual(stream.usageHold({ status: "rejected", resetsAt: 1794592800, type: "five_hour" }, 80, now), { until: 1794592800000, why: "Claude's session limit reached" });
-      assert.deepStrictEqual(stream.usageHold({ status: "rejected", resetsAt: 1794592800, type: "seven_day" }, 0, now), { until: 1794592800000, why: "Claude's weekly limit reached" }, "the limit holds with the cap off too");
+      assert.deepStrictEqual(stream.usageHold({ status: "rejected", resetsAt: 1794592800, type: "five_hour" }, 80, now), { until: 1794592800000, why: "Claude's session limit reached", limitName: "Claude's session limit" });
+      assert.deepStrictEqual(stream.usageHold({ status: "rejected", resetsAt: 1794592800, type: "seven_day" }, 0, now), { until: 1794592800000, why: "Claude's weekly limit reached", limitName: "Claude's weekly limit" }, "the limit holds with the cap off too");
       assert.strictEqual(stream.usageHold({ status: "rejected", resetsAt: 1794592800 }, 80, now).why, "Claude's usage limit reached");
       assert.strictEqual(stream.usageHold({ status: "rejected", resetsAt: null }, 80, now), null);
       assert.strictEqual(stream.usageHold(null, 80, now), null);
@@ -10828,6 +10828,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(hold("You've hit your session limit · resets 9:50pm (Europe/Kyiv)", "2026-11-25T15:50:01Z"), {
         until: Date.parse("2026-11-25T19:50:00Z"),
         why: "Claude's session limit reached",
+        limitName: "Claude's session limit",
       });
       assert.strictEqual(hold("You've hit your session limit · resets 7pm (Europe/Kyiv)", "2026-11-24T16:49:24Z").until, Date.parse("2026-11-24T17:00:00Z"), "minutes left out on the hour");
       assert.strictEqual(hold("You’ve hit your session limit · resets 1:15am (Europe/Kyiv) · progress saved", "2026-11-25T21:30:00Z").until, Date.parse("2026-11-25T23:15:00Z"), "a clock already past today is tomorrow's");
@@ -10835,6 +10836,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(hold("You've hit your weekly limit · resets Nov 28, 10am (Europe/Kyiv)", "2026-11-25T10:00:00Z"), {
         until: Date.parse("2026-11-28T08:00:00Z"),
         why: "Claude's weekly limit reached",
+        limitName: "Claude's weekly limit",
       });
       assert.strictEqual(hold("You've hit your weekly limit · resets Jan 2, 2027, 9:30am (Europe/Kyiv)", "2026-12-30T10:00:00Z").until, Date.parse("2027-01-02T07:30:00Z"));
       assert.strictEqual(hold("You've hit your weekly limit · resets Jan 2, 9am (Europe/Kyiv)", "2026-12-30T10:00:00Z").until, Date.parse("2027-01-02T07:00:00Z"), "no year: the next one");
@@ -10843,6 +10845,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(hold("You've hit your weekly limit · resets Mar 28, 5am (Europe/Kyiv)", "2027-03-25T10:00:00Z").until, Date.parse("2027-03-28T02:00:00Z"));
       assert.strictEqual(hold("You've hit your session limit · resets 9:50pm (America/New_York)", "2026-11-25T15:50:00Z").until, Date.parse("2026-11-26T02:50:00Z"));
       assert.strictEqual(hold("You're out of usage credits · resets 9:50pm (Europe/Kyiv)", "2026-11-25T15:50:00Z").why, "Out of Claude usage credits");
+      assert.strictEqual(hold("You're out of usage credits · resets 9:50pm (Europe/Kyiv)", "2026-11-25T15:50:00Z").limitName, undefined, "credits name no limit: a run it stops says what the hold says");
       // No zone, or one Intl doesn't know: the machine's own clock.
       const local = new Date(2026, 10, 25, 12, 0);
       assert.strictEqual(stream.limitResetFromText("You've hit your session limit · resets 9:50pm", local).until, new Date(2026, 10, 25, 21, 50).getTime());
@@ -11863,6 +11866,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         f.snapshot.pullRequests[0] = { ...f.snapshot.pullRequests[0], headOid: "bbb222" };
         await new Promise((r) => setTimeout(r, 150));
         assert.deepStrictEqual([only(f)[0].state, f.children.length], ["working", 1], "a drive commits on top of the head and goes on");
+        assert.ok(!readLog(f).some((l) => l.event === "superseded"), "and nothing is logged as stopped");
       } finally {
         f.agent.stop();
       }
@@ -12045,6 +12049,102 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         f.setAgent({ enabled: true, limits: { costPerDay: 0 } });
         f.agent.onSnapshot(f.snapshot);
         await until(() => f.children.length === 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: the daily budget is the local day's — past midnight the count starts over and the run it held starts", async () => {
+      let t = new Date(2026, 10, 25, 23, 0).getTime();
+      const f = agentFixture({
+        now: () => new Date(t),
+        agent: { limits: { costPerDay: 3 } },
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, { type: "result", subtype: "success", is_error: false, result: "Reviewed.", total_cost_usd: 3.25 });
+          setImmediate(() => c.emit("exit", 0));
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f)[0]?.finishedAt !== undefined);
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_2", number: 8 }));
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 1, "held by the day's budget");
+        t = new Date(2026, 10, 26, 0, 5).getTime();
+        assert.strictEqual(f.agent.getState().costToday, 0, "a new day counts from nothing");
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+        await until(() => only(f).every((i) => i.finishedAt !== undefined));
+        assert.strictEqual(f.agent.getState().costToday, 3.25, "only the new day's run");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a usage hold of the agent's cap lets go when the cap is switched off; the limit's own hold doesn't — and an expired one leaves state.json", async () => {
+      let t = Date.parse("2026-11-25T16:00:00Z");
+      const statePath = (dir) => path.join(dir, "agent", "state.json");
+      const seed = (hold) => {
+        const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+        const st = agentStore.emptyStore("2026-11-25");
+        st.usageHold = hold;
+        agentStore.writeFileAtomic(statePath(home), JSON.stringify(st));
+        return home;
+      };
+      // The cap's hold: 85% of the window against a cap of 80.
+      const capHome = seed({ until: new Date(t + 2 * 3_600_000).toISOString(), why: "Claude's session usage at 85% (agent cap 80%)", usage: 85 });
+      const f = agentFixture({ home: capHome, now: () => new Date(t), script: succeed("Reviewed.") });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 0, "held by the cap");
+        f.setAgent({ enabled: true, limits: { usageCap: 0 } });
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1);
+        await until(() => JSON.parse(nfsA.readFileSync(statePath(capHome), "utf8")).usageHold === undefined);
+      } finally {
+        f.agent.stop();
+      }
+      // The limit's own hold names no usage: the cap, even off, doesn't lift it — its reset does.
+      const limitHome = seed({ until: new Date(t + 3_600_000).toISOString(), why: "Claude's session limit reached" });
+      const g = agentFixture({ home: limitHome, now: () => new Date(t), agent: { limits: { usageCap: 0 } }, script: succeed("Reviewed.") });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        assert.deepStrictEqual([g.children.length, g.agent.getState().heldWhy], [0, "Claude's session limit reached"]);
+        t += 3_600_000 + 1000;
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length === 1);
+        await until(() => JSON.parse(nfsA.readFileSync(statePath(limitHome), "utf8")).usageHold === undefined);
+        assert.strictEqual(g.agent.getState().heldUntil, null);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: a usage reading during a run is held against the cap as it is now — a cap raised mid-run holds nothing", async () => {
+      const t = Date.parse("2026-11-25T16:00:00Z");
+      const session = Math.floor(Date.parse("2026-11-25T20:50:00Z") / 1000);
+      let go = null;
+      const f = agentFixture({
+        now: () => new Date(t),
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          go = () => {
+            emit(c, { type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: session, rateLimitType: "five_hour", unifiedWindows: { five_hour: { utilization: 0.83, resetsAt: session } } } });
+            emit(c, { type: "result", subtype: "success", is_error: false, result: "Reviewed." });
+            setImmediate(() => c.emit("exit", 0));
+          };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => go !== null && f.agent.getState().running.length === 1);
+        // Raised from the default 80 while the run works: its 83% is under the cap now.
+        f.setAgent({ enabled: true, limits: { usageCap: 90 } });
+        go();
+        await until(() => only(f)[0]?.finishedAt !== undefined);
+        assert.strictEqual(f.agent.getState().heldUntil, null);
+        assert.strictEqual(JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).usageHold, undefined);
       } finally {
         f.agent.stop();
       }
@@ -13865,7 +13965,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       });
 
       test("agent guard hints: git in a read-only run names the gh reads that work — and each one passes the guard", () => {
-        const reason = bashRefused('git -C "C:/wt" diff a1b2..c3d4 --stat', /so no git; use gh: /);
+        // The guard file carries the run's own --allowedTools, for the hints alone.
+        const reason = bashRefused('git -C "C:/wt" diff a1b2..c3d4 --stat', /so no git; use gh: /, "review", { ...hintRun, allowedTools: ad.DEFAULT_AGENT_TOOLS.review });
         for (const named of [
           "gh pr view 12 --json headRefOid,baseRefOid,commits",
           "gh pr diff 12",
@@ -13878,7 +13979,11 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           assert.ok(guard.ruleAllows(ad.DEFAULT_AGENT_TOOLS.review, cmd), `the default review tools let ${cmd} run`);
         }
         // A brief's default tools have no gh api: its hint doesn't send it there.
-        assert.doesNotMatch(bashRefused("git log --oneline -3", /gh pr diff 12/, "brief", readRun), /gh api/);
+        assert.doesNotMatch(bashRefused("git log --oneline -3", /gh pr diff 12/, "brief", { ...readRun, allowedTools: ad.DEFAULT_AGENT_TOOLS.brief }), /gh api/);
+        // Nor does a review whose own tools leave gh api out — the hint follows the run's tools, not the defaults.
+        assert.doesNotMatch(bashRefused("git log --oneline -3", /gh pr diff 12/, "review", { ...readRun, allowedTools: ad.DEFAULT_AGENT_TOOLS.review.filter((r) => !r.startsWith("Bash(gh api")) }), /gh api/);
+        // A guard file with no tools in it: the plain hint.
+        assert.match(bashRefused("git log --oneline -3", null, "review", readRun), /so no git; use gh pr diff \/ gh pr view\.$/);
         // gh pr diff takes no paths: the one file's patch is named instead.
         bashRefused("gh pr diff 12 --patch -- src/a.ts", /takes no file paths.*gh api repos\/acme\/widgets\/pulls\/12\/files --paginate/);
         bashRefused("gh api repos/acme/widgets/contents/CONTEXT.md --ref abc123 --jq .content", /A ref goes in the quoted path: 'repos\/<owner>\/<repo>\/contents\/PATH\?ref=SHA'/);
@@ -13939,6 +14044,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         }
         // A wrapper call as the rules spell it passes too.
         assert.deepStrictEqual(guard.checkBash("review", "/c/T/prd-agent/r/bin/pr-review-publish.sh review Acme/Widgets 12 C:/T/prd-agent/r/out/review.json", gpr, { ...folder }), { allow: true });
+        // A review whose plugin carries the preflight helper is granted its node: the rules don't forbid it then.
+        const withPreflight = agentCore.agentRules("review", "on", folder, { repo: "Acme/Widgets", number: 12 }, "en", { allowedTools: [...ad.DEFAULT_AGENT_TOOLS.review, "Bash(node *)"], workflows: [workflow] });
+        assert.match(withPreflight, /Bash runs one plain command per call: gh, twg, the publish wrapper, the review preflight's node only — no ls, cat, grep, sleep, cd or git; node only as the review skill's preflight runs it; no pipes/);
         // A brief's tools have no gh api, no wrapper and no workflow: none of them is named.
         const brief = agentCore.agentRules("brief", "on", null, { repo: "Acme/Widgets", number: 12 }, "en", { allowedTools: ad.DEFAULT_AGENT_TOOLS.brief, workflows: [] });
         assert.match(brief, /gh pr diff 12/);
@@ -18017,6 +18125,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       st.items = [
         { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", state: "working", headline: "h", queuedAt: "2026-11-05T00:00:00Z", runId, key: "PR_R|rereview|aaa111|reply@2026-11-05T00:00:00Z", scenario: "rereview", threadsOnly: true, sessionId: "11111111-1111-4111-8111-111111111111", worktree: path.join(home, "gone") },
       ];
+      // The head's full re-review, published before it: what made this one light.
+      st.ledger["PR_R|rereview|aaa111|asked@-"] = { state: "published", at: "2026-11-04T23:00:00Z", runId: "00000000-0000-4000-8000-0000000000d1" };
       agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
       const g = agentFixture({ home, script: keepWorking });
       try {
@@ -18027,6 +18137,68 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual([again.threadsOnly, queued.detail, queued.data.rereview], [true, "Queued: re-review of your threads only (asked by you)", "threads"]);
         const rules = g.children[0].args[g.children[0].args.indexOf("--append-system-prompt") + 1];
         assert.ok(rules.includes(agentCore.THREADS_ONLY_RULE));
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: a run planned over the threads only while the head's full re-review still ran goes full when that one failed — the head still gets its full re-review", async () => {
+      // The review of #72: a full re-review of the head starts, the author answers, a light run is planned on the
+      // running one — and then the full one fails (a usage limit, its time limit, a stop).
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const full = "00000000-0000-4000-8000-0000000000f1";
+      const light = "00000000-0000-4000-8000-0000000000f2";
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", headline: "h", queuedAt: "2026-11-05T00:00:00Z", scenario: "rereview" };
+      const st = agentStore.emptyStore("2026-11-05");
+      st.items = [
+        { ...base, runId: full, key: "PR_R|rereview|aaa111|asked@-", state: "error", finishedAt: "2026-11-05T00:20:00Z" },
+        { ...base, runId: light, key: "PR_R|rereview|aaa111|reply@2026-11-05T00:10:00Z", state: "working", threadsOnly: true, sessionId: "11111111-1111-4111-8111-111111111111", worktree: path.join(home, "gone") },
+      ];
+      st.ledger["PR_R|rereview|aaa111|asked@-"] = { state: "failed", at: "2026-11-05T00:00:00Z", runId: full };
+      st.ledger["PR_R|rereview|aaa111|reply@2026-11-05T00:10:00Z"] = { state: "started", at: "2026-11-05T00:21:00Z", runId: light };
+      agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
+      const g = agentFixture({ home, script: keepWorking });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length > 0);
+        const again = only(g).find((i) => i.key === "PR_R|rereview|aaa111|asked");
+        assert.strictEqual(again.threadsOnly, undefined, "nothing full got through on this head: this run is the full one");
+        const started = readLog(g).find((l) => l.event === "started" && l.runId === again.runId);
+        assert.deepStrictEqual([started.data.rereview, started.data.widened], ["full", true]);
+        const rules = g.children[0].args[g.children[0].args.indexOf("--append-system-prompt") + 1];
+        assert.ok(!rules.includes(agentCore.THREADS_ONLY_RULE));
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: neither a run over the threads only nor a full one that never got through counts as the head's full re-review", async () => {
+      const iso = (min) => new Date(Date.now() + min * 60_000).toISOString();
+      const lightAt = iso(-70);
+      const repliedAt = iso(-30);
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", headline: "h", queuedAt: iso(-90), finishedAt: iso(-80), scenario: "rereview" };
+      const cut = "00000000-0000-4000-8000-0000000000f3";
+      const light = "00000000-0000-4000-8000-0000000000f4";
+      const st = agentStore.emptyStore("2026-11-05");
+      st.items = [
+        // A full re-review the app's closing cut short: its entry still reads "started", its run is over.
+        { ...base, runId: cut, key: "PR_R|rereview|aaa111|asked@-", state: "done", headline: "Stopped by you" },
+        // A light run that went out: it read none of the code.
+        { ...base, runId: light, key: `PR_R|rereview|aaa111|reply@${lightAt}`, state: "done", threadsOnly: true },
+      ];
+      st.ledger["PR_R|rereview|aaa111|asked@-"] = { state: "started", at: iso(-90), runId: cut };
+      st.ledger[`PR_R|rereview|aaa111|reply@${lightAt}`] = { state: "published", at: iso(-60), runId: light };
+      agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
+      // The author answers again on the same head.
+      const pr = { ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false, headOid: "aaa111" }), viewerReviewedAt: iso(-120), viewerReviewedHead: true, viewerApproved: false, authorRepliedAt: repliedAt };
+      const g = agentFixture({ home, pr, script: keepWorking, agent: { limits: { settleMinutes: 0 } } });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length === 1);
+        const next = only(g).find((i) => i.state === "working");
+        assert.deepStrictEqual([next.key, next.threadsOnly], [`PR_R|rereview|aaa111|reply@${repliedAt}`, undefined], "a full re-review, the head's first that counts");
+        assert.strictEqual(readLog(g).find((l) => l.event === "queued" && l.runId === next.runId).data.rereview, "full");
       } finally {
         g.agent.stop();
       }

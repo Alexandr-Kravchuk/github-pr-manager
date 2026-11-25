@@ -1,4 +1,3 @@
-import { DEFAULT_AGENT_TOOLS } from "./agent-defaults";
 import { gitBashPath, isInsideDir, parsePublishCall, PUBLISH_USAGE, samePath, type PublishSub } from "./agent-publish";
 import type { AgentRunKind } from "./types";
 
@@ -79,6 +78,12 @@ export interface GuardRun {
   sessionRoots?: string[];
   /** The review skill's preflight, when a mounted plugin carries its helper (`checkPreflight`). */
   preflight?: GuardPreflight;
+  /**
+   * The run's `--allowedTools` rules — for hints only, never a decision: a
+   * refusal suggests instead only calls these let through. Absent: the plain
+   * `gh pr diff` / `gh pr view`.
+   */
+  allowedTools?: string[];
 }
 
 /**
@@ -655,7 +660,7 @@ function insteadOf(prog: string): string {
 }
 
 /** What Bash runs in a read-only run, in words. */
-function readOnlyPrograms(run: GuardRun | null): string {
+function readOnlyPrograms(run: (Pick<GuardRun, "wrapperPath"> & { preflight?: unknown }) | null): string {
   return `gh, twg${run?.wrapperPath ? ", the publish wrapper" : ""}${run?.preflight ? ", the review preflight's node" : ""}`;
 }
 
@@ -741,9 +746,12 @@ export interface ToolRulesRun {
 export function sessionToolRules(kind: AgentRunKind, t: ToolRulesRun): string {
   const tools = t.allowedTools;
   const readOnly = READ_ONLY.has(kind);
+  // The review preflight's node (`preflightFor` grants it): the one node call such a run makes.
+  const preflight = tools.includes("Bash(node *)");
+  const programs = readOnlyPrograms({ ...(t.wrapperPath ? { wrapperPath: t.wrapperPath } : {}), ...(preflight ? { preflight: true } : {}) });
   const out: string[] = [
     readOnly
-      ? `Tools here — a guard checks every call, and a refused call is a wasted step. Bash runs one plain command per call: ${readOnlyPrograms(t.wrapperPath ? { wrapperPath: t.wrapperPath } : null)} only — no ls, cat, grep, node, sleep, cd or git; no pipes, redirection, 2>&1, ; or &&; quote any * ? { } ~ #. Files: Read (offset/limit for a part), Glob, Grep.`
+      ? `Tools here — a guard checks every call, and a refused call is a wasted step. Bash runs one plain command per call: ${programs} only — no ls, cat, grep, ${preflight ? "" : "node, "}sleep, cd or git${preflight ? "; node only as the review skill's preflight runs it" : ""}; no pipes, redirection, 2>&1, ; or &&; quote any * ? { } ~ #. Files: Read (offset/limit for a part), Glob, Grep.`
       : "Tools here — a guard checks every call, and a refused call is a wasted step. Bash runs one plain command per call: no pipes, redirection, 2>&1, ; or &&; no cd (you are in the worktree) and no git -C; quote any * ? { } ~ #. Files: Read (offset/limit for a part), Glob, Grep.",
   ];
   if (readOnly) {
@@ -1547,7 +1555,7 @@ function checkGit(kind: AgentRunKind, words: string[], pr: GuardPr | null, run: 
   // filters by default, and the PR's own .gitattributes picks which files go
   // through them. A read-only run takes the diff from `gh pr diff`.
   if (READ_ONLY.has(kind)) {
-    const instead = gitInstead(pr, DEFAULT_AGENT_TOOLS[kind]);
+    const instead = gitInstead(pr, run?.allowedTools ?? []);
     return deny(`This run only reads, and git can run configured filters on the PR's files — so no git; use gh${instead.length ? `: ${instead.join("; ")}` : " pr diff / gh pr view"}.`);
   }
   const sub = words[1] ?? "";
