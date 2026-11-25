@@ -137,8 +137,25 @@ export function stepLabel(steps: readonly Pick<PlanStep, "status">[]): string {
   return `${next >= 0 ? next + 1 : steps.length}/${steps.length}`;
 }
 
+/** "21:50" for a time later today, "Fri 10:00" for another day — a weekly window resets days on. */
+function untilClock(iso: string, now: Date): string {
+  const d = new Date(iso);
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return sameDay ? localClock(iso) : `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()]} ${localClock(iso)}`;
+}
+
+/** Whether the runs finished today spent the day's budget (`limits.costPerDay`, 0 is none). */
+export function budgetSpent(costToday: number, costPerDay: number): boolean {
+  return costPerDay > 0 && costToday >= costPerDay;
+}
+
+/** Dollars as a card says them: "$12.40". */
+export function dollars(n: number): string {
+  return `$${n.toFixed(2)}`;
+}
+
 /** Why the queue isn't moving, when something holds it. */
-export type QueueBlock = "paused" | "quiet" | "usage" | "daily";
+export type QueueBlock = "paused" | "quiet" | "usage" | "daily" | "budget";
 
 /**
  * The agent's state in the numbers and words every place shows — the header
@@ -154,11 +171,18 @@ export interface AgentSummary {
   readyForYou: number;
   /** What holds the queue; null when nothing does. */
   block: QueueBlock | null;
-  /** That, in words: "Paused", "Quiet hours until 08:00", "Usage limit — waits until 14:05", "Daily limit reached (30)". */
+  /**
+   * That, in words: "Paused", "Quiet hours until 08:00", "Claude's session
+   * limit reached — waits until 14:05", "Claude's weekly usage at 82% (agent
+   * cap 80%) — waits until Fri 10:00", "Daily limit reached (30)", "Daily
+   * budget reached ($20.40 of $20)".
+   */
   blockText: string | null;
 }
 
-export function agentSummary(state: AgentState): AgentSummary {
+export function agentSummary(state: AgentState, now: Date = new Date()): AgentSummary {
+  const costToday = state.costToday ?? 0;
+  const costPerDay = state.costPerDay ?? 0;
   const block: QueueBlock | null = state.paused
     ? "paused"
     : state.quietUntil
@@ -167,17 +191,21 @@ export function agentSummary(state: AgentState): AgentSummary {
         ? "usage"
         : state.perDay > 0 && state.runsToday >= state.perDay
           ? "daily"
-          : null;
+          : budgetSpent(costToday, costPerDay)
+            ? "budget"
+            : null;
   const blockText =
     block === "paused"
       ? "Paused"
       : block === "quiet"
         ? `Quiet hours until ${state.quietUntil}`
         : block === "usage" && state.heldUntil
-          ? `Usage limit — waits until ${localClock(state.heldUntil)}`
+          ? `${state.heldWhy || "Claude's usage limit"} — waits until ${untilClock(state.heldUntil, now)}`
           : block === "daily"
             ? `Daily limit reached (${state.perDay})`
-            : null;
+            : block === "budget"
+              ? `Daily budget reached (${dollars(costToday)} of $${costPerDay})`
+              : null;
   return {
     running: state.running.length,
     pausedRuns: state.running.filter((r) => r.paused).length,
@@ -193,8 +221,8 @@ export function agentSummary(state: AgentState): AgentSummary {
  * the step its plan is on), else why nothing does, plus what waits for you —
  * "Drafting review #911 · 4/6 · 2 ready for you", "Paused", "Quiet hours until 08:00 · 3 in line".
  */
-export function agentTrayLine(state: AgentState): string {
-  const sum = agentSummary(state);
+export function agentTrayLine(state: AgentState, now: Date = new Date()): string {
+  const sum = agentSummary(state, now);
   const first = state.running[0];
   const item = first ? state.items.find((i) => i.runId === first.runId) : undefined;
   let line: string;
@@ -205,7 +233,7 @@ export function agentTrayLine(state: AgentState): string {
     line = `${itemVerb(item)} #${item.prNumber}${first.paused ? " (paused)" : step ? ` · ${step}` : ""}${sum.running > 1 ? ` +${sum.running - 1}` : ""}`;
   } else if (sum.blockText && sum.queued > 0) {
     line = `${sum.blockText} · ${sum.queued} in line`;
-  } else if (sum.blockText && sum.block !== "daily") {
+  } else if (sum.blockText && sum.block !== "daily" && sum.block !== "budget") {
     line = sum.blockText;
   } else if (sum.queued > 0) {
     line = `${sum.queued} in line`;

@@ -30,6 +30,15 @@ export interface AgentStoreData {
   /** Local date ("YYYY-MM-DD") `runsToday` counts for. */
   day: string;
   runsToday: number;
+  /** What the runs that ended on `day` cost at API prices (`total_cost_usd`) — the daily budget counts it. */
+  costToday?: number;
+  /**
+   * Claude's usage holds the queue until `until` (`usageHold`, or a run cut
+   * short by the limit): kept across a restart, which would otherwise start
+   * runs straight into the limit. `usage`: held by the agent's cap at that
+   * percent, so raising the cap past it lets go.
+   */
+  usageHold?: { until: string; why: string; usage?: number };
   items: AgentItemRecord[];
   /** Shadow reviews you published exactly as prepared — the Shadow → On hint counts these. */
   acceptedUnchanged: number;
@@ -100,6 +109,16 @@ export function readStore(file: string, day: string): AgentStoreData {
       ledger: raw.ledger ?? {},
       day: typeof raw.day === "string" ? raw.day : day,
       runsToday: typeof raw.runsToday === "number" ? raw.runsToday : 0,
+      ...(typeof raw.costToday === "number" && Number.isFinite(raw.costToday) ? { costToday: raw.costToday } : {}),
+      ...(raw.usageHold && typeof raw.usageHold.until === "string" && typeof raw.usageHold.why === "string"
+        ? {
+            usageHold: {
+              until: raw.usageHold.until,
+              why: raw.usageHold.why,
+              ...(typeof raw.usageHold.usage === "number" ? { usage: raw.usageHold.usage } : {}),
+            },
+          }
+        : {}),
       // Never from disk: a drive's push is checked against what the app took in memory before the session.
       items: raw.items.map((item) => {
         const { pushTo: _dropped, ...rest } = item as AgentItemRecord;

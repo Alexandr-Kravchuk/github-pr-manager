@@ -9025,6 +9025,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(a.scenarios.merge.mode, "offer", "a merge waits for your click, always");
       assert.strictEqual(a.cloneMissing, true);
       assert.deepStrictEqual([a.scenarios.review.maxLines, a.scenarios.review.maxFiles, a.limits.parallel, a.limits.perDay], [400, 15, 2, 30]);
+      // A fifth of each Claude window stays yours; a dollar budget is opt-in.
+      assert.deepStrictEqual([a.limits.usageCap, a.limits.costPerDay], [80, 0]);
       for (const rule of a.permissions.tools.review) assert.ok(!/push|Edit|Write/.test(rule), `review must not write: ${rule}`);
     });
 
@@ -9062,6 +9064,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(a.scenarios.driveCi.maxAttempts, 10);
       assert.deepStrictEqual([a.limits.parallel, a.limits.perDay, a.limits.maxMinutes], [1, 500, 5]);
       assert.deepStrictEqual(a.limits.quietHours, { enabled: true, from: "20:00", to: "07:30" });
+      const b = cfg.validateAgent({ limits: { parallel: 8, usageCap: 150, costPerDay: 12.6 } });
+      assert.deepStrictEqual([b.limits.parallel, b.limits.usageCap, b.limits.costPerDay], [5, 100, 13], "at most 5 at a time: each run in flight goes on past the usage cap");
+      const c = cfg.validateAgent({ limits: { usageCap: -5, costPerDay: "x" } });
+      assert.deepStrictEqual([c.limits.usageCap, c.limits.costPerDay], [0, 0], "0 turns either off");
       assert.strictEqual(a.policy.signature, cfg.validateAgent(undefined).policy.signature, "the signature can't be blanked out");
       assert.strictEqual(a.policy.logRetentionDays, 1);
     });
@@ -10754,13 +10760,84 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(r.jobs.map((j) => j.prId), ["OLD", "NEW"]);
     });
 
-    test("agent-stream: only a rejected usage limit holds the queue, a warning does not", () => {
+    test("agent-stream: a rejected usage limit holds the queue until it resets, a warning alone does not", () => {
+      const now = 1794500000000;
       // The seven-day window past 75% reads "allowed_warning" (recorded from claude 2.1.314).
-      assert.strictEqual(stream.usageHoldUntil({ status: "allowed_warning", resetsAt: 1794592800 }), null);
-      assert.strictEqual(stream.usageHoldUntil({ status: "allowed", resetsAt: 1794592800 }), null);
-      assert.strictEqual(stream.usageHoldUntil({ status: "rejected", resetsAt: 1794592800 }), 1794592800000);
-      assert.strictEqual(stream.usageHoldUntil({ status: "rejected", resetsAt: null }), null);
-      assert.strictEqual(stream.usageHoldUntil(null), null);
+      assert.strictEqual(stream.usageHold({ status: "allowed_warning", resetsAt: 1794592800 }, 80, now), null);
+      assert.strictEqual(stream.usageHold({ status: "allowed", resetsAt: 1794592800 }, 80, now), null);
+      assert.deepStrictEqual(stream.usageHold({ status: "rejected", resetsAt: 1794592800, type: "five_hour" }, 80, now), { until: 1794592800000, why: "Claude's session limit reached" });
+      assert.deepStrictEqual(stream.usageHold({ status: "rejected", resetsAt: 1794592800, type: "seven_day" }, 0, now), { until: 1794592800000, why: "Claude's weekly limit reached" }, "the limit holds with the cap off too");
+      assert.strictEqual(stream.usageHold({ status: "rejected", resetsAt: 1794592800 }, 80, now).why, "Claude's usage limit reached");
+      assert.strictEqual(stream.usageHold({ status: "rejected", resetsAt: null }, 80, now), null);
+      assert.strictEqual(stream.usageHold(null, 80, now), null);
+    });
+
+    test("agent-stream: a rate_limit_event carries the session and weekly windows' use (recorded from claude 2.1.270)", () => {
+      // stdout of `claude -p --output-format stream-json --verbose` on a subscription, 2026-11-25.
+      const ev = stream.parseStreamLine(
+        '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1795639800,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.15,"resetsAt":1795639800},"seven_day":{"utilization":0.02,"resetsAt":1795658400}}},"uuid":"b130a5ec-ad84-42eb-8667-ac04f3cf7f18","session_id":"1789ed41-80e6-4c61-a662-7a5915715dc0"}',
+      );
+      const p = stream.applyStreamEvent(stream.initialProgress(), ev);
+      assert.deepStrictEqual(p.rateLimit, {
+        status: "allowed",
+        resetsAt: 1795639800,
+        type: "five_hour",
+        windows: { fiveHour: { utilization: 0.15, resetsAt: 1795639800 }, sevenDay: { utilization: 0.02, resetsAt: 1795658400 } },
+      });
+      // An older Claude Code: only the limiting window's share, at the top level.
+      assert.deepStrictEqual(stream.readUsage({ status: "allowed_warning", resetsAt: 1795658400, rateLimitType: "seven_day", utilization: 0.81 }).windows, {
+        sevenDay: { utilization: 0.81, resetsAt: 1795658400 },
+      });
+      // An API key: no windows at all; junk in them is dropped.
+      assert.deepStrictEqual(stream.readUsage({ status: "allowed", unifiedWindows: { five_hour: { utilization: "lots" } } }), { status: "allowed", resetsAt: null });
+    });
+
+    test("agent-stream: a window used up to the agent's cap holds new runs until that window resets", () => {
+      const now = Date.parse("2026-11-25T16:00:00Z");
+      const session = Math.floor(Date.parse("2026-11-25T20:50:00Z") / 1000);
+      const week = Math.floor(Date.parse("2026-11-28T08:00:00Z") / 1000);
+      const reading = (five, seven) => ({ status: "allowed", resetsAt: session, type: "five_hour", windows: { fiveHour: { utilization: five, resetsAt: session }, sevenDay: { utilization: seven, resetsAt: week } } });
+      assert.strictEqual(stream.usageHold(reading(0.15, 0.02), 80, now), null);
+      assert.strictEqual(stream.usageHold(reading(0.795, 0.5), 80, now), null, "79.5% is under 80");
+      assert.deepStrictEqual(stream.usageHold(reading(0.8, 0.5), 80, now), { until: session * 1000, why: "Claude's session usage at 80% (agent cap 80%)", usage: 80 });
+      assert.deepStrictEqual(stream.usageHold(reading(0.5, 0.29), 29, now), { until: week * 1000, why: "Claude's weekly usage at 29% (agent cap 29%)", usage: 29 }, "no float error at the edge");
+      assert.strictEqual(stream.usageHold(reading(0.9, 0.85), 80, now).until, week * 1000, "both past the cap: the later reset frees both");
+      assert.strictEqual(stream.usageHold(reading(1.2, 0.1), 80, now).why, "Claude's session usage at 120% (agent cap 80%)", "a window can run past its cap");
+      assert.strictEqual(stream.usageHold(reading(0.95, 0.1), 0, now), null, "0 turns the cap off");
+      assert.strictEqual(stream.usageHold(reading(0.95, 0.1), 80, session * 1000), null, "a window that has reset since is no hold");
+      assert.strictEqual(stream.usageHold({ status: "allowed_warning", resetsAt: week, type: "seven_day" }, 80, now), null, "no share, no cap hold");
+    });
+
+    test("agent-stream: Claude Code's limit line says when the limit resets, in its own time zone", () => {
+      const at = (iso) => new Date(iso);
+      const hold = (text, now) => stream.limitResetFromText(text, at(now));
+      // As the agent's runs ended on 2026-11-25 and 2026-11-24 (Kyiv is UTC+2 in winter).
+      assert.deepStrictEqual(hold("You've hit your session limit · resets 9:50pm (Europe/Kyiv)", "2026-11-25T15:50:01Z"), {
+        until: Date.parse("2026-11-25T19:50:00Z"),
+        why: "Claude's session limit reached",
+      });
+      assert.strictEqual(hold("You've hit your session limit · resets 7pm (Europe/Kyiv)", "2026-11-24T16:49:24Z").until, Date.parse("2026-11-24T17:00:00Z"), "minutes left out on the hour");
+      assert.strictEqual(hold("You’ve hit your session limit · resets 1:15am (Europe/Kyiv) · progress saved", "2026-11-25T21:30:00Z").until, Date.parse("2026-11-25T23:15:00Z"), "a clock already past today is tomorrow's");
+      // More than a day away: the date; another year: the year too.
+      assert.deepStrictEqual(hold("You've hit your weekly limit · resets Nov 28, 10am (Europe/Kyiv)", "2026-11-25T10:00:00Z"), {
+        until: Date.parse("2026-11-28T08:00:00Z"),
+        why: "Claude's weekly limit reached",
+      });
+      assert.strictEqual(hold("You've hit your weekly limit · resets Jan 2, 2027, 9:30am (Europe/Kyiv)", "2026-12-30T10:00:00Z").until, Date.parse("2027-01-02T07:30:00Z"));
+      assert.strictEqual(hold("You've hit your weekly limit · resets Jan 2, 9am (Europe/Kyiv)", "2026-12-30T10:00:00Z").until, Date.parse("2027-01-02T07:00:00Z"), "no year: the next one");
+      // Summer time, and the morning the clocks go forward (03:00 → 04:00 on 2027-03-28).
+      assert.strictEqual(hold("You've hit your weekly limit · resets Jul 1, 10am (Europe/Kyiv)", "2027-06-28T10:00:00Z").until, Date.parse("2027-07-01T07:00:00Z"));
+      assert.strictEqual(hold("You've hit your weekly limit · resets Mar 28, 5am (Europe/Kyiv)", "2027-03-25T10:00:00Z").until, Date.parse("2027-03-28T02:00:00Z"));
+      assert.strictEqual(hold("You've hit your session limit · resets 9:50pm (America/New_York)", "2026-11-25T15:50:00Z").until, Date.parse("2026-11-26T02:50:00Z"));
+      assert.strictEqual(hold("You're out of usage credits · resets 9:50pm (Europe/Kyiv)", "2026-11-25T15:50:00Z").why, "Out of Claude usage credits");
+      // No zone, or one Intl doesn't know: the machine's own clock.
+      const local = new Date(2026, 10, 25, 12, 0);
+      assert.strictEqual(stream.limitResetFromText("You've hit your session limit · resets 9:50pm", local).until, new Date(2026, 10, 25, 21, 50).getTime());
+      assert.strictEqual(stream.limitResetFromText("You've hit your session limit · resets 9:50pm (Mars/Base)", local).until, new Date(2026, 10, 25, 21, 50).getTime());
+      // Not a limit line, or one with no reset.
+      for (const text of ["The run failed", "You've hit your monthly spend limit.", "You've hit your session limit · resets 13:50pm (Europe/Kyiv)", ""]) {
+        assert.strictEqual(stream.limitResetFromText(text, local), null, text);
+      }
     });
 
     // Events recorded from a real `claude -p` session (2.1.270), trimmed.
@@ -11695,6 +11772,113 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual([only(g)[0].retryAt, g.children.length], [undefined, 1]);
       } finally {
         g.agent.stop();
+      }
+    });
+
+    await atest("agent: a run Claude's session limit stopped holds the whole queue until the reset, and is tried again then — across a restart", async () => {
+      // As on 2026-11-25: five runs refused at 17:50 Kyiv, the limit back at 21:50.
+      let t = Date.parse("2026-11-25T15:50:00Z");
+      const reset = Date.parse("2026-11-25T19:50:00Z");
+      const f = agentFixture({
+        now: () => new Date(t),
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, { type: "result", subtype: "success", is_error: true, result: "You've hit your session limit · resets 9:50pm (Europe/Kyiv)", total_cost_usd: 1.45 });
+          setImmediate(() => c.emit("exit", 1));
+        },
+      });
+      let first;
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "error"));
+        first = only(f)[0];
+        assert.deepStrictEqual([first.headline, first.retryAt], ["Stopped by Claude's session limit", new Date(reset).toISOString()], "tried again once the limit resets, not ten minutes on");
+        const st = f.agent.getState();
+        assert.deepStrictEqual([st.heldUntil, st.heldWhy], [new Date(reset).toISOString(), "Claude's session limit reached"]);
+        assert.match(view.agentSummary(st, new Date(t)).blockText, /^Claude's session limit reached — waits until \d\d:\d\d$/);
+        await until(() => /^Its last run on this head failed \(Stopped by Claude's session limit\) — it tries again by itself at \d\d:\d\d$/.test(f.agent.getState().idle.PR_R ?? ""));
+        // Past the usual ten minutes, and another PR asks for a review: nothing starts into the limit.
+        t += agentCore.RETRY_AFTER_MS + 60_000;
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_2", number: 8 }));
+        f.agent.onSnapshot(f.snapshot);
+        assert.ok(only(f).some((i) => i.prId === "PR_2" && i.state === "queued"));
+        assert.strictEqual(f.children.length, 1);
+      } finally {
+        f.agent.stop();
+      }
+      // The app started again: the hold is in state.json, not lost with the process.
+      const g = agentFixture({ home: f.dir, now: () => new Date(t), script: succeed("Reviewed.") });
+      try {
+        assert.strictEqual(g.agent.getState().heldUntil, new Date(reset).toISOString());
+        g.agent.onSnapshot(g.snapshot);
+        assert.strictEqual(g.children.length, 0);
+        t = reset + 1000;
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length === 1);
+        assert.ok(only(g).some((i) => i.retryOf === first.runId), "its one try again");
+        assert.strictEqual(g.agent.getState().heldUntil, null);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: Claude's usage past the agent's cap holds new runs until that window resets; a raised cap lets go", async () => {
+      let t = Date.parse("2026-11-25T16:00:00Z");
+      const session = Math.floor(Date.parse("2026-11-25T20:50:00Z") / 1000);
+      const f = agentFixture({
+        now: () => new Date(t),
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, {
+            type: "rate_limit_event",
+            rate_limit_info: { status: "allowed", resetsAt: session, rateLimitType: "five_hour", unifiedWindows: { five_hour: { utilization: 0.83, resetsAt: session }, seven_day: { utilization: 0.4, resetsAt: session + 86_400 } } },
+          });
+          emit(c, { type: "result", subtype: "success", is_error: false, result: "Reviewed." });
+          setImmediate(() => c.emit("exit", 0));
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f)[0]?.finishedAt !== undefined);
+        assert.notStrictEqual(only(f)[0].state, "error", "the run itself went on to its end");
+        const st = f.agent.getState();
+        assert.deepStrictEqual([st.heldUntil, st.heldWhy], [new Date(session * 1000).toISOString(), "Claude's session usage at 83% (agent cap 80%)"]);
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_2", number: 8 }));
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 1, "the default cap, 80%, leaves the rest of the window to you");
+        // Raised past the reading: the hold lets go at once.
+        f.setAgent({ enabled: true, limits: { usageCap: 90 } });
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: once the day's runs cost the daily budget, no new run starts — the budget is the local day's, 0 is none", async () => {
+      const f = agentFixture({
+        agent: { limits: { costPerDay: 3 } },
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, { type: "result", subtype: "success", is_error: false, result: "Reviewed.", total_cost_usd: 3.25 });
+          setImmediate(() => c.emit("exit", 0));
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f)[0]?.finishedAt !== undefined);
+        const st = f.agent.getState();
+        assert.deepStrictEqual([st.costToday, st.costPerDay], [3.25, 3]);
+        assert.deepStrictEqual([view.agentSummary(st).block, view.agentSummary(st).blockText], ["budget", "Daily budget reached ($3.25 of $3)"]);
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_2", number: 8 }));
+        f.agent.onSnapshot(f.snapshot);
+        assert.ok(only(f).some((i) => i.prId === "PR_2" && i.state === "queued"));
+        assert.strictEqual(f.children.length, 1);
+        f.setAgent({ enabled: true, limits: { costPerDay: 0 } });
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+      } finally {
+        f.agent.stop();
       }
     });
 
@@ -16169,7 +16353,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const queued = [vItem({ prId: "F", state: "queued" })];
       assert.strictEqual(view.agentTrayLine({ ...base, quietUntil: "08:00", items: queued }), "Quiet hours until 08:00 · 1 in line");
       assert.strictEqual(view.agentTrayLine({ ...base, items: queued }), "1 in line");
-      assert.match(view.agentTrayLine({ ...base, heldUntil: new Date(2026, 10, 5, 14, 5).toISOString() }), /^Usage limit — waits until 14:05$/);
+      const day = new Date(2026, 10, 5, 9, 0);
+      assert.strictEqual(view.agentTrayLine({ ...base, heldUntil: new Date(2026, 10, 5, 14, 5).toISOString() }, day), "Claude's usage limit — waits until 14:05", "a state from before the reason was sent");
+      assert.strictEqual(
+        view.agentTrayLine({ ...base, heldUntil: new Date(2026, 10, 5, 14, 5).toISOString(), heldWhy: "Claude's session usage at 83% (agent cap 80%)", items: queued }, day),
+        "Claude's session usage at 83% (agent cap 80%) — waits until 14:05 · 1 in line",
+      );
+      // A weekly window resets days on: the day is said too.
+      assert.strictEqual(view.agentTrayLine({ ...base, heldUntil: new Date(2026, 10, 7, 10, 0).toISOString(), heldWhy: "Claude's weekly limit reached" }, day), "Claude's weekly limit reached — waits until Sat 10:00");
+      // The day's budget, like the run limit: said while something waits for it.
+      assert.strictEqual(view.agentTrayLine({ ...base, costToday: 20.4, costPerDay: 20, items: queued }), "Daily budget reached ($20.40 of $20) · 1 in line");
+      assert.strictEqual(view.agentTrayLine({ ...base, costToday: 20.4, costPerDay: 20 }), "Idle");
     });
 
     test("agent toasts: a trigger the agent took in On is left to the agent; Shadow, other PRs and other triggers still toast", () => {
@@ -17750,6 +17944,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.readyItems([...items, vItem({ prId: "C", state: "queued" })]).length, 0, "not while the agent is on the PR again");
       assert.deepStrictEqual([view.agentSummary({ ...base, paused: true }).block, view.agentSummary({ ...base, quietUntil: "08:00" }).blockText], ["paused", "Quiet hours until 08:00"]);
       assert.strictEqual(view.agentSummary({ ...base, runsToday: 30 }).blockText, "Daily limit reached (30)");
+      assert.strictEqual(view.agentSummary({ ...base, costToday: 2.999, costPerDay: 3 }).block, null, "under the budget");
+      assert.deepStrictEqual(
+        [view.agentSummary({ ...base, costToday: 3, costPerDay: 3 }).block, view.agentSummary({ ...base, costToday: 300, costPerDay: 0 }).block],
+        ["budget", null],
+        "0 is no budget",
+      );
       assert.deepStrictEqual([view.stepLabel([]), view.stepLabel([{ status: "completed" }, { status: "pending" }]), view.stepLabel([{ status: "completed" }])], ["", "2/2", "1/1"]);
       assert.strictEqual(actionLabel(vItem({ prId: "P", state: "error", scenario: "afterMerge" })), null, "the Jira run after a merge can't run again: a note");
     });

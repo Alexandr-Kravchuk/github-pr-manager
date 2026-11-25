@@ -377,7 +377,14 @@ function LimitsSection({ agent, setAgent, inputCls }: SectionProps) {
           <NumField label="Runs at a time" bound="parallel" value={l.parallel} onChange={(parallel) => patch({ parallel })} />
           <NumField label="Runs per day" bound="perDay" value={l.perDay} onChange={(perDay) => patch({ perDay })} />
           <NumField label="Stop a run after" bound="maxMinutes" value={l.maxMinutes} unit="min" onChange={(maxMinutes) => patch({ maxMinutes })} />
+          <NumField label="Start nothing past Claude usage" bound="usageCap" value={l.usageCap} unit="%" onChange={(usageCap) => patch({ usageCap })} />
+          <NumField label="Daily budget at API prices" bound="costPerDay" value={l.costPerDay} unit="$" onChange={(costPerDay) => patch({ costPerDay })} />
         </div>
+        <p className="text-xs text-fg-faint">
+          Usage: no new run starts while your Claude session (5-hour) or weekly window is used this far — the rest stays yours. Runs in flight finish, so more of
+          them at a time go further past it. Reaching the limit itself holds every run until it resets. Budget: what today&apos;s runs cost as Claude reports it;
+          on a subscription it is a measure, not a bill. 0 turns either off.
+        </p>
         <div className="flex flex-wrap items-center gap-2">
           <Check checked={l.quietHours.enabled} onChange={(enabled) => quiet({ enabled })} title="Quiet hours — start nothing new between" />
           <input type="time" value={l.quietHours.from} disabled={!l.quietHours.enabled} onChange={(e) => e.target.value && quiet({ from: e.target.value })} className={cn(inputCls, "mt-0 w-28")} />

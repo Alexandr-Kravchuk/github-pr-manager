@@ -193,7 +193,7 @@ export function AgentCompanion({
                     ? sum.blockText
                       ? `${sum.blockText} · ${sum.queued} in line`
                       : `${sum.queued} in line`
-                    : sum.blockText && sum.block !== "daily"
+                    : sum.blockText && sum.block !== "daily" && sum.block !== "budget"
                       ? sum.blockText
                       : waiting > 0
                         ? `${waiting} ready for you`
@@ -286,8 +286,8 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
                 : sum.block === "quiet"
                   ? `${sum.blockText} — only what you ask for starts.`
                   : sum.block === "usage"
-                    ? `Claude's ${sum.blockText?.toLowerCase()}.`
-                    : sum.block === "daily"
+                    ? `${sum.blockText}.`
+                    : sum.block === "daily" || sum.block === "budget"
                       ? `${sum.blockText} — ${sum.queued > 0 ? `${sum.queued} in line wait` : "new runs wait"} until tomorrow.`
                       : sum.queued > 0
                         ? "The next one starts in a moment."
