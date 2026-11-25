@@ -413,6 +413,18 @@ export interface AgentSettings {
   limits: {
     parallel: number;
     perDay: number;
+    /**
+     * No new run starts while Claude's session (5-hour) or weekly window is
+     * used to this percent or more — the rest is left for your own work
+     * (`usageHold`). 0 is off; the limit itself holds the queue either way.
+     */
+    usageCap: number;
+    /**
+     * No new run starts once the runs finished today (the local day, as
+     * `perDay` counts) cost this many dollars at API prices — what Claude
+     * reports as `total_cost_usd`, a measure of usage on a subscription. 0 is off.
+     */
+    costPerDay: number;
     /** A run is stopped (and handed to you) after this many minutes. */
     maxMinutes: number;
     /** No new run starts between `from` and `to` ("HH:MM", may wrap past midnight). */
@@ -1281,8 +1293,13 @@ export interface AgentState {
   runsToday: number;
   perDay: number;
   parallel: number;
-  /** Set while Claude's usage limit holds new runs back. */
+  /** Set while Claude's usage — its limit, or the agent's cap on it — holds new runs back. */
   heldUntil: string | null;
+  /** Why, in words: "Claude's session limit reached", "Claude's weekly usage at 82% (agent cap 80%)". */
+  heldWhy?: string | null;
+  /** What the runs finished today cost at API prices, and the day's budget (0: none) — `limits.costPerDay`. */
+  costToday?: number;
+  costPerDay?: number;
   /** The companion settings, so the header shows the chip only when wanted. */
   headerChip: boolean;
   /** …and the tray its status line and Pause item. */

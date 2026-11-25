@@ -5,11 +5,11 @@ import path from "node:path";
 import { DEFAULT_AGENT_PROMPTS, languageRule, runModelFor, runsReviewWorkflow, SONNET_REVIEWERS_RULE } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, withAgentReview, type AgentJob, type AgentReview, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, disputeSteps, gitBashPath, readPlanLines, shasNotOnPr, summarizePlan, type PublishStep, type PublishSummary } from "../../shared/agent-publish";
-import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/agent-stream";
+import { describeToolUse, limitResetFromText, MAX_USAGE_HOLD_MS, usageHold, type RunProgress, type UsageHold } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
-import { AGENT_CLOSED, approvableRun, approvalStands, boardStage, cardKey, keyHead, NO_CHECKOUT_WHY, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
+import { AGENT_CLOSED, approvableRun, approvalStands, boardStage, budgetSpent, cardKey, keyHead, NO_CHECKOUT_WHY, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -484,7 +484,6 @@ export function createAgent(deps: AgentDeps): Agent {
   });
   const running = new Map<string, Running>();
   let idle: Record<string, string> = {};
-  let heldUntil: number | null = null;
   /** When the last plan's first PR waiting to settle has (`PlanResult.wakeAt`): the tick plans again then. */
   let replanAt: number | null = null;
   let timer: NodeJS.Timeout | null = null;
@@ -583,6 +582,32 @@ export function createAgent(deps: AgentDeps): Agent {
     for (const e of board.entries) store.log(e);
     store.data.board = board.marks;
     return board.entries.length > 0;
+  }
+
+  /**
+   * Claude's usage holding the queue now, or null: kept in state.json
+   * (`usageHold`), so a restart doesn't start runs straight into the limit. A
+   * hold of the agent's cap lets go once the cap is raised past it or off.
+   */
+  function usageHoldNow(cap = settings()?.limits.usageCap ?? 0): UsageHold | null {
+    const h = store.data.usageHold;
+    if (!h) return null;
+    const until = Date.parse(h.until);
+    if (!Number.isFinite(until) || now().getTime() >= until) return null;
+    if (h.usage !== undefined && !(cap > 0 && h.usage >= cap)) return null;
+    return { until, why: h.why, ...(h.usage !== undefined ? { usage: h.usage } : {}) };
+  }
+  /** A new usage hold: the latest reading wins — it knows the windows as they are now. Never past `MAX_USAGE_HOLD_MS`. */
+  function holdForUsage(hold: UsageHold): void {
+    const until = new Date(Math.min(hold.until, now().getTime() + MAX_USAGE_HOLD_MS)).toISOString();
+    const was = store.data.usageHold;
+    if (was && was.until === until && was.why === hold.why && was.usage === hold.usage) return;
+    store.data.usageHold = { until, why: hold.why, ...(hold.usage !== undefined ? { usage: hold.usage } : {}) };
+    void store.save();
+  }
+  /** What a run's end cost counts toward the day's budget. */
+  function spend(costUsd: unknown): void {
+    if (typeof costUsd === "number" && Number.isFinite(costUsd) && costUsd > 0) store.data.costToday = (store.data.costToday ?? 0) + costUsd;
   }
 
   /** What holds the queue, logged when it changes: paused, quiet hours, the usage or daily limit, a host's budget. */
@@ -1538,7 +1563,8 @@ export function createAgent(deps: AgentDeps): Agent {
     const s = all.agent;
     /** How the session went, once it has ended — on the run's end line, failed or not. */
     let endStats: Record<string, unknown> | undefined;
-    const fail = (headline: string, error?: string) => {
+    /** `limitUntil`: Claude's limit refused the run — tried again once it resets, not in ten minutes. */
+    const fail = (headline: string, error?: string, limitUntil?: number) => {
       item.state = "error";
       item.headline = headline;
       item.error = error;
@@ -1548,7 +1574,7 @@ export function createAgent(deps: AgentDeps): Agent {
       // run that is a try again already, not one cut short again and again, and
       // not one with no checkout: the plan holds such a PR back, so the try would never come.
       if (RETRIED.has(item.scenario) && !item.key.endsWith("|asked") && !item.retryOf && !headline.startsWith("Cut short") && !headline.startsWith(NO_CHECKOUT_WHY)) {
-        item.retryAt = new Date(now().getTime() + RETRY_AFTER_MS).toISOString();
+        item.retryAt = new Date(Math.max(now().getTime() + RETRY_AFTER_MS, limitUntil ?? 0)).toISOString();
       }
       // Recorded even when the run never started, or every tick would queue the
       // same PR again; a new head commit is a new key and gets another try.
@@ -1818,8 +1844,9 @@ export function createAgent(deps: AgentDeps): Agent {
           entry.recent = [...entry.recent, { at: stamp(), text: progress.activity }].slice(-RECENT_MAX);
         }
         entry.progress = progress;
-        const hold = usageHoldUntil(progress.rateLimit);
-        if (hold !== null) heldUntil = hold;
+        // The cap as the run started; `usageHoldNow` reads it as it is now.
+        const hold = usageHold(progress.rateLimit, s.limits.usageCap, now().getTime());
+        if (hold) holdForUsage(hold);
         changed();
       },
       deps.spawner,
@@ -1839,6 +1866,7 @@ export function createAgent(deps: AgentDeps): Agent {
     const result = outcome.progress.result;
     item.finishedAt = stamp();
     endStats = runStats(item, outcome, item.finishedAt, { takeOver: entry.takeOver, offStop: entry.offStop });
+    spend(endStats.costUsd);
     // Ended under it — a Windows restart, Ctrl+C, a workflow still running —
     // rather than by you, by its time limit, or by finishing.
     const cut = entry.takeOver || entry.offStop || outcome.stopped || outcome.timedOut ? null : cutShort(outcome);
@@ -1960,8 +1988,21 @@ export function createAgent(deps: AgentDeps): Agent {
         item.headline = current && approvalStands(current) && current.headOid === keyHead(item.key) ? "Already approved on this head — nothing to post" : "Reviewed — nothing to post";
       }
     } else {
+      const error = result?.text || outcome.stderr.trim().split("\n").slice(-3).join(" ") || `exit ${outcome.exitCode}`;
+      // Refused by Claude's subscription limit: the whole queue waits for its
+      // reset (the stream's own reading first, else the reset in Claude Code's
+      // error result — never the model's words, which a PR can dictate), and
+      // this run is tried again then, not ten minutes on into the same wall.
+      const limit =
+        (outcome.progress.rateLimit?.status === "rejected" ? usageHold(outcome.progress.rateLimit, 0, now().getTime()) : null) ??
+        (result?.isError ? limitResetFromText(result.text, now()) : null);
       // `fail` saves, logs and tells; the rest of this function only cleans up.
-      fail("The run failed", result?.text || outcome.stderr.trim().split("\n").slice(-3).join(" ") || `exit ${outcome.exitCode}`);
+      if (limit && limit.until > now().getTime()) {
+        holdForUsage(limit);
+        fail(limit.why.endsWith(" reached") ? `Stopped by ${limit.why.slice(0, -" reached".length)}` : limit.why, error, limit.until);
+      } else {
+        fail("The run failed", error);
+      }
     }
     // Nothing to post, nothing asked, nothing major found: no decision is left.
     // Its diagrams go out with the review, as one comment of their own.
@@ -2588,6 +2629,7 @@ export function createAgent(deps: AgentDeps): Agent {
       { gh, spawner: deps.spawner ?? spawnClaude, ...(deps.checkMermaid ? { check: deps.checkMermaid } : {}) },
     );
     item.diagrams = out.diagrams;
+    spend(out.costUsd);
     logRun(item, "diagrams", {
       detail: clip(out.diagrams.note ?? `${out.diagrams.list.length} drawn`),
       ms: out.ms,
@@ -2953,6 +2995,7 @@ export function createAgent(deps: AgentDeps): Agent {
     if (store.data.day !== day) {
       store.data.day = day;
       store.data.runsToday = 0;
+      store.data.costToday = 0;
       store.prune(s.policy.logRetentionDays, now().getTime());
     }
     const quiet = quietUntil(now(), s.limits.quietHours);
@@ -2972,10 +3015,14 @@ export function createAgent(deps: AgentDeps): Agent {
     const queued = queueOrder(store.data.items.filter((i) => i.state === "queued"));
     // Paused: nothing starts, whoever asked.
     if (store.data.paused) return noteHold(queued.length > 0 ? "paused" : null);
-    if (heldUntil !== null && now().getTime() < heldUntil) {
-      return noteHold(queued.length > 0 ? `Claude usage limit until ${new Date(heldUntil).toISOString()}` : null);
+    // Claude's limit, or the agent's cap on it: nothing starts, whoever asked.
+    const usage = usageHoldNow(s.limits.usageCap);
+    if (usage) return noteHold(queued.length > 0 ? `${usage.why} until ${new Date(usage.until).toISOString()}` : null);
+    if (store.data.usageHold) {
+      delete store.data.usageHold;
+      void store.save();
+      changed();
     }
-    heldUntil = null;
     const snapshot = deps.getSnapshot();
     const byId = new Map((snapshot?.pullRequests ?? []).map((p) => [p.id, p]));
     /** Why queued runs wait this tick — a full house of parallel runs is the queue working, not a hold. */
@@ -2987,6 +3034,10 @@ export function createAgent(deps: AgentDeps): Agent {
       if (busy >= s.limits.parallel) break;
       if (store.data.runsToday >= s.limits.perDay) {
         holds.add(`daily limit of ${s.limits.perDay} runs reached`);
+        break;
+      }
+      if (budgetSpent(store.data.costToday ?? 0, s.limits.costPerDay)) {
+        holds.add(`daily budget of $${s.limits.costPerDay} reached`);
         break;
       }
       // A merged PR has left the snapshot; its Jira dry run goes by the item alone.
@@ -3370,7 +3421,12 @@ export function createAgent(deps: AgentDeps): Agent {
         runsToday: store.data.runsToday,
         perDay: s?.limits.perDay ?? 0,
         parallel: s?.limits.parallel ?? 0,
-        heldUntil: heldUntil !== null ? new Date(heldUntil).toISOString() : null,
+        ...(() => {
+          const hold = usageHoldNow(s?.limits.usageCap ?? 0);
+          return { heldUntil: hold ? new Date(hold.until).toISOString() : null, heldWhy: hold?.why ?? null };
+        })(),
+        costToday: store.data.day === localDay(now()) ? (store.data.costToday ?? 0) : 0,
+        costPerDay: s?.limits.costPerDay ?? 0,
         headerChip: s?.companion.headerChip ?? true,
         trayState: s?.companion.trayState ?? true,
         paused: store.data.paused,

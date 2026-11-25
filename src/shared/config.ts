@@ -434,6 +434,8 @@ export function validateAgent(raw: unknown): AgentSettings {
     limits: {
       parallel: num(limits.parallel, "parallel", d.limits.parallel),
       perDay: num(limits.perDay, "perDay", d.limits.perDay),
+      usageCap: num(limits.usageCap, "usageCap", d.limits.usageCap),
+      costPerDay: num(limits.costPerDay, "costPerDay", d.limits.costPerDay),
       maxMinutes: num(limits.maxMinutes, "maxMinutes", d.limits.maxMinutes),
       quietHours: {
         enabled: bool(quiet.enabled, d.limits.quietHours.enabled),

@@ -869,6 +869,41 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   rather than the filtered ones, and only while the agent is on — pruning runs
   only then; their marks persist in `state.json` (`board`), so a restart logs
   what moved while the app was closed rather than every card again.
+- **The agent's share of your Claude usage** (Settings › Agent › Limits). You
+  work in Claude yourself, so the agent must not spend the whole window. Every
+  run's stream-json carries `rate_limit_event`s (`readUsage` in
+  `shared/agent-stream.ts`): `status` (`allowed` / `allowed_warning` /
+  `rejected`), `resetsAt` and `rateLimitType` of the window that limits now,
+  and `unifiedWindows` — `five_hour` (the session) and `seven_day` (weekly),
+  each `{ utilization, resetsAt }`, `utilization` a fraction that may pass 1 —
+  sent whenever a window's rounded percentage moves (absent for an API key).
+  `usageHold` turns a reading into a hold: `rejected` until its reset, or a
+  window at `limits.usageCap` percent or more (default 80, 0 off) until that
+  window resets; `allowed_warning` alone never holds — it comes at Claude
+  Code's own thresholds (75% of the week), and holding on it stopped every run
+  for days. Runs in flight finish, so the cap is overshot by what they still
+  spend — the reason `limits.parallel` stops at 5. A run refused by the limit
+  ends with Claude Code's line, "You've hit your session limit · resets 9:50pm
+  (Europe/Kyiv)" (a date past a day: "Nov 28, 10am", a year past New Year), in
+  the result's text with `is_error` and `subtype: "success"`;
+  `limitResetFromText` reads it in that zone, and the stream's own `rejected`
+  reading wins when there is one. Only that error result is read, never the
+  model's words: a PR can make a session write the line, and a hold stops
+  every run — so the line must be the whole text, its year this one or the
+  next, and no hold lasts past `MAX_USAGE_HOLD_MS` (8 days). Such a run is "Stopped by Claude's session
+  limit" with its `retryAt` at the reset, not `RETRY_AFTER_MS` on, which only
+  ran it into the same wall. The hold is `usageHold` in `state.json`, not
+  memory — a restart used to start the queue straight into the limit — and
+  holds every run, asked or not; a cap hold keeps the share it was set at
+  (`usage`) and lets go once the cap is raised past it. `limits.costPerDay`
+  (0 off, the default) holds new runs once the runs ended on the local day
+  cost that many dollars at API prices (`costToday`: each run's
+  `total_cost_usd` plus its diagrams' — on a subscription a measure of usage,
+  not a bill), counted like `perDay`. `AgentState` carries `heldUntil` /
+  `heldWhy` and `costToday` / `costPerDay`, and `agentSummary` words them once
+  for the Board, the chip, the popover and the tray ("Claude's weekly usage at
+  82% (agent cap 80%) — waits until Fri 10:00", "Daily budget reached ($20.40
+  of $20)").
 - **Upsource reviews** (Settings › Integrations › Upsource, `Settings.upsource`)
   join the list as items of their own: `shared/upsource.ts` (Node-free) maps
   each open review you wrote or review into a `PullRequest` with

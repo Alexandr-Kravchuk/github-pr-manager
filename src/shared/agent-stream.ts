@@ -33,6 +33,31 @@ export interface RunResult {
   tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
 
+/** One of Claude's subscription windows: the fraction of it used (may pass 1) and when it resets (Unix seconds). */
+export interface UsageWindow {
+  utilization: number;
+  resetsAt: number;
+}
+
+/**
+ * A `rate_limit_event`'s `rate_limit_info`, as Claude Code (2.1.270) sends it
+ * in stream-json: `status` "allowed" / "allowed_warning" / "rejected" and
+ * `resetsAt` of the window that limits now (`rateLimitType`), plus
+ * `unifiedWindows` — the session (`five_hour`) and weekly (`seven_day`)
+ * windows, each `{ utilization, resetsAt }`, read from the API's
+ * `anthropic-ratelimit-unified-*` headers on every reply and sent whenever
+ * a window's rounded percentage moves. Absent for an API key (no
+ * subscription), and before the first reply that carries them.
+ */
+export interface UsageReading {
+  status: string;
+  resetsAt: number | null;
+  /** The window `status` and `resetsAt` are about: "five_hour", "seven_day", "seven_day_opus", … */
+  type?: string;
+  /** The session and weekly windows; an older Claude Code's top-level `utilization` fills the limiting one. */
+  windows?: { fiveHour?: UsageWindow; sevenDay?: UsageWindow };
+}
+
 export interface RunProgress {
   sessionId: string | null;
   steps: PlanStep[];
@@ -43,8 +68,11 @@ export interface RunProgress {
   /** The latest thing it said. */
   lastText: string | null;
   toolCalls: number;
-  /** The latest Claude usage-limit reading: the scheduler holds runs back once it says "rejected" (`usageHoldUntil`). */
-  rateLimit: { status: string; resetsAt: number | null } | null;
+  /**
+   * The latest Claude usage-limit reading: the scheduler holds runs back once
+   * it says "rejected", or once a window is past the agent's cap (`usageHold`).
+   */
+  rateLimit: UsageReading | null;
   /**
    * Background tasks the session is still running — a skill's Workflow runs
    * as one. A result while one runs is not the end: the session gets the
@@ -185,11 +213,7 @@ export function applyStreamEvent(p: RunProgress, ev: unknown): RunProgress {
   }
 
   if (type === "rate_limit_event" && isObj(ev.rate_limit_info)) {
-    const info = ev.rate_limit_info;
-    return {
-      ...p,
-      rateLimit: { status: str(info.status) || "unknown", resetsAt: typeof info.resetsAt === "number" ? info.resetsAt : null },
-    };
+    return { ...p, rateLimit: readUsage(ev.rate_limit_info) };
   }
 
   if (type === "assistant" && isObj(ev.message) && Array.isArray(ev.message.content)) {
@@ -270,19 +294,189 @@ export function applyStreamEvent(p: RunProgress, ev: unknown): RunProgress {
   return p;
 }
 
-/** The current step: the one in progress, else the first not done. */
-/**
- * Until when (ms) the scheduler holds its queue for a usage-limit reading, or
- * null to go on. Only "rejected" — the limit is reached — holds: Claude Code
- * also sends "allowed_warning" once a window passes a threshold (75% of the
- * seven-day window, say), and holding on that stopped every run for days of
- * usage still left.
- */
-export function usageHoldUntil(rateLimit: RunProgress["rateLimit"]): number | null {
-  if (!rateLimit || rateLimit.status !== "rejected" || !rateLimit.resetsAt) return null;
-  return rateLimit.resetsAt * 1000;
+function readWindow(v: unknown): UsageWindow | undefined {
+  if (!isObj(v)) return undefined;
+  const { utilization, resetsAt } = v;
+  return typeof utilization === "number" && Number.isFinite(utilization) && typeof resetsAt === "number" && Number.isFinite(resetsAt)
+    ? { utilization, resetsAt }
+    : undefined;
 }
 
+/** A `rate_limit_info` held to its shapes; unknown fields are dropped. */
+export function readUsage(info: Obj): UsageReading {
+  const resetsAt = typeof info.resetsAt === "number" ? info.resetsAt : null;
+  const type = str(info.rateLimitType);
+  const unified = isObj(info.unifiedWindows) ? info.unifiedWindows : null;
+  let fiveHour = unified ? readWindow(unified.five_hour) : undefined;
+  let sevenDay = unified ? readWindow(unified.seven_day) : undefined;
+  // An older Claude Code: only the limiting window's share, at the top level.
+  if (!fiveHour && !sevenDay && resetsAt !== null && typeof info.utilization === "number" && Number.isFinite(info.utilization)) {
+    if (type === "five_hour") fiveHour = { utilization: info.utilization, resetsAt };
+    if (type === "seven_day") sevenDay = { utilization: info.utilization, resetsAt };
+  }
+  return {
+    status: str(info.status) || "unknown",
+    resetsAt,
+    ...(type ? { type } : {}),
+    ...(fiveHour || sevenDay ? { windows: { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}) } } : {}),
+  };
+}
+
+/** Why the queue waits for Claude's usage, and until when (ms). */
+export interface UsageHold {
+  until: number;
+  why: string;
+  /** Set when the agent's cap, not the limit itself, holds: the window's share in percent — a cap raised past it lets go. */
+  usage?: number;
+}
+
+/** Claude Code's own names for its windows, as its limit messages say them. */
+const LIMIT_NAMES: Record<string, string> = {
+  five_hour: "session limit",
+  seven_day: "weekly limit",
+  seven_day_opus: "Opus limit",
+  seven_day_sonnet: "Sonnet limit",
+  seven_day_overage_included: "Fable limit",
+  overage: "usage credit limit",
+};
+
+/**
+ * Whether a usage reading holds the scheduler's queue, until when and why;
+ * null to go on.
+ * - "rejected": the limit is reached — until it resets.
+ * - A session or weekly window at or past `capPercent` of it (0 is off) —
+ *   until that window resets, so what is left of it stays yours. With both
+ *   past the cap, the later reset. A window whose reset has passed is spent
+ *   history, not a hold.
+ * "allowed_warning" alone holds nothing: Claude Code sends it once a window
+ * passes a threshold of its own (75% of the seven-day window, say), and
+ * holding on that stopped every run for days of usage still left.
+ */
+export function usageHold(rateLimit: UsageReading | null, capPercent: number, nowMs: number): UsageHold | null {
+  if (!rateLimit) return null;
+  if (rateLimit.status === "rejected" && rateLimit.resetsAt) {
+    return { until: rateLimit.resetsAt * 1000, why: `Claude's ${LIMIT_NAMES[rateLimit.type ?? ""] ?? "usage limit"} reached` };
+  }
+  if (!(capPercent > 0)) return null;
+  let hold: UsageHold | null = null;
+  const windows: Array<[string, UsageWindow | undefined]> = [
+    ["session", rateLimit.windows?.fiveHour],
+    ["weekly", rateLimit.windows?.sevenDay],
+  ];
+  for (const [name, w] of windows) {
+    if (!w) continue;
+    const until = w.resetsAt * 1000;
+    // Percent to one decimal: 0.8 × 100 is 80.00000000000001, 0.29 × 100 is 28.999999999999996.
+    const usage = Math.round(w.utilization * 1000) / 10;
+    if (until <= nowMs || usage < capPercent) continue;
+    if (!hold || until > hold.until) hold = { until, why: `Claude's ${name} usage at ${Math.round(usage)}% (agent cap ${capPercent}%)`, usage };
+  }
+  return hold;
+}
+
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+/**
+ * Claude Code's line when a request is refused for the subscription's limit,
+ * as its result's text: "You've hit your session limit · resets 9:50pm
+ * (Europe/Kyiv)"; a reset more than a day away is "… · resets Nov 28, 10am
+ * (Europe/Kyiv)", with the year when it isn't this one ("Jan 2, 2027,
+ * 9am"). The clock is in the named time zone (Claude Code's own, the
+ * machine's), minutes left out on the hour.
+ */
+const LIMIT_LINE =
+  /^\s*(?:You['’]ve hit your ([^·\n]+?)|You['’]re (out of usage credits))\s*·[^\n]*?\bresets\s+(?:([A-Za-z]{3})\s+(\d{1,2}),\s+(?:(\d{4}),\s+)?)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b(?:\s*\(([^)\n]+)\))?(?:\s*·[^\n]*)?\s*$/i;
+
+/**
+ * The longest a usage hold may last: Claude's longest window is a week. A
+ * hold stops every run, so nothing — a reading, a line — holds past this.
+ */
+export const MAX_USAGE_HOLD_MS = 8 * 86_400_000;
+
+/** The wall clock in `timeZone` (the machine's own when absent) at `ms`. */
+function wallClock(ms: number, timeZone: string | undefined): { y: number; mo: number; d: number; h: number; mi: number; s: number } {
+  if (!timeZone) {
+    const t = new Date(ms);
+    return { y: t.getFullYear(), mo: t.getMonth() + 1, d: t.getDate(), h: t.getHours(), mi: t.getMinutes(), s: t.getSeconds() };
+  }
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+  }).formatToParts(new Date(ms));
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+  return { y: get("year"), mo: get("month"), d: get("day"), h: get("hour") % 24, mi: get("minute"), s: get("second") };
+}
+
+/** The instant (ms) a wall clock in `timeZone` shows; the machine's own zone when absent. */
+function fromWallClock(y: number, mo: number, d: number, h: number, mi: number, timeZone: string | undefined): number {
+  if (!timeZone) return new Date(y, mo - 1, d, h, mi).getTime();
+  const wanted = Date.UTC(y, mo - 1, d, h, mi);
+  // The zone's offset at a guess, then at the answer: once more across a DST change.
+  let t = wanted;
+  for (let i = 0; i < 2; i++) {
+    const w = wallClock(t, timeZone);
+    t += wanted - Date.UTC(w.y, w.mo - 1, w.d, w.h, w.mi, w.s);
+  }
+  return t;
+}
+
+/** A time zone Intl knows, or undefined (the machine's own then). */
+function knownZone(name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: name });
+    return name;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * When the limit in Claude Code's limit line resets, and which limit it is;
+ * null for any other text, or a limit line with no reset in it. A time with
+ * no date is the next time the clock shows it.
+ *
+ * Pass only the text of a result Claude Code marked `is_error` — never what
+ * the model said: a PR's diff or comments can make a session write this very
+ * line, and a hold stops every run. So the line must be the whole text, its
+ * year this one or the next, and its reset within `MAX_USAGE_HOLD_MS`.
+ */
+export function limitResetFromText(text: string, now: Date): UsageHold | null {
+  const m = LIMIT_LINE.exec(text);
+  if (!m) return null;
+  const [, limit, credits, monthName, dayText, yearText, hourText, minuteText, ampm, zoneName] = m;
+  const zone = knownZone(zoneName?.trim());
+  const hour12 = Number(hourText);
+  if (hour12 < 1 || hour12 > 12) return null;
+  const h = (hour12 % 12) + (ampm.toLowerCase() === "pm" ? 12 : 0);
+  const mi = minuteText ? Number(minuteText) : 0;
+  if (mi > 59) return null;
+  const nowMs = now.getTime();
+  const today = wallClock(nowMs, zone);
+  let until: number;
+  if (monthName) {
+    const mo = MONTHS.indexOf(monthName.toLowerCase()) + 1;
+    const d = Number(dayText);
+    if (mo === 0 || d < 1 || d > 31) return null;
+    if (yearText && Number(yearText) !== today.y && Number(yearText) !== today.y + 1) return null;
+    until = fromWallClock(yearText ? Number(yearText) : today.y, mo, d, h, mi, zone);
+    // "Jan 2" read in late December, from a Claude Code that left the year out.
+    if (!yearText && until < nowMs - 86_400_000) until = fromWallClock(today.y + 1, mo, d, h, mi, zone);
+  } else {
+    until = fromWallClock(today.y, today.mo, today.d, h, mi, zone);
+    if (until <= nowMs) until = fromWallClock(today.y, today.mo, today.d + 1, h, mi, zone);
+  }
+  if (!Number.isFinite(until) || until - nowMs > MAX_USAGE_HOLD_MS) return null;
+  return { until, why: credits ? "Out of Claude usage credits" : `Claude's ${limit.trim()} reached` };
+}
+
+/** The current step: the one in progress, else the first not done. */
 export function currentStep(p: Pick<RunProgress, "steps">): PlanStep | null {
   return p.steps.find((s) => s.status === "in_progress") ?? p.steps.find((s) => s.status !== "completed") ?? null;
 }

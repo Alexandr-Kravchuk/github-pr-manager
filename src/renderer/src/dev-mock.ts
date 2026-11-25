@@ -1028,6 +1028,8 @@ function mockAgentState(): AgentState {
     perDay: 30,
     parallel: 2,
     heldUntil: null,
+    costToday: 14.37,
+    costPerDay: 50,
     headerChip: true,
     trayState: true,
     paused: false,

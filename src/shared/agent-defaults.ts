@@ -203,8 +203,11 @@ export const AGENT_BOUNDS = {
   maxLines: { min: 1, max: 100_000 },
   maxFiles: { min: 1, max: 5_000 },
   maxAttempts: { min: 1, max: 10 },
-  parallel: { min: 1, max: 8 },
+  // Every run in flight goes on past the usage cap, so more at a time overshoots it further.
+  parallel: { min: 1, max: 5 },
   perDay: { min: 1, max: 500 },
+  usageCap: { min: 0, max: 100 },
+  costPerDay: { min: 0, max: 10_000 },
   maxMinutes: { min: 5, max: 240 },
   settleMinutes: { min: 0, max: 240 },
   promoteAfter: { min: 1, max: 100 },
@@ -252,6 +255,9 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   limits: {
     parallel: 2,
     perDay: 30,
+    // A fifth of each window stays yours; a budget is opt-in — on a subscription the dollars are only a measure.
+    usageCap: 80,
+    costPerDay: 0,
     maxMinutes: 30,
     quietHours: { enabled: false, from: "20:00", to: "08:00" },
     // Authors (and their own agents) push every 10–30 min: a review of a head
