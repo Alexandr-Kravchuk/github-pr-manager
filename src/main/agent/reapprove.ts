@@ -7,6 +7,7 @@
 // signature, or a review request.
 
 import { signedBody, type PublishRequest } from "../../shared/agent-publish";
+import { CLEAN_APPROVAL_MARKER } from "../../shared/approval-feedback";
 import { baseMerges, dismissedApprovals, reapprovalBody, type ReviewTimelineNode } from "../../shared/agent-reapprove";
 import { isPlainBranch, safeGit, withNoHooks } from "./drive";
 import { ghError, hostFlag, type GhRunner } from "./publish";
@@ -337,13 +338,29 @@ export async function checkReapproval(gh: GhRunner, pr: ReapprovalTarget, scenar
   };
 }
 
+/**
+ * The text of an approval the app posts: one line, the hidden marker that tells
+ * the author's dashboard there is nothing in it to act on (`readApproval`), and
+ * the signature — first and last, as a reader sees them.
+ */
+function approvalBody(line: string, signature: string): string {
+  return signedBody(`${line}\n\n${CLEAN_APPROVAL_MARKER}`, signature);
+}
+
 /** Your approval again, on the head it now has: one line and the signature. */
 export function reapproveRequest(repo: string, number: number, head: string, oldHead: string, signature: string): PublishRequest {
   return {
     label: "approval",
     endpoint: `repos/${repo}/pulls/${number}/reviews`,
-    body: { event: "APPROVE", commit_id: head, body: signedBody(reapprovalBody(oldHead), signature) },
+    body: { event: "APPROVE", commit_id: head, body: approvalBody(reapprovalBody(oldHead), signature) },
   };
+}
+
+const EYES_MUTATION = "mutation($id:ID!){ addReaction(input:{subjectId:$id, content:EYES}){ reaction{ content } } }";
+
+/** 👀 on a review: how the PR's author says they read the feedback in an approval (`PullRequest.reviewFeedback`). */
+export function markReadRequest(reviewId: string): PublishRequest {
+  return { label: "👀 on the approval", endpoint: "graphql", body: { query: EYES_MUTATION, variables: { id: reviewId } } };
 }
 
 /**
@@ -354,7 +371,7 @@ export function approveAgainRequest(repo: string, number: number, head: string, 
   return {
     label: "approval",
     endpoint: `repos/${repo}/pulls/${number}/reviews`,
-    body: { event: "APPROVE", commit_id: head, body: signedBody(`Approved again: nothing changed since my approval of \`${head.slice(0, 7)}\`.`, signature) },
+    body: { event: "APPROVE", commit_id: head, body: approvalBody(`Approved again: nothing changed since my approval of \`${head.slice(0, 7)}\`.`, signature) },
   };
 }
 
@@ -366,7 +383,7 @@ export function approveRequest(repo: string, number: number, head: string, signa
   return {
     label: "approval",
     endpoint: `repos/${repo}/pulls/${number}/reviews`,
-    body: { event: "APPROVE", commit_id: head, body: signedBody(`Approved \`${head.slice(0, 7)}\`: nothing blocking is left.`, signature) },
+    body: { event: "APPROVE", commit_id: head, body: approvalBody(`Approved \`${head.slice(0, 7)}\`: nothing blocking is left.`, signature) },
   };
 }
 

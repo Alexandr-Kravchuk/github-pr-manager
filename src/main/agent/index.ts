@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { DEFAULT_AGENT_PROMPTS, languageRule } from "../../shared/agent-defaults";
-import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
+import { askedDriveReasons, driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, disputeSteps, gitBashPath, readPlanLines, shasNotOnPr, summarizePlan, type PublishStep, type PublishSummary } from "../../shared/agent-publish";
 import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
@@ -52,7 +52,7 @@ import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, redirectingKeys, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
 import { claudeSessionRoots, cutShort, preflightFor, runTempEnv, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
-import { approveAgainRequest, approveRequest, checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
+import { approveAgainRequest, approveRequest, checkBaseOnly, checkReapproval, markReadRequest, reapproveRequest, reaskRequest } from "./reapprove";
 import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
 import { diagramComment, wantsDiagrams } from "../../shared/agent-diagrams";
 import { actionArgs, boardNow, clip, diffBoard, diffIdle, diffItems, itemFields, runStats, settingsDiff, type ItemMark } from "./journal";
@@ -164,7 +164,10 @@ export function runKindOf(scenario: AgentScenario): AgentRunKind {
   }
 }
 
-const REASON_TEXT: Record<string, string> = { ci: "failing CI", conflicts: "conflicts", comments: "review comments", self: "self-review" };
+const REASON_TEXT: Record<string, string> = { ci: "failing CI", conflicts: "conflicts", comments: "review comments", feedback: "an approval's feedback", self: "self-review" };
+
+/** Only what reviewers wrote — comments, an approval's feedback — no CI, no conflict: their own words and prompt. */
+const answersReviewers = (reasons: readonly string[] | undefined) => (reasons?.length ?? 0) > 0 && reasons!.every((r) => r === "comments" || r === "feedback");
 
 /** "failing CI and review comments" */
 export function describeReasons(reasons: readonly string[]): string {
@@ -181,8 +184,10 @@ function queuedHeadline(job: Pick<AgentJob, "scenario" | "key" | "reasons">): st
     case "drive":
       return job.reasons?.includes("self")
         ? "Queued: self-review before reviewers"
-        : job.reasons?.length && job.reasons.every((r) => r === "comments")
-          ? "Queued: reviewers' comments to check"
+        : answersReviewers(job.reasons)
+          ? job.reasons!.includes("comments")
+            ? "Queued: reviewers' comments to check"
+            : "Queued: an approval's feedback to check"
           : `Queued: drive — ${describeReasons(job.reasons ?? [])}`;
     default:
       return "Queued: review";
@@ -207,7 +212,7 @@ function workingHeadline(scenario: AgentScenario): string {
 /** A running item's line: what it drives for, or what its scenario does. */
 function runningHeadline(item: Pick<AgentItem, "scenario" | "reasons">): string {
   if (item.reasons?.includes("self")) return "Self-reviewing before reviewers";
-  if (item.reasons?.length && item.reasons.every((r) => r === "comments")) return "Checking reviewers' comments";
+  if (answersReviewers(item.reasons)) return item.reasons!.includes("comments") ? "Checking reviewers' comments" : "Checking the approval's feedback";
   return item.reasons?.length ? `Driving — ${describeReasons(item.reasons)}` : workingHeadline(item.scenario);
 }
 
@@ -280,13 +285,19 @@ function driveFocus(reasons: readonly string[]): string {
       "Then validate its findings against the code and fix only the confirmed ones, one commit each. A finding that is a business, product or design decision is not yours to settle: change nothing for it and ask the user in the prd-result block. "
     );
   }
+  let focus = "";
   if (reasons.includes("comments")) {
-    return (
+    focus +=
       "Reviewers commented on the user's PR. Validate every open comment against the head commit before changing code: fix the confirmed ones (a commit each) and answer in each thread — what you fixed, or why it doesn't hold — through the wrapper. " +
-      "A comment that is a business, product or design decision is not yours to settle: change nothing for it, don't argue in the thread, and ask the user in the prd-result block, as a blocker finding. "
-    );
+      "A comment that is a business, product or design decision is not yours to settle: change nothing for it, don't argue in the thread, and ask the user in the prd-result block, as a blocker finding. ";
   }
-  return "";
+  if (reasons.includes("feedback")) {
+    focus +=
+      "A reviewer approved the PR with feedback in the approval's own text — not in a thread. Read the body of every APPROVED review with `gh api repos/<owner/repo>/pulls/<number>/reviews`, validate each point against the head commit, and fix the confirmed ones, a commit each. " +
+      "There is no thread to answer: say in your final message which points you fixed and why the others don't hold. A point that is a business, product or design decision is not yours to settle: change nothing for it and ask the user in the prd-result block. " +
+      "The user marks the approval read on the Board once they have seen your result. ";
+  }
+  return focus;
 }
 
 function scenarioRules(
@@ -364,7 +375,7 @@ export function promptFor(item: Pick<AgentItem, "scenario" | "reasons">, claude:
   if (item.scenario === "drive") {
     const r = item.reasons ?? [];
     if (r.includes("self")) return claude.agentPrompts.selfReview || DEFAULT_AGENT_PROMPTS.selfReview;
-    if (r.length > 0 && r.every((x) => x === "comments")) return claude.agentPrompts.validateComments || DEFAULT_AGENT_PROMPTS.validateComments;
+    if (answersReviewers(r)) return claude.agentPrompts.validateComments || DEFAULT_AGENT_PROMPTS.validateComments;
     return claude.prompts.drive || DEFAULT_CLAUDE_PROMPTS.drive;
   }
   return promptForScenario(item.scenario, claude);
@@ -721,9 +732,9 @@ export function createAgent(deps: AgentDeps): Agent {
         void closeAs(item, item.headline);
         continue;
       }
-      const found = item.scenario === "drive" ? driveReasons(pr, s) : undefined;
+      const reasons = item.scenario === "drive" ? askedDriveReasons(pr, s) : item.reasons;
       // Cut short while it cloned: your yes to the clone goes on with it, or it would be refused for the missing checkout.
-      const queued = enqueueAsked(pr, s, item.scenario, found && found.length === 0 ? ["self"] : (found ?? item.reasons), undefined, item.clone ? { clone: true } : undefined);
+      const queued = enqueueAsked(pr, s, item.scenario, reasons, undefined, item.clone ? { clone: true } : undefined);
       void closeAs(item, queued.ok ? AGENT_CLOSED.rerun : item.headline);
     }
   }
@@ -1114,6 +1125,53 @@ export function createAgent(deps: AgentDeps): Agent {
       return { ok: true };
     } finally {
       approvingAgain.delete(pr.id);
+    }
+  }
+
+  /** PRs whose approvals are being marked read right now — a second click waits for the first. */
+  const markingRead = new Set<string>();
+
+  /**
+   * 👀 on each approval of your PR whose text carries feedback, on your click
+   * (the Board's "Mark as read"): the sign the dashboard waits for before it
+   * offers Merge (`hasUnaddressedReviewFeedback`). The PR is read again first,
+   * and the reviews come from that read — never from the renderer — so a review
+   * edited since gets its 👀 after the edit, as the rule needs.
+   */
+  async function markFeedbackRead(prId: string): Promise<AgentActionResult> {
+    const pr = snapshotPr(prId);
+    if (!pr) return { ok: false, error: "The PR isn't on the dashboard any more." };
+    if (!pr.roles.includes("author")) return { ok: false, error: "Only the approvals of your own PRs can be marked read." };
+    if (!deps.fetchPr) return { ok: false, error: "The app can't read the PR here." };
+    if (markingRead.has(prId)) return { ok: false, error: "It is being marked read already." };
+    markingRead.add(prId);
+    try {
+      let read: FreshPullRequest | null;
+      try {
+        read = await deps.fetchPr({ id: pr.id, hostLabel: pr.hostLabel, roles: pr.roles });
+      } catch (e) {
+        return { ok: false, error: `Couldn't read the PR: ${(e as Error).message}` };
+      }
+      if (!read) return { ok: false, error: "The PR is gone or out of reach." };
+      if (read.state !== "OPEN") return { ok: false, error: `The PR was ${read.state.toLowerCase()} already.` };
+      const feedback = read.pr.reviewFeedback ?? [];
+      // Read already — from GitHub, or another click: nothing to do.
+      if (feedback.length === 0) return { ok: true };
+      if (feedback.some((f) => !f.reviewId)) return { ok: false, error: "GitHub didn't name the review — add 👀 to it on GitHub." };
+      const done: string[] = [];
+      for (const f of feedback) {
+        const req = markReadRequest(f.reviewId!);
+        const res = await gh(ghApiArgs(req, pr.url), { input: JSON.stringify(req.body) });
+        if (res.code !== 0) {
+          if (done.length > 0) store.log({ at: stamp(), kind: "run", event: "feedback-read", prId: pr.id, prNumber: pr.number, repo: pr.repo, headOid: pr.headOid ?? undefined, detail: `Marked read on your click: ${done.join(", ")} — then GitHub refused ${f.login}'s` });
+          return { ok: false, error: `GitHub refused the 👀 on ${f.login}'s approval: ${ghError(res)}` };
+        }
+        done.push(f.login);
+      }
+      store.log({ at: stamp(), kind: "run", event: "feedback-read", prId: pr.id, prNumber: pr.number, repo: pr.repo, headOid: pr.headOid ?? undefined, detail: `Marked read (👀) on your click: the approval${done.length === 1 ? "" : "s"} of ${done.join(", ")}` });
+      return { ok: true };
+    } finally {
+      markingRead.delete(prId);
     }
   }
 
@@ -2937,6 +2995,7 @@ export function createAgent(deps: AgentDeps): Agent {
       return { ok: true };
     }
     if (action.type === "approveAgain") return approveAgain(action.prId, all);
+    if (action.type === "markFeedbackRead") return markFeedbackRead(action.prId);
     if (action.type === "notNow" || action.type === "bringBack") {
       const pr = snapshot?.pullRequests.find((p) => p.id === action.prId);
       if (action.type === "notNow") {
@@ -2962,8 +3021,7 @@ export function createAgent(deps: AgentDeps): Agent {
         if (run) return { ok: false, error: `Yours — ${run}.` };
         if (pr.isCrossRepository) return { ok: false, error: "Its branch is in a fork — the agent pushes only to branches of the repository itself." };
         // Nothing broken: a self-review of its head, before reviewers see it.
-        const reasons = driveReasons(pr, all.agent);
-        return enqueueAsked(pr, all.agent, "drive", reasons.length > 0 ? reasons : ["self"], action.before, clone);
+        return enqueueAsked(pr, all.agent, "drive", askedDriveReasons(pr, all.agent), action.before, clone);
       }
       if (!pr.roles.includes("reviewer") && !pr.roles.includes("reviewed")) return { ok: false, error: "The agent works on PRs you review or your own." };
       if (pr.viewerHasReviewed) return enqueueAsked(pr, all.agent, "rereview", undefined, action.before, clone);
@@ -3139,8 +3197,7 @@ export function createAgent(deps: AgentDeps): Agent {
         }
         // A drive goes again for what the PR needs now, not what it needed then.
         // Nothing broken any more: run again as a self-review.
-        const found = item.scenario === "drive" ? driveReasons(pr, all.agent) : undefined;
-        const reasons = found && found.length === 0 ? ["self"] : found;
+        const reasons = item.scenario === "drive" ? askedDriveReasons(pr, all.agent) : undefined;
         // The old result goes only once the new run is in the queue: a refusal
         // (the agent is already on the PR) leaves it where it was. Your yes to
         // a clone goes with it — a clone that failed is tried again.

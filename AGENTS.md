@@ -444,7 +444,7 @@ Three layers:
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `jira-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
   `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`,
-  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js`, `weather.js`, `ui-style.js` and `upsource.js` stay free of `node:` builtin references, so the
+  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js`, `approval-feedback.js`, `weather.js`, `ui-style.js` and `upsource.js` stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
@@ -478,6 +478,22 @@ Three layers:
   reads the PR again — open, same head, your approval not already on it — and
   posts an APPROVE of that head with one line and the signature, logged as
   `run/approved`; the run is then marked published, so it is offered once.
+  Your PR approved with feedback in the approval's text
+  (`hasUnaddressedReviewFeedback`, which keeps `canBeMerged` false until you
+  put 👀 on that review) is Your turn, never "With reviewers": "Approved with
+  feedback" lists each approval's points and offers "Mark as read 👀"
+  (`markFeedbackRead`, only the PR id over IPC: main reads the PR again and
+  puts EYES on every review of `reviewFeedback` in that read, logged as
+  `run/feedback-read`), "Let the agent address it" (an asked drive with the
+  `feedback` reason — `askedDriveReasons`; the plan never starts one for it by
+  itself) and the review on GitHub. Which text is feedback is
+  `shared/approval-feedback.ts` (`readApproval`, Node-free): a plain yes, the
+  app's own approvals (they carry `CLEAN_APPROVAL_MARKER`; older ones are
+  matched by their one line) and a creatio-code-review approval that lists no
+  finding as a severity list item are clean; any other prose is feedback. An
+  approved PR of yours that still waits names what holds it
+  (`approvedHold`: a required review, a team, CI, behind base, open threads,
+  or GitHub not calling it mergeable yet) instead of "Waiting for reviewers".
   Every Your-turn card has "Not now" (`notNow`,
   only the PR id goes over IPC): main stores the card's `cardKey` — the PR's
   head, `updatedAt`, CI and conflict state, and its latest run — in
@@ -773,6 +789,7 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   refused tools and stderr's tail; `interrupted` when its process was ended
   under it; `diagrams`; `published`/`pushed`/`merged`/`reapproved`/`reasked`
   and their `not-*` refusals; `approved-again` (no run: your Approve again);
+  `feedback-read` (no run: your Mark as read put 👀 on approvals with feedback);
   `approved` (your Approve on a review that found nothing blocking);
   `offered` for an offer; `notice`), `item` (every
   state change of an item), `board`

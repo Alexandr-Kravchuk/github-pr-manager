@@ -28,8 +28,13 @@ export interface AgentJob {
   reasons?: string[];
 }
 
-/** Why a run on your PR: CI, a conflict, reviewers' comments — or "self", a self-review before reviewers see it. */
-export type DriveReason = "ci" | "conflicts" | "comments" | "self";
+/**
+ * Why a run on your PR: CI, a conflict, reviewers' comments — or "self", a
+ * self-review before reviewers see it. "feedback", the points in an approval's
+ * text, only on your say-so (`askedDriveReasons`): an approval asks nothing the
+ * plan should start a run for by itself.
+ */
+export type DriveReason = "ci" | "conflicts" | "comments" | "feedback" | "self";
 
 export interface PlanContext {
   /** A Claude session of yours is on this PR — the agent stays out of its way. */
@@ -119,6 +124,10 @@ export function mergeBlocker(pr: PullRequest, s: AgentSettings): string | null {
   if (pr.ciState === "failure") return "CI is red";
   if (pr.ciState === "pending") return "CI is still running";
   if (pr.awaitingReview) return "Waiting for reviewers";
+  // Named before the catch-all, so an idle card says what holds the merge.
+  if (pr.hasUnaddressedReviewFeedback) return "An approval's feedback is yet to be marked read";
+  if (pr.requiredReviewPending) return "A required review is missing";
+  if (pr.isBehindBase) return "Behind its base branch";
   if (!pr.canBeMerged) return "Not mergeable yet";
   if (m.requireAllReviewers && pr.reviewers.some((r) => r.reviewState === "pending" || r.reviewState === "changes_requested")) return "Not every requested reviewer approved";
   if (m.requireThreadsResolved && pr.unresolvedThreads > 0) return `${pr.unresolvedThreads} unresolved thread${pr.unresolvedThreads === 1 ? "" : "s"}`;
@@ -167,6 +176,17 @@ export function driveReasons(pr: PullRequest, s: AgentSettings): DriveReason[] {
   }
   if (s.scenarios.driveComments.mode !== "off" && (pr.hasUnaddressedChangeRequest || pr.hasUnaddressedComments)) out.push("comments");
   return out;
+}
+
+/**
+ * What a run you ask for on your PR works on — a button, Run again, a run the
+ * app's closing cut short: what the plan would drive it for now, the feedback
+ * in an approval too, and with nothing of that a self-review.
+ */
+export function askedDriveReasons(pr: PullRequest, s: AgentSettings): DriveReason[] {
+  const out = driveReasons(pr, s);
+  if (pr.hasUnaddressedReviewFeedback) out.push("feedback");
+  return out.length > 0 ? out : ["self"];
 }
 
 /** A first review asked of you that you haven't given — the trigger for `review` and `brief`. */

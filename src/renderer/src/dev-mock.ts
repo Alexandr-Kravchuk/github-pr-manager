@@ -540,6 +540,51 @@ FIXTURES.agent = [
     requestedOfMe: true,
     author: { login: "teammate", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4" },
   }),
+  // Yours, approved — but the approval's text lists points: the dashboard holds
+  // Merge until you mark it read (👀), and the card says so in Your turn.
+  pr({
+    id: "mock-feedback-pr",
+    repo: "acme/dashboard",
+    number: 68,
+    url: "https://github.com/acme/dashboard/pull/68",
+    title: "fix: Board offers Approve on the head's latest review, whatever day it ended",
+    reviewDecision: "APPROVED",
+    hasHumanApproval: true,
+    hasNoReviews: false,
+    awaitingReview: false,
+    hasUnaddressedReviewFeedback: true,
+    reviewers: [{ login: "octo-lead", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4", reviewState: "approved" }],
+    reviewFeedback: [
+      {
+        reviewId: "PRR_mock68",
+        login: "octo-lead",
+        url: "https://github.com/acme/dashboard/pull/68#pullrequestreview-1",
+        submittedAt: new Date(Date.now() - 40 * 60e3).toISOString(),
+        excerpt: "Review mode: full (six lenses). Decision: approve (minor issues). The logic is focused and has shared-level tests. One low-confidence Major and two Minors below.",
+        points: [
+          { severity: "major", text: "low confidence — `src/shared/agent-view.ts:566` - approvableRun picks the latest run by finishedAt, which later actions stamp again." },
+          { severity: "minor", text: "`src/shared/agent-view.ts:566` - a closed run with no plan may still count as approvable." },
+          { severity: "minor", text: "`src/main/agent/index.ts:1078` - the refusal of a superseded run has no main-process test." },
+        ],
+      },
+    ],
+  }),
+  // Yours, approved, nobody left to answer — CI still running: "With reviewers" names CI, not the reviewer.
+  pr({
+    id: "mock-approved-ci-pr",
+    repo: "acme/dashboard",
+    number: 69,
+    url: "https://github.com/acme/dashboard/pull/69",
+    title: "chore: show what holds an approved PR",
+    reviewDecision: "APPROVED",
+    hasHumanApproval: true,
+    hasNoReviews: false,
+    awaitingReview: false,
+    ciState: "pending",
+    pendingChecks: [{ name: "CI / unit", kind: "check", state: "pending", url: null }],
+    checks: [{ name: "CI / unit", kind: "check", state: "pending", url: null }],
+    reviewers: [{ login: "octo-lead", avatarUrl: "https://avatars.githubusercontent.com/u/9919?v=4", reviewState: "approved" }],
+  }),
 ];
 
 const mood = new URLSearchParams(window.location.search).get("buddy") ?? "sleeping";
@@ -1075,6 +1120,14 @@ function mockAgentAction(action: AgentAction): { ok: true } | { ok: false; error
     agentState = { ...agentState, items };
     for (const l of agentListeners) l(agentState);
     Object.assign(pr, { requestedOfMe: false, myReReviewDue: false, viewerApproved: true, viewerHasReviewed: true, viewerReviewedHead: true, viewerReviewedAt: at, roles: pr.roles.filter((r) => r !== "reviewer") });
+    return { ok: true };
+  }
+  // 👀 on the approvals: the feedback reads as read, and GitHub's own state (approved) decides the card.
+  if (action.type === "markFeedbackRead") {
+    const pr = snapshot.pullRequests.find((p) => p.id === action.prId);
+    if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
+    Object.assign(pr, { hasUnaddressedReviewFeedback: false, reviewFeedback: [], canBeMerged: !pr.isDraft && pr.ciState !== "failure" && !pr.hasConflicts });
+    for (const l of agentListeners) l(agentState);
     return { ok: true };
   }
   // The mock keeps a card aside until you bring it back: nothing on its PRs changes by itself.

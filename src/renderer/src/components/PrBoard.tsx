@@ -92,7 +92,7 @@ export function PrBoard({
     const prId = "prId" in action ? action.prId : "runId" in action ? (state.items.find((i) => i.runId === action.runId)?.prId ?? null) : null;
     setNotice(res.ok ? null : { text: res.error, prId });
     // An approval changes GitHub's state: read it again so the card moves now.
-    if (res.ok && (action.type === "approveAgain" || action.type === "approve")) void window.api.refresh().catch(() => {});
+    if (res.ok && (action.type === "approveAgain" || action.type === "approve" || action.type === "markFeedbackRead")) void window.api.refresh().catch(() => {});
     return res.ok;
   };
   const open = (e: BoardEntry) => (e.pr ? onOpen(e.pr) : openUrl(e.url));
