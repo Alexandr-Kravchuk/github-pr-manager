@@ -557,18 +557,22 @@ export function approvableReview(item: AgentItem | null | undefined, pr: PullReq
  * since. The latest review of the head decides: one after it that posted,
  * prepared something, was cut short or that you discarded leaves no approval
  * to rest on. Only one closed before it ever ran (dropped from the queue,
- * superseded while waiting) is no review and doesn't count.
+ * superseded while waiting) is no review and doesn't count. "Later" is when a
+ * run started, not when it ended: a Discard or an Approve stamps `finishedAt`
+ * again, long after the run, and would reorder them.
  */
 export function approvableRun(items: readonly AgentItem[], pr: PullRequest): AgentItem | null {
   if (!pr.headOid) return null;
+  const began = (i: AgentItem) => i.startedAt ?? i.queuedAt;
   let latest: AgentItem | null = null;
   for (const i of items) {
     if ((i.scenario !== "review" && i.scenario !== "rereview") || keyHead(i.key) !== pr.headOid) continue;
     // A discarded draft keeps `startedAt` (`closeAs`): what it found still stands against the earlier review.
     if (isQuiet(i) && !i.startedAt) continue;
-    if (!latest || (i.finishedAt ?? i.queuedAt) > (latest.finishedAt ?? latest.queuedAt)) latest = i;
+    if (!latest || began(i) > began(latest)) latest = i;
   }
-  return latest && approvableReview(latest, pr) ? latest : null;
+  // A run closed as housekeeping is no review to approve on, though it posted nothing.
+  return latest && !isQuiet(latest) && approvableReview(latest, pr) ? latest : null;
 }
 
 /** Your PR is ready to merge as GitHub sees it. */

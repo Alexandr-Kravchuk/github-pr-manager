@@ -479,7 +479,8 @@ Three layers:
   (`approvableRun`): the card otherwise reads today's runs only, so a review
   that ended yesterday on the same head left "Let the agent re-review" and no
   Approve; a later review of the head that posted, was cut short or that you
-  discarded means none (one closed before it ever ran doesn't count).
+  discarded means none (one closed before it ever ran doesn't count). Later
+  is by `startedAt`, since a Discard or an Approve stamps `finishedAt` again.
   Main checks the rule again,
   reads the PR again — open, same head, your approval not already on it — and
   posts an APPROVE of that head with one line and the signature, logged as
