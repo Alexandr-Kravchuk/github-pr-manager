@@ -4,7 +4,7 @@ import { useId, useState, type Dispatch, type ReactNode, type SetStateAction } f
 // the same ones `validateAgent` clamps with in the main process.
 import { AGENT_BOUNDS, AGENT_LANGUAGES, DEFAULT_AGENT_SIGNATURE, DEFAULT_AGENT_TOOLS, type AgentBoundKey } from "../../../shared/agent-defaults";
 import type { SettingsSectionId } from "../../../shared/settings-search";
-import type { AgentLanguage, AgentMode, AgentRunKind, AgentSettings, MergeMethod } from "../../../shared/types";
+import type { AgentEffort, AgentLanguage, AgentMode, AgentRunKind, AgentSettings, MergeMethod } from "../../../shared/types";
 import { cn } from "../format";
 
 /** The Agent tab's sections — their ids, titles and search words live in settings-search.ts. */
@@ -96,6 +96,9 @@ function GeneralSection({ agent, setAgent, inputCls }: SectionProps) {
               <option value="high">High</option>
             </select>
           </Field>
+          <div className="sm:col-span-2">
+            <RunModels agent={agent} setAgent={setAgent} inputCls={inputCls} />
+          </div>
           <div className="sm:col-span-2">
             <Field
               label="Language"
@@ -400,6 +403,79 @@ const RUN_KIND_LABEL: Record<AgentRunKind, string> = {
   drive: "Drive to green",
   afterMerge: "After merging",
 };
+
+const MODEL_OPTIONS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: "fable", label: "Fable" },
+  { id: "opus", label: "Opus" },
+  { id: "sonnet", label: "Sonnet" },
+  { id: "haiku", label: "Haiku" },
+];
+const EFFORT_LABEL: Record<Exclude<AgentEffort, "">, string> = { low: "Low", medium: "Medium", high: "High" };
+
+/**
+ * Model and effort per kind of run, over the agent's own (`runModelFor`): an
+ * empty choice says what it falls back to. A model saved by hand that isn't a
+ * preset stays listed, so opening Settings doesn't change it.
+ */
+function RunModels({ agent, setAgent, inputCls }: SectionProps) {
+  const kinds = Object.keys(RUN_KIND_LABEL) as AgentRunKind[];
+  const modelLabel = (m: string) => MODEL_OPTIONS.find((o) => o.id === m)?.label ?? (m || "Claude Code's default");
+  const effortLabel = (e: AgentEffort) => (e ? EFFORT_LABEL[e] : "Claude Code's default");
+  const patch = (kind: AgentRunKind, value: Partial<AgentSettings["runModels"][AgentRunKind]>) =>
+    setAgent((a) => ({ ...a, runModels: { ...a.runModels, [kind]: { ...a.runModels[kind], ...value } } }));
+  return (
+    <div className="space-y-3">
+      <Field
+        label="Per kind of run"
+        hint="Drive to green also runs the self-review of your PR and answers reviewers' comments. A brief only reads and writes prose, so it starts on Sonnet."
+      >
+        <div className="mt-1 grid grid-cols-[auto_1fr_1fr] items-center gap-x-2 gap-y-1.5 text-sm text-fg-secondary">
+          {kinds.map((k) => {
+            const own = agent.runModels[k];
+            return (
+              <div key={k} className="contents">
+                <span className="pr-2">{RUN_KIND_LABEL[k]}</span>
+                <select
+                  aria-label={`Model for ${RUN_KIND_LABEL[k]}`}
+                  value={own.model}
+                  onChange={(e) => patch(k, { model: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="">As above: {modelLabel(agent.model)}</option>
+                  {MODEL_OPTIONS.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.label}
+                    </option>
+                  ))}
+                  {own.model && !MODEL_OPTIONS.some((o) => o.id === own.model) && <option value={own.model}>{own.model}</option>}
+                </select>
+                <select
+                  aria-label={`Effort for ${RUN_KIND_LABEL[k]}`}
+                  value={own.effort}
+                  onChange={(e) => patch(k, { effort: e.target.value as AgentEffort })}
+                  className={inputCls}
+                >
+                  <option value="">As above: {effortLabel(agent.effort)}</option>
+                  {(Object.keys(EFFORT_LABEL) as Array<keyof typeof EFFORT_LABEL>).map((e) => (
+                    <option key={e} value={e}>
+                      {EFFORT_LABEL[e]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })}
+        </div>
+      </Field>
+      <Check
+        checked={agent.sonnetReviewers}
+        onChange={(sonnetReviewers) => setAgent((a) => ({ ...a, sonnetReviewers }))}
+        title="Reviewers on Sonnet"
+        hint="A review, a re-review and a self-review ask the review skill's workflow to run its reviewer subagents on Sonnet (its reviewerModel argument); otherwise each of them, up to a dozen per review, runs on the session's model. The session that leads the review keeps the model chosen above."
+      />
+    </div>
+  );
+}
 
 function PermissionsSection({ agent, setAgent, inputCls }: SectionProps) {
   const kinds = Object.keys(RUN_KIND_LABEL) as AgentRunKind[];

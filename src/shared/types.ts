@@ -322,6 +322,9 @@ export type AgentLanguage = "en" | "uk" | "pl";
 /** The kinds of session the agent starts — each has its own tool set. */
 export type AgentRunKind = "review" | "brief" | "rereview" | "drive" | "afterMerge";
 
+/** An agent run's effort; "" = Claude Code's default (per kind of run: the agent's own `effort`). */
+export type AgentEffort = "" | "low" | "medium" | "high";
+
 /** A merge method, in `gh pr merge` terms. */
 export type MergeMethod = "merge" | "squash" | "rebase";
 
@@ -336,7 +339,18 @@ export interface AgentSettings {
   /** Model for agent runs; "" = Claude Code's default. */
   model: string;
   /** Effort for agent runs; "" = Claude Code's default. */
-  effort: "" | "low" | "medium" | "high";
+  effort: AgentEffort;
+  /**
+   * Model and effort per kind of run, over `model` / `effort` above: "" takes
+   * those (`runModelFor` in agent-defaults.ts). A brief only reads and writes
+   * prose, so it starts on Sonnet.
+   */
+  runModels: Record<AgentRunKind, { model: string; effort: AgentEffort }>;
+  /**
+   * The review skill's workflow runs its reviewer subagents on Sonnet: a
+   * review, a re-review and a self-review pass it `reviewerModel: "sonnet"`.
+   */
+  sonnetReviewers: boolean;
   /**
    * What the agent writes to you in: its task list, questions, briefs and
    * results. What it posts on GitHub, commits or writes to Jira is not affected.

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { DEFAULT_AGENT_PROMPTS, languageRule } from "../../shared/agent-defaults";
+import { DEFAULT_AGENT_PROMPTS, languageRule, runModelFor, runsReviewWorkflow, SONNET_REVIEWERS_RULE } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, disputeSteps, gitBashPath, readPlanLines, shasNotOnPr, summarizePlan, type PublishStep, type PublishSummary } from "../../shared/agent-publish";
 import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/agent-stream";
@@ -258,7 +258,8 @@ export function agentRules(
   pr: RulesPr | null = null,
   language: AgentLanguage = "en",
 ): string {
-  return `${scenarioRules(scenario, mode, folder, pr)} ${resultRuleFor(scenario)} ${languageRule(language)}`;
+  const sonnet = pr?.sonnetReviewers && runsReviewWorkflow(scenario, pr.reasons) ? ` ${SONNET_REVIEWERS_RULE}` : "";
+  return `${scenarioRules(scenario, mode, folder, pr)}${sonnet} ${resultRuleFor(scenario)} ${languageRule(language)}`;
 }
 
 /** The PR a session's rules name: its place, a drive's base, why it runs — and, in a GitHub stack, its layer (`stackRules`). */
@@ -270,6 +271,8 @@ interface RulesPr {
   stack?: string | null;
   /** A full-context drive: the user's own Claude setup is loaded (`fullContextDrive`). */
   full?: boolean;
+  /** Settings › Agent › "Reviewers on Sonnet": a run of the review workflow passes it `reviewerModel: "sonnet"`. */
+  sonnetReviewers?: boolean;
 }
 
 /** What a run on your own PR is for, on top of the drive rules. */
@@ -1562,6 +1565,9 @@ export function createAgent(deps: AgentDeps): Agent {
     // Your own PR: your whole Claude setup (Settings › Agent › "Your PRs: full
     // context"). Not the after-merge Jira run, which only reads.
     const full = kind === "drive" && s.permissions.fullContextDrive;
+    // This kind's own model and effort, else the agent's (Settings › Agent).
+    const used = runModelFor(s, kind);
+    const sonnetReviewers = s.sonnetReviewers && runsReviewWorkflow(item.scenario, item.reasons);
     writeGuardFile(guardFile, full ? {
       mode: "full",
       ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),
@@ -1592,8 +1598,10 @@ export function createAgent(deps: AgentDeps): Agent {
       data: {
         cwd: dir,
         mode: item.mode,
-        model: s.model,
-        effort: s.effort,
+        // What this run was started with ("" = Claude Code's default), and the review workflow's reviewers when they were moved to Sonnet.
+        model: used.model,
+        effort: used.effort,
+        ...(sonnetReviewers ? { reviewerModel: "sonnet" } : {}),
         isolation: full ? "full" : "restricted",
         ...(item.reasons ? { reasons: item.reasons } : {}),
         // How long it stood in the queue (a resumed run's queue time is its first run's).
@@ -1636,14 +1644,15 @@ export function createAgent(deps: AgentDeps): Agent {
           ...(item.reasons ? { reasons: item.reasons } : {}),
           stack: pr ? stackRules(pr, item.scenario) : null,
           ...(full ? { full: true } : {}),
+          ...(sonnetReviewers ? { sonnetReviewers: true } : {}),
         }, s.language),
         allowedTools,
         // Full context: your own plugins load as in your sessions; the skills this run mounted come on top.
         pluginDirs: full ? mine.pluginDirs : pluginDirs,
         // The payload folder stays named: the session writes its reply files there.
         addDirs: full ? (folder ? [folder.outDir] : []) : addDirs,
-        model: s.model,
-        effort: s.effort,
+        model: used.model,
+        effort: used.effort,
         settingsFile,
         timeoutMs: s.limits.maxMinutes * 60_000,
         env: {

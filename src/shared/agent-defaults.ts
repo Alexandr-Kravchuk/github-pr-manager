@@ -1,4 +1,4 @@
-import type { AgentLanguage, AgentPromptKey, AgentRunKind, AgentSettings } from "./types";
+import type { AgentEffort, AgentLanguage, AgentPromptKey, AgentRunKind, AgentScenario, AgentSettings } from "./types";
 
 // The PR agent's defaults and the bounds of its numbers. Node-free like
 // `notify.ts`, because the renderer value-imports it: the Agent tab of Settings
@@ -147,6 +147,54 @@ export function migrateTools(kind: AgentRunKind, saved: readonly string[], saved
 
 export const DEFAULT_AGENT_SIGNATURE = "🤖 Prepared by the PR agent (Claude Code) on my behalf. Reply here — I read every reply.";
 
+/** The efforts an agent run takes, "" first (Claude Code's default, or per kind of run the agent's own). */
+export const AGENT_EFFORTS: readonly AgentEffort[] = ["", "low", "medium", "high"];
+
+/**
+ * A model as it may go on Claude Code's command line: an alias (`sonnet`) or a
+ * model id (`claude-sonnet-5-5`, `fable[1m]`) — never something that starts
+ * with a dash and reads as a flag.
+ */
+export function isModelName(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,79}$/.test(value);
+}
+
+/**
+ * Per kind of run, "" = the agent's own model and effort. A brief reads the
+ * diff and writes prose — Sonnet does that at a fraction of Opus's cost (on a
+ * subscription, of its limit); the other kinds start as the agent's.
+ */
+export const DEFAULT_AGENT_RUN_MODELS: AgentSettings["runModels"] = {
+  review: { model: "", effort: "" },
+  brief: { model: "sonnet", effort: "" },
+  rereview: { model: "", effort: "" },
+  drive: { model: "", effort: "" },
+  afterMerge: { model: "", effort: "" },
+};
+
+/** The model and effort a run of this kind is started with: its own, else the agent's; "" leaves Claude Code's default. */
+export function runModelFor(s: Pick<AgentSettings, "model" | "effort" | "runModels">, kind: AgentRunKind): { model: string; effort: AgentEffort } {
+  const own = s.runModels?.[kind];
+  return { model: own?.model || s.model, effort: own?.effort || s.effort };
+}
+
+/** The runs whose prompt starts the review skill's workflow: a review, a re-review, the self-review of your own PR. */
+export function runsReviewWorkflow(scenario: AgentScenario, reasons: readonly string[] | undefined): boolean {
+  return scenario === "review" || scenario === "rereview" || (scenario === "drive" && (reasons ?? []).includes("self"));
+}
+
+/**
+ * The session rule behind `sonnetReviewers`. The creatio-code-review workflow
+ * takes `reviewerModel: "sonnet"` and then runs each reviewer as the plugin's
+ * `<reviewer>-sonnet` agent, pinned to Sonnet in its frontmatter — the
+ * Workflow runtime's `agent()` has no model option of its own. Without it the
+ * six reviewers and the context, synthesis and publish stages all inherit the
+ * session's model.
+ */
+export const SONNET_REVIEWERS_RULE =
+  'When you start the review skill\'s workflow, pass reviewerModel: "sonnet" in its args too, with the others: its reviewer subagents then run on Sonnet. ' +
+  "If the workflow takes no such argument, go on without it.";
+
 /**
  * Bounds of every number the agent takes. Out-of-range values are clamped by
  * the validator and flagged by the Settings field, so the two can't disagree.
@@ -176,6 +224,8 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   enabled: false,
   model: "",
   effort: "",
+  runModels: DEFAULT_AGENT_RUN_MODELS,
+  sonnetReviewers: true,
   language: "en",
   worktreeDir: "",
   removeWorktree: true,

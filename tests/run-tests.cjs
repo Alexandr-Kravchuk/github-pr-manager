@@ -9006,6 +9006,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(ids("mermaid"), ["agentDiagrams"]);
       assert.deepStrictEqual(ids("quiet hours"), ["agentLimits"]);
       assert.deepStrictEqual(ids("worktree"), ["agent"]);
+      assert.deepStrictEqual(ids("reviewers on sonnet"), ["agent"]);
+      assert.deepStrictEqual(ids("model per run"), ["agent"]);
       assert.deepStrictEqual(ids("squash"), ["agentScenarios"]);
       assert.deepStrictEqual(ids("tray icon"), ["agentCompanion"]);
       assert.deepStrictEqual(ids("signature"), ["agentPolicy"]);
@@ -11200,6 +11202,35 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await until(() => JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).board === undefined);
       } finally {
         f.agent.stop();
+      }
+    });
+
+    await atest("agent models: a run starts with its kind's model and effort, the agent's filling an empty one, and run/started logs what it used", async () => {
+      const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, agent: { model: "opus", effort: "high", runModels: { review: { model: "haiku", effort: "" } } } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().items.some((i) => i.state === "needsYou"));
+        const args = f.children[0].args;
+        assert.strictEqual(args[args.indexOf("--model") + 1], "haiku", "the review's own model");
+        assert.strictEqual(args[args.indexOf("--effort") + 1], "high", "an empty effort takes the agent's");
+        assert.match(args[args.indexOf("--append-system-prompt") + 1], /reviewerModel: "sonnet"/, "reviewers on Sonnet by default");
+        const started = readLog(f).find((l) => l.kind === "run" && l.event === "started");
+        assert.deepStrictEqual([started.data.model, started.data.effort, started.data.reviewerModel], ["haiku", "high", "sonnet"]);
+      } finally {
+        f.agent.stop();
+      }
+      // Nothing chosen anywhere: no flag, Claude Code's default — and with Reviewers on Sonnet off, nothing said about them.
+      const g = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, agent: { sonnetReviewers: false } });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.agent.getState().items.some((i) => i.state === "needsYou"));
+        const args = g.children[0].args;
+        assert.ok(!args.includes("--model") && !args.includes("--effort"));
+        assert.ok(!args[args.indexOf("--append-system-prompt") + 1].includes("reviewerModel"));
+        const started = readLog(g).find((l) => l.kind === "run" && l.event === "started");
+        assert.deepStrictEqual([started.data.model, started.data.effort, "reviewerModel" in started.data], ["", "", false]);
+      } finally {
+        g.agent.stop();
       }
     });
 
@@ -13685,6 +13716,53 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       });
       assert.strictEqual(cfg.validateAgent({ diagrams: { model: "--dangerously-skip-permissions" } }).diagrams.model, "sonnet", "it goes on a command line");
       assert.strictEqual(cfg.validateAgent({ diagrams: { model: "claude-sonnet-5-5" } }).diagrams.model, "claude-sonnet-5-5");
+    });
+
+    test("agent models: per kind of run — a brief on Sonnet, the rest as the agent's; settings saved before read the defaults", () => {
+      const ad = require(path.join(__dirname, "../dist/main/shared/agent-defaults.js"));
+      const none = { model: "", effort: "" };
+      const d = cfg.validateAgent(undefined);
+      assert.deepStrictEqual(d.runModels, { review: none, brief: { model: "sonnet", effort: "" }, rereview: none, drive: none, afterMerge: none });
+      assert.strictEqual(d.sonnetReviewers, true, "reviewers on Sonnet by default");
+      // Agent settings from before these fields: the defaults, the agent's own model and effort kept as the fallback.
+      const old = cfg.validateAgent({ enabled: true, model: "opus", effort: "high" });
+      assert.deepStrictEqual([old.runModels, old.sonnetReviewers], [d.runModels, true]);
+      assert.deepStrictEqual(ad.runModelFor(old, "brief"), { model: "sonnet", effort: "high" });
+      for (const kind of ["review", "rereview", "drive", "afterMerge"]) assert.deepStrictEqual(ad.runModelFor(old, kind), { model: "opus", effort: "high" }, kind);
+      assert.deepStrictEqual(cfg.validateSettings({ hosts: [], agent: { enabled: true } }).agent.runModels, d.runModels, "a whole settings file too");
+      // Saved per kind: kept; empty means the agent's (not the default Sonnet); a flag or an unknown effort falls back.
+      const s = cfg.validateAgent({
+        model: "opus",
+        runModels: {
+          brief: { model: "", effort: "low" },
+          drive: { model: " claude-sonnet-5-5 ", effort: "medium" },
+          review: { model: "--dangerously-skip-permissions", effort: "max" },
+          rereview: "sonnet",
+        },
+        sonnetReviewers: false,
+      });
+      assert.deepStrictEqual(s.runModels.brief, { model: "", effort: "low" });
+      assert.deepStrictEqual(ad.runModelFor(s, "brief"), { model: "opus", effort: "low" });
+      assert.deepStrictEqual(s.runModels.drive, { model: "claude-sonnet-5-5", effort: "medium" });
+      assert.deepStrictEqual(s.runModels.review, none, "it goes on a command line");
+      assert.deepStrictEqual([s.runModels.rereview, s.runModels.afterMerge], [none, none]);
+      assert.strictEqual(s.sonnetReviewers, false);
+      assert.strictEqual(cfg.validateAgent({ sonnetReviewers: "no" }).sonnetReviewers, true);
+      // Nothing chosen anywhere: Claude Code's default.
+      assert.deepStrictEqual(ad.runModelFor(cfg.validateAgent({ runModels: { brief: { model: "" } } }), "brief"), none);
+      // A save writes them, and a save of this build keeps another build's field beside them.
+      const kept = cfg.keepUnknownSettings({ agent: { runModels: { brief: { model: "opus", future: 1 } } } }, cfg.validateSettings({ hosts: [] }));
+      assert.deepStrictEqual(kept.agent.runModels.brief, { model: "sonnet", effort: "", future: 1 });
+    });
+
+    test("agent models: Reviewers on Sonnet — the review workflow's runs are told to pass reviewerModel, no other run is", () => {
+      const pr = { repo: "a/b", number: 7, sonnetReviewers: true };
+      for (const scenario of ["review", "rereview"]) assert.match(agentCore.agentRules(scenario, "shadow", null, pr), /reviewerModel: "sonnet"/, scenario);
+      assert.match(agentCore.agentRules("drive", "shadow", null, { ...pr, reasons: ["self"] }), /reviewerModel: "sonnet"/, "a self-review runs the same workflow");
+      for (const [scenario, reasons] of [["brief"], ["afterMerge"], ["drive", ["ci"]], ["drive", ["comments"]]]) {
+        assert.ok(!agentCore.agentRules(scenario, "shadow", null, { ...pr, reasons }).includes("reviewerModel"), `${scenario} ${reasons ?? ""}`);
+      }
+      assert.ok(!agentCore.agentRules("review", "shadow", null, { repo: "a/b", number: 7 }).includes("reviewerModel"), "off: nothing said");
     });
 
     test("agent diagrams: the drawing run answers once, with no tools and nothing of yours loaded or saved", () => {
