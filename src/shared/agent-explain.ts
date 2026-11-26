@@ -8,7 +8,22 @@
 import { resultCard, type RunAsk, type RunFinding } from "./agent-result";
 import type { PublishSummary } from "./agent-publish";
 import { currentStep } from "./agent-stream";
-import { approvableReview, isNoCheckoutWhy, isOwnSessionWhy, queueOrder, runFor, stageColumns, stageLine, type BoardStage, type StageCard, type StageContext } from "./agent-view";
+import {
+  answersReviewers,
+  approvableReview,
+  approvedHold,
+  feedbackFrom,
+  isFeedbackOnly,
+  isNoCheckoutWhy,
+  isOwnSessionWhy,
+  queueOrder,
+  runFor,
+  stageColumns,
+  stageLine,
+  type BoardStage,
+  type StageCard,
+  type StageContext,
+} from "./agent-view";
 import type { AgentAction, AgentItem, AgentState, PullRequest } from "./types";
 
 /** Whose move it is: yours, the agent's, someone else's (the author, reviewers), or nobody's. */
@@ -86,7 +101,7 @@ export interface ExplainedBoard {
 const OWNER_ORDER: Record<BoardOwner, number> = { you: 0, agent: 1, others: 2, done: 3 };
 
 /** Within Your turn: a move ready in one click first, then a question or a brief, a failure, then what nothing has started on. */
-const KIND_RANK: Record<string, number> = { merge: 0, reapprove: 0, send: 1, push: 1, reask: 1, draftReview: 2, decide: 2, fix: 3, review: 4, rereview: 4, fixYourself: 4, draft: 9 };
+const KIND_RANK: Record<string, number> = { merge: 0, reapprove: 0, send: 1, push: 1, reask: 1, feedback: 1, draftReview: 2, decide: 2, fix: 3, review: 4, rereview: 4, fixYourself: 4, draft: 9 };
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const lower = (s: string) => `${s.charAt(0).toLowerCase()}${s.slice(1)}`;
@@ -138,6 +153,8 @@ function doing(item: AgentItem): string {
       const r = item.reasons ?? [];
       if (r.includes("self")) return "self-reviewing your PR before reviewers see it";
       if (r.includes("comments") && r.length === 1) return "answering the reviewers' comments";
+      if (isFeedbackOnly(r)) return "checking the feedback in the approval";
+      if (answersReviewers(r)) return "answering the reviewers' comments and the approval's feedback";
       if (r.includes("conflicts")) return "resolving the conflict";
       return "fixing the failing CI";
     }
@@ -227,15 +244,22 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
     if (lane === "mine") {
       const pending = pr?.reviewers.filter((r) => r.reviewState === "pending" || r.reviewState === "changes_requested").map((r) => r.login) ?? [];
       const changes = pr?.reviewers.filter((r) => r.reviewState === "changes_requested").map((r) => r.login) ?? [];
-      waitingOn = pr?.blockedByStack ? "The PR below it" : pending.length > 0 ? pending.join(", ") : "Reviewers";
+      const approved = pr?.reviewers.filter((r) => r.reviewState === "approved").map((r) => r.login) ?? [];
+      // Approved, nobody left to answer, and still not mergeable: what holds it, by name.
+      const hold = pr ? approvedHold(pr) : null;
+      waitingOn = pr?.blockedByStack ? "The PR below it" : pending.length > 0 ? pending.join(", ") : hold ? hold.who : "Reviewers";
       now = pr?.blockedByStack
         ? "It waits for the PR below it in the stack to merge first."
         : changes.length > 0
           ? `${changes.join(", ")} asked for changes.`
           : pending.length > 0
-            ? `Waiting for ${pending.join(", ")} to review.`
-            : "Waiting for reviewers.";
-      next = "Once they approve and CI is green, Merge comes to Your turn. If they comment, the agent answers what it can and asks you the rest.";
+            ? `${approved.length > 0 ? `${approved.join(", ")} approved; waiting` : "Waiting"} for ${pending.join(", ")} to review.`
+            : hold
+              ? `${approved.length > 0 ? `${approved.join(", ")} approved` : "Approved"} — ${hold.text}.`
+              : "Waiting for reviewers.";
+      next = hold
+        ? "Once that clears, Merge comes to Your turn."
+        : "Once they approve and CI is green, Merge comes to Your turn. If they comment, the agent answers what it can and asks you the rest.";
       if (canStart) {
         choices = [
           cloneFirst
@@ -427,7 +451,15 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         }
         const n = item?.drive?.commits.length ?? 0;
         const reasons = item?.reasons ?? [];
-        const what = reasons.includes("self") ? "what its self-review found" : reasons.includes("ci") ? "the failing CI" : reasons.includes("conflicts") ? "the conflict" : "what reviewers asked";
+        const what = reasons.includes("self")
+          ? "what its self-review found"
+          : reasons.includes("ci")
+            ? "the failing CI"
+            : reasons.includes("conflicts")
+              ? "the conflict"
+              : isFeedbackOnly(reasons)
+                ? "what the approval's feedback asked"
+                : "what reviewers asked";
         const replies = plan && !item?.published ? plan.replies.length : 0;
         now = `The agent fixed ${what}: ${plural(n, "commit")}${replies > 0 ? ` and ${plural(replies, "answer")} to reviewers` : ""}, ready.`;
         ask = "Look at the commits, then push them.";
@@ -537,6 +569,38 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
             ? [toSession, open()]
             : [{ ...open(), primary: true }];
         next = canStart ? "Its commits come back to Your turn to push." : `CI runs again on your push.${sessionOnIt ? ` ${SESSION_NEXT}` : ""}`;
+        break;
+      }
+      case "feedback": {
+        // GitHub calls it approved; the text of the approval says more, and the
+        // dashboard holds Merge until you say you read it (👀 on the review).
+        const fb = pr?.reviewFeedback ?? [];
+        const who = pr ? feedbackFrom(pr) : [];
+        const points = fb.flatMap((f) => f.points);
+        now = `${who.length > 0 ? who.join(", ") : "A reviewer"} approved with feedback in the approval's text${points.length > 0 ? ` (${plural(points.length, "point")})` : ""}. Merge waits until you mark it read.`;
+        // The agent checked it on your ask and changed nothing: what it found is the card's answer.
+        if (item?.scenario === "drive" && item.reasons?.includes("feedback") && item.state === "needsYou" && !(item.drive?.commits.length)) {
+          now += ` The agent checked it and changed nothing${summary ? `: ${lower(summary)}` : "."}`;
+        }
+        read.summary = fb.map((f) => (fb.length > 1 ? `${f.login}: ${f.excerpt}` : f.excerpt)).filter(Boolean).join("\n\n") || null;
+        read.findings = points.map((p) => ({ severity: p.severity, text: p.text, where: "" }));
+        ask = canStart ? "Read it, then mark it read — or let the agent check each point first." : "Read it, then mark it read.";
+        const reviewUrl = fb.find((f) => f.url)?.url ?? url;
+        // Always Shadow (main): what the agent makes of a reviewer's text waits for your Push.
+        const letAgent: BoardChoice = cloneFirst
+          ? { label: "Clone and address it", does: `${cloned} — then checks each point against the code and fixes the ones that hold; you see the commits before anything is pushed.`, act: { type: "enqueue", prId, clone: true, feedback: true } }
+          : { label: "Let the agent address it", does: "The agent checks each point against the code and fixes the ones that hold, in a separate checkout; you see the commits before anything is pushed.", act: { type: "enqueue", prId, feedback: true } };
+        choices = [
+          {
+            label: stage.action?.label ?? "Mark as read 👀",
+            primary: true,
+            does: `Puts 👀 on ${fb.length === 1 ? "the approval" : "each approval"} on GitHub under your name — the sign you read it. Nothing else is written, and no code changes.`,
+            act: { type: "markFeedbackRead", prId },
+          },
+          ...(canStart ? [letAgent] : sessionOnIt ? [{ ...toSession, primary: false }] : []),
+          { label: "Read on GitHub", does: "Opens the approval in your browser.", url: reviewUrl },
+        ];
+        next = `Marked read, it goes to Merge once CI and the other reviewers allow it.${canStart ? " If the agent addresses it, its commits come back here to push first." : ""}`;
         break;
       }
       case "draft":

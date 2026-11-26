@@ -528,7 +528,7 @@ Three layers:
   `pr-table.js`, `view-mode.js`, `claude-launch.js`, `claude-sessions.js`,
   `settings-search.js`, `host-status.js`, `jira-status.js`, `stale.js`, `agent-defaults.js`, `agent-publish.js`,
   `agent-stream.js`, `agent-result.js`, `agent-view.js`, `agent-diagrams.js`,
-  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js`, `weather.js`, `ui-style.js` and `upsource.js` stay free of `node:` builtin references, so the
+  `agent-reapprove.js`, `agent-stack.js`, `agent-explain.js`, `approval-feedback.js`, `weather.js`, `ui-style.js` and `upsource.js` stay free of `node:` builtin references, so the
   invariant can't regress unnoticed; extend that list before value-importing
   another `shared` module.
 - **renderer** (`src/renderer`, Vite + React + Tailwind v4) — the dashboard UI.
@@ -569,6 +569,45 @@ Three layers:
   reads the PR again — open, same head, your approval not already on it — and
   posts an APPROVE of that head with one line and the signature, logged as
   `run/approved`; the run is then marked published, so it is offered once.
+  Your PR approved with feedback in the approval's text
+  (`hasUnaddressedReviewFeedback`, which keeps `canBeMerged` false until you
+  put 👀 on that review) is Your turn, never "With reviewers": "Approved with
+  feedback" lists each approval's points and offers "Mark as read 👀"
+  (`markFeedbackRead`, only the PR id over IPC: main reads the PR again and
+  puts EYES only on what the card showed — the snapshot's `reviewFeedback`,
+  by review id and `updatedAt`; a review new or edited since refuses the
+  whole click and the Board reads the PR again, since the 👀 says "I read
+  this"; your 👀 from before a review's last edit is taken off first
+  (`ackBeforeEdit`), as GitHub doesn't give a reaction twice; logged as
+  `run/feedback-read`), "Let the agent address it" (`enqueue` with
+  `feedback: true` — the only ask that adds the `feedback` reason,
+  `askedDriveReasons`; Run again and a recovered run keep it only if they had
+  it, and the plan never starts one by itself; always Shadow, since an
+  approval's text is anyone's words; its own prompt, and rules that name only
+  the approvals the card showed at the ask — kept on the item as
+  `feedbackShown` and read back through `feedbackToRead`, so one that came
+  or changed after the click is not its work; a run that changed nothing is
+  the card's answer, not a failure — `isFeedbackOnly` / `answersReviewers`
+  in `shared/agent-view.ts` say which runs those are) and the review on
+  GitHub. Which text is feedback is `shared/approval-feedback.ts`
+  (`readApproval`, Node-free): a plain yes, the app's own approvals (one of
+  `APP_APPROVAL_LINES` first — the same source main posts them from — and
+  nothing after it longer than a signature) and a creatio-code-review
+  approval with a positive sign that it had no finding — no list item at all,
+  folded or not, and either `mode=lenient` in its meta line (a lenient round
+  raises only Blockers and never approves with one) or its own "approve (no
+  findings)" — are clean. Every other text is feedback, a folded `<details>`
+  included, and every list item of a creatio-code-review approval is a point
+  (`note` when it names no severity), since nothing makes its publisher name
+  one. Hidden comments are stripped in one indexOf pass and a body is read to
+  GitHub's 65,536-character cap. `reviewFeedback` is in the poller's snapshot
+  hash, so the card follows an edit. An approved PR of yours that still waits
+  names what holds it (`approvedHold`) instead of "Waiting for reviewers", in
+  the one order the agent's idle reason (`mergeBlocker`) names it too —
+  `MERGE_HOLDS` in `shared/agent-view.ts`: CI running, a reviewer or team,
+  the feedback (never on that card: such a PR is Your turn), a required
+  review, behind base, open threads (the card only; for the agent the
+  threads setting decides), or GitHub not calling it mergeable yet.
   Every Your-turn card has "Not now" (`notNow`,
   only the PR id goes over IPC): main stores the card's `cardKey` — the PR's
   head, `updatedAt`, CI and conflict state, and its latest run — in
@@ -866,6 +905,7 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   under it; `superseded` when the PR got a new head under it, with the same
   stats and the head it read (`was`); `diagrams`; `published`/`pushed`/`merged`/`reapproved`/`reasked`
   and their `not-*` refusals; `approved-again` (no run: your Approve again);
+  `feedback-read` (no run: your Mark as read put 👀 on approvals with feedback);
   `approved` (your Approve on a review that found nothing blocking);
   `offered` for an offer; `notice`), `item` (every
   state change of an item), `board`

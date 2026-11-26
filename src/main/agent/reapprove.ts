@@ -7,6 +7,7 @@
 // signature, or a review request.
 
 import { signedBody, type PublishRequest } from "../../shared/agent-publish";
+import { APP_APPROVAL_LINES } from "../../shared/approval-feedback";
 import { baseMerges, dismissedApprovals, reapprovalBody, type ReviewTimelineNode } from "../../shared/agent-reapprove";
 import { isPlainBranch, safeGit, withNoHooks } from "./drive";
 import { ghError, hostFlag, type GhRunner } from "./publish";
@@ -337,6 +338,10 @@ export async function checkReapproval(gh: GhRunner, pr: ReapprovalTarget, scenar
   };
 }
 
+// The app's approval lines come from `APP_APPROVAL_LINES` (shared/approval-feedback.ts),
+// the same source the author's dashboard reads them by: one line and the signature
+// is nothing to act on there.
+
 /** Your approval again, on the head it now has: one line and the signature. */
 export function reapproveRequest(repo: string, number: number, head: string, oldHead: string, signature: string): PublishRequest {
   return {
@@ -344,6 +349,24 @@ export function reapproveRequest(repo: string, number: number, head: string, old
     endpoint: `repos/${repo}/pulls/${number}/reviews`,
     body: { event: "APPROVE", commit_id: head, body: signedBody(reapprovalBody(oldHead), signature) },
   };
+}
+
+const EYES_MUTATION = "mutation($id:ID!){ addReaction(input:{subjectId:$id, content:EYES}){ reaction{ content } } }";
+
+/** 👀 on a review: how the PR's author says they read the feedback in an approval (`PullRequest.reviewFeedback`). */
+export function markReadRequest(reviewId: string): PublishRequest {
+  return { label: "👀 on the approval", endpoint: "graphql", body: { query: EYES_MUTATION, variables: { id: reviewId } } };
+}
+
+const EYES_REMOVE = "mutation($id:ID!){ removeReaction(input:{subjectId:$id, content:EYES}){ reaction{ content } } }";
+
+/**
+ * Takes your 👀 off a review — the step before giving it again when the review
+ * was edited after it (`ReviewFeedback.ackBeforeEdit`): a reaction you already
+ * gave is not given twice, and the old one, older than the edit, counts for nothing.
+ */
+export function unmarkReadRequest(reviewId: string): PublishRequest {
+  return { label: "old 👀 off the approval", endpoint: "graphql", body: { query: EYES_REMOVE, variables: { id: reviewId } } };
 }
 
 /**
@@ -354,7 +377,7 @@ export function approveAgainRequest(repo: string, number: number, head: string, 
   return {
     label: "approval",
     endpoint: `repos/${repo}/pulls/${number}/reviews`,
-    body: { event: "APPROVE", commit_id: head, body: signedBody(`Approved again: nothing changed since my approval of \`${head.slice(0, 7)}\`.`, signature) },
+    body: { event: "APPROVE", commit_id: head, body: signedBody(APP_APPROVAL_LINES.approvedAgain(head), signature) },
   };
 }
 
@@ -366,7 +389,7 @@ export function approveRequest(repo: string, number: number, head: string, signa
   return {
     label: "approval",
     endpoint: `repos/${repo}/pulls/${number}/reviews`,
-    body: { event: "APPROVE", commit_id: head, body: signedBody(`Approved \`${head.slice(0, 7)}\`: nothing blocking is left.`, signature) },
+    body: { event: "APPROVE", commit_id: head, body: signedBody(APP_APPROVAL_LINES.approved(head), signature) },
   };
 }
 

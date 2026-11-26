@@ -1,5 +1,5 @@
 import { brokenLayerBelow, STACK_REBASE_HINT } from "./agent-stack";
-import { localClock, OWN_SESSION_WHY } from "./agent-view";
+import { localClock, MERGE_HOLDS, OWN_SESSION_WHY } from "./agent-view";
 import type { AgentRunKind, AgentScenario, AgentSettings, PullRequest } from "./types";
 
 export type { AgentScenario };
@@ -34,8 +34,13 @@ export interface AgentJob {
   threadsOnly?: true;
 }
 
-/** Why a run on your PR: CI, a conflict, reviewers' comments — or "self", a self-review before reviewers see it. */
-export type DriveReason = "ci" | "conflicts" | "comments" | "self";
+/**
+ * Why a run on your PR: CI, a conflict, reviewers' comments — or "self", a
+ * self-review before reviewers see it. "feedback", the points in an approval's
+ * text, only on your say-so (`askedDriveReasons`): an approval asks nothing the
+ * plan should start a run for by itself.
+ */
+export type DriveReason = "ci" | "conflicts" | "comments" | "feedback" | "self";
 
 export interface PlanContext {
   /** A Claude session of yours is on this PR — the agent stays out of its way. */
@@ -207,9 +212,9 @@ export function mergeBlocker(pr: PullRequest, s: AgentSettings): string | null {
   if (pr.blockedByStack) return "Waits for the PR below it in the stack";
   if (pr.hasConflicts) return "Has conflicts";
   if (pr.ciState === "failure") return "CI is red";
-  if (pr.ciState === "pending") return "CI is still running";
-  if (pr.awaitingReview) return "Waiting for reviewers";
-  if (!pr.canBeMerged) return "Not mergeable yet";
+  // The rest in the one order the Board's "With reviewers" card names them too (`MERGE_HOLDS`).
+  const hold = MERGE_HOLDS.find((h) => h.blocker && h.holds(pr));
+  if (hold?.blocker) return hold.blocker(pr);
   if (m.requireAllReviewers && pr.reviewers.some((r) => r.reviewState === "pending" || r.reviewState === "changes_requested")) return "Not every requested reviewer approved";
   if (m.requireThreadsResolved && pr.unresolvedThreads > 0) return `${pr.unresolvedThreads} unresolved thread${pr.unresolvedThreads === 1 ? "" : "s"}`;
   if (m.requireChecksGreen && pr.checks.length > 0 && pr.ciState !== "success") return "Not every check is green";
@@ -258,6 +263,20 @@ export function driveReasons(pr: PullRequest, s: AgentSettings): DriveReason[] {
   }
   if (s.scenarios.driveComments.mode !== "off" && (pr.hasUnaddressedChangeRequest || pr.hasUnaddressedComments)) out.push("comments");
   return out;
+}
+
+/**
+ * What a run you ask for on your PR works on — a button, Run again, a run the
+ * app's closing cut short: what the plan would drive it for now, and with
+ * nothing of that a self-review. An approval's feedback only with
+ * `withFeedback` — the feedback card's own button, or the Run again / recovery
+ * of a run that was asked for it — and only while it is still unread: no other
+ * run takes an approval's text as work.
+ */
+export function askedDriveReasons(pr: PullRequest, s: AgentSettings, withFeedback = false): DriveReason[] {
+  const out = driveReasons(pr, s);
+  if (withFeedback && pr.hasUnaddressedReviewFeedback) out.push("feedback");
+  return out.length > 0 ? out : ["self"];
 }
 
 /** A first review asked of you that you haven't given — the trigger for `review` and `brief`. */

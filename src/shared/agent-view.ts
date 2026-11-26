@@ -355,6 +355,7 @@ export type StageActionKind =
   | "review"
   | "rereview"
   | "fixYourself"
+  | "feedback"
   | "draft"
   | "updateJira";
 
@@ -519,6 +520,9 @@ export function resultAction(item: AgentItem, lane: BoardLane, headOid: string |
       }
       // Nothing to push, yet answers for the reviewers: they go out by themselves.
       if (n === 0 && replies > 0) return { kind: "send", label: replies === 1 ? "Send reply" : `Send ${replies} replies` };
+      // An approval's feedback checked and nothing in it held: an answer, not a failure — the
+      // feedback card (GitHub's say-so) comes back with the run's words, and Mark as read on it.
+      if (n === 0 && isFeedbackOnly(item.reasons)) return null;
       // It ran to the end and has nothing to push: it couldn't do it.
       return item.drive ? fix() : null;
     }
@@ -629,6 +633,90 @@ function needsWork(pr: PullRequest): boolean {
   return pr.ciState === "failure" || pr.hasConflicts || pr.hasUnaddressedChangeRequest || pr.hasUnaddressedComments;
 }
 
+/** Your PR's "Approved with feedback" card: the 👀 is its one-click move. */
+const FEEDBACK_ACTION: StageAction = { kind: "feedback", label: "Mark as read 👀" };
+
+/** When the newest approval with feedback came: the card's age. */
+function feedbackSince(pr: PullRequest): string {
+  const at = (pr.reviewFeedback ?? []).map((f) => f.submittedAt).filter((t): t is string => Boolean(t));
+  return at.length > 0 ? at.sort()[at.length - 1] : pr.updatedAt;
+}
+
+/** Who approved your PR with feedback still to read: "anna, oleg". */
+export function feedbackFrom(pr: Pick<PullRequest, "reviewFeedback">): string[] {
+  return [...new Set((pr.reviewFeedback ?? []).map((f) => f.login))];
+}
+
+/** One thing that holds a PR of yours back from Merge, in each place's words. */
+export interface MergeHold {
+  key: "ci" | "reviewers" | "feedback" | "required" | "behind" | "threads" | "unmergeable";
+  holds: (pr: PullRequest) => boolean;
+  /** The agent's reason for leaving the PR idle (`mergeBlocker`). Null: a setting decides it there (open threads). */
+  blocker: ((pr: PullRequest) => string) | null;
+  /** The Board's "With reviewers" card (`approvedHold`): who it waits on, the sentence's end, a list row's words. Null: never shown there. */
+  card: ((pr: PullRequest) => { who: string; text: string; short: string }) | null;
+}
+
+const threadsOpen = (pr: PullRequest) => `${pr.unresolvedThreads} review thread${pr.unresolvedThreads === 1 ? "" : "s"}`;
+
+/**
+ * What holds your PR back from Merge once it is not a draft, not waiting on a
+ * stack, not conflicting and not red — in the one order both places say it:
+ * the agent's idle reason (`mergeBlocker`) and the Board's "With reviewers"
+ * card (`approvedHold`), so two cards never give two reasons for one PR.
+ */
+export const MERGE_HOLDS: readonly MergeHold[] = [
+  { key: "ci", holds: (pr) => pr.ciState === "pending", blocker: () => "CI is still running", card: () => ({ who: "CI", text: "CI is still running", short: "CI running" }) },
+  {
+    key: "reviewers",
+    holds: (pr) => pr.awaitingReview,
+    blocker: () => "Waiting for reviewers",
+    // On the card only once no reviewer of yours is left to answer (`approvedHold`): what is pending then is a team.
+    card: () => ({ who: "A team", text: "a review requested of a team is still pending", short: "a team review pending" }),
+  },
+  // Never on that card: such a PR is Your turn ("Approved with feedback").
+  { key: "feedback", holds: (pr) => pr.hasUnaddressedReviewFeedback, blocker: () => "An approval's feedback is yet to be marked read", card: null },
+  {
+    key: "required",
+    holds: (pr) => Boolean(pr.requiredReviewPending),
+    blocker: () => "A required review is missing",
+    card: () => ({ who: "Branch rules", text: "branch protection still requires another review (a code owner's, for example)", short: "a required review missing" }),
+  },
+  {
+    key: "behind",
+    holds: (pr) => pr.isBehindBase,
+    blocker: () => "Behind its base branch",
+    card: () => ({ who: "Base branch", text: "GitHub wants the branch updated with its base first (Update branch on GitHub)", short: "behind its base" }),
+  },
+  {
+    key: "threads",
+    holds: (pr) => pr.unresolvedThreads > 0,
+    // For the agent, Settings › Agent › Merge › "threads resolved" decides (`mergeBlocker`).
+    blocker: null,
+    card: (pr) => ({ who: "Open threads", text: `${threadsOpen(pr)} ${pr.unresolvedThreads === 1 ? "is" : "are"} still open`, short: `${threadsOpen(pr)} open` }),
+  },
+  {
+    key: "unmergeable",
+    holds: (pr) => !pr.canBeMerged,
+    blocker: () => "Not mergeable yet",
+    card: () => ({ who: "GitHub", text: "GitHub doesn't call it mergeable yet; it may still be checking after the last push", short: "not mergeable yet" }),
+  },
+];
+
+/**
+ * What holds your approved PR back from Merge when no reviewer is left to
+ * answer — the Board's "With reviewers" card says it, not "Waiting for
+ * reviewers". `who`: the card's "waiting on"; `text`: the sentence's end;
+ * `short`: a list row's words. Null: nothing named (no approval, or a reviewer
+ * still to answer, which the card names itself).
+ */
+export function approvedHold(pr: PullRequest): { who: string; text: string; short: string } | null {
+  if (!pr.hasHumanApproval || pr.blockedByStack) return null;
+  if (pr.reviewers.some((r) => r.reviewState === "pending" || r.reviewState === "changes_requested")) return null;
+  const hold = MERGE_HOLDS.find((h) => h.card && h.holds(pr));
+  return hold?.card ? hold.card(pr) : null;
+}
+
 /**
  * The column a PR's card sits in, and the one thing it asks of you. `pr` is
  * null for a PR that has left the dashboard (merged, closed) — then only the
@@ -690,10 +778,15 @@ export function boardStage(pr: PullRequest | null, items: readonly AgentItem[], 
       // The orchestrator waits for someone to merge; everything else is its run's work.
       if (githubReady(pr)) return card("you", pr.updatedAt, { kind: "merge", label: "Merge on GitHub" });
       if (pr.isDraft || needsWork(pr)) return card("agent", pr.updatedAt);
+      // Marking an approval read is yours, whoever drives the code.
+      if (pr.hasUnaddressedReviewFeedback) return card("you", feedbackSince(pr), FEEDBACK_ACTION);
       return card("waiting", waitedSince);
     }
     if (pr.isDraft) return card("you", pr.createdAt, { kind: "draft", label: "Open on GitHub" });
     if (needsWork(pr)) return card("you", pr.updatedAt, { kind: "fixYourself", label: "Open on GitHub" });
+    // Approved, with feedback in the approval's text: the dashboard holds Merge
+    // until you mark it read — yours, never "With reviewers".
+    if (pr.hasUnaddressedReviewFeedback) return card("you", feedbackSince(pr), FEEDBACK_ACTION);
     if (githubReady(pr)) return card("you", pr.updatedAt, { kind: "merge", label: "Merge on GitHub" });
     return card("waiting", waitedSince);
   }
@@ -749,6 +842,7 @@ const YOU_ORDER: Record<StageActionKind, number> = {
   review: 4,
   rereview: 4,
   fixYourself: 4,
+  feedback: 1,
   updateJira: 5,
   draft: 9,
 };
@@ -806,8 +900,24 @@ export function stageColumns(shown: readonly PullRequest[], all: readonly PullRe
 }
 
 const EVENT_WORD: Record<string, string> = { APPROVE: "Approve", REQUEST_CHANGES: "Request changes", COMMENT: "Comment" };
-const REASON_WORK: Record<string, string> = { self: "Self-review before reviewers look", ci: "Fixing CI", conflicts: "Resolving the conflict", comments: "Answering reviewers' comments" };
-const REASON_NAME: Record<string, string> = { self: "Self-review", ci: "CI", conflicts: "Conflict", comments: "Reviewers' comments" };
+/** A drive on the feedback in your PR's approvals and nothing else. */
+export function isFeedbackOnly(reasons: readonly string[] | undefined): boolean {
+  return !!reasons && reasons.length > 0 && reasons.every((r) => r === "feedback");
+}
+
+/** A drive on what reviewers wrote — thread comments, an approval's feedback — and nothing else: no CI, no conflict. */
+export function answersReviewers(reasons: readonly string[] | undefined): boolean {
+  return !!reasons && reasons.length > 0 && reasons.every((r) => r === "comments" || r === "feedback");
+}
+
+const REASON_WORK: Record<string, string> = {
+  self: "Self-review before reviewers look",
+  ci: "Fixing CI",
+  conflicts: "Resolving the conflict",
+  comments: "Answering reviewers' comments",
+  feedback: "Checking the approval's feedback",
+};
+const REASON_NAME: Record<string, string> = { self: "Self-review", ci: "CI", conflicts: "Conflict", comments: "Reviewers' comments", feedback: "Approval feedback" };
 
 function count(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
@@ -909,7 +1019,13 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
       // A stack mends a conflict by a rebase of its layers, never by a merge of the base in.
       if (pr.hasConflicts) parts.push(pr.stack ? "Conflicts in the stack — it needs Rebase stack" : "Conflicts with the base branch");
       if (pr.hasUnaddressedChangeRequest || pr.hasUnaddressedComments) parts.push("Reviewers wait for your answer");
+      if (pr.hasUnaddressedReviewFeedback) parts.push("Approval feedback to read");
       return parts.join(" · ");
+    }
+    if (kind === "feedback") {
+      const points = (pr.reviewFeedback ?? []).reduce((n, f) => n + f.points.length, 0);
+      const who = feedbackFrom(pr);
+      return `Approved with feedback${who.length > 0 ? ` by ${who.join(", ")}` : ""}${points > 0 ? ` · ${count(points, "point")}` : ""} — mark it read to merge`;
     }
   }
   if (stage.column === "waiting" && pr) {
@@ -918,6 +1034,9 @@ export function stageLine(stage: BoardStage, pr: PullRequest | null): string {
       const parts = pr.reviewers
         .filter((r) => r.reviewState !== "commented")
         .map((r) => (r.reviewState === "approved" ? `${r.login} ✓` : r.reviewState === "changes_requested" ? `${r.login} asked for changes` : r.reviewState === "dismissed" ? `${r.login}'s review dismissed` : `${r.login} pending`));
+      // Approved and still here: say what holds it, or it reads as waiting on the very reviewer who approved.
+      const hold = approvedHold(pr);
+      if (hold) parts.push(hold.short);
       return parts.length > 0 ? parts.join(" · ") : "Waiting for reviewers";
     }
     const verdict = pr.viewerHasReviewed ? (pr.viewerApproved ? "You approved" : "You asked for changes") : pr.roles.includes("reviewed") ? "You commented" : "Waiting for the author";
@@ -956,6 +1075,9 @@ export function agentNoticeTitle(kind: "needsYou" | "failed" | "finished", item:
     return `The agent finished ${pr}`;
   }
   const action = resultAction(item, laneOfScenario(item.scenario), headOid);
+  if (!action && item.scenario === "drive" && isFeedbackOnly(item.reasons)) {
+    return `Approval feedback checked, nothing to change: ${pr}`;
+  }
   switch (action?.kind) {
     case "send":
       if (item.scenario === "drive") return `${action.label === "Send reply" ? "Reply" : "Replies"} to reviewers ready to send: ${pr}`;

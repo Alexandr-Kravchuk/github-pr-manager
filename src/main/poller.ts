@@ -224,6 +224,10 @@ export function hashSnapshot(s: DashboardResponse, { trackComments = true } = {}
     // unanswered comment still pushes a snapshot and fires the notification.
     p.hasUnaddressedComments,
     p.hasUnaddressedReviewFeedback,
+    // The Board's "Approved with feedback" card lists these, and "Mark as read"
+    // marks only what that card showed: a second approval, or an edit, may move
+    // nothing else on the PR — a reaction or a review edit doesn't bump updatedAt.
+    (p.reviewFeedback ?? []).map((f) => `${f.reviewId}@${f.updatedAt}:${f.ackBeforeEdit ? 1 : 0}`).join(","),
     p.isBehindBase,
     // Flips on the clock alone — a PR nobody touches crosses the threshold with
     // no other field moving, and its badge and close action must still appear.
