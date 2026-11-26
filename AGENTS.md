@@ -1163,16 +1163,22 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   workflow. `WORKFLOW_WAIT_RULE` (in `sessionToolRules`) says to end the turn
   once the workflow is launched, with no review of its own beside it, and
   that nothing the wrapper records shows on GitHub before the session ends.
-  The guard backs it: in a read-only run, the same call by the same agent —
-  the file tools and `gh`/`twg` reads, keyed by `repeatKey` with the hook
-  input's `agent_id` (absent for the session itself; a workflow's agents are
-  subagents with ids of their own, so its reviewers each reading the diff is
-  no repeat) — is refused past `REPEAT_LIMIT` (3), with `repeatRefusal`
-  telling it to end its turn. The count is `repeats.json` beside the guard
-  file (`countRepeat` in `main/agent/hook.ts`), started over with each run;
-  best effort, it only ever refuses. Not in a drive, where the same
-  `git diff` rightly answers anew after an edit, and never the wrapper's
-  writes or the preflight's node.
+  The guard backs it: in a read-only run, the same call by the same agent
+  more than `REPEAT_LIMIT` (3) times in a row — the file tools and
+  `gh`/`twg` reads, keyed by `repeatKey` with the hook input's `agent_id`
+  (absent for the session itself; a workflow's agents are subagents with ids
+  of their own, so its reviewers each reading the diff is no repeat) — is
+  refused, with `repeatRefusal` telling it to end its turn. Only in a row:
+  any other call in between starts the count over, so a re-read after other
+  work or a retry after a failed `gh` is never held against it, and that
+  day's loops were still caught (104 of 118 and 78 of 94 repeated looks).
+  The count is one small file per agent in the run's `repeats` folder beside
+  the guard file (`countInARow` in `main/agent/hook.ts`: the last call's hash
+  and its run length, written through a renamed temporary file; missing or
+  broken reads as a first call), cleared when the run starts; best effort, it
+  only ever refuses. Not in a drive, where the same `git diff` rightly
+  answers anew after an edit, and never the wrapper's writes or the
+  preflight's node.
 - **The computer's sleep doesn't end a run.** On 2026-11-26 six runs started
   in a short wake from Modern Standby, froze with the system, and were all
   "Stopped after 120 min" at the next wake — two hours of sleep and a few
@@ -1182,7 +1188,12 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   run works on mains power, `main.ts` holds a `powerSaveBlocker`
   (`prevent-app-suspension`; Settings › Agent › "Keep the computer awake
   while a run works", `keepAwake`, on by default), released once no run
-  works or on battery; settings are read only when that starts. Modern
+  works, on battery or with the setting off. The decision is
+  `createKeepAwake` (`main/keep-awake.ts`, unit-tested with its calls
+  injected): the setting is read only while a run works on mains power, at
+  most once per `KEEP_AWAKE_SETTING_TTL_MS` (30 s) — the agent pushes its
+  state every quarter second — so turning it off mid-run takes hold within
+  that, and one that can't be read is off. Modern
   Standby may still sleep on a lid or power button — the awake deadline is
   what keeps such a run. `main.log` records each system suspend (with the
   runs working) and resume.

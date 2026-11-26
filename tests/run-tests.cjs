@@ -10761,6 +10761,25 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(spawnSync(process.execPath, [hookJs, "review", url], { input: "not json", encoding: "utf8" }).status, 2);
     });
 
+    test("agent guard hook: the repeat count — in a row, per agent, one file each; a missing, broken or unwritable file never throws", () => {
+      const dir = path.join(nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-repeat-")), "repeats");
+      assert.deepStrictEqual([1, 2, 3].map(() => hookMod.countInARow(dir, "main", "k1")), [1, 2, 3]);
+      assert.strictEqual(hookMod.countInARow(dir, "agent-a", "k1"), 1, "another agent's own count");
+      assert.strictEqual(hookMod.countInARow(dir, "main", "k2"), 1, "another call starts the count over");
+      assert.strictEqual(hookMod.countInARow(dir, "main", "k1"), 1, "…so a look after other work is a first look again");
+      // Broken files of every kind read as no call yet.
+      const files = nfsA.readdirSync(dir).map((f) => path.join(dir, f));
+      for (const junk of ["not json", "[1,2]", "null", JSON.stringify({ id: "x", n: -4 })]) {
+        for (const f of files) nfsA.writeFileSync(f, junk);
+        assert.strictEqual(hookMod.countInARow(dir, "main", "k1"), 1, junk);
+      }
+      assert.deepStrictEqual(nfsA.readdirSync(dir).filter((f) => f.endsWith(".tmp")), [], "no temporary file is left behind");
+      // A folder that can't be made (a file in its place): it still answers.
+      const blocked = path.join(nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-repeat-")), "repeats");
+      nfsA.writeFileSync(blocked, "a file");
+      assert.strictEqual(hookMod.countInARow(blocked, "main", "k1"), 1);
+    });
+
     test("agent guard hook: the same read made again and again — a session waiting by looking — is stopped after a few, per agent", () => {
       const url = "https://github.com/acme/widgets/pull/1";
       const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-repeat-"));
@@ -10771,12 +10790,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       for (let i = 1; i <= guard.REPEAT_LIMIT; i++) assert.strictEqual(run(poll).status, 0, `look ${i}`);
       const stopped = run(poll);
       assert.strictEqual(stopped.status, 2);
-      assert.match(stopped.stderr, /made this very call 3 times already in this run.*end your turn now — its result comes back to you as a message/);
+      assert.match(stopped.stderr, /made this very call 3 times in a row already.*end your turn now — its result comes back to you as a message/);
       // Another agent of the workflow reads the same thing for the first time: not a repeat.
       assert.strictEqual(run({ ...poll, agent_id: "a35aed0b6b0748234" }).status, 0);
       // A description of its own doesn't make it another call; another command is.
       assert.strictEqual(run({ ...poll, tool_input: { ...poll.tool_input, description: "Waiting" } }).status, 2);
       assert.strictEqual(run({ tool_name: "Bash", tool_input: { command: "gh pr view 1" } }).status, 0);
+      // Only in a row: after another call the same look is a first one again.
+      assert.strictEqual(run(poll).status, 0);
       // A drive's `git diff` answers anew after each edit: never counted.
       assert.strictEqual(guard.repeatKey("drive", "Bash", { command: "gh pr view 1" }, null), null);
       assert.strictEqual(guard.repeatKey("review", "Bash", { command: "/c/T/bin/pr-review-publish.sh review a/b 1 C:/T/out/r.json" }, null), null, "the wrapper's writes are steps");
@@ -11221,6 +11242,56 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const awake = runner.awakeDeadline(30, () => (done = true), { stepMs: 5 });
       for (let i = 0; i < 100 && !done; i++) await new Promise((r) => setTimeout(r, 10));
       assert.ok(done && awake.awakeMs() >= 30);
+    });
+
+    test("keep awake: one blocker while a run works on mains power with the setting on — released when any of the three stops; the setting read sparingly", () => {
+      const ka = require(path.join(__dirname, "../dist/main/main/keep-awake.js"));
+      let t = 0;
+      let battery = false;
+      let on = true;
+      let reads = 0;
+      const started = [];
+      const stopped = [];
+      const k = ka.createKeepAwake({
+        start: () => (started.push(started.length + 1), started.length),
+        stop: (id) => stopped.push(id),
+        onBattery: () => battery,
+        setting: () => (reads++, on),
+        now: () => t,
+      });
+      k.update(false);
+      assert.deepStrictEqual([k.held(), reads], [false, 0], "no run: nothing held, nothing read");
+      k.update(true);
+      k.update(true);
+      assert.deepStrictEqual([k.held(), started, reads], [true, [1], 1], "one blocker, the setting read once");
+      k.update(false);
+      assert.deepStrictEqual([k.held(), stopped], [false, [1]], "released once no run works");
+      // On battery: none, and a blocker held when unplugged goes.
+      k.update(true);
+      battery = true;
+      k.update(true);
+      assert.deepStrictEqual([k.held(), stopped], [false, [1, 2]]);
+      k.update(true);
+      assert.strictEqual(started.length, 2, "none on battery");
+      battery = false;
+      // The setting turned off mid-run: read again once its read is old enough, then let go.
+      k.update(true);
+      assert.strictEqual(k.held(), true);
+      on = false;
+      t += ka.KEEP_AWAKE_SETTING_TTL_MS - 1;
+      k.update(true);
+      assert.strictEqual(k.held(), true, "a fresh enough read is reused");
+      t += 1;
+      k.update(true);
+      assert.deepStrictEqual([k.held(), stopped.length], [false, 3]);
+      // Every push tick of a long run with the setting off: one read per TTL, not one per tick.
+      const before = reads;
+      for (let i = 0; i < 100; i++) k.update(true);
+      assert.strictEqual(reads, before);
+      // A setting that can't be read is off.
+      const broken = ka.createKeepAwake({ start: () => 1, stop: () => {}, onBattery: () => false, setting: () => { throw new Error("EBUSY"); } });
+      broken.update(true);
+      assert.strictEqual(broken.held(), false);
     });
 
     test("agent worktrees: the PR's remote is found by URL; the head is fetched by pull ref and checked out detached", () => {
@@ -12200,6 +12271,87 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual([only(f).length, only(f)[0].limitStops], [1, undefined], "no second run beside it; a run that ended otherwise clears the count");
       } finally {
         f.agent.stop();
+      }
+    });
+
+    await atest("agent: a limit stop goes on in its session only so many times in a row, never for a drive or with its folder gone — and anything else ends the count", async () => {
+      let t = Date.parse("2026-11-25T15:50:00Z");
+      // Claude Code's own reading: refused until an hour on, whenever it is asked.
+      const limited = (c) => {
+        nfsA.mkdirSync(c.cwd, { recursive: true });
+        emit(c, { type: "system", subtype: "init", session_id: "s" });
+        emit(c, { type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: Math.floor((t + 3_600_000) / 1000), rateLimitType: "five_hour" } });
+        emit(c, { type: "result", subtype: "success", is_error: true, result: "You've hit your session limit" });
+        setImmediate(() => c.emit("exit", 1));
+      };
+      const failing = (c) => {
+        nfsA.mkdirSync(c.cwd, { recursive: true });
+        emit(c, { type: "system", subtype: "init", session_id: "s" });
+        emit(c, { type: "result", subtype: "error_during_execution", is_error: true, result: "boom" });
+        setImmediate(() => c.emit("exit", 1));
+      };
+      /** One limit stop, then on past the reset to its resumed run. */
+      const stopThenGoOn = async (f, n) => {
+        await until(() => only(f)[0]?.limitStops === n && only(f)[0].interrupted === true);
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(only(f)[0].state, "queued");
+        t += 2 * 3_600_000;
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === n + 1);
+        assert.ok(f.children[n].args.includes("--resume"), `resume ${n}`);
+      };
+      // LIMIT_RESUMES (3) in a row go on; the fourth stop fails as before, its count cleared.
+      const f = agentFixture({ now: () => new Date(t), script: limited });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        for (const n of [1, 2, 3]) await stopThenGoOn(f, n);
+        await until(() => only(f)[0].state === "error");
+        const [last] = only(f);
+        assert.deepStrictEqual([last.headline, last.interrupted, last.limitStops], ["Stopped by Claude's session limit", undefined, undefined]);
+        assert.ok(last.retryAt, "tried anew at the reset, as before");
+        assert.strictEqual(f.children.length, 4, "no loop on the limit");
+      } finally {
+        f.agent.stop();
+      }
+      // A run that ends any other way after a limit stop: the count goes.
+      let runs = 0;
+      const g = agentFixture({ now: () => new Date(t), script: (c) => (++runs === 1 ? limited(c) : failing(c)) });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await stopThenGoOn(g, 1);
+        await until(() => only(g)[0].state === "error");
+        assert.deepStrictEqual([only(g)[0].headline, only(g)[0].limitStops], ["The run failed", undefined]);
+      } finally {
+        g.agent.stop();
+      }
+      // A drive starts over rather than going on: its push is checked against what the app read before the session.
+      const d = agentFixture({ pr: { ...reviewPr({ role: "author" }), ciState: "failure" }, now: () => new Date(t), script: limited });
+      try {
+        d.agent.onSnapshot(d.snapshot);
+        await until(() => only(d)[0]?.state === "error");
+        const [drive] = only(d);
+        assert.deepStrictEqual([drive.scenario, drive.interrupted, drive.limitStops], ["drive", undefined, undefined]);
+        assert.match(drive.headline, /^Stopped by Claude's session limit/, "(a drive's kept worktree is said after it)");
+        assert.ok(drive.retryAt);
+      } finally {
+        d.agent.stop();
+      }
+      // Its folder gone (here: never made): nothing to go on in — it fails as before.
+      const h = agentFixture({
+        now: () => new Date(t),
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, { type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: Math.floor((t + 3_600_000) / 1000), rateLimitType: "five_hour" } });
+          emit(c, { type: "result", subtype: "success", is_error: true, result: "You've hit your session limit" });
+          setImmediate(() => c.emit("exit", 1));
+        },
+      });
+      try {
+        h.agent.onSnapshot(h.snapshot);
+        await until(() => only(h)[0]?.state === "error");
+        assert.deepStrictEqual([only(h)[0].headline, only(h)[0].interrupted, only(h)[0].limitStops], ["Stopped by Claude's session limit", undefined, undefined]);
+      } finally {
+        h.agent.stop();
       }
     });
 

@@ -1978,8 +1978,8 @@ export function createAgent(deps: AgentDeps): Agent {
     // The wrapper's own rule, and Write — which the guard holds to the payload folder.
     // The preflight's node, which the guard holds to the helper's two calls.
     const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(preflight ? ["Bash(node *)"] : [])])];
-    // The guard's count of repeated reads (`countRepeat`) starts over with each run of the item, a resumed one too.
-    fs.rmSync(path.join(runDir, "repeats.json"), { force: true });
+    // The guard's count of repeated reads (`countInARow`) starts over with each run of the item, a resumed one too.
+    fs.rmSync(path.join(runDir, "repeats"), { recursive: true, force: true });
     writeGuardFile(guardFile, full ? {
       mode: "full",
       ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),

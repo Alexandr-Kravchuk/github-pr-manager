@@ -200,24 +200,31 @@ export function checkRealWrite(kind: AgentRunKind, toolName: string, input: unkn
 }
 
 /**
- * One more of this call (`repeatKey`) in the run's `repeats.json`, next to its
- * guard file: how many times it has been made now. Best effort — two calls at
- * once may count as one, and a file that can't be read starts over; the count
- * only ever stops a loop, it never allows anything.
+ * How many times in a row `agent` has now made this call (`repeatKey`): one
+ * small file per agent in the run's `repeats` folder, next to its guard file,
+ * holding its last call's hash and how many times it came in a row — another
+ * call starts the count over, so a re-read after something else is never held
+ * against it. Written through a temporary file renamed over the old one; a
+ * file that is missing, half written or not ours counts as no call yet, and a
+ * folder that can't be written still answers. Best effort: the count only ever
+ * stops a loop, it never allows anything.
  */
-export function countRepeat(file: string, key: string): number {
-  const id = createHash("sha256").update(key).digest("hex").slice(0, 32);
-  let counts: Record<string, number> = {};
+export function countInARow(dir: string, agent: string, key: string): number {
+  const hash = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 32);
+  const file = path.join(dir, hash(agent));
+  const id = hash(key);
+  let n = 1;
   try {
-    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) counts = raw as Record<string, number>;
+    const last = JSON.parse(fs.readFileSync(file, "utf8")) as { id?: unknown; n?: unknown } | null;
+    if (last && last.id === id && typeof last.n === "number" && Number.isInteger(last.n) && last.n > 0) n = last.n + 1;
   } catch {
-    // None yet, or unreadable: start over.
+    // None yet, or unreadable: a first call.
   }
-  const n = (typeof counts[id] === "number" ? counts[id] : 0) + 1;
-  counts[id] = n;
   try {
-    fs.writeFileSync(file, JSON.stringify(counts));
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ id, n }));
+    fs.renameSync(tmp, file);
   } catch {
     // Unwritable: the call still goes through the rest of the guard.
   }
@@ -257,10 +264,11 @@ function main(): void {
         const real = checkRealWrite(kind, tool, call.tool_input, run);
         decision = real.allow ? decision : real;
       }
-      // The same read again and again — waiting for a background workflow by looking: stopped after a few.
+      // The same read again and again — waiting for a background workflow by looking: stopped after a few in a row.
       if (decision.allow && guardFile) {
-        const key = repeatKey(kind, tool, call.tool_input, typeof call.agent_id === "string" && call.agent_id ? call.agent_id : null);
-        const n = key ? countRepeat(path.join(path.dirname(guardFile), "repeats.json"), key) : 0;
+        const agent = typeof call.agent_id === "string" && call.agent_id ? call.agent_id : null;
+        const key = repeatKey(kind, tool, call.tool_input, agent);
+        const n = key ? countInARow(path.join(path.dirname(guardFile), "repeats"), agent ?? "main", key) : 0;
         if (n > REPEAT_LIMIT) decision = { allow: false, reason: repeatRefusal(n - 1) };
       }
     } catch (e) {
