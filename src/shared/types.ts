@@ -381,7 +381,11 @@ export interface AgentSettings {
   /** "owner/name" the agent may work in; empty = every repository (with a checkout, or one the agent clones). */
   repos: string[];
   scenarios: {
-    /** A review requested of you personally, on a PR within the size limit. */
+    /**
+     * A review requested of you personally, at any size. `maxLines` /
+     * `maxFiles` are the limit between a small PR and a big one (`isBigPr`):
+     * a small one's whole workflow may run on Sonnet (`sonnetSmallPrs`).
+     */
     review: {
       mode: AgentMode;
       maxLines: number;
@@ -393,7 +397,12 @@ export interface AgentSettings {
       /** Hold the approve while another reviewer's change request is open. */
       holdApproveOnChangeRequest: boolean;
     };
-    /** A review requested of you on a PR over the limit: a brief, never posted. */
+    /**
+     * Read by older releases only: they wrote a brief of a PR over the limit
+     * before its review. The agent writes no briefs now — a big PR goes
+     * straight to the review — and nothing reads this; it is still validated
+     * and saved so an older build finds the shape it expects.
+     */
     brief: { mode: "off" | "on" };
     /** The author replied in your threads. */
     rereview: { mode: AgentMode; resolve: boolean; approve: boolean };
@@ -1175,9 +1184,13 @@ export interface AgentItem {
   result?: import("./agent-result").RunResultCard;
   /** Your answer to its question, queued: the next run continues the session with it. */
   answer?: string;
-  /** A brief's questions for the author, carried into the review that follows it (on its own, or on "Draft a review"). */
+  /**
+   * An older release's brief questions for the author, which went into the
+   * review's prompt. No longer read: they had the review session check the
+   * code itself beside its workflow. Kept so a state.json that has it loads.
+   */
   carry?: string[];
-  /** The brief a big PR's review follows, kept on the review's card — the brief itself closes once the review is queued. */
+  /** A brief an older release wrote, kept on the card of the review that replaced it — the brief itself closes once the review is queued. */
   brief?: string;
   /**
    * A failed run the agent planned itself: when it tries it once more on its

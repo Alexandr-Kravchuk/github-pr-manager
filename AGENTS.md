@@ -223,8 +223,9 @@ Three layers:
   would post and approve under your name unchosen. Model and effort are per
   kind of run too (`runModels`, Settings › Agent › "Per kind of run"):
   `runModelFor` takes the kind's own, else the agent's `model`/`effort`, else
-  Claude Code's default, and `run/started` logs what the run got. A brief
-  defaults to Sonnet, the rest to the agent's; an absent field reads as the
+  Claude Code's default, and `run/started` logs what the run got. Every kind
+  defaults to the agent's (the brief's Sonnet is unread: no briefs are
+  written); an absent field reads as the
   default, a saved empty one as the agent's, and a model is a name only
   (`isModelName`: it goes on a command line). "Reviewers on Sonnet"
   (`sonnetReviewers`, on by default) adds `SONNET_REVIEWERS_RULE` to the
@@ -297,24 +298,27 @@ Three layers:
   `Reviewed`, `isReviewDue` and `Hide my approvals` keep GitHub's answer. A
   Comment review of your own is not counted — `latestReviews` keeps one per
   reviewer, a reply in someone's thread is such a review too, and a plain
-  question would shrink the whole review to a look at the latest changes. A
-  review asked of you starts without a click on a big PR too: its brief comes
-  first, and once a brief of the PR is written — on any head, once per PR
-  (`briefDone`) — the plan queues the review, which takes the brief over
-  (`takeBrief`, the PR's latest brief still waiting, an older head's too: the
-  brief closes, its questions for the author go into the review's prompt,
-  which asks only those that still hold, and its text onto the review's card,
-  and the brief alone sends no toast). A push before the review sends the new
-  head straight to the review, never to a second brief; a brief you ask for
-  runs as before. "Draft a review" is left for a brief no review
-  followed — reviews off, or the request gone. A run the agent planned
+  question would shrink the whole review to a look at the latest changes. The
+  agent writes no briefs: a review asked of you on a big PR starts its review
+  straight away, and "Let the agent review" asks for the review itself. A
+  brief was a second session over the same diff, and its questions for the
+  author went into the review's prompt, so the review session checked them in
+  the code itself beside its workflow — on the evening of 2026-11-25, $32 of
+  briefs and $23 of that checking. A brief an older release left waiting
+  closes when the PR's review is queued (`takeBrief`: its text onto the
+  review's card, none of its questions into the prompt — `carry` is no longer
+  read), and "Draft a review" on one no review followed starts a plain review.
+  `scenarios.brief`, `runModels.brief` and the `triage` prompt stay in
+  settings, unread, so an older build finds the shape it expects; Settings no
+  longer shows them. The review limit (`isBigPr`) now only decides whether a
+  small PR's whole workflow runs on Sonnet. A run the agent planned
   itself that fails (`fail`: a checkout the network refused, a crashed
   session) is tried once more by itself `RETRY_AFTER_MS` later (`retryAt`
   on the failed item, `dueRetry` in the plan; the new run carries
   `retryOf` and is not tried a third time) while the plan still wants that
   head — not a run you asked for, not one cut short again and again; the
-  card, the toast and the PR's reason say when. A review, brief or
-  re-review the agent plans itself waits for the PR to settle first —
+  card, the toast and the PR's reason say when. A review or re-review the
+  agent plans itself waits for the PR to settle first —
   authors and their own agents push every 10–30 minutes, and a day's log
   had a third of the runs review a head replaced during the run or right
   after it: `settlesUntil` in `planJobs` holds it until the PR has had no
@@ -326,7 +330,7 @@ Three layers:
   (`SETTLING_WHY`), a job the ledger already has keeps the ledger's reason
   (`known`), and the plan's `wakeAt` — the first PR to settle — has the
   tick plan again then, since a quiet PR brings no new snapshot. A drive, an
-  offer and a run you ask for never wait. And a review, brief or re-review
+  offer and a run you ask for never wait. And a review or re-review
   whose PR gets a new head while it runs is stopped at once
   (`stopMovedRuns`, on every tick, from the poller's latest read): the
   agent's own closes as superseded with `run/superseded` (what it cost, the
@@ -1183,6 +1187,35 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   only ever refuses. Not in a drive, where the same `git diff` rightly
   answers anew after an edit, and never the wrapper's writes or the
   preflight's node.
+- **A review's own session only orchestrates its skill's workflow.** When the
+  review or re-review prompt's skill has exactly one `*.workflow.js`
+  (`skillWorkflows`; a full-context drive never), the session is told the
+  whole call — `Workflow({ scriptPath, args })`, the args the app knows
+  (`reviewWorkflowArgs`: the PR, `dryRun`, the wrapper as `publishCommand`,
+  `statusComment: false`, `rereview: "threads-only"` for a run over the
+  threads, `model`/`reviewerModel` for the Sonnet options) — and nothing
+  else to do first: `orchestratorRules` replaces the plan, tool and Sonnet
+  rules, so it starts the workflow, ends its turn, and once the result comes
+  back finishes a re-review's thread work through the wrapper and writes the
+  prd-result. The guard file then says `orchestrator: true`, and the hook
+  holds the session itself (no `agent_id`; a workflow's agents come with one,
+  `agent_type: "workflow-subagent"` — checked against claude 2.1.270) to it:
+  `checkOrchestratorUse` refuses its reads of the PR's worktree, every
+  Grep/Glob/LS, the Agent tool and any Bash but the wrapper and
+  `gh api user`; and while the workflow it launched in this turn runs
+  (`workflowLaunchedThisTurn`, from the hook input's `transcript_path` —
+  only the run's own `<sessionId>.jsonl` — and `prompt_id`) every call is
+  refused with `WORKFLOW_RUNNING_REFUSAL`. That needs no timer and no guess:
+  a workflow's result comes only as a new prompt (`origin.kind:
+  "task-notification"`) after the session ends its turn, so no call in the
+  launching turn can see it — the 159 looks of #304's review were all in
+  that turn. A launch that failed or was refused, or a later turn (a resume
+  after a restart or the usage limit, which may start it again), holds
+  nothing. Claude Code writes the transcript as it goes, so a call made in
+  the very instant of the launch can slip past the hold; it still meets
+  `checkOrchestratorUse`. On the evening of 2026-11-25 the sessions around the
+  workflow were a third of the cost: $23 checking a brief's questions in the
+  code beside the workflow, $20 waiting by looking ($15 of it in one review).
 - **The computer's sleep doesn't end a run.** On 2026-11-26 six runs started
   in a short wake from Modern Standby, froze with the system, and were all
   "Stopped after 120 min" at the next wake — two hours of sleep and a few

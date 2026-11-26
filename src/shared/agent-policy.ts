@@ -80,12 +80,6 @@ export interface PlanContext {
    * instead of being queued only to fail, and to notify, on every new trigger.
    */
   noCheckout?: (pr: PullRequest) => string | null;
-  /**
-   * A brief of this PR was written — on this head or an earlier one: a big
-   * PR's review then follows on its own, and a new head gets no second brief.
-   * Absent: never, so a big PR gets its brief.
-   */
-  briefDone?: (pr: PullRequest) => boolean;
   /** The clock a PR's settling is measured against (`settlesUntil`). Absent: the real one. */
   now?: Date;
   /**
@@ -221,7 +215,13 @@ export function mergeBlocker(pr: PullRequest, s: AgentSettings): string | null {
   return null;
 }
 
-/** Over the review limit: too big for the agent to review on its own. */
+/**
+ * Over the review limit — a big PR. It is reviewed all the same (the agent
+ * writes no briefs: a brief before the review was a second session reading
+ * the same diff, and its questions made the review session check the code
+ * itself); the limit only decides whether a small PR's whole review runs on
+ * Sonnet (`sonnetSmallPrs`).
+ */
 export function isBigPr(pr: Pick<PullRequest, "additions" | "deletions" | "changedFiles">, s: AgentSettings): boolean {
   const { maxLines, maxFiles } = s.scenarios.review;
   return pr.additions + pr.deletions > maxLines || pr.changedFiles > maxFiles;
@@ -559,19 +559,10 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
       skip(OWN_SESSION_WHY);
       continue;
     }
-    // A big PR gets a brief first — the problem, the approach, the risky parts,
-    // the decisions for you — and once it is written, the review starts on its
-    // own, carrying the brief's questions for the author. Briefs off: straight
-    // to the review. Nothing waits for a click in between.
-    const big = isBigPr(pr, s);
-    if (big && s.scenarios.brief.mode !== "off" && !ctx.briefDone?.(pr)) {
-      if (!settled(jobKey(pr, "brief"))) continue;
-      jobs.push({ key: jobKey(pr, "brief"), prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario: "brief", kind: "brief", mode: "on", createdAt: pr.createdAt });
-      continue;
-    }
+    // Big or small, straight to the review: the agent writes no briefs.
     const mode = s.scenarios.review.mode;
     if (mode === "off") {
-      skip(big && s.scenarios.brief.mode !== "off" ? "Reviews are off — a big PR gets its brief only" : "Reviews are off");
+      skip("Reviews are off");
       continue;
     }
     if (!settled(jobKey(pr, "review"))) continue;

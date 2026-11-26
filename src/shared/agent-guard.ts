@@ -84,6 +84,14 @@ export interface GuardRun {
    * `gh pr diff` / `gh pr view`.
    */
   allowedTools?: string[];
+  /**
+   * A review or re-review whose session only orchestrates the review skill's
+   * workflow (`checkOrchestratorUse`): the session itself — not the
+   * workflow's agents — reads none of the PR's code and starts no agents of
+   * its own, and makes no call at all while the workflow it launched in this
+   * turn runs (`workflowLaunchedThisTurn`).
+   */
+  orchestrator?: boolean;
 }
 
 /**
@@ -737,6 +745,110 @@ function refusedSyntax(kind: AgentRunKind, command: string, error: string, run: 
  */
 export const WORKFLOW_WAIT_RULE =
   "It runs in the background and its result comes back to you as a message: once it is launched, end your turn at once — no more tool calls, no checking on it (not on GitHub, not in its files, not in the shell), and no review of your own beside it. Nothing you record through the publish wrapper shows on GitHub before this session ends.";
+
+// ---------------------------------------------------------------------------
+// The orchestrator. A review's own session starts the review skill's workflow
+// and reports its result; the workflow's agents do the review. On 2026-11-25
+// the sessions around the workflow cost a third of the evening on their own:
+// a big PR's brief questions had them read and grep the PR's code beside the
+// workflow ($23), and they waited for it by looking ($20 — $15 of it in one
+// review, 159 looks while its context grew to 200k). A rule asking them not
+// to did not hold, so the guard holds it for the session itself — never for
+// the workflow's agents, which come with an `agent_id` of their own.
+// ---------------------------------------------------------------------------
+
+/** The refusal of every call the session makes while the workflow it launched in this turn runs. */
+export const WORKFLOW_RUNNING_REFUSAL =
+  "The review workflow you launched is running. Its result reaches you only as your next message, after you end your turn — nothing you could look at changes before that. End your turn now, with no more tool calls.";
+
+const ORCHESTRATOR_ROLE = "You only orchestrate this review: the workflow's agents read the PR, its diff, its threads and its Jira task — not you.";
+
+/**
+ * What the orchestrating session itself may not do, on top of `checkToolUse`:
+ * a denial, or null when the call goes on to the usual checks. It reads no
+ * code of the PR (its working folder) — the payload folder, the skill's own
+ * files and its session's folders stay readable for the workflow's result —
+ * searches nothing, starts no agent of its own, and runs only the publish
+ * wrapper and `gh api user` (its login, for the threads that are its own).
+ */
+export function checkOrchestratorUse(toolName: string, input: unknown, run: GuardRun | null, real: RealPath = asWritten): GuardDecision | null {
+  if (toolName === "Agent") return deny(`${ORCHESTRATOR_ROLE} Start no agents of your own: start the workflow by its script path and end your turn.`);
+  if (toolName === "Grep" || toolName === "Glob" || toolName === "LS" || toolName === "NotebookRead") {
+    return deny(`${ORCHESTRATOR_ROLE} Search nothing: the workflow's result names what it found, and its files are in your payload folder.`);
+  }
+  if (toolName === "Read") {
+    const work = run?.workDir ? real(run.workDir) : null;
+    const targets = readTargets(toolName, input, run?.workDir);
+    if (work && "paths" in targets && targets.paths.some((p) => withinDir(real(p) ?? p, work))) {
+      return deny(`${ORCHESTRATOR_ROLE} Don't read the PR's code (${run!.workDir}): read the workflow's result, nothing else.`);
+    }
+    return null;
+  }
+  if (toolName === "Bash") {
+    const command = typeof (input as { command?: unknown } | null)?.command === "string" ? (input as { command: string }).command : "";
+    const split = shellWords(command);
+    const words = "words" in split ? split.words : [];
+    if (run?.wrapperPath && words.length > 0 && samePath(words[0], run.wrapperPath)) return null;
+    if (isGhApiUser(words)) return null;
+    return deny(
+      `${ORCHESTRATOR_ROLE} Bash runs only the publish wrapper here${run?.wrapperPath ? ` (${gitBashPath(run.wrapperPath)})` : ""} and \`gh api user\` for your login — no gh, twg or git reads of your own.`,
+    );
+  }
+  return null;
+}
+
+/** `gh api user`, with at most a `--jq`/`-q` filter: the session's own login. */
+function isGhApiUser(words: string[]): boolean {
+  if (words[0] !== "gh" || words[1] !== "api" || words[2] !== "user") return false;
+  const rest = words.slice(3);
+  return rest.length === 0 || (rest.length === 2 && (rest[0] === "--jq" || rest[0] === "-q"));
+}
+
+/**
+ * Whether the session launched a Workflow in the turn `promptId` names that
+ * hasn't reported back yet — from its transcript (Claude Code's JSONL, the
+ * hook's `transcript_path`). A workflow runs in the background and its result
+ * comes as a message of its own, a new prompt (`origin.kind:
+ * "task-notification"`) after the session ends its turn: a call in the very
+ * turn it was launched in can never see it. Counted: a `Workflow` call of the
+ * session itself (not a sidechain) whose result in this turn is no error —
+ * a launch that failed or was refused may be tried again — unless that
+ * workflow's notification is already in the transcript as a message. A
+ * transcript that can't be read reads as nothing launched: the check only
+ * ever refuses.
+ */
+export function workflowLaunchedThisTurn(transcript: string, promptId: string): boolean {
+  if (!promptId) return false;
+  const calls = new Set<string>();
+  const launched: string[] = [];
+  const reported = new Set<string>();
+  for (const line of transcript.split("\n")) {
+    const hasCall = line.includes('"Workflow"');
+    const hasResult = line.includes(promptId) && line.includes("tool_result");
+    const hasNote = line.includes("<tool-use-id>");
+    if (!hasCall && !hasResult && !hasNote) continue;
+    let j: { type?: unknown; isSidechain?: unknown; promptId?: unknown; message?: { content?: unknown }; attachment?: unknown } | null;
+    try {
+      j = JSON.parse(line) as typeof j;
+    } catch {
+      continue;
+    }
+    if (!j || j.isSidechain === true) continue;
+    const content = Array.isArray(j.message?.content) ? (j.message!.content as Array<Record<string, unknown>>) : [];
+    if (j.type === "assistant") {
+      for (const c of content) if (c.type === "tool_use" && c.name === "Workflow" && typeof c.id === "string") calls.add(c.id);
+      continue;
+    }
+    if (j.type !== "user" && j.type !== "attachment") continue;
+    if (j.type === "user" && j.promptId === promptId) {
+      for (const c of content) {
+        if (c.type === "tool_result" && typeof c.tool_use_id === "string" && calls.has(c.tool_use_id) && c.is_error !== true) launched.push(c.tool_use_id);
+      }
+    }
+    if (hasNote) for (const m of line.matchAll(/<tool-use-id>([A-Za-z0-9_-]+)<\/tool-use-id>/g)) reported.add(m[1]);
+  }
+  return launched.some((id) => !reported.has(id));
+}
 
 /** How many times in a row one agent of a read-only run makes the very same read before the guard says stop. */
 export const REPEAT_LIMIT = 3;

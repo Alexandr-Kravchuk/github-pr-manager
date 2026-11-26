@@ -15,6 +15,7 @@ import path from "node:path";
 
 import {
   checkDriveWrite,
+  checkOrchestratorUse,
   checkToolUse,
   guardPrFromUrl,
   isAgentRunKind,
@@ -23,6 +24,8 @@ import {
   repeatKey,
   repeatRefusal,
   toolFilePath,
+  workflowLaunchedThisTurn,
+  WORKFLOW_RUNNING_REFUSAL,
   type GuardDecision,
   type GuardRun,
   type RequestStore,
@@ -71,6 +74,11 @@ export function readGuardFile(file: string | undefined): GuardRun | null {
       const dirs = folders(raw.readDirs);
       if (!dirs) return null;
       run.readDirs = dirs;
+    }
+    // Only a plain yes: anything else is a guard file the app didn't write.
+    if ("orchestrator" in raw) {
+      if (typeof raw.orchestrator !== "boolean") return null;
+      if (raw.orchestrator) run.orchestrator = true;
     }
     // A session id names one folder per root; anything but an id's characters could name another.
     if ("sessionId" in raw) {
@@ -200,6 +208,25 @@ export function checkRealWrite(kind: AgentRunKind, toolName: string, input: unkn
 }
 
 /**
+ * Whether the orchestrating session launched a workflow in this very turn that
+ * hasn't reported back (`workflowLaunchedThisTurn`), from its transcript — the
+ * hook input's `transcript_path`, taken only when it is the run's own session
+ * file (`<sessionId>.jsonl`), and read up to 64 MB. Anything that can't be
+ * read reads as no: this check only ever refuses.
+ */
+export function launchedThisTurn(run: GuardRun | null, transcriptPath: unknown, promptId: unknown): boolean {
+  if (!run?.sessionId || typeof transcriptPath !== "string" || typeof promptId !== "string" || !promptId) return false;
+  if (!path.isAbsolute(transcriptPath) || path.basename(transcriptPath).toLowerCase() !== `${run.sessionId.toLowerCase()}.jsonl`) return false;
+  try {
+    const st = fs.statSync(transcriptPath);
+    if (!st.isFile() || st.size > 64 * 1024 * 1024) return false;
+    return workflowLaunchedThisTurn(fs.readFileSync(transcriptPath, "utf8"), promptId);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * How many times in a row `agent` has now made this call (`repeatKey`): one
  * small file per agent in the run's `repeats` folder, next to its guard file,
  * holding its last call's hash and how many times it came in a row — another
@@ -246,7 +273,7 @@ function main(): void {
       process.stderr.write("PR agent guard: unknown run — refusing every tool call.\n");
       process.exit(2);
     }
-    let call: { tool_name?: unknown; tool_input?: unknown; agent_id?: unknown };
+    let call: { tool_name?: unknown; tool_input?: unknown; agent_id?: unknown; transcript_path?: unknown; prompt_id?: unknown };
     try {
       call = JSON.parse(input) as typeof call;
     } catch {
@@ -257,16 +284,23 @@ function main(): void {
     let decision: GuardDecision;
     try {
       const tool = typeof call.tool_name === "string" ? call.tool_name : "";
-      // Checked preflight requests are copied next to the guard file, out of the session's reach.
-      const requests = requestStore(path.join(path.dirname(guardFile ?? "."), "requests"));
-      decision = checkToolUse(kind, tool, call.tool_input, pr, run, realRead, guardFile ? requests : undefined);
+      // A workflow's agents come with an id of their own; the session itself has none.
+      const agent = typeof call.agent_id === "string" && call.agent_id ? call.agent_id : null;
+      // The orchestrating session: nothing at all while the workflow it launched this turn runs, then only its own part.
+      const orchestrating = run?.orchestrator === true && agent === null;
+      if (orchestrating && launchedThisTurn(run, call.transcript_path, call.prompt_id)) {
+        decision = { allow: false, reason: WORKFLOW_RUNNING_REFUSAL };
+      } else {
+        // Checked preflight requests are copied next to the guard file, out of the session's reach.
+        const requests = requestStore(path.join(path.dirname(guardFile ?? "."), "requests"));
+        decision = (orchestrating ? checkOrchestratorUse(tool, call.tool_input, run, realRead) : null) ?? checkToolUse(kind, tool, call.tool_input, pr, run, realRead, guardFile ? requests : undefined);
+      }
       if (decision.allow) {
         const real = checkRealWrite(kind, tool, call.tool_input, run);
         decision = real.allow ? decision : real;
       }
       // The same read again and again — waiting for a background workflow by looking: stopped after a few in a row.
       if (decision.allow && guardFile) {
-        const agent = typeof call.agent_id === "string" && call.agent_id ? call.agent_id : null;
         const key = repeatKey(kind, tool, call.tool_input, agent);
         const n = key ? countInARow(path.join(path.dirname(guardFile), "repeats"), agent ?? "main", key) : 0;
         if (n > REPEAT_LIMIT) decision = { allow: false, reason: repeatRefusal(n - 1) };
