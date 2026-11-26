@@ -1218,6 +1218,12 @@ export interface AgentItem {
    */
   interrupted?: boolean;
   /**
+   * Interrupted because Claude's usage limit refused it mid-way: not the PR's
+   * failure. It goes back in line at once, held there until the limit resets
+   * (or your Try now), and goes on like an interrupted run.
+   */
+  usageRefused?: true;
+  /**
    * How many runs of it in a row ended with their process cut short (Ctrl+C,
    * a shutdown, a workflow still running). Each goes on by itself like an
    * interrupted run, up to a cap; a run that ends any other way clears it.
@@ -1384,6 +1390,11 @@ export type AgentAction =
   // The whole agent — two members, so a check for both narrows the rest.
   | { type: "pauseAgent" }
   | { type: "resumeAgent" }
+  /**
+   * Your limit was raised or reset: stop waiting out Claude's usage limit
+   * (`heldUntil`). One run goes first; a refusal brings the wait back.
+   */
+  | { type: "tryNow" }
   | { type: "hint"; runId: string; text: string }
   /** Your answer to a finished run's question: the same session goes on with it. */
   | { type: "answer"; runId: string; text: string }

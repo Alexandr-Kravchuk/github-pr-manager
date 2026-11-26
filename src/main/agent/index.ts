@@ -566,7 +566,7 @@ interface Running {
 }
 
 /** What starts a session — refused while the agent is off; everything else is your own click and works. */
-const STARTS_A_RUN: ReadonlySet<AgentAction["type"]> = new Set(["enqueue", "retry", "reviewAnyway", "answer"]);
+const STARTS_A_RUN: ReadonlySet<AgentAction["type"]> = new Set(["enqueue", "retry", "reviewAnyway", "answer", "tryNow"]);
 
 export function createAgent(deps: AgentDeps): Agent {
   const now = deps.now ?? (() => new Date());
@@ -584,6 +584,14 @@ export function createAgent(deps: AgentDeps): Agent {
   });
   const running = new Map<string, Running>();
   let idle: Record<string, string> = {};
+  /**
+   * Set once you let go of Claude's usage hold before its time (Try now,
+   * Resume): your limit was raised or reset, which no reading tells the app.
+   * One run goes first (`runId`, null until it starts) and the rest wait until
+   * Claude lets it through — a limit that still holds then costs one run, not
+   * a run per parallel slot, and its reading brings the hold back.
+   */
+  let usageProbe: { runId: string | null } | null = null;
   /** When the last plan's first PR waiting to settle has (`PlanResult.wakeAt`): the tick plans again then. */
   let replanAt: number | null = null;
   let timer: NodeJS.Timeout | null = null;
@@ -826,9 +834,27 @@ export function createAgent(deps: AgentDeps): Agent {
       if (on && !r.paused) pauseRun(item, r);
       else if (!on && r.paused && r.byAgentPause) resumeRun(item, r);
     }
+    // Resume is "start runs again": a usage hold it can't see past would leave it doing nothing.
+    if (!on) releaseUsageHold();
     void store.save();
     changed();
     if (!on) tick();
+  }
+
+  /**
+   * Lets go of Claude's usage-limit hold before its time, on your word (Try
+   * now, Resume): a limit raised or reset sends no reading, so the hold would
+   * otherwise last to the time the refusal named. One run then finds out
+   * (`usageProbe`).
+   */
+  function releaseUsageHold(): void {
+    if (!store.data.usageHold) return;
+    const live = usageHoldNow() !== null;
+    delete store.data.usageHold;
+    void store.save();
+    if (!live) return;
+    usageProbe = { runId: null };
+    store.log({ at: stamp(), kind: "plan", event: "usage-released", detail: "you let go of Claude's usage-limit wait: one run goes first" });
   }
 
   /**
@@ -871,8 +897,13 @@ export function createAgent(deps: AgentDeps): Agent {
         item.interrupted = undefined;
         item.resumeSession = true;
         item.finishedAt = undefined;
-        item.headline = item.cuts ? "Queued: going on — its process was ended" : "Queued: going on — the app closed while it ran";
-        logRun(item, "resumed", { detail: item.cuts ? `after it was cut short (${item.cuts} in a row)` : "after a restart" });
+        item.headline = item.usageRefused
+          ? "Queued: going on — after Claude's usage limit"
+          : item.cuts
+            ? "Queued: going on — its process was ended"
+            : "Queued: going on — the app closed while it ran";
+        logRun(item, "resumed", { detail: item.usageRefused ? "after Claude's usage limit refused it" : item.cuts ? `after it was cut short (${item.cuts} in a row)` : "after a restart" });
+        item.usageRefused = undefined;
         continue;
       }
       const pr = snapshot.pullRequests.find((p) => p.id === item.prId);
@@ -1766,8 +1797,7 @@ export function createAgent(deps: AgentDeps): Agent {
     const s = all.agent;
     /** How the session went, once it has ended — on the run's end line, failed or not. */
     let endStats: Record<string, unknown> | undefined;
-    /** `limitUntil`: Claude's limit refused the run — tried again once it resets, not in ten minutes. */
-    const fail = (headline: string, error?: string, limitUntil?: number) => {
+    const fail = (headline: string, error?: string) => {
       item.state = "error";
       item.headline = headline;
       item.error = error;
@@ -1777,7 +1807,7 @@ export function createAgent(deps: AgentDeps): Agent {
       // run that is a try again already, not one cut short again and again, and
       // not one with no checkout: the plan holds such a PR back, so the try would never come.
       if (RETRIED.has(item.scenario) && !item.key.endsWith("|asked") && !item.retryOf && !headline.startsWith("Cut short") && !headline.startsWith(NO_CHECKOUT_WHY)) {
-        item.retryAt = new Date(Math.max(now().getTime() + RETRY_AFTER_MS, limitUntil ?? 0)).toISOString();
+        item.retryAt = new Date(now().getTime() + RETRY_AFTER_MS).toISOString();
       }
       // Recorded even when the run never started, or every tick would queue the
       // same PR again; a new head commit is a new key and gets another try.
@@ -1834,7 +1864,7 @@ export function createAgent(deps: AgentDeps): Agent {
     item.headline = runningHeadline(item);
     item.resumeSession = undefined;
     // What an earlier run of this item showed (Resume, an answer) gives way to this run's.
-    for (const k of ["output", "result", "plan", "planHash", "planEdited", "drive", "error", "published", "pushed", "interrupted", "follow"] as const) delete item[k];
+    for (const k of ["output", "result", "plan", "planHash", "planEdited", "drive", "error", "published", "pushed", "interrupted", "usageRefused", "follow"] as const) delete item[k];
     const answer = item.answer;
     item.answer = undefined;
     if (!resume) item.checkout = checkout ?? undefined;
@@ -2068,9 +2098,14 @@ export function createAgent(deps: AgentDeps): Agent {
         // A new usage reading only, against the cap as it is now — as
         // `usageHoldNow` reads it: the cap the run started with would write a
         // hold a raised cap drops on the next tick, and again on every event.
-        if (fresh && reading) {
-          const hold = usageHold(reading, settings()?.limits.usageCap ?? s.limits.usageCap, now().getTime());
-          if (hold) holdForUsage(hold);
+        const hold = fresh && reading ? usageHold(reading, settings()?.limits.usageCap ?? s.limits.usageCap, now().getTime()) : null;
+        if (hold) {
+          holdForUsage(hold);
+          usageProbe = null;
+        } else if (usageProbe?.runId === item.runId && (reading !== null || progress.toolCalls > 0)) {
+          // Claude let the first run after a released hold through: the rest may start.
+          usageProbe = null;
+          setImmediate(tick);
         }
         changed();
       },
@@ -2096,6 +2131,17 @@ export function createAgent(deps: AgentDeps): Agent {
     // rather than by you, by its time limit, or by finishing.
     const cut = entry.takeOver || entry.offStop || outcome.stopped || outcome.timedOut ? null : cutShort(outcome);
     if (!cut) item.cuts = undefined;
+    // Claude's subscription limit refused it: the stream's own "rejected"
+    // reading first, else the reset in Claude Code's error result — never the
+    // model's words, which a PR can dictate. Not the PR's failure and nothing
+    // for you to do: the whole queue waits for the reset, and this run goes
+    // back in line and on where it stopped.
+    const succeeded = Boolean(result && !result.isError && result.subtype === "success");
+    const refusedBy = succeeded
+      ? null
+      : ((outcome.progress.rateLimit?.status === "rejected" ? usageHold(outcome.progress.rateLimit, 0, now().getTime()) : null) ??
+        (result?.isError ? limitResetFromText(result.text, now()) : null));
+    const limit = refusedBy && refusedBy.until > now().getTime() ? refusedBy : null;
     let publishNow = false;
     let pushNow = false;
     // Why the run-end thread check couldn't run, when it couldn't: the log tells it from "nothing held".
@@ -2146,6 +2192,11 @@ export function createAgent(deps: AgentDeps): Agent {
       item.cuts = (item.cuts ?? 0) + 1;
       if (item.cuts > CUT_RESUMES) fail(`Cut short ${item.cuts} times in a row`, `${cut} — run it again once that is sorted out`);
       else markInterrupted(item, item.finishedAt, cut);
+    } else if (limit) {
+      // Not counted as a cut: the hold, not a cap, keeps it from running into the limit again and again.
+      holdForUsage(limit);
+      markInterrupted(item, item.finishedAt, `${limit.limitName ?? "Claude's usage limit"} refused it`);
+      item.usageRefused = true;
     } else if (result && !result.isError && result.subtype === "success") {
       item.state = "needsYou";
       // The card's summary, questions and findings; the rest is the full report.
@@ -2214,20 +2265,8 @@ export function createAgent(deps: AgentDeps): Agent {
       }
     } else {
       const error = result?.text || outcome.stderr.trim().split("\n").slice(-3).join(" ") || `exit ${outcome.exitCode}`;
-      // Refused by Claude's subscription limit: the whole queue waits for its
-      // reset (the stream's own reading first, else the reset in Claude Code's
-      // error result — never the model's words, which a PR can dictate), and
-      // this run is tried again then, not ten minutes on into the same wall.
-      const limit =
-        (outcome.progress.rateLimit?.status === "rejected" ? usageHold(outcome.progress.rateLimit, 0, now().getTime()) : null) ??
-        (result?.isError ? limitResetFromText(result.text, now()) : null);
       // `fail` saves, logs and tells; the rest of this function only cleans up.
-      if (limit && limit.until > now().getTime()) {
-        holdForUsage(limit);
-        fail(limit.limitName ? `Stopped by ${limit.limitName}` : limit.why, error, limit.until);
-      } else {
-        fail("The run failed", error);
-      }
+      fail("The run failed", error);
     }
     // Nothing to post, nothing asked, nothing major found: no decision is left.
     // Its diagrams go out with the review, as one comment of their own.
@@ -2288,7 +2327,8 @@ export function createAgent(deps: AgentDeps): Agent {
     // worktree sweep could take its folder from under the session your
     // terminal is still opening — nor one cut short, whose recovery is the
     // next plan's (`recoverInterrupted`), nor one the agent's switching off ended.
-    if (!stopped && !entry.takeOver && !entry.offStop && !item.interrupted) {
+    // One the usage limit refused is put back in line by this very plan.
+    if (!stopped && !entry.takeOver && !entry.offStop && (!item.interrupted || item.usageRefused)) {
       const snapshot = deps.getSnapshot();
       if (snapshot) onSnapshot(snapshot);
     }
@@ -3248,6 +3288,8 @@ export function createAgent(deps: AgentDeps): Agent {
       void store.save();
       changed();
     }
+    // The first run after a released hold ended before Claude said anything (its checkout failed, say): the next one finds out.
+    if (usageProbe?.runId && !store.data.items.some((i) => i.runId === usageProbe!.runId && i.state === "working")) usageProbe.runId = null;
     const snapshot = deps.getSnapshot();
     const byId = new Map((snapshot?.pullRequests ?? []).map((p) => [p.id, p]));
     /** Why queued runs wait this tick — a full house of parallel runs is the queue working, not a hold. */
@@ -3288,6 +3330,12 @@ export function createAgent(deps: AgentDeps): Agent {
         holds.add(`#${pr!.number}: your Claude session is on it`);
         continue;
       }
+      // After a usage hold you let go of: this run goes first, the rest once Claude lets it through.
+      if (usageProbe?.runId) {
+        holds.add("Claude's usage limit: the first run since you let go of the wait must get through");
+        break;
+      }
+      if (usageProbe) usageProbe.runId = item.runId;
       void run(item, pr, all).catch((e) => console.warn(`[agent] run failed: ${(e as Error).message}`));
     }
     noteHold(holds.size > 0 ? [...holds].sort().join("; ") : null);
@@ -3396,6 +3444,12 @@ export function createAgent(deps: AgentDeps): Agent {
     const snapshot = deps.getSnapshot();
     if (action.type === "pauseAgent" || action.type === "resumeAgent") {
       setPaused(action.type === "pauseAgent");
+      return { ok: true };
+    }
+    if (action.type === "tryNow") {
+      releaseUsageHold();
+      changed();
+      tick();
       return { ok: true };
     }
     if (action.type === "approveAgain") return approveAgain(action.prId, all);

@@ -238,7 +238,19 @@ function Overview({
             {yours > 0 && <span>Nothing in Your turn has gone out: it goes out only when you press its button.</span>}
             {sum.block === "paused" && <span className="font-medium text-amber-700 dark:text-amber-300">Paused — nothing starts, and nothing goes out on its own.</span>}
             {sum.block === "quiet" && <span className="text-amber-700 dark:text-amber-300">{sum.blockText} — only what you ask for starts.</span>}
-            {sum.block === "usage" && <span className="text-amber-700 dark:text-amber-300">{sum.blockText} — runs wait (Settings › Agent › Limits).</span>}
+            {sum.block === "usage" && (
+              <span className="text-amber-700 dark:text-amber-300">
+                {sum.blockText} — runs wait (Settings › Agent › Limits).{" "}
+                <button
+                  type="button"
+                  className="font-medium underline"
+                  onClick={() => void run({ type: "tryNow" })}
+                  title="Your limit was raised or reset? One run goes first; if Claude still refuses it, the wait comes back."
+                >
+                  Try now
+                </button>
+              </span>
+            )}
             {(sum.block === "daily" || sum.block === "budget") && (
               <span className="text-amber-700 dark:text-amber-300">
                 {sum.blockText} — {sum.queued > 0 ? `${sum.queued} in line wait` : "new runs wait"} until tomorrow (Settings › Agent › Limits).
