@@ -246,7 +246,7 @@ export function validateAgentAction(value: unknown): AgentAction {
   // Main reads what the card shows itself: only the PR is named.
   if (v.type === "notNow" || v.type === "bringBack") return { type: v.type, prId: validatePrId(v.prId) };
   // The whole agent: nothing else rides along.
-  if (v.type === "pauseAgent" || v.type === "resumeAgent") return { type: v.type };
+  if (v.type === "pauseAgent" || v.type === "resumeAgent" || v.type === "tryNow") return { type: v.type };
   if (typeof v.runId !== "string" || !RUN_ID.test(v.runId)) throw new Error("agentAction: expected a run id.");
   if (v.type === "moveQueued") return { type: "moveQueued", runId: v.runId, before: before() };
   if (v.type === "dispute") {

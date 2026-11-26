@@ -911,7 +911,8 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   state change of an item), `board`
   (a card's column or button changed: `seen` on the first look, `move`,
   `action`, `left`), `plan` (why the agent leaves a PR alone — `idle` — what
-  holds the queue — `held`/`released` — what a head's re-approve check
+  holds the queue — `held`/`released`, the usage hold below included, and
+  `usage-released` when your Try now or Resume let go of it — what a head's re-approve check
   found, `reapprove-check`, and whether a reviewed PR's new head was the same
   change on a new base, `base-check`), `action` (each `act`, i.e. each
   click, with its result) and `agent` (start, stop, `on`/`off`, `settings`
@@ -943,22 +944,25 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   reading wins when there is one. Only that error result is read, never the
   model's words: a PR can make a session write the line, and a hold stops
   every run — so the line must be the whole text, its year this one or the
-  next, and no hold lasts past `MAX_USAGE_HOLD_MS` (8 days). Such a run goes
-  on in its own session once the limit resets: it is marked interrupted
-  (`limitStops`, "… stopped it — it goes on where it stopped once that
-  resets"), keeps its worktree, `recoverInterrupted` queues it with
-  `resumeSession`, the hold keeps it waiting, and it resumes with
-  `LIMIT_RESUME_PROMPT`, which also tells it to start its review workflow
-  again with `resumeFromRunId` (the `wf_…` its launch printed under
-  "Transcript dir") so the agents that finished come from the workflow's own
-  cache — starting over threw away ~$87 of work on 2026-11-25. Not a drive
-  (its push is checked against what the app read before the session), and
-  only `LIMIT_RESUMES` times in a row; otherwise, or with its folder gone, it
-  is "Stopped by Claude's session limit" with its `retryAt` at the reset,
-  not `RETRY_AFTER_MS` on, which only ran it into the same wall. The hold is `usageHold` in `state.json`, not
+  next, and no hold lasts past `MAX_USAGE_HOLD_MS` (8 days). Such a run is no
+  failure card: it is `interrupted` (`usageRefused`, not counted as a cut —
+  the hold keeps it from hitting the wall again), put back in line by the
+  plan at once and `resumed` in its own session when the hold ends, like a
+  run a restart cut short (a drive starts over); a failure with a `retryAt`
+  only ran into the same wall. It goes on with `LIMIT_RESUME_PROMPT` (`afterLimit`
+  set at the requeue), which also tells it to start its review workflow
+  again with `resumeFromRunId` — the `wf_…` its launch printed under
+  "Transcript dir" — so the agents that finished come from the workflow's
+  own cache instead of running again. The hold is `usageHold` in `state.json`, not
   memory — a restart used to start the queue straight into the limit — and
   holds every run, asked or not; a cap hold keeps the share it was set at
-  (`usage`) and lets go once the cap is raised past it. `limits.costPerDay`
+  (`usage`) and lets go once the cap is raised past it. A limit raised or
+  reset sends no reading, so your Try now (on the Board and the popover) or
+  Resume lets go of any hold early (`releaseUsageHold`, logged
+  `usage-released`): one run goes first (`usageProbe`) and the rest wait
+  until Claude lets it through — a reading that holds nothing, or a tool
+  call — so a limit that still holds costs one run, not one per parallel
+  slot, and its reading brings the hold back. `limits.costPerDay`
   (0 off, the default) holds new runs once the runs ended on the local day
   cost that many dollars at API prices (`costToday`: each run's
   `total_cost_usd` plus its diagrams' — on a subscription a measure of usage,

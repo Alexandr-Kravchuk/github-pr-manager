@@ -286,7 +286,19 @@ function CompanionPopover({ anchor, focus, onClose, onFocus }: { anchor: RefObje
                 : sum.block === "quiet"
                   ? `${sum.blockText} — only what you ask for starts.`
                   : sum.block === "usage"
-                    ? `${sum.blockText}.`
+                    ? (
+                        <>
+                          {sum.blockText}.{" "}
+                          <button
+                            type="button"
+                            className="font-medium text-sky-700 hover:underline dark:text-sky-300"
+                            onClick={() => void act({ type: "tryNow" }).then((res) => setError(res.ok ? null : res.error))}
+                            title="Your limit was raised or reset? One run goes first; if Claude still refuses it, the wait comes back."
+                          >
+                            Try now
+                          </button>
+                        </>
+                      )
                     : sum.block === "daily" || sum.block === "budget"
                       ? `${sum.blockText} — ${sum.queued > 0 ? `${sum.queued} in line wait` : "new runs wait"} until tomorrow.`
                       : sum.queued > 0

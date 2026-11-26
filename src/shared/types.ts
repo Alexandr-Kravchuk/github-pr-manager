@@ -1231,18 +1231,25 @@ export interface AgentItem {
    */
   interrupted?: boolean;
   /**
+   * Interrupted because Claude's usage limit refused it mid-way: not the PR's
+   * failure. It goes back in line at once, held there until the limit resets
+   * (or your Try now), and goes on like an interrupted run.
+   */
+  usageRefused?: true;
+  /**
    * How many runs of it in a row ended with their process cut short (Ctrl+C,
    * a shutdown, a workflow still running). Each goes on by itself like an
    * interrupted run, up to a cap; a run that ends any other way clears it.
    */
   cuts?: number;
   /**
-   * How many runs of it in a row Claude's usage limit stopped. Such a run goes
-   * on in its own session once the limit resets, with what it did kept — it
-   * isn't started over (13 runs on 2026-11-25, ~$87 of work lost each time).
-   * Up to a cap; a run that ends any other way clears it.
+   * Queued to go on after Claude's usage limit refused it (`usageRefused`,
+   * cleared at the requeue): its session is told to take its review workflow
+   * up from the workflow's own cache (`resumeFromRunId`) rather than run every
+   * agent again — starting over lost ~$87 of work on 2026-11-25. Cleared when
+   * the run starts.
    */
-  limitStops?: number;
+  afterLimit?: true;
   /** Diagrams of the change, drawn after the run (Settings › Agent › Diagrams). */
   diagrams?: AgentItemDiagrams;
   /**
@@ -1404,6 +1411,11 @@ export type AgentAction =
   // The whole agent — two members, so a check for both narrows the rest.
   | { type: "pauseAgent" }
   | { type: "resumeAgent" }
+  /**
+   * Your limit was raised or reset: stop waiting out Claude's usage limit
+   * (`heldUntil`). One run goes first; a refusal brings the wait back.
+   */
+  | { type: "tryNow" }
   | { type: "hint"; runId: string; text: string }
   /** Your answer to a finished run's question: the same session goes on with it. */
   | { type: "answer"; runId: string; text: string }

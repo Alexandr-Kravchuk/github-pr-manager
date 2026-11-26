@@ -12182,7 +12182,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
-    await atest("agent: a run Claude's session limit stopped holds the whole queue until the reset, and is tried again then — across a restart", async () => {
+    await atest("agent: a run Claude's session limit stopped holds the whole queue until the reset, back in line rather than failed — across a restart", async () => {
       // As on 2026-11-25: five runs refused at 17:50 Kyiv, the limit back at 21:50.
       let t = Date.parse("2026-11-25T15:50:00Z");
       const reset = Date.parse("2026-11-25T19:50:00Z");
@@ -12197,13 +12197,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       let first;
       try {
         f.agent.onSnapshot(f.snapshot);
-        await until(() => only(f).some((i) => i.state === "error"));
-        first = only(f)[0];
-        assert.deepStrictEqual([first.headline, first.retryAt], ["Stopped by Claude's session limit", new Date(reset).toISOString()], "tried again once the limit resets, not ten minutes on");
+        first = only(f)[0].runId;
+        await until(() => f.agent.getState().heldUntil !== null && only(f).some((i) => i.prId === "PR_R" && i.state === "queued"));
+        // Refused, not failed: no failure card and no try again ten minutes on — it waits in line for the reset.
+        assert.ok(!only(f).some((i) => i.state === "error" || i.retryAt), "no failure card");
+        const ends = readLog(f).filter((l) => l.kind === "run" && l.runId === first).map((l) => l.event);
+        assert.ok(ends.includes("interrupted") && !ends.includes("failed"), "logged as interrupted, not failed");
+        assert.ok(readLog(f).some((l) => l.kind === "run" && l.runId === first && l.detail === "Interrupted — Claude's session limit refused it"));
         const st = f.agent.getState();
         assert.deepStrictEqual([st.heldUntil, st.heldWhy], [new Date(reset).toISOString(), "Claude's session limit reached"]);
         assert.match(view.agentSummary(st, new Date(t)).blockText, /^Claude's session limit reached — waits until \d\d:\d\d$/);
-        await until(() => /^Its last run on this head failed \(Stopped by Claude's session limit\) — it tries again by itself at \d\d:\d\d$/.test(f.agent.getState().idle.PR_R ?? ""));
         // Past the usual ten minutes, and another PR asks for a review: nothing starts into the limit.
         t += agentCore.RETRY_AFTER_MS + 60_000;
         f.snapshot.pullRequests.push(reviewPr({ id: "PR_2", number: 8 }));
@@ -12222,14 +12225,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         t = reset + 1000;
         g.agent.onSnapshot(g.snapshot);
         await until(() => g.children.length === 1);
-        assert.ok(only(g).some((i) => i.retryOf === first.runId), "its one try again");
+        assert.ok(only(g).some((i) => i.prId === "PR_R" && i.state !== "queued" && i.state !== "error"), "the refused run's PR goes first, once");
         assert.strictEqual(g.agent.getState().heldUntil, null);
       } finally {
         g.agent.stop();
       }
     });
 
-    await atest("agent: a run Claude's limit stopped goes on in its own session once the limit resets — what it did is kept, not paid for again", async () => {
+    await atest("agent: a run Claude's limit refused goes on in its own session after the reset — told to take its review workflow up from the workflow's cache", async () => {
       let t = Date.parse("2026-11-25T15:50:00Z");
       const reset = Date.parse("2026-11-25T19:50:00Z");
       let runs = 0;
@@ -12251,108 +12254,23 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       });
       try {
         f.agent.onSnapshot(f.snapshot);
-        await until(() => only(f)[0]?.interrupted === true);
-        const [stopped] = only(f);
-        assert.deepStrictEqual([stopped.state, stopped.limitStops, stopped.retryAt], ["needsYou", 1, undefined]);
-        assert.strictEqual(stopped.headline, "Interrupted — Claude's session limit stopped it — it goes on where it stopped once that resets");
+        await until(() => only(f)[0]?.afterLimit === true && only(f)[0].state === "queued");
         assert.strictEqual(f.agent.getState().heldUntil, new Date(reset).toISOString(), "the queue waits for the reset");
-        assert.ok(readLog(f).some((l) => l.kind === "run" && l.event === "interrupted" && l.data.costUsd === 13.5), "its spend is logged");
-        // The next poll queues it to go on; the hold keeps it until the reset.
-        f.agent.onSnapshot(f.snapshot);
-        assert.deepStrictEqual([only(f)[0].state, only(f)[0].headline, f.children.length], ["queued", "Queued: going on where it stopped once Claude's limit resets", 1]);
+        assert.strictEqual(f.children.length, 1);
         t = reset + 1000;
         f.agent.onSnapshot(f.snapshot);
         await until(() => f.children.length === 2);
         const again = f.children[1];
         assert.ok(again.args.includes("--resume"), "the same session, with what it did");
-        assert.ok(again.written.includes(agentCore.LIMIT_RESUME_PROMPT.slice(0, 60)), "told to go on, its workflow from its cache");
-        assert.match(again.written, /resumeFromRunId/);
+        assert.ok(again.written.includes(agentCore.LIMIT_RESUME_PROMPT.slice(0, 60)), "told it was the usage limit");
+        assert.match(again.written, /resumeFromRunId/, "and to take its workflow up from the cache");
         await until(() => only(f)[0].state !== "queued" && only(f)[0].state !== "working");
-        assert.deepStrictEqual([only(f).length, only(f)[0].limitStops], [1, undefined], "no second run beside it; a run that ended otherwise clears the count");
+        assert.deepStrictEqual([only(f).length, only(f)[0].afterLimit], [1, undefined], "no second run beside it; the mark goes as it starts");
       } finally {
         f.agent.stop();
       }
-    });
-
-    await atest("agent: a limit stop goes on in its session only so many times in a row, never for a drive or with its folder gone — and anything else ends the count", async () => {
-      let t = Date.parse("2026-11-25T15:50:00Z");
-      // Claude Code's own reading: refused until an hour on, whenever it is asked.
-      const limited = (c) => {
-        nfsA.mkdirSync(c.cwd, { recursive: true });
-        emit(c, { type: "system", subtype: "init", session_id: "s" });
-        emit(c, { type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: Math.floor((t + 3_600_000) / 1000), rateLimitType: "five_hour" } });
-        emit(c, { type: "result", subtype: "success", is_error: true, result: "You've hit your session limit" });
-        setImmediate(() => c.emit("exit", 1));
-      };
-      const failing = (c) => {
-        nfsA.mkdirSync(c.cwd, { recursive: true });
-        emit(c, { type: "system", subtype: "init", session_id: "s" });
-        emit(c, { type: "result", subtype: "error_during_execution", is_error: true, result: "boom" });
-        setImmediate(() => c.emit("exit", 1));
-      };
-      /** One limit stop, then on past the reset to its resumed run. */
-      const stopThenGoOn = async (f, n) => {
-        await until(() => only(f)[0]?.limitStops === n && only(f)[0].interrupted === true);
-        f.agent.onSnapshot(f.snapshot);
-        assert.strictEqual(only(f)[0].state, "queued");
-        t += 2 * 3_600_000;
-        f.agent.onSnapshot(f.snapshot);
-        await until(() => f.children.length === n + 1);
-        assert.ok(f.children[n].args.includes("--resume"), `resume ${n}`);
-      };
-      // LIMIT_RESUMES (3) in a row go on; the fourth stop fails as before, its count cleared.
-      const f = agentFixture({ now: () => new Date(t), script: limited });
-      try {
-        f.agent.onSnapshot(f.snapshot);
-        for (const n of [1, 2, 3]) await stopThenGoOn(f, n);
-        await until(() => only(f)[0].state === "error");
-        const [last] = only(f);
-        assert.deepStrictEqual([last.headline, last.interrupted, last.limitStops], ["Stopped by Claude's session limit", undefined, undefined]);
-        assert.ok(last.retryAt, "tried anew at the reset, as before");
-        assert.strictEqual(f.children.length, 4, "no loop on the limit");
-      } finally {
-        f.agent.stop();
-      }
-      // A run that ends any other way after a limit stop: the count goes.
-      let runs = 0;
-      const g = agentFixture({ now: () => new Date(t), script: (c) => (++runs === 1 ? limited(c) : failing(c)) });
-      try {
-        g.agent.onSnapshot(g.snapshot);
-        await stopThenGoOn(g, 1);
-        await until(() => only(g)[0].state === "error");
-        assert.deepStrictEqual([only(g)[0].headline, only(g)[0].limitStops], ["The run failed", undefined]);
-      } finally {
-        g.agent.stop();
-      }
-      // A drive starts over rather than going on: its push is checked against what the app read before the session.
-      const d = agentFixture({ pr: { ...reviewPr({ role: "author" }), ciState: "failure" }, now: () => new Date(t), script: limited });
-      try {
-        d.agent.onSnapshot(d.snapshot);
-        await until(() => only(d)[0]?.state === "error");
-        const [drive] = only(d);
-        assert.deepStrictEqual([drive.scenario, drive.interrupted, drive.limitStops], ["drive", undefined, undefined]);
-        assert.match(drive.headline, /^Stopped by Claude's session limit/, "(a drive's kept worktree is said after it)");
-        assert.ok(drive.retryAt);
-      } finally {
-        d.agent.stop();
-      }
-      // Its folder gone (here: never made): nothing to go on in — it fails as before.
-      const h = agentFixture({
-        now: () => new Date(t),
-        script: (c) => {
-          emit(c, { type: "system", subtype: "init", session_id: "s" });
-          emit(c, { type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: Math.floor((t + 3_600_000) / 1000), rateLimitType: "five_hour" } });
-          emit(c, { type: "result", subtype: "success", is_error: true, result: "You've hit your session limit" });
-          setImmediate(() => c.emit("exit", 1));
-        },
-      });
-      try {
-        h.agent.onSnapshot(h.snapshot);
-        await until(() => only(h)[0]?.state === "error");
-        assert.deepStrictEqual([only(h)[0].headline, only(h)[0].interrupted, only(h)[0].limitStops], ["Stopped by Claude's session limit", undefined, undefined]);
-      } finally {
-        h.agent.stop();
-      }
+      // A session going on after a restart is told only that.
+      assert.ok(!agentCore.RESUME_PROMPT.includes("resumeFromRunId"));
     });
 
     await atest("agent: the model writing Claude's limit line holds nothing — only Claude Code's own error result counts", async () => {
@@ -19570,6 +19488,91 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       } finally {
         f.agent.stop();
       }
+    });
+
+    await atest("agent usage limit: a refused run goes back in line and on in its session; the queue waits for the reset; Resume or Try now lets one run go first", async () => {
+      const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+      const reject = (c) => {
+        emit(c, { type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt } });
+        emit(c, { type: "result", subtype: "success", is_error: true, result: "You've hit your session limit · resets 9:50pm" });
+        setImmediate(() => c.emit("exit", 1));
+      };
+      let spawned = 0;
+      const notes = [];
+      const f = agentFixture({
+        agent: { limits: { parallel: 3 } },
+        notify: (n) => notes.push(n.kind),
+        // `worktree add` makes its folder, as git would: a refused run goes on in it.
+        git: (args) => {
+          const at = args.indexOf("add");
+          if (at > 0 && args[at - 1] === "worktree") nfsA.mkdirSync(args[at + 3], { recursive: true });
+          return "";
+        },
+        script: (c) => {
+          spawned += 1;
+          emit(c, { type: "system", subtype: "init", session_id: `s${spawned}` });
+          // The first two are refused; from the third on Claude answers when the test says so.
+          if (spawned <= 2) reject(c);
+        },
+      });
+      const byPr = (id) => only(f).find((i) => i.prId === id && (i.state === "queued" || i.state === "working"));
+      const settle = () => new Promise((r) => setTimeout(r, 50));
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        const first = only(f)[0].runId;
+        await until(() => f.agent.getState().heldUntil !== null && byPr("PR_R")?.state === "queued");
+        assert.strictEqual(f.agent.getState().heldUntil, new Date(resetsAt * 1000).toISOString());
+        // Refused, not failed: the same run is back in line, to go on in its session — no card, no toast.
+        const back = byPr("PR_R");
+        assert.deepStrictEqual([back.runId, back.resumeSession, back.headline, back.usageRefused], [first, true, "Queued: going on — after Claude's usage limit", undefined]);
+        assert.ok(!only(f).some((i) => i.state === "error" || i.state === "needsYou"), "no failure card");
+        assert.ok(!notes.includes("failed"), "no failure toast");
+        const ends = readLog(f).filter((l) => l.kind === "run" && l.runId === first).map((l) => [l.event, l.detail]);
+        assert.deepStrictEqual(ends.slice(-2), [["interrupted", "Interrupted — Claude's usage limit refused it"], ["resumed", "after Claude's usage limit refused it"]]);
+
+        // Held: new runs queue and wait for the reset, whoever asked.
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_B", number: 8 }), reviewPr({ id: "PR_C", number: 9 }), reviewPr({ id: "PR_D", number: 10 }));
+        f.agent.onSnapshot(f.snapshot);
+        await settle();
+        assert.deepStrictEqual(["PR_R", "PR_B", "PR_C", "PR_D"].map((id) => byPr(id)?.state), ["queued", "queued", "queued", "queued"]);
+        assert.strictEqual(f.children.length, 1);
+
+        // Pause and Resume — what the user did to "restart" it — let go of the wait: one run goes first,
+        // the refused one, in its own session.
+        await f.agent.act({ type: "pauseAgent" });
+        await f.agent.act({ type: "resumeAgent" });
+        assert.strictEqual(f.agent.getState().heldUntil, null);
+        await until(() => f.children.length === 2);
+        const resumed = f.children[1];
+        assert.ok(back.sessionId);
+        assert.strictEqual(resumed.args[resumed.args.indexOf("--resume") + 1], back.sessionId, "the session it ran");
+        assert.strictEqual(resumed.cwd, back.worktree, "in the folder it ran in");
+        // Still refused: the wait is back, it cost one run, not three, and that run is in line again.
+        await until(() => f.agent.getState().heldUntil !== null && byPr("PR_R")?.state === "queued");
+        await settle();
+        assert.strictEqual(f.children.length, 2, "nothing else started on a refused first run");
+        assert.deepStrictEqual(["PR_B", "PR_C", "PR_D"].map((id) => byPr(id)?.state), ["queued", "queued", "queued"]);
+
+        // Try now: again one run first …
+        assert.deepStrictEqual(await f.agent.act({ type: "tryNow" }), { ok: true });
+        await until(() => f.children.length === 3);
+        await settle();
+        assert.strictEqual(f.children.length, 3, "the rest wait for Claude's answer to the first");
+        assert.strictEqual(byPr("PR_R").state, "working");
+        // … and once Claude lets it through, the rest start, up to the parallel limit.
+        emit(f.children[2], { type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt } });
+        await until(() => byPr("PR_B")?.state === "working" && byPr("PR_C")?.state === "working");
+        assert.strictEqual(byPr("PR_D").state, "queued");
+        assert.strictEqual(f.agent.getState().heldUntil, null);
+        assert.strictEqual(readLog(f).filter((l) => l.kind === "plan" && l.event === "usage-released").length, 2);
+        assert.ok(!notes.includes("failed"));
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    test("ipc: Try now names nothing — a run id or a time riding along is dropped", () => {
+      assert.deepStrictEqual(ipcAgent.validateAgentAction({ type: "tryNow", runId: "x", until: 0 }), { type: "tryNow" });
     });
 
     test("main.js wiring: the tray shows the agent hidden or not; Show agent opens its popover; toasts the agent took are left out", () => {
