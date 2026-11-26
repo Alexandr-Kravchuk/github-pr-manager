@@ -16,7 +16,14 @@ reviewed — and highlights what needs attention:
   reviewer also clears it; pushes, author replies, marking seen and re-requesting
   review alone do not. This uses the latest opinionated review
   per reviewer (up to the existing 15-reviewer query cap), not semantic analysis
-  or proof that a code change implements feedback.
+  or proof that a code change implements feedback. Two formats are read by their
+  structure instead of being held: the dashboard's own approvals (Approve,
+  Approve again, re-approve) carry nothing to act on, and a creatio-code-review
+  approval holds the PR only when it lists findings (Blocker / Major / Minor
+  items) — their points are shown. On the Board such a PR is in **Your turn**
+  as "Approved with feedback", with **Mark as read 👀** (the app adds the 👀
+  for you, on the approvals the card shows only), **Let the agent address it**
+  (its commits always wait for your Push), or the review on GitHub.
 - 💬 **unresolved comments** — how many threads still need to be resolved;
 - review state (approved / changes requested / review required), drafts, author, last update.
 

@@ -1,3 +1,4 @@
+import { readApproval } from "./approval-feedback";
 import { DEFAULT_SEARCH_LIMIT, validateSearchLimit } from "./config";
 import { ISSUE_KEY_PATTERN } from "./issue-key";
 import type {
@@ -12,6 +13,7 @@ import type {
   RateLimitInfo,
   ReviewDecision,
   Reviewer,
+  ReviewFeedback,
 } from "./types";
 
 /**
@@ -101,7 +103,7 @@ fragment PrFields on PullRequest {
   # 15 is load-bearing — see the note above this fragment before changing it.
   latestOpinionatedReviews(first: 15) {
     nodes {
-      author { __typename login avatarUrl } state submittedAt body updatedAt
+      id url author { __typename login avatarUrl } state submittedAt body updatedAt
       commit { oid }
       reactions(first: 100, content: EYES) { nodes { content createdAt user { login } } }
     }
@@ -359,6 +361,9 @@ interface RawPr {
   timelineItems?: { nodes: Array<{ createdAt?: string } | null> };
   latestOpinionatedReviews: {
     nodes: Array<{
+      // Optional: fixtures and older cached reads may lack them.
+      id?: string;
+      url?: string;
       author: { __typename: string; login: string; avatarUrl: string } | null;
       state: string;
       submittedAt: string | null;
@@ -544,16 +549,9 @@ function parseIssueKey(title: string, headRefName: string): string | null {
   return fromBranch ? fromBranch[1] : null;
 }
 
-/** Only plain approvals are safe to interpret automatically. Unknown prose is
- * kept for human review: text length and a keyword list cannot prove intent.
- * Author EYES acknowledgement on that specific review also clears feedback.
- * It must postdate the body's last edit; another user's reaction never counts.
- * Pushes, author replies and re-requests alone do not clear feedback.
- */
-export function approvalBodyNeedsAttention(body: string | undefined): boolean {
-  const text = (body ?? "").trim().toLowerCase().replace(/[.!✅👍]+$/u, "").trim();
-  return text !== "" && !/^(?:lgtm|looks good(?: to me)?|approved|approve|thanks|thank you|good job|nice work|ship it|✅|👍)$/.test(text);
-}
+// How an approval's text is read — a plain yes, the app's own approval,
+// creatio-code-review's, or prose to read — lives in `approval-feedback.ts`.
+export { approvalBodyNeedsAttention } from "./approval-feedback";
 
 /**
  * The PR's place in a native GitHub stack, or null outside one. The bottom is
@@ -624,15 +622,32 @@ export function mapPr(
       reviewerRepliedAt = last.createdAt;
     }
   }
-  const hasUnaddressedReviewFeedback = pr.latestOpinionatedReviews.nodes.some(
-    (r) => r.state === "APPROVED" && r.author?.__typename === "User" &&
-      r.author.login !== authorLogin && approvalBodyNeedsAttention(r.body) &&
-      !r.reactions?.nodes.some((reaction) =>
-        authorLogin != null && reaction.content === "EYES" &&
-        reaction.user?.login.toLowerCase() === authorLogin.toLowerCase() &&
-        // Invalid/missing dates fail closed; edited feedback requires a new acknowledgement.
-        Date.parse(reaction.createdAt) >= Date.parse(r.updatedAt ?? "")),
-  );
+  // Each reviewer's latest approval whose text says more than a plain yes
+  // (`readApproval`) and that the author hasn't marked read with 👀 since its
+  // last edit: what the Board's "Approved with feedback" card lists.
+  const reviewFeedback: ReviewFeedback[] = [];
+  for (const r of pr.latestOpinionatedReviews.nodes) {
+    if (r.state !== "APPROVED" || r.author?.__typename !== "User" || r.author.login === authorLogin) continue;
+    const reading = readApproval(r.body);
+    if (!reading.feedback) continue;
+    const authorEyes = (r.reactions?.nodes ?? []).filter((reaction) =>
+      authorLogin != null && reaction.content === "EYES" &&
+      reaction.user?.login.toLowerCase() === authorLogin.toLowerCase());
+    // Invalid/missing dates fail closed; edited feedback requires a new acknowledgement.
+    const read = authorEyes.some((reaction) => Date.parse(reaction.createdAt) >= Date.parse(r.updatedAt ?? ""));
+    if (read) continue;
+    reviewFeedback.push({
+      reviewId: r.id ?? null,
+      login: r.author.login,
+      url: r.url ?? null,
+      submittedAt: r.submittedAt,
+      updatedAt: r.updatedAt ?? null,
+      ackBeforeEdit: authorEyes.length > 0,
+      points: reading.points,
+      excerpt: reading.excerpt,
+    });
+  }
+  const hasUnaddressedReviewFeedback = reviewFeedback.length > 0;
 
   const checks = extractChecks(pr);
   const failingChecks = checks.filter((c) => c.state === "failure");
@@ -868,6 +883,7 @@ export function mapPr(
     hasUnaddressedChangeRequest,
     hasUnaddressedComments,
     hasUnaddressedReviewFeedback,
+    reviewFeedback,
     hasHumanApproval,
     hasConflicts,
     isBehindBase: pr.mergeStateStatus === "BEHIND",

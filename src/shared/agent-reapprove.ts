@@ -10,6 +10,8 @@
 // commits). Pure and Node-free — the reads are main's
 // (`main/agent/reapprove.ts`), and the policy asks here too.
 
+import { APP_APPROVAL_LINES } from "./approval-feedback";
+
 export interface DismissedApproval {
   /** As GitHub spells it — what a review request names. */
   login: string;
@@ -96,5 +98,6 @@ export function baseMerges(own: readonly string[][], chain: ReadonlySet<string>)
 
 /** The line a re-approval posts above the signature. */
 export function reapprovalBody(oldHead: string): string {
-  return `Re-approved: only the base branch changed since my approval at \`${oldHead.slice(0, 7)}\` — the PR's own changes are the same.`;
+  // The author's dashboard reads it as nothing to act on: one source for both sides.
+  return APP_APPROVAL_LINES.reapproved(oldHead);
 }

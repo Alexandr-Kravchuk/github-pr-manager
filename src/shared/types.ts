@@ -575,6 +575,33 @@ export interface Reviewer {
   reviewState: ReviewerState;
 }
 
+/**
+ * A reviewer's latest approval whose text says more than a plain yes, not yet
+ * marked read (👀) by the PR's author — one of `PullRequest.reviewFeedback`.
+ */
+export interface ReviewFeedback {
+  /** The review's GraphQL node id — what a 👀 reaction goes on; null when the read didn't carry it. */
+  reviewId: string | null;
+  login: string;
+  /** The review on GitHub. */
+  url: string | null;
+  submittedAt: string | null;
+  /** Its last edit — "Mark as read" marks only the version the card showed. */
+  updatedAt: string | null;
+  /** You put 👀 on it before its last edit: that 👀 counts for nothing, and is taken off before a new one. */
+  ackBeforeEdit: boolean;
+  /** The points its format lists (creatio-code-review's findings); empty for prose. */
+  points: FeedbackPoint[];
+  /** The text as GitHub shows it, cut short. */
+  excerpt: string;
+}
+
+export interface FeedbackPoint {
+  /** The severity the item names; "note" when it names none — still a point, never dropped. */
+  severity: "blocker" | "major" | "minor" | "note";
+  text: string;
+}
+
 /** A single status/CI check on the PR's latest commit. */
 export interface CheckItem {
   name: string;
@@ -850,10 +877,18 @@ export interface PullRequest {
    */
   hasUnaddressedComments: boolean;
   /** Human approval body beyond a plain acknowledgement. Conservative intent
-   * check; cleared by author EYES on that review after its last edit, or the
+   * check (`readApproval` in `approval-feedback.ts`: the app's own and
+   * creatio-code-review's approvals are read by their format, other prose is
+   * feedback); cleared by author EYES on that review after its last edit, or the
    * reviewer's later clean approval. Never cleared by a push,
    * author reply, marking seen, re-request or disabling comment tracking. */
   hasUnaddressedReviewFeedback: boolean;
+  /**
+   * The approvals behind `hasUnaddressedReviewFeedback`, one per reviewer —
+   * what the Board's "Approved with feedback" card shows and where "Mark as
+   * read" puts its 👀. Optional: reviews from Upsource and older fixtures have none.
+   */
+  reviewFeedback?: ReviewFeedback[];
   /**
    * At least one non-bot reviewer's latest review is an approval. This is what
    * marks a PR "good to go" — a single human approve is enough, independent of
@@ -1146,6 +1181,13 @@ export interface AgentItem {
    */
   clone?: true;
   /**
+   * A drive on an approval's feedback: the approvals the card showed when you
+   * asked (review id and version). Its rules name only those that still read
+   * the same — feedback that came or changed after your click is not its work.
+   * Run again and a recovered run keep the list.
+   */
+  feedbackShown?: Array<{ reviewId: string | null; updatedAt: string | null }>;
+  /**
    * A drive's result from before the app last started: what it would push
    * and its session going on with your answer are checked against what the
    * app took in memory before the session, which a restart drops — so it can
@@ -1352,10 +1394,14 @@ export type AgentAction =
    * `before`: the queued run it goes in front of; null or absent, the end of the queue.
    * `clone`: you said yes to the agent cloning the PR's repository for it, when
    * it has no checkout and Settings › Agent doesn't let it clone by itself.
+   * `feedback`: on your PR, the run works on the feedback in its approvals too
+   * (the "Approved with feedback" card's button) — never asked by another button.
    */
-  | { type: "enqueue"; prId: string; before?: string | null; clone?: true }
+  | { type: "enqueue"; prId: string; before?: string | null; clone?: true; feedback?: true }
   /** Your approval again, on a PR it already stands on, to answer a review request made after it. */
   | { type: "approveAgain"; prId: string }
+  /** 👀 on the approvals of your PR whose text carries feedback (`PullRequest.reviewFeedback`): you read them. */
+  | { type: "markFeedbackRead"; prId: string }
   /** Your approval of the PR, resting on the agent's review of its head that found nothing blocking (`approvableReview`). */
   | { type: "approve"; runId: string }
   /** Sets a Your-turn card aside until something on its PR changes; `bringBack` puts it back now. */
