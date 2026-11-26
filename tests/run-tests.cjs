@@ -10667,6 +10667,29 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(spawnSync(process.execPath, [hookJs, "review", url], { input: "not json", encoding: "utf8" }).status, 2);
     });
 
+    test("agent guard hook: the same read made again and again — a session waiting by looking — is stopped after a few, per agent", () => {
+      const url = "https://github.com/acme/widgets/pull/1";
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-repeat-"));
+      const guardFile = path.join(runDir, "guard.json");
+      nfsA.writeFileSync(guardFile, JSON.stringify({}));
+      const run = (call, kind = "review") => spawnSync(process.execPath, [hookJs, kind, url, guardFile], { input: JSON.stringify(call), encoding: "utf8" });
+      const poll = { tool_name: "Bash", tool_input: { command: "gh api repos/acme/widgets/issues/1/timeline --paginate --jq length", description: "Check again" } };
+      for (let i = 1; i <= guard.REPEAT_LIMIT; i++) assert.strictEqual(run(poll).status, 0, `look ${i}`);
+      const stopped = run(poll);
+      assert.strictEqual(stopped.status, 2);
+      assert.match(stopped.stderr, /made this very call 3 times already in this run.*end your turn now — its result comes back to you as a message/);
+      // Another agent of the workflow reads the same thing for the first time: not a repeat.
+      assert.strictEqual(run({ ...poll, agent_id: "a35aed0b6b0748234" }).status, 0);
+      // A description of its own doesn't make it another call; another command is.
+      assert.strictEqual(run({ ...poll, tool_input: { ...poll.tool_input, description: "Waiting" } }).status, 2);
+      assert.strictEqual(run({ tool_name: "Bash", tool_input: { command: "gh pr view 1" } }).status, 0);
+      // A drive's `git diff` answers anew after each edit: never counted.
+      assert.strictEqual(guard.repeatKey("drive", "Bash", { command: "gh pr view 1" }, null), null);
+      assert.strictEqual(guard.repeatKey("review", "Bash", { command: "/c/T/bin/pr-review-publish.sh review a/b 1 C:/T/out/r.json" }, null), null, "the wrapper's writes are steps");
+      assert.strictEqual(guard.repeatKey("review", "Glob", { pattern: "*.json", path: "C:/T/out" }, null), guard.repeatKey("review", "Glob", { path: "C:/T/out", pattern: "*.json" }, null), "the same input in another key order");
+      assert.notStrictEqual(guard.repeatKey("review", "Read", { file_path: "C:/wt/a.ts", offset: 1 }, null), guard.repeatKey("review", "Read", { file_path: "C:/wt/a.ts", offset: 200 }, null));
+    });
+
     // The posting scenarios in Shadow — what the tests below were written
     // against. The defaults are On (a fresh install works right away), so a
     // test of Shadow says so here, and one of On sets its mode itself.
@@ -11050,6 +11073,22 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(out.timedOut, true);
     });
 
+    await atest("agent runner: a run's time limit counts awake time — a sleep the clock jumps over adds one step, not its length", async () => {
+      // Each step finds the clock an hour on, as after the computer slept through it.
+      let t = 0;
+      let fired = false;
+      const asleep = runner.awakeDeadline(100, () => (fired = true), { stepMs: 10, now: () => (t += 3_600_000) });
+      await new Promise((r) => setTimeout(r, 35));
+      assert.ok(!fired, "hours of sleep don't use up 100 ms");
+      assert.ok(asleep.awakeMs() <= 80, `at most two steps a step: ${asleep.awakeMs()}`);
+      asleep.stop();
+      // Awake, it expires on time.
+      let done = false;
+      const awake = runner.awakeDeadline(30, () => (done = true), { stepMs: 5 });
+      for (let i = 0; i < 100 && !done; i++) await new Promise((r) => setTimeout(r, 10));
+      assert.ok(done && awake.awakeMs() >= 30);
+    });
+
     test("agent worktrees: the PR's remote is found by URL; the head is fetched by pull ref and checked out detached", () => {
       const cfgText = '[core]\n\tbare = false\n[remote "upstream"]\n\turl = git@github.com:a/b.git\n[remote "origin"]\n\turl = https://github.com/me/b.git\n[branch "main"]\n\tremote = origin\n';
       assert.deepStrictEqual(wt.parseRemotes(cfgText), [
@@ -11321,8 +11360,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       } finally {
         f.agent.stop();
       }
-      // Nothing chosen anywhere: no flag, Claude Code's default — and with Reviewers on Sonnet off, nothing said about them.
-      const g = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, agent: { sonnetReviewers: false } });
+      // Nothing chosen anywhere: no flag, Claude Code's default — and with both Sonnet switches off, nothing said about them.
+      const g = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, agent: { sonnetReviewers: false, sonnetSmallPrs: false } });
       try {
         g.agent.onSnapshot(g.snapshot);
         await until(() => g.agent.getState().items.some((i) => i.state === "needsYou"));
@@ -11333,6 +11372,28 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual([started.data.model, started.data.effort, "reviewerModel" in started.data], ["", "", false]);
       } finally {
         g.agent.stop();
+      }
+      // A small PR (60 lines here): the whole workflow on Sonnet, said in the rules and logged.
+      const h = agentFixture({ script: reviewWithPlan(), captureScript: captureJs });
+      try {
+        h.agent.onSnapshot(h.snapshot);
+        await until(() => h.agent.getState().items.some((i) => i.state === "needsYou"));
+        assert.ok(h.children[0].args[h.children[0].args.indexOf("--append-system-prompt") + 1].includes(ad.SONNET_WORKFLOW_RULE));
+        const started = readLog(h).find((l) => l.kind === "run" && l.event === "started");
+        assert.deepStrictEqual([started.data.workflowModel, started.data.reviewerModel], ["sonnet", "sonnet"]);
+      } finally {
+        h.agent.stop();
+      }
+      // A big PR's review (its brief off): only its reviewers on Sonnet.
+      const k = agentFixture({ pr: reviewPr({ additions: 900 }), script: reviewWithPlan(), captureScript: captureJs, agent: { scenarios: { brief: { mode: "off" } } } });
+      try {
+        k.agent.onSnapshot(k.snapshot);
+        await until(() => k.agent.getState().items.some((i) => i.state === "needsYou"));
+        const rules = k.children[0].args[k.children[0].args.indexOf("--append-system-prompt") + 1];
+        assert.ok(rules.includes(ad.SONNET_REVIEWERS_RULE) && !rules.includes(ad.SONNET_WORKFLOW_RULE));
+        assert.strictEqual("workflowModel" in readLog(k).find((l) => l.kind === "run" && l.event === "started").data, false);
+      } finally {
+        k.agent.stop();
       }
     });
 
@@ -11960,6 +12021,51 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(g.agent.getState().heldUntil, null);
       } finally {
         g.agent.stop();
+      }
+    });
+
+    await atest("agent: a run Claude's limit stopped goes on in its own session once the limit resets — what it did is kept, not paid for again", async () => {
+      let t = Date.parse("2026-11-25T15:50:00Z");
+      const reset = Date.parse("2026-11-25T19:50:00Z");
+      let runs = 0;
+      const f = agentFixture({
+        now: () => new Date(t),
+        script: (c) => {
+          runs++;
+          // The run's worktree, which the session works in.
+          nfsA.mkdirSync(c.cwd, { recursive: true });
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          if (runs === 1) {
+            emit(c, { type: "result", subtype: "success", is_error: true, result: "You've hit your session limit · resets 9:50pm (Europe/Kyiv)", total_cost_usd: 13.5 });
+            setImmediate(() => c.emit("exit", 1));
+          } else {
+            emit(c, { type: "result", subtype: "success", is_error: false, result: "Reviewed." });
+            setImmediate(() => c.emit("exit", 0));
+          }
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f)[0]?.interrupted === true);
+        const [stopped] = only(f);
+        assert.deepStrictEqual([stopped.state, stopped.limitStops, stopped.retryAt], ["needsYou", 1, undefined]);
+        assert.strictEqual(stopped.headline, "Interrupted — Claude's session limit stopped it — it goes on where it stopped once that resets");
+        assert.strictEqual(f.agent.getState().heldUntil, new Date(reset).toISOString(), "the queue waits for the reset");
+        assert.ok(readLog(f).some((l) => l.kind === "run" && l.event === "interrupted" && l.data.costUsd === 13.5), "its spend is logged");
+        // The next poll queues it to go on; the hold keeps it until the reset.
+        f.agent.onSnapshot(f.snapshot);
+        assert.deepStrictEqual([only(f)[0].state, only(f)[0].headline, f.children.length], ["queued", "Queued: going on where it stopped once Claude's limit resets", 1]);
+        t = reset + 1000;
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+        const again = f.children[1];
+        assert.ok(again.args.includes("--resume"), "the same session, with what it did");
+        assert.ok(again.written.includes(agentCore.LIMIT_RESUME_PROMPT.slice(0, 60)), "told to go on, its workflow from its cache");
+        assert.match(again.written, /resumeFromRunId/);
+        await until(() => only(f)[0].state !== "queued" && only(f)[0].state !== "working");
+        assert.deepStrictEqual([only(f).length, only(f)[0].limitStops], [1, undefined], "no second run beside it; a run that ended otherwise clears the count");
+      } finally {
+        f.agent.stop();
       }
     });
 
@@ -13928,7 +14034,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           ['cat "C:/T/prd-agent/r/bin/pr-review-publish.sh"', /that is the app's publish wrapper — run it, don't read it — usage: pr-review-publish\.sh/],
           ['grep -n summary "C:/wt/x.json"', /Instead of grep: search with the Grep tool/],
           ["jq -r .x C:/wt/a.json", /shape gh's JSON with its own --jq/],
-          ["sleep 120", /reports to you by itself when it ends/],
+          ["sleep 120", /don't wait at all — end your turn: a background workflow's result comes back to you as a message/],
           ["cmd /c dir", /run the program itself, as one plain command/],
           ["python -m json.tool x", /no script or program from the PR's repository/],
         ]) bashRefused(command, why);
@@ -14030,6 +14136,15 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           /The publish wrapper \(run it — never with --help, never read it\): \/c\/T\/prd-agent\/r\/bin\/pr-review-publish\.sh review\|comment Acme\/Widgets 12 FILE\.json · reply\|escalate Acme\/Widgets 12 COMMENT-ID FILE\.txt · resolve THREAD-ID; every FILE written under C:\/T\/prd-agent\/r\/out\//,
           /start the review workflow with statusComment: false/,
         ]) assert.match(review, said);
+        // Once the workflow runs, the session waits by ending its turn — not by looking again and again.
+        assert.ok(review.includes(guard.WORKFLOW_WAIT_RULE));
+        assert.match(guard.WORKFLOW_WAIT_RULE, /end your turn at once — no more tool calls, no checking on it \(not on GitHub, not in its files, not in the shell\), and no review of your own beside it/);
+        // A small PR's whole workflow goes to Sonnet; a big one keeps the reviewers-only rule.
+        const small = agentCore.agentRules("review", "on", folder, { repo: "Acme/Widgets", number: 12, sonnetReviewers: true, sonnetWorkflow: true }, "en");
+        const big = agentCore.agentRules("review", "on", folder, { repo: "Acme/Widgets", number: 12, sonnetReviewers: true }, "en");
+        assert.ok(small.includes(ad.SONNET_WORKFLOW_RULE) && !small.includes(ad.SONNET_REVIEWERS_RULE));
+        assert.ok(big.includes(ad.SONNET_REVIEWERS_RULE) && !big.includes(ad.SONNET_WORKFLOW_RULE));
+        assert.ok(!agentCore.agentRules("brief", "on", null, { repo: "Acme/Widgets", number: 12, sonnetWorkflow: true }, "en").includes("model: \"sonnet\""), "a brief runs no workflow");
         // Every command the rules name passes the guard for this PR, and the run's own tools.
         for (const named of [
           "gh pr view 12 --json headRefOid,baseRefOid,commits",
@@ -18887,7 +19002,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const src = nfsA.readFileSync(path.join(__dirname, "../dist/main/main/main.js"), "utf8");
       assert.match(src, /showAgent: \(\) => showAgent\(\)/);
       assert.match(src, /toggleAgentPause: \(\) =>[\s\S]{0,200}"resumeAgent" : "pauseAgent"/);
-      assert.match(src, /agentPushTimer = null;\s*(?:\/\/[^\n]*\n\s*)?updateTrayAgent\(\);\s*if \(agent && mainWindow/, "before the visibility gate");
+      assert.match(src, /agentPushTimer = null;\s*(?:\/\/[^\n]*\n\s*)?updateTrayAgent\(\);\s*updateKeepAwake\(\);\s*if \(agent && mainWindow/, "before the visibility gate — the keep-awake check too: a hidden window is when a run works overnight");
       assert.match(src, /trayController\.setAgent\(s && s\.enabled && s\.trayState \? \{ line: \(0, agent_view_1\.agentTrayLine\)\(s\), paused: s\.paused \} : null\)/);
       assert.match(src, /sendToRenderer\("agent-open-companion", null\)/);
       assert.match(src, /void poller\?\.refresh\(\);\s*(?:\/\/[^\n]*\n\s*)*agent\?\.refresh\(\);/, "saving settings wakes the agent, without waiting for the poll");

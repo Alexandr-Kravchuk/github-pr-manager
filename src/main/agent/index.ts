@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { DEFAULT_AGENT_PROMPTS, languageRule, runModelFor, runsReviewWorkflow, SONNET_REVIEWERS_RULE } from "../../shared/agent-defaults";
+import { DEFAULT_AGENT_PROMPTS, languageRule, runModelFor, runsReviewWorkflow, SONNET_REVIEWERS_RULE, SONNET_WORKFLOW_RULE } from "../../shared/agent-defaults";
 import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, withAgentReview, type AgentJob, type AgentReview, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, disputeSteps, gitBashPath, readPlanLines, shasNotOnPr, summarizePlan, type PublishStep, type PublishSummary } from "../../shared/agent-publish";
 import { describeToolUse, limitResetFromText, MAX_USAGE_HOLD_MS, usageHold, type RunProgress, type UsageHold } from "../../shared/agent-stream";
@@ -148,6 +148,8 @@ export interface Agent {
 const RECENT_MAX = 40;
 /** How many times in a row a run whose process was ended under it goes on by itself. */
 const CUT_RESUMES = 2;
+/** How many times in a row a run Claude's usage limit stopped goes on in its own session; past that it fails as before and is tried anew. */
+const LIMIT_RESUMES = 3;
 
 // The same local day the Board's "Done today" uses.
 const localDay = todayKey;
@@ -250,8 +252,24 @@ export function ghTarget(prUrl: string, repo: string): Record<string, string> {
 
 /** The first message of a session Resume picks up again. */
 export const RESUME_PROMPT = "The app running you closed while you worked and has started you again. Continue where you stopped and finish the task.";
-/** …and of one with a publish wrapper, whose folder the app makes afresh. */
-export const RESUME_PROMPT_WRAPPER = `${RESUME_PROMPT} Whatever you recorded through the publish wrapper before is gone: if you had recorded your review, replies or resolves already, record them again — once.`;
+/** What a resumed session with a publish wrapper is told: the app makes its folder afresh. */
+const WRAPPER_AFRESH = " Whatever you recorded through the publish wrapper before is gone: if you had recorded your review, replies or resolves already, record them again — once.";
+/** …and of one with a publish wrapper. */
+export const RESUME_PROMPT_WRAPPER = `${RESUME_PROMPT}${WRAPPER_AFRESH}`;
+/**
+ * …and of one Claude's usage limit stopped (`limitStops`): its review workflow
+ * goes on from the workflow's own cache — same session, so `resumeFromRunId`
+ * finds the agents that finished — instead of all of them running again.
+ */
+export const LIMIT_RESUME_PROMPT =
+  "Claude's usage limit stopped you mid-task; it has reset, and the app has started you again. Continue where you stopped and finish the task. " +
+  'If your review workflow was running, start it again with the same scriptPath and args plus resumeFromRunId set to its run id — the wf_… at the end of the "Transcript dir" its launch printed — so the agents that had finished come back from its cache instead of running again.';
+
+/** The first message of a session the app picks up again: after a restart, or after Claude's usage limit stopped it. */
+function resumePrompt(item: Pick<AgentItem, "limitStops">, wrapper: boolean): string {
+  if (item.limitStops) return wrapper ? `${LIMIT_RESUME_PROMPT}${WRAPPER_AFRESH}` : LIMIT_RESUME_PROMPT;
+  return wrapper ? RESUME_PROMPT_WRAPPER : RESUME_PROMPT;
+}
 
 /**
  * The rules every agent session gets on top of its prompt — ending with how to
@@ -268,7 +286,9 @@ export function agentRules(
   language: AgentLanguage = "en",
   tools: Pick<ToolRulesRun, "allowedTools" | "workflows"> | null = null,
 ): string {
-  const sonnet = pr?.sonnetReviewers && runsReviewWorkflow(scenario, pr.reasons) ? ` ${SONNET_REVIEWERS_RULE}` : "";
+  // A small PR's whole workflow on Sonnet, else its reviewers when that is on.
+  const workflowRule = pr?.sonnetWorkflow ? SONNET_WORKFLOW_RULE : pr?.sonnetReviewers ? SONNET_REVIEWERS_RULE : null;
+  const sonnet = workflowRule && runsReviewWorkflow(scenario, pr?.reasons) ? ` ${workflowRule}` : "";
   const toolRules = tools
     ? ` ${sessionToolRules(runKindOf(scenario), { ...tools, pr: pr ? { repo: pr.repo, number: pr.number } : null, ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}) })}`
     : "";
@@ -288,6 +308,8 @@ interface RulesPr {
   threadsOnly?: boolean;
   /** Settings › Agent › "Reviewers on Sonnet": a run of the review workflow passes it `reviewerModel: "sonnet"`. */
   sonnetReviewers?: boolean;
+  /** Settings › Agent › "Small PRs: the whole review on Sonnet": the workflow gets `model: "sonnet"` too. */
+  sonnetWorkflow?: boolean;
 }
 
 /**
@@ -771,8 +793,12 @@ export function createAgent(deps: AgentDeps): Agent {
         item.interrupted = undefined;
         item.resumeSession = true;
         item.finishedAt = undefined;
-        item.headline = item.cuts ? "Queued: going on — its process was ended" : "Queued: going on — the app closed while it ran";
-        logRun(item, "resumed", { detail: item.cuts ? `after it was cut short (${item.cuts} in a row)` : "after a restart" });
+        item.headline = item.limitStops
+          ? "Queued: going on where it stopped once Claude's limit resets"
+          : item.cuts
+            ? "Queued: going on — its process was ended"
+            : "Queued: going on — the app closed while it ran";
+        logRun(item, "resumed", { detail: item.limitStops ? `after Claude's usage limit stopped it (${item.limitStops} in a row)` : item.cuts ? `after it was cut short (${item.cuts} in a row)` : "after a restart" });
         continue;
       }
       const pr = snapshot.pullRequests.find((p) => p.id === item.prId);
@@ -1779,11 +1805,15 @@ export function createAgent(deps: AgentDeps): Agent {
     // This kind's own model and effort, else the agent's (Settings › Agent).
     const used = runModelFor(s, kind);
     const sonnetReviewers = s.sonnetReviewers && runsReviewWorkflow(item.scenario, item.reasons);
+    // A PR under the review limit: the whole workflow on Sonnet (`sonnetSmallPrs`).
+    const sonnetWorkflow = s.sonnetSmallPrs && runsReviewWorkflow(item.scenario, item.reasons) && pr !== null && !isBigPr(pr, s);
     // Where Claude Code files what this session spills over (a long tool result, a Workflow's journal, a background task's output).
     const sessionRoots = claudeSessionRoots({ ...launcherEnv(process.env), ...tempEnv });
     // The wrapper's own rule, and Write — which the guard holds to the payload folder.
     // The preflight's node, which the guard holds to the helper's two calls.
     const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(preflight ? ["Bash(node *)"] : [])])];
+    // The guard's count of repeated reads (`countRepeat`) starts over with each run of the item, a resumed one too.
+    fs.rmSync(path.join(runDir, "repeats.json"), { force: true });
     writeGuardFile(guardFile, full ? {
       mode: "full",
       ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),
@@ -1819,7 +1849,8 @@ export function createAgent(deps: AgentDeps): Agent {
         // What this run was started with ("" = Claude Code's default), and the review workflow's reviewers when they were moved to Sonnet.
         model: used.model,
         effort: used.effort,
-        ...(sonnetReviewers ? { reviewerModel: "sonnet" } : {}),
+        ...(sonnetReviewers || sonnetWorkflow ? { reviewerModel: "sonnet" } : {}),
+        ...(sonnetWorkflow ? { workflowModel: "sonnet" } : {}),
         isolation: full ? "full" : "restricted",
         ...(item.reasons ? { reasons: item.reasons } : {}),
         ...(item.scenario === "rereview" ? { rereview: item.threadsOnly ? "threads" : "full" } : {}),
@@ -1853,9 +1884,7 @@ export function createAgent(deps: AgentDeps): Agent {
         prompt: resume
           ? answer
             ? answerMessage(answer, Boolean(folder))
-            : folder
-              ? RESUME_PROMPT_WRAPPER
-              : RESUME_PROMPT
+            : resumePrompt(item, Boolean(folder))
           : item.carry?.length
             ? `${mine.prompt}\n\nA brief of this PR raised these questions for its author — ask the ones that still hold in your review, as comments:\n${item.carry.map((q) => `- ${q}`).join("\n")}`
             : mine.prompt,
@@ -1868,6 +1897,7 @@ export function createAgent(deps: AgentDeps): Agent {
           stack: pr ? stackRules(pr, item.scenario) : null,
           ...(full ? { full: true } : {}),
           ...(sonnetReviewers ? { sonnetReviewers: true } : {}),
+          ...(sonnetWorkflow ? { sonnetWorkflow: true } : {}),
         }, s.language, full ? null : { allowedTools, workflows }),
         allowedTools,
         // Full context: your own plugins load as in your sessions; the skills this run mounted come on top.
@@ -1930,6 +1960,8 @@ export function createAgent(deps: AgentDeps): Agent {
     if (!cut) item.cuts = undefined;
     let publishNow = false;
     let pushNow = false;
+    /** Claude's limit stopped it, and it goes on in its session once the limit resets. */
+    let limitStopped = false;
     // Why the run-end thread check couldn't run, when it couldn't: the log tells it from "nothing held".
     let heldUnchecked: string | null = null;
     // A finished review or brief gets its diagrams before it reaches you: still
@@ -2056,11 +2088,23 @@ export function createAgent(deps: AgentDeps): Agent {
       // `fail` saves, logs and tells; the rest of this function only cleans up.
       if (limit && limit.until > now().getTime()) {
         holdForUsage(limit);
-        fail(limit.limitName ? `Stopped by ${limit.limitName}` : limit.why, error, limit.until);
+        const name = limit.limitName ?? "Claude's usage limit";
+        // A session that can go on, does, once the limit resets: what it did stays,
+        // where a new run would pay for all of it again. Not a drive — its push is
+        // checked against what the app read before the session (`recoverInterrupted`).
+        const dir = item.worktree ?? (item.scenario === "afterMerge" ? path.join(runDir, "cwd") : null);
+        if (item.scenario !== "drive" && item.sessionId && dir && fs.existsSync(dir) && (item.limitStops ?? 0) < LIMIT_RESUMES) {
+          limitStopped = true;
+          item.limitStops = (item.limitStops ?? 0) + 1;
+          markInterrupted(item, stamp(), `${name} stopped it — it goes on where it stopped once that resets`);
+        } else {
+          fail(limit.limitName ? `Stopped by ${limit.limitName}` : limit.why, error, limit.until);
+        }
       } else {
         fail("The run failed", error);
       }
     }
+    if (!limitStopped) item.limitStops = undefined;
     // Nothing to post, nothing asked, nothing major found: no decision is left.
     // Its diagrams go out with the review, as one comment of their own.
     if (item.plan && postsDiagrams(item, s) && item.headline.startsWith("Would post: ")) {

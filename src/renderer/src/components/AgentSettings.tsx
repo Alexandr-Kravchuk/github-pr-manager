@@ -148,6 +148,12 @@ function GeneralSection({ agent, setAgent, inputCls }: SectionProps) {
           title="Clone a repository it has no checkout of"
           hint="A PR whose repository isn't in your projects folder gets a lightweight clone of the agent's own (no file contents until a run needs them), in the app's data folder. Off: such a PR waits until you set its folder in Settings › Claude, and its card asks before the agent clones that one repository (Clone and review)."
         />
+        <Check
+          checked={agent.keepAwake}
+          onChange={(keepAwake) => setAgent((a) => ({ ...a, keepAwake }))}
+          title="Keep the computer awake while a run works"
+          hint="On mains power, the app asks the system not to sleep until the agent's runs end. A run's time limit counts only the time the computer is awake either way, so a run the system put to sleep goes on after the wake instead of being stopped."
+        />
         <div>
           <span className="block text-xs font-medium text-fg-muted">Repositories</span>
           <div className="mt-1.5 flex flex-wrap gap-4 text-sm text-fg-secondary">
@@ -489,6 +495,12 @@ function RunModels({ agent, setAgent, inputCls }: SectionProps) {
         onChange={(sonnetReviewers) => setAgent((a) => ({ ...a, sonnetReviewers }))}
         title="Reviewers on Sonnet"
         hint="A review, a re-review and a self-review ask the review skill's workflow to run its reviewer subagents on Sonnet (its reviewerModel argument); otherwise each of them, up to a dozen per review, runs on the session's model. The session that leads the review keeps the model chosen above."
+      />
+      <Check
+        checked={agent.sonnetSmallPrs}
+        onChange={(sonnetSmallPrs) => setAgent((a) => ({ ...a, sonnetSmallPrs }))}
+        title="Small PRs: the whole review on Sonnet"
+        hint="A PR under the review limit (Scenarios › Review) runs every stage of the review skill's workflow on Sonnet — gathering the context, the reviewers, the summary and the publishing (its model argument). A big PR keeps the reviewers-only rule above."
       />
     </div>
   );

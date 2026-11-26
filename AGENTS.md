@@ -233,7 +233,14 @@ Three layers:
   `reviewerModel: "sonnet"` and then runs each reviewer as the plugin's
   `<reviewer>-sonnet` agent, pinned in its frontmatter, since the Workflow
   runtime's `agent()` has no model option; a host env with
-  `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` overrides that pin), `agent-stream.ts` (a run's
+  `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` overrides that pin). "Small PRs: the
+  whole review on Sonnet" (`sonnetSmallPrs`, on by default) replaces that
+  rule with `SONNET_WORKFLOW_RULE` for a PR under the review limit
+  (`isBigPr` false): the workflow's `model: "sonnet"` moves its context,
+  synthesis and publish stages to Sonnet too (its `review-agent-sonnet`) —
+  on 2026-11-25 a 54-line PR's review cost ~$8 on Opus, a dozen agents with
+  the context stage alone at ~$2; `run/started` logs `workflowModel`),
+  `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (where a
   PR stands — `boardStage`: the column is whose move it is, the agent's
@@ -896,9 +903,19 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   reading wins when there is one. Only that error result is read, never the
   model's words: a PR can make a session write the line, and a hold stops
   every run — so the line must be the whole text, its year this one or the
-  next, and no hold lasts past `MAX_USAGE_HOLD_MS` (8 days). Such a run is "Stopped by Claude's session
-  limit" with its `retryAt` at the reset, not `RETRY_AFTER_MS` on, which only
-  ran it into the same wall. The hold is `usageHold` in `state.json`, not
+  next, and no hold lasts past `MAX_USAGE_HOLD_MS` (8 days). Such a run goes
+  on in its own session once the limit resets: it is marked interrupted
+  (`limitStops`, "… stopped it — it goes on where it stopped once that
+  resets"), keeps its worktree, `recoverInterrupted` queues it with
+  `resumeSession`, the hold keeps it waiting, and it resumes with
+  `LIMIT_RESUME_PROMPT`, which also tells it to start its review workflow
+  again with `resumeFromRunId` (the `wf_…` its launch printed under
+  "Transcript dir") so the agents that finished come from the workflow's own
+  cache — starting over threw away ~$87 of work on 2026-11-25. Not a drive
+  (its push is checked against what the app read before the session), and
+  only `LIMIT_RESUMES` times in a row; otherwise, or with its folder gone, it
+  is "Stopped by Claude's session limit" with its `retryAt` at the reset,
+  not `RETRY_AFTER_MS` on, which only ran it into the same wall. The hold is `usageHold` in `state.json`, not
   memory — a restart used to start the queue straight into the limit — and
   holds every run, asked or not; a cap hold keeps the share it was set at
   (`usage`) and lets go once the cap is raised past it. `limits.costPerDay`
@@ -1097,6 +1114,38 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   them, and the tests assert each hinted call stays refused — add a hint
   where the refusal is, never an allow. The rules ride on every step of
   every run: keep them short.
+- **A session waits for its workflow by ending its turn, never by looking.**
+  `claude -p` stays alive for background workflows and hands their result
+  back as a new turn, yet sessions checked on theirs — the PR's timeline,
+  a Glob of the payload folder — up to 98 times in one run, each look
+  re-reading the whole context: on 2026-11-25 such waiting was 1,006 calls,
+  ~23% of what the reviews cost, and one review spent $18 waiting on a $11
+  workflow. `WORKFLOW_WAIT_RULE` (in `sessionToolRules`) says to end the turn
+  once the workflow is launched, with no review of its own beside it, and
+  that nothing the wrapper records shows on GitHub before the session ends.
+  The guard backs it: in a read-only run, the same call by the same agent —
+  the file tools and `gh`/`twg` reads, keyed by `repeatKey` with the hook
+  input's `agent_id` (absent for the session itself; a workflow's agents are
+  subagents with ids of their own, so its reviewers each reading the diff is
+  no repeat) — is refused past `REPEAT_LIMIT` (3), with `repeatRefusal`
+  telling it to end its turn. The count is `repeats.json` beside the guard
+  file (`countRepeat` in `main/agent/hook.ts`), started over with each run;
+  best effort, it only ever refuses. Not in a drive, where the same
+  `git diff` rightly answers anew after an edit, and never the wrapper's
+  writes or the preflight's node.
+- **The computer's sleep doesn't end a run.** On 2026-11-26 six runs started
+  in a short wake from Modern Standby, froze with the system, and were all
+  "Stopped after 120 min" at the next wake — two hours of sleep and a few
+  minutes of work, their reviews thrown away. A run's time limit is an
+  `awakeDeadline` (`main/agent/runner.ts`): a step every 30 s counts at most
+  two steps, so a frozen stretch adds one step, not its length. And while a
+  run works on mains power, `main.ts` holds a `powerSaveBlocker`
+  (`prevent-app-suspension`; Settings › Agent › "Keep the computer awake
+  while a run works", `keepAwake`, on by default), released once no run
+  works or on battery; settings are read only when that starts. Modern
+  Standby may still sleep on a lid or power button — the awake deadline is
+  what keeps such a run. `main.log` records each system suspend (with the
+  runs working) and resume.
 - **Except a drive on your own PR, with full context** (Settings › Agent ›
   "Your PRs: full context", `permissions.fullContextDrive`, on by default).
   Its diff and comments are yours and your reviewers', so it runs with your

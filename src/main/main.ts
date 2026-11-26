@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
+import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, powerSaveBlocker, session, shell } from "electron";
 
 import { agentNoticeTitle, agentTakesToast, agentTrayLine } from "../shared/agent-view";
 import { ConfigError, defaultSettings, getGhStatus, pickAppId, resolveGhToken, toHostConfigs, toPublicConfig } from "../shared/config";
@@ -156,10 +156,41 @@ function scheduleAgentPush(): void {
     agentPushTimer = null;
     // The tray shows the agent hidden or not — a hidden window is when it matters.
     updateTrayAgent();
+    updateKeepAwake();
     if (agent && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
       sendToRenderer("agent-state", agent.getState());
     }
   }, 250);
+}
+/** The `powerSaveBlocker` id while a run works on mains power (Settings › Agent › keepAwake), else null. */
+let keepAwakeId: number | null = null;
+
+/**
+ * Asks the OS not to sleep while an agent run works — on 2026-11-26 six runs
+ * started in a short wake from Modern Standby froze with the system and lost
+ * their reviews. Only on mains power, and only while the setting is on;
+ * released as soon as no run works. Settings are read only when that changes.
+ */
+function updateKeepAwake(): void {
+  const working = Boolean(agent && agent.getState().running.length > 0);
+  let want = false;
+  if (working && keepAwakeId === null) {
+    try {
+      want = loadSettings().agent.keepAwake && !powerMonitor.isOnBatteryPower();
+    } catch {
+      want = false;
+    }
+  } else if (working) {
+    want = !powerMonitor.isOnBatteryPower();
+  }
+  if (want && keepAwakeId === null) {
+    keepAwakeId = powerSaveBlocker.start("prevent-app-suspension");
+    diag("agent: keeping the computer awake while a run works");
+  } else if (!want && keepAwakeId !== null) {
+    powerSaveBlocker.stop(keepAwakeId);
+    keepAwakeId = null;
+    diag("agent: the computer may sleep again");
+  }
 }
 let systemSuspended = false;
 
@@ -1343,8 +1374,14 @@ function startApp(): void {
   // the user sees on return is current rather than stale.
   powerMonitor.on("suspend", () => {
     systemSuspended = true;
+    // A run's time limit skips the sleep (`awakeDeadline`); the line says when it happened.
+    diag(`system suspend (agent runs working: ${agent?.getState().running.length ?? 0})`);
   });
+  // Unplugged: the computer may sleep again; plugged in, a working run keeps it awake.
+  powerMonitor.on("on-battery", () => updateKeepAwake());
+  powerMonitor.on("on-ac", () => updateKeepAwake());
   powerMonitor.on("resume", () => {
+    diag("system resume");
     systemSuspended = false;
     void poller?.wake();
   });

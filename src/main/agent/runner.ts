@@ -310,6 +310,40 @@ export function cutShort(outcome: Pick<RunOutcome, "progress" | "exitCode" | "si
   return null;
 }
 
+/**
+ * A deadline counted in the time the computer was awake. A plain timer counts
+ * sleep too: on 2026-11-26 six runs started in a short wake from Modern
+ * Standby at 04:50, froze with the system, and were all stopped "after 120
+ * min" the moment it woke at 06:49 — two hours of sleep and a few minutes of
+ * work, their reviews thrown away. Here a step checks the clock every
+ * `stepMs` and counts at most twice that per step, so a frozen stretch adds
+ * one step, not its length.
+ */
+export function awakeDeadline(ms: number, onExpire: () => void, opts: { stepMs?: number; now?: () => number } = {}): { stop(): void; awakeMs(): number } {
+  const now = opts.now ?? (() => Date.now());
+  const step = Math.max(1, Math.min(opts.stepMs ?? 30_000, Math.ceil(ms / 4)));
+  let awake = 0;
+  let last = now();
+  let done = false;
+  const timer = setInterval(() => {
+    const t = now();
+    awake += Math.min(Math.max(0, t - last), 2 * step);
+    last = t;
+    if (awake >= ms && !done) {
+      done = true;
+      clearInterval(timer);
+      onExpire();
+    }
+  }, step);
+  return {
+    stop: () => {
+      done = true;
+      clearInterval(timer);
+    },
+    awakeMs: () => awake,
+  };
+}
+
 export interface RunHandle {
   progress(): RunProgress;
   hint(text: string): void;
@@ -382,15 +416,16 @@ export function startRun(spec: RunSpec, onProgress: (p: RunProgress) => void, sp
   });
 
   // Not unref'd: the time limit is a real deadline, and while a run is alive
-  // there is a process to wait for anyway.
-  const timer = setTimeout(() => {
+  // there is a process to wait for anyway. Counted in awake time only: a run
+  // the computer's sleep froze goes on after the wake, not stopped by it.
+  const timer = awakeDeadline(spec.timeoutMs, () => {
     timedOut = true;
     child.kill();
-  }, spec.timeoutMs);
+  });
 
   const done = new Promise<RunOutcome>((resolve) => {
     const finish = (exitCode: number | null, signal: NodeJS.Signals | null = null) => {
-      clearTimeout(timer);
+      timer.stop();
       stdinOpen = false;
       resolve({ progress, exitCode, signal, timedOut, stopped, stderr });
     };

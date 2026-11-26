@@ -196,6 +196,16 @@ export const SONNET_REVIEWERS_RULE =
   "If the workflow takes no such argument, go on without it.";
 
 /**
+ * The session rule behind `sonnetSmallPrs`: the workflow's `model` argument
+ * moves every stage to Sonnet (its `review-agent-sonnet` and
+ * `<reviewer>-sonnet` agents). On 2026-11-25 a 54-line PR's review cost about
+ * $8 on Opus, a dozen agents with the context stage alone at ~$2.
+ */
+export const SONNET_WORKFLOW_RULE =
+  'When you start the review skill\'s workflow, pass model: "sonnet" and reviewerModel: "sonnet" in its args too, with the others: this PR is small, so every stage of the workflow runs on Sonnet. ' +
+  "If the workflow takes no such argument, go on without it.";
+
+/**
  * Bounds of every number the agent takes. Out-of-range values are clamped by
  * the validator and flagged by the Settings field, so the two can't disagree.
  */
@@ -230,6 +240,8 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   effort: "",
   runModels: DEFAULT_AGENT_RUN_MODELS,
   sonnetReviewers: true,
+  sonnetSmallPrs: true,
+  keepAwake: true,
   language: "en",
   worktreeDir: "",
   removeWorktree: true,
