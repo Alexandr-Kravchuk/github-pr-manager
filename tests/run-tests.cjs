@@ -9112,7 +9112,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(ids("squash"), ["agentScenarios"]);
       assert.deepStrictEqual(ids("tray icon"), ["agentCompanion"]);
       assert.deepStrictEqual(ids("signature"), ["agentPolicy"]);
-      assert.deepStrictEqual(ids("triage"), ["claude"], "the agent's prompts are edited with the Claude button's");
+      assert.deepStrictEqual(ids("agent prompts"), ["claude"], "the agent's prompts are edited with the Claude button's");
+      assert.deepStrictEqual(ids("triage"), [], "the agent writes no briefs: their prompt is gone from Settings");
       assert.strictEqual(ss.toSettingsTab("agent"), "agent");
     });
 
@@ -10805,6 +10806,144 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.notStrictEqual(guard.repeatKey("review", "Read", { file_path: "C:/wt/a.ts", offset: 1 }, null), guard.repeatKey("review", "Read", { file_path: "C:/wt/a.ts", offset: 200 }, null));
     });
 
+    test("agent guard: a review's own session only orchestrates — no code of the PR, no search, no agents, no gh or twg reads; its own part goes on to the usual checks", () => {
+      const run = { workDir: "C:\\wt", readDirs: ["C:\\wt", "C:\\T\\out", "C:\\plugins\\cd"], outDir: "C:\\T\\out", wrapperPath: "C:/T/bin/pr-review-publish.sh", orchestrator: true };
+      const o = (tool, input) => guard.checkOrchestratorUse(tool, input, run);
+      for (const [tool, input] of [
+        ["Agent", { prompt: "Review the diff" }],
+        ["Grep", { pattern: "readWorklog", path: "C:\\wt" }],
+        ["Glob", { pattern: "*review*.json", path: "C:/T/out" }],
+        ["Read", { file_path: "C:\\wt\\src\\a.ts" }],
+        ["Read", { file_path: "src/a.ts" }],
+        ["Bash", { command: "gh pr diff 12" }],
+        ["Bash", { command: "gh api repos/acme/widgets/pulls/12/comments --paginate" }],
+        ["Bash", { command: "twg jira workitem get ENG-1 -o json" }],
+        ["Bash", { command: "ls C:/T/out" }],
+      ]) {
+        const d = o(tool, input);
+        assert.ok(d && d.allow === false, `${tool} ${JSON.stringify(input)}`);
+        assert.match(d.reason, /only orchestrate/);
+      }
+      for (const [tool, input] of [
+        ["Read", { file_path: "C:\\T\\out\\review-12.json" }],
+        ["Read", { file_path: "C:/plugins/cd/skills/creatio-code-review/SKILL.md" }],
+        ["Bash", { command: "/c/T/bin/pr-review-publish.sh resolve T_1" }],
+        ["Bash", { command: "gh api user --jq .login" }],
+        ["Bash", { command: "gh api user" }],
+        ["Workflow", { scriptPath: "C:/plugins/cd/skills/creatio-code-review/x.workflow.js" }],
+        ["Skill", { skill: "creatio-code-review" }],
+        ["Write", { file_path: "C:\\T\\out\\reply.txt" }],
+        ["ToolSearch", { query: "select:TaskCreate" }],
+      ]) {
+        assert.strictEqual(o(tool, input), null, `${tool} ${JSON.stringify(input)} goes on to the usual checks`);
+      }
+      assert.strictEqual(guard.checkOrchestratorUse("Bash", { command: "gh api user -q .login --paginate" }, run).allow, false, "only the login, nothing more");
+    });
+
+    test("agent guard: a workflow the session launched in this very turn runs until its notification comes as a message — a failed launch, a later turn or an agent's own call doesn't count", () => {
+      const line = (o) => JSON.stringify(o);
+      const call = (id, side = false) => line({ type: "assistant", isSidechain: side, message: { content: [{ type: "tool_use", id, name: "Workflow", input: { scriptPath: "x" } }] } });
+      const result = (id, promptId, isError = false, side = false) =>
+        line({ type: "user", isSidechain: side, promptId, message: { content: [{ type: "tool_result", tool_use_id: id, is_error: isError, content: "Workflow launched in background. Task ID: w1" }] } });
+      const note = (id, promptId) =>
+        line({ type: "user", isSidechain: false, promptId, origin: { kind: "task-notification" }, message: { content: `<task-notification>\n<task-id>w1</task-id>\n<tool-use-id>${id}</tool-use-id>\n</task-notification>` } });
+      const enqueued = (id) => line({ type: "queue-operation", operation: "enqueue", content: `<task-notification>\n<tool-use-id>${id}</tool-use-id>\n</task-notification>` });
+      const t = (...lines) => lines.join("\n");
+      const w = guard.workflowLaunchedThisTurn;
+      assert.strictEqual(w(t(call("toolu_1"), result("toolu_1", "P1")), "P1"), true, "launched this turn");
+      assert.strictEqual(w(t(call("toolu_1"), result("toolu_1", "P1"), enqueued("toolu_1")), "P1"), true, "a result queued for the next turn isn't the session's yet");
+      assert.strictEqual(w(t(call("toolu_1"), result("toolu_1", "P1"), note("toolu_1", "P2")), "P2"), false, "its result came, as the next turn");
+      assert.strictEqual(w(t(call("toolu_1"), result("toolu_1", "P1"), note("toolu_1", "P2")), "P1"), false, "reported is reported");
+      assert.strictEqual(w(t(call("toolu_1"), result("toolu_1", "P1")), "P3"), false, "a later turn — a resume after a restart or the limit — may start it again");
+      assert.strictEqual(w(t(call("toolu_1"), result("toolu_1", "P1", true)), "P1"), false, "a launch that failed or was refused may be tried again");
+      assert.strictEqual(w(t(call("toolu_1", true), result("toolu_1", "P1", false, true)), "P1"), false, "an agent's own Workflow call isn't the session's");
+      assert.strictEqual(w(t("not json", call("toolu_1"), "{", result("toolu_1", "P1")), "P1"), true, "a broken line is skipped");
+      assert.strictEqual(w(t(call("toolu_1"), result("toolu_1", "P1")), ""), false, "no prompt id: nothing to tell");
+      assert.strictEqual(w("", "P1"), false);
+    });
+
+    test("agent guard hook: the orchestrating session is refused every call while its workflow runs, and the PR's code before and after — the workflow's agents are not", () => {
+      const url = "https://github.com/acme/widgets/pull/1";
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-orch-"));
+      const work = path.join(runDir, "wt");
+      const out = path.join(runDir, "out");
+      nfsA.mkdirSync(path.join(work, "src"), { recursive: true });
+      nfsA.mkdirSync(out, { recursive: true });
+      nfsA.writeFileSync(path.join(work, "src", "a.ts"), "x");
+      nfsA.writeFileSync(path.join(out, "review.json"), "{}");
+      const sessionId = "11111111-2222-3333-4444-555555555555";
+      const transcript = path.join(runDir, `${sessionId}.jsonl`);
+      const guardFile = path.join(runDir, "guard.json");
+      const writeGuard = (over = {}) => nfsA.writeFileSync(guardFile, JSON.stringify({ workDir: work, readDirs: [work, out], sessionId, orchestrator: true, ...over }));
+      writeGuard();
+      const run = (call) => spawnSync(process.execPath, [hookJs, "review", url, guardFile], { input: JSON.stringify({ transcript_path: transcript, prompt_id: "P1", ...call }), encoding: "utf8" });
+      const readCode = { tool_name: "Read", tool_input: { file_path: path.join(work, "src", "a.ts") } };
+      const readOut = { tool_name: "Read", tool_input: { file_path: path.join(out, "review.json") } };
+      // Before the launch: its own part only.
+      nfsA.writeFileSync(transcript, "");
+      assert.strictEqual(run(readOut).status, 0);
+      const code = run(readCode);
+      assert.strictEqual(code.status, 2);
+      assert.match(code.stderr, /only orchestrate/);
+      assert.strictEqual(run({ ...readCode, agent_id: "a7fd6ca7ccd1c514f" }).status, 0, "a workflow agent reads the PR's code");
+      // Launched in this turn: nothing at all from the session; the workflow's agents go on as usual.
+      nfsA.writeFileSync(
+        transcript,
+        [
+          JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_9", name: "Workflow", input: {} }] } }),
+          JSON.stringify({ type: "user", promptId: "P1", message: { content: [{ type: "tool_result", tool_use_id: "toolu_9", content: "Workflow launched in background." }] } }),
+        ].join("\n"),
+      );
+      const waiting = run(readOut);
+      assert.strictEqual(waiting.status, 2);
+      assert.match(waiting.stderr, /End your turn now, with no more tool calls/);
+      assert.strictEqual(run({ tool_name: "TaskUpdate", tool_input: {} }).status, 2, "no call at all");
+      assert.strictEqual(run({ ...readCode, agent_id: "a7fd6ca7ccd1c514f" }).status, 0);
+      // Its result is the next turn's message: the session reads it then.
+      assert.strictEqual(run({ ...readOut, prompt_id: "P2" }).status, 0);
+      // A transcript that isn't the run's own session file is not read: nothing is held by it.
+      assert.strictEqual(run({ ...readOut, transcript_path: path.join(runDir, "other.jsonl") }).status, 0);
+      // Not an orchestrator: no such hold.
+      writeGuard({ orchestrator: false });
+      assert.strictEqual(run(readCode).status, 0);
+      assert.strictEqual(run(readOut).status, 0);
+      // A malformed yes is a guard file the app didn't write: no access at all.
+      writeGuard({ orchestrator: "yes" });
+      assert.strictEqual(run({ ...readOut, prompt_id: "P2" }).status, 2);
+      assert.strictEqual(hookMod.readGuardFile(guardFile), null);
+    });
+
+    test("agent rules: a review whose skill has a workflow only orchestrates it — the whole call spelled out, then the turn ends; no task list, no tool rules of a reviewer", () => {
+      const folder = { wrapperPath: "C:\\T\\bin\\pr-review-publish.sh", outDir: "C:\\T\\out" };
+      const item = { url: "https://github.com/acme/widgets/pull/12", scenario: "review" };
+      const args = agentCore.reviewWorkflowArgs(item, folder, { sonnetReviewers: true, sonnetWorkflow: false });
+      assert.deepStrictEqual(args, { pr: item.url, dryRun: false, publishCommand: "/c/T/bin/pr-review-publish.sh", statusComment: false, reviewerModel: "sonnet" });
+      assert.deepStrictEqual(agentCore.reviewWorkflowArgs({ ...item, scenario: "rereview", threadsOnly: true }, null, { sonnetReviewers: false, sonnetWorkflow: true }), {
+        pr: item.url,
+        dryRun: true,
+        rereview: "threads-only",
+        model: "sonnet",
+        reviewerModel: "sonnet",
+      });
+      const workflow = { scriptPath: "C:\\plugins\\cd\\skills\\creatio-code-review\\creatio-code-review-workflow.workflow.js", args };
+      const r = agentCore.agentRules("review", "shadow", folder, { repo: "acme/widgets", number: 12, workflow, sonnetReviewers: true }, "en", { allowedTools: ad.DEFAULT_AGENT_TOOLS.review, workflows: [workflow.scriptPath] });
+      assert.ok(r.includes(`Workflow({ scriptPath: "C:/plugins/cd/skills/creatio-code-review/creatio-code-review-workflow.workflow.js", args: ${JSON.stringify(args)} })`), r);
+      assert.match(r, /you only orchestrate/);
+      assert.match(r, /end your turn at once/i);
+      assert.match(r, /prd-result/);
+      assert.match(r, /No task list/);
+      assert.doesNotMatch(r, /First write your plan as a task list|Bash runs one plain command/, "none of a reviewing session's own rules");
+      assert.ok(!r.includes(ad.SONNET_REVIEWERS_RULE), "the models are in the args");
+      const rr = agentCore.agentRules("rereview", "on", folder, { repo: "acme/widgets", number: 12, workflow }, "en", null);
+      assert.match(rr, /escalate acme\/widgets 12/);
+      assert.match(rr, /C:\/T\/out\//);
+      assert.match(rr, /resolved and escalated/);
+      // A dry run without a wrapper: nothing about publishing or threads of its own.
+      assert.match(agentCore.agentRules("review", "shadow", null, { repo: "acme/widgets", number: 12, workflow }, "en"), /This is a dry run: nothing is posted/);
+      // Without a workflow: the rules as before.
+      assert.match(agentCore.agentRules("review", "shadow", folder, { repo: "acme/widgets", number: 12 }, "en"), /First write your plan as a task list/);
+    });
+
     // The posting scenarios in Shadow — what the tests below were written
     // against. The defaults are On (a fresh install works right away), so a
     // test of Shadow says so here, and one of On sets its mode itself.
@@ -10902,25 +11041,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.notStrictEqual(policy.jobKey({ id: "PR_R", headOid: "bbb222" }, "review"), r.jobs[0].key, "a new head is a new key");
     });
 
-    test("agent policy: over the limit is a brief first — it never posts — and then the review, on its own", () => {
-      const r = policy.planJobs([reviewPr({ additions: 900 }), reviewPr({ id: "PR_F", changedFiles: 40 })], agentOn(), noSessions);
-      assert.deepStrictEqual(r.jobs.map((j) => [j.scenario, j.mode]), [["brief", "on"], ["brief", "on"]]);
-      // The brief of this head is written: the review follows — no click in between.
-      const briefed = { ...noSessions, briefDone: (pr) => pr.id === "PR_R" };
-      const next = policy.planJobs([reviewPr({ additions: 900 }), reviewPr({ id: "PR_F", changedFiles: 40 })], agentOn(), briefed);
-      assert.deepStrictEqual(next.jobs.map((j) => [j.prId, j.scenario, j.mode, j.key]), [["PR_R", "review", "shadow", "PR_R|review|aaa111"], ["PR_F", "brief", "on", "PR_F|brief|aaa111"]]);
-      assert.strictEqual(policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { review: { mode: "on" } } }), briefed).jobs[0].mode, "on", "the review in its own mode");
-      // Briefs off: a big PR goes straight to the review.
-      const noBrief = policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { brief: { mode: "off" } } }), noSessions);
-      assert.deepStrictEqual(noBrief.jobs.map((j) => j.scenario), ["review"]);
-      // Reviews off: the brief is all a big PR gets.
-      const reviewsOff = agentOn({ scenarios: { review: { mode: "off" } } });
-      assert.deepStrictEqual(policy.planJobs([reviewPr({ additions: 900 })], reviewsOff, noSessions).jobs.map((j) => j.scenario), ["brief"]);
-      const done = policy.planJobs([reviewPr({ additions: 900 })], reviewsOff, briefed);
-      assert.deepStrictEqual(done.jobs, []);
-      assert.strictEqual(done.idle.get("PR_R"), "Reviews are off — a big PR gets its brief only");
-      const both = policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { review: { mode: "off" }, brief: { mode: "off" } } }), noSessions);
-      assert.deepStrictEqual([both.jobs, both.idle.get("PR_R")], [[], "Reviews are off"]);
+    test("agent policy: over the limit is reviewed like any PR — the agent writes no briefs, whatever the saved brief setting says", () => {
+      const big = [reviewPr({ additions: 900 }), reviewPr({ id: "PR_F", changedFiles: 40 })];
+      for (const brief of ["on", "off"]) {
+        const r = policy.planJobs(big, agentOn({ scenarios: { brief: { mode: brief } } }), noSessions);
+        assert.deepStrictEqual(r.jobs.map((j) => [j.prId, j.scenario, j.mode, j.key]), [["PR_R", "review", "shadow", "PR_R|review|aaa111"], ["PR_F", "review", "shadow", "PR_F|review|aaa111"]], `brief ${brief}`);
+      }
+      assert.strictEqual(policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { review: { mode: "on" } } }), noSessions).jobs[0].mode, "on", "the review in its own mode");
+      // Reviews off: nothing at all, a brief neither.
+      const off = policy.planJobs([reviewPr({ additions: 900 })], agentOn({ scenarios: { review: { mode: "off" } } }), noSessions);
+      assert.deepStrictEqual([off.jobs, off.idle.get("PR_R")], [[], "Reviews are off"]);
     });
 
     test("agent policy: team requests, drafts, ignored, reviewed, your own session and other repos are left alone", () => {
@@ -11589,8 +11719,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       } finally {
         h.agent.stop();
       }
-      // A big PR's review (its brief off): only its reviewers on Sonnet.
-      const k = agentFixture({ pr: reviewPr({ additions: 900 }), script: reviewWithPlan(), captureScript: captureJs, agent: { scenarios: { brief: { mode: "off" } } } });
+      // A big PR's review: only its reviewers on Sonnet.
+      const k = agentFixture({ pr: reviewPr({ additions: 900 }), script: reviewWithPlan(), captureScript: captureJs });
       try {
         k.agent.onSnapshot(k.snapshot);
         await until(() => k.agent.getState().items.some((i) => i.state === "needsYou"));
@@ -12136,17 +12266,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       } finally {
         f.agent.stop();
       }
-      // A brief that asked you something, going on with your answer: your answer would go with a stop.
-      const asks = "Prose.\n\n```prd-result\n" + JSON.stringify({ summary: "A decision for you.", asks: [{ question: "Keep the old API?", options: ["Yes", "No"] }], findings: [] }) + "\n```";
+      // A review waiting for you, going on with your answer: your answer would go with a stop.
       let runs = 0;
-      const g = agentFixture({ pr: reviewPr({ additions: 900 }), agent: { scenarios: { review: { mode: "off" } } }, script: (c) => (++runs === 1 ? succeed(asks)(c) : keepWorking(c)), tickMs: 20 });
+      const plan = reviewWithPlan();
+      const g = agentFixture({ captureScript: captureJs, script: (c) => (++runs === 1 ? plan(c) : keepWorking(c)), tickMs: 20 });
       try {
         g.agent.onSnapshot(g.snapshot);
         await until(() => only(g)[0]?.state === "needsYou");
-        const brief = only(g)[0];
-        assert.strictEqual(brief.scenario, "brief");
-        nfsA.mkdirSync(brief.worktree, { recursive: true });
-        assert.deepStrictEqual(await g.agent.act({ type: "answer", runId: brief.runId, text: "Yes" }), { ok: true });
+        const review = only(g)[0];
+        assert.strictEqual(review.scenario, "review");
+        nfsA.mkdirSync(review.worktree, { recursive: true });
+        assert.deepStrictEqual(await g.agent.act({ type: "answer", runId: review.runId, text: "Yes" }), { ok: true });
         await until(() => g.children.length === 2 && g.agent.getState().running.length === 1);
         g.snapshot.pullRequests[0] = { ...g.snapshot.pullRequests[0], headOid: "bbb222" };
         await new Promise((r) => setTimeout(r, 150));
@@ -12705,11 +12835,24 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
-    await atest("agent act: Review anyway turns a brief no review followed (reviews off) into a review; a review can't be turned again", async () => {
-      const f = agentFixture({ pr: reviewPr({ additions: 1200 }), script: succeed("Problem: … Decisions for you: …"), agent: { scenarios: { review: { mode: "off" } } } });
+    await atest("agent act: Review anyway turns a brief an older release left (no review followed) into a review; a review can't be turned again", async () => {
+      // The agent writes no briefs now: this one is an older release's, in state.json.
+      const e = agentFixture({ pr: reviewPr({ additions: 1200 }), script: succeed("Problem: … Decisions for you: …") });
+      try {
+        e.agent.onSnapshot(e.snapshot);
+        await until(() => only(e).some((i) => i.state === "done"));
+      } finally {
+        e.agent.stop();
+      }
+      const stateFile = path.join(e.dir, "agent", "state.json");
+      const state = JSON.parse(nfsA.readFileSync(stateFile, "utf8"));
+      Object.assign(state.items[0], { scenario: "brief", key: state.items[0].key.replace("|review|", "|brief|"), state: "needsYou", headline: "Brief ready" });
+      state.ledger = {};
+      nfsA.writeFileSync(stateFile, JSON.stringify(state));
+      const f = agentFixture({ home: e.dir, pr: reviewPr({ additions: 1200 }), script: succeed("Problem: … Decisions for you: …"), agent: { scenarios: { review: { mode: "off" } } } });
       try {
         f.agent.onSnapshot(f.snapshot);
-        await until(() => only(f).some((i) => i.state === "needsYou"));
+        assert.strictEqual(f.children.length, 0, "reviews off: nothing starts on its own, a brief neither");
         const brief = only(f)[0];
         assert.strictEqual(brief.scenario, "brief");
         assert.strictEqual(actionLabel(brief), "Draft a review");
@@ -12718,9 +12861,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(only(f)[1].headline, "Reviewed — nothing to post", "nothing captured to post: a note, not a decision");
         assert.strictEqual(only(f)[0].headline, view.AGENT_CLOSED.reviewed, "the brief leaves Your move");
         assert.strictEqual(only(f)[1].scenario, "review");
-        assert.ok(f.children[1].args.includes("--settings"));
-        const settingsFile = f.children[1].args[f.children[1].args.indexOf("--settings") + 1];
+        assert.ok(f.children[0].args.includes("--settings"));
+        const settingsFile = f.children[0].args[f.children[0].args.indexOf("--settings") + 1];
         assert.match(nfsA.readFileSync(settingsFile, "utf8"), /hook\.js[\s\S]*review/, "the review runs under the review guard, not the brief's");
+        assert.doesNotMatch(f.children[0].written, /A brief of this PR raised/, "no brief's questions go into the review's prompt");
         assert.strictEqual((await f.agent.act({ type: "reviewAnyway", runId: only(f)[1].runId })).ok, false);
       } finally {
         f.agent.stop();
@@ -15406,8 +15550,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.ok(!off.addDirs.some((d) => /[\/]tmp$/.test(d)), "and no temp folder granted");
       assert.notStrictEqual(off.env.TEMP, path.join(off.runDir, "tmp"), "the session keeps the usual temp folder");
 
-      // The helper mounted, but not a run that may preflight: a brief (it reads, it doesn't review),
-      // or a review with no payload folder (it runs as a plain dry run). None of it, and no temp folder made.
+      // The helper mounted, but not a run that may preflight: a review with no payload folder (it
+      // runs as a plain dry run). None of it, and no temp folder made.
       const none = (r, what) => {
         assert.strictEqual(r.g.preflight, undefined, what);
         assert.ok(!r.args.includes("Bash(node *)"), what);
@@ -15415,12 +15559,42 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.ok(![r.env.TEMP, r.env.TMP, r.env.TMPDIR].includes(path.join(r.runDir, "tmp")), what);
         assert.ok(!nfsA.existsSync(path.join(r.runDir, "tmp")), what);
       };
-      const brief = await runOnce(withHelper, { pr: reviewPr({ additions: 900 }), script: () => {} });
-      assert.strictEqual(brief.kind, "brief", "a big PR gets a brief first");
-      none(brief, "a brief");
+      const big = await runOnce(withHelper, { pr: reviewPr({ additions: 900 }), script: () => {} });
+      assert.strictEqual(big.kind, "review", "a big PR gets its review straight away — and the preflight with it");
+      assert.ok(big.g.preflight, "a big PR's review");
       const noFolder = await runOnce(withHelper, { captureScript: undefined, script: () => {} });
       assert.strictEqual(noFolder.kind, "review");
       none(noFolder, "a review with no payload folder");
+    });
+
+    await atest("agent orchestrator wiring: a review whose skill has a workflow is told the workflow's call and held to orchestrating it; a skill with none, or a drive, is not", async () => {
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-orchwire-"));
+      const plugin = path.join(root, "creatio-development");
+      const skill = path.join(plugin, "skills", "creatio-code-review");
+      nfsA.mkdirSync(skill, { recursive: true });
+      const script = path.join(skill, "creatio-code-review-workflow.workflow.js");
+      const runOnce = async (over = {}) => {
+        const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, plugins: [{ name: "creatio-development", installPath: plugin, skills: ["creatio-code-review"] }], ...over });
+        try {
+          f.agent.onSnapshot(f.snapshot);
+          await until(() => f.children.length > 0);
+          const c = f.children[0];
+          const runDir = path.dirname(c.args[c.args.indexOf("--settings") + 1]);
+          return { g: JSON.parse(nfsA.readFileSync(path.join(runDir, "guard.json"), "utf8")), rules: c.args[c.args.indexOf("--append-system-prompt") + 1], url: f.snapshot.pullRequests[0].url };
+        } finally {
+          f.agent.stop();
+        }
+      };
+      nfsA.writeFileSync(script, "export const meta = { name: 'creatio-code-review-workflow' }");
+      const on = await runOnce();
+      assert.strictEqual(on.g.orchestrator, true);
+      assert.ok(on.rules.includes(`Workflow({ scriptPath: ${JSON.stringify(script.replace(/\\/g, "/"))}, args: {"pr":${JSON.stringify(on.url)},"dryRun":false,"publishCommand":`), on.rules);
+      assert.match(on.rules, /"statusComment":false/);
+      assert.match(on.rules, /you only orchestrate/);
+      nfsA.rmSync(script);
+      const off = await runOnce();
+      assert.strictEqual(off.g.orchestrator, undefined, "no workflow to orchestrate: the session reviews as before");
+      assert.match(off.rules, /First write your plan as a task list/);
     });
 
     await atest("agent publish: in On the app posts right after the run, and holds an approve while someone else asks for changes", async () => {
@@ -15905,13 +16079,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
 
     test("agent policy: a review the agent published — a plain Comment too — counts as yours: a new head gets a re-review of what changed, not a brief and a first review again (#295)", () => {
       const at = (h) => `2026-07-0${h}T00:00:00Z`;
-      // A big PR — over the limit, so a first review of it would start with a brief.
+      // A big PR — over the limit; an older release started its first review with a brief.
       const pr = (o = {}) => ({ ...reviewPr({ additions: 900, headOid: o.headOid ?? "bbb222", role: o.role ?? "reviewer", requestedOfMe: o.requestedOfMe ?? true }), lastCommitPushedAt: at(6), authorRepliedAt: null, ...o });
       const agentComment = { at: at(5), head: "aaa111" };
       const rows = [
         // [what, PR, the agent's review, more of the plan's context, settings, jobs as [scenario, key], idle, base checks]
         ["#295: the agent's Comment review, then a push and the review asked again", pr(), agentComment, {}, null, [["rereview", `PR_R|rereview|bbb222|asked@${at(6)}`]], undefined, []],
-        ["no review of the agent's: a first review, its brief first", pr(), null, {}, null, [["brief", "PR_R|brief|bbb222"]], undefined, []],
+        ["no review of the agent's: a first review, with no brief before it", pr(), null, {}, null, [["review", "PR_R|review|bbb222"]], undefined, []],
         ["a push alone: first checked for the same change on a new base", pr({ role: "reviewed", requestedOfMe: false }), agentComment, { baseOnlyState: () => "unchecked" }, null, [], "Reviewed — checking whether only the base changed under your review", ["PR_R|rereview|bbb222|base"]],
         ["a push alone that changed the code: the re-review", pr({ role: "reviewed", requestedOfMe: false }), agentComment, { baseOnlyState: () => "changed" }, null, [["rereview", `PR_R|rereview|bbb222|reply@${at(6)}`]], undefined, []],
         ["only the base changed: nothing to re-review", pr({ role: "reviewed", requestedOfMe: false }), agentComment, { baseOnlyState: () => "same" }, null, [], "Reviewed — only the base changed under your review since", []],
@@ -19020,94 +19194,66 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(actionLabel(vItem({ prId: "P", state: "needsYou", scenario: "brief", output: "b", result: { summary: "s", asks: [], findings: [], authorQuestions: ["q"], structured: true } })), "Draft a review");
     });
 
-    await atest("agent brief: Review anyway carries the brief's questions for the author into the review it drafts", async () => {
+    await atest("agent: a big PR's review starts straight away — no brief first, whether the agent plans it or you ask", async () => {
       const big = reviewPr({ additions: 5000 });
-      const text = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: ["Why drop the cache?"], asks: [] }) + "\n```";
-      const f = agentFixture({ pr: big, script: succeed(text), agent: { scenarios: { review: { mode: "off" } } } });
+      const f = agentFixture({ pr: big, script: succeed("Reviewed.") });
       try {
         f.agent.onSnapshot(f.snapshot);
-        await until(() => only(f).some((i) => i.scenario === "brief" && i.state === "needsYou"));
-        const brief = only(f).find((i) => i.scenario === "brief");
-        assert.deepStrictEqual(brief.result.authorQuestions, ["Why drop the cache?"]);
-        assert.deepStrictEqual(await f.agent.act({ type: "reviewAnyway", runId: brief.runId }), { ok: true });
-        await until(() => f.children.length === 2);
-        assert.match(f.children[1].written, /questions for its author[\s\S]*Why drop the cache\?/);
-        assert.match(only(f)[1].brief, /^Brief\./, "the brief's text stays on the review's card");
+        await until(() => f.children.length === 1);
+        assert.deepStrictEqual(only(f).map((i) => [i.scenario, i.key]), [["review", `${big.id}|review|aaa111`]], "planned by the agent: the review itself");
       } finally {
         f.agent.stop();
       }
+      const g = agentFixture({ pr: big, script: succeed("Reviewed."), agent: { scenarios: { review: { mode: "off" } } } });
+      try {
+        assert.deepStrictEqual(await g.agent.act({ type: "enqueue", prId: big.id }), { ok: true });
+        await until(() => g.children.length === 1);
+        assert.deepStrictEqual(only(g).map((i) => i.scenario), ["review"], "asked by you: the review, not a brief");
+        assert.match(only(g)[0].key, /\|review\|aaa111\|asked$/);
+      } finally {
+        g.agent.stop();
+      }
     });
 
-    await atest("agent brief: a big PR's review follows its brief on its own — the brief's questions in its prompt, its text on its card, no toast for the brief", async () => {
+    await atest("agent: a brief an older release left waiting closes with the PR's review — its text on the review's card, none of its questions in the prompt", async () => {
       const big = reviewPr({ additions: 5000 });
-      const text = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: ["Why drop the cache?"], asks: [] }) + "\n```";
-      const notices = [];
-      const f = agentFixture({ pr: big, script: succeed(text), notify: (n) => notices.push([n.kind, n.item.scenario]) });
+      const e = agentFixture({ pr: big, script: succeed("Reviewed.") });
+      try {
+        e.agent.onSnapshot(e.snapshot);
+        await until(() => only(e).some((i) => i.state === "done"));
+      } finally {
+        e.agent.stop();
+      }
+      const stateFile = path.join(e.dir, "agent", "state.json");
+      const state = JSON.parse(nfsA.readFileSync(stateFile, "utf8"));
+      Object.assign(state.items[0], {
+        scenario: "brief",
+        key: state.items[0].key.replace("|review|", "|brief|"),
+        state: "needsYou",
+        headline: "Brief ready",
+        output: "Brief.",
+        result: { summary: "Big change.", asks: [], findings: [], authorQuestions: ["Why drop the cache?"], structured: true },
+      });
+      state.ledger = {};
+      nfsA.writeFileSync(stateFile, JSON.stringify(state));
+      const f = agentFixture({ home: e.dir, pr: big, script: succeed("Reviewed.") });
       try {
         f.agent.onSnapshot(f.snapshot);
-        await until(() => f.children.length === 2);
+        await until(() => f.children.length === 1);
         const [brief, review] = only(f);
         assert.deepStrictEqual([brief.scenario, brief.state, brief.headline], ["brief", "done", view.AGENT_CLOSED.reviewed], "the brief leaves Your move for the review");
-        assert.deepStrictEqual([review.scenario, review.key], ["review", `${big.id}|review|aaa111`], "planned by the agent, not asked by you");
-        assert.deepStrictEqual(review.carry, ["Why drop the cache?"]);
-        assert.match(review.brief, /^Brief\./);
-        assert.match(f.children[1].written, /questions for its author[\s\S]*Why drop the cache\?/);
-        await until(() => only(f)[1].state !== "queued" && only(f)[1].state !== "working");
-        assert.ok(!notices.some(([kind, scenario]) => kind === "needsYou" && scenario === "brief"), "the brief alone asks nothing of you: no toast for it");
-        // The head's brief and review are both in the ledger: another plan of the same head runs neither again.
-        f.agent.onSnapshot(f.snapshot);
-        assert.strictEqual(f.children.length, 2);
+        assert.deepStrictEqual([review.scenario, review.carry], ["review", undefined]);
+        assert.match(review.brief, /^Brief\./, "the brief's text stays readable on the review's card");
+        assert.doesNotMatch(f.children[0].written, /Why drop the cache\?/, "its questions don't make the review session check the code itself");
       } finally {
         f.agent.stop();
       }
     });
 
-    await atest("agent brief: a brief you asked for on a big PR is followed by the review too", async () => {
+    await atest("agent: #295 — a review the agent published as a plain Comment is your review: the next push gets a re-review of the changes, no first review again", async () => {
       const big = reviewPr({ additions: 5000 });
-      const f = agentFixture({ pr: big, script: succeed("Brief.") });
-      try {
-        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: big.id }), { ok: true });
-        await until(() => f.children.length === 2);
-        const [brief, review] = only(f);
-        assert.match(brief.key, /\|brief\|aaa111\|asked$/);
-        assert.deepStrictEqual([brief.headline, review.scenario], [view.AGENT_CLOSED.reviewed, "review"]);
-      } finally {
-        f.agent.stop();
-      }
-    });
-
-    await atest("agent brief: written once per PR — a new head before any review gets no second brief; its review takes the older brief's questions", async () => {
-      const big = reviewPr({ additions: 5000 });
-      const text = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: ["Why drop the cache?"], asks: [] }) + "\n```";
-      const f = agentFixture({ pr: big, script: succeed(text), agent: { scenarios: { review: { mode: "off" } } } });
-      try {
-        f.agent.onSnapshot(f.snapshot);
-        await until(() => only(f).some((i) => i.scenario === "brief" && i.state === "needsYou"));
-        // A push while reviews are off: the brief stands for the PR, none is written for the new head.
-        f.snapshot.pullRequests[0] = reviewPr({ additions: 5000, headOid: "bbb222" });
-        f.agent.onSnapshot(f.snapshot);
-        await new Promise((r) => setTimeout(r, 50));
-        assert.strictEqual(f.children.length, 1, "no second brief");
-        assert.strictEqual(f.agent.getState().idle.PR_R, "Reviews are off — a big PR gets its brief only");
-        // Reviews on: the new head's review follows that brief, its questions in the prompt.
-        f.setAgent({ enabled: true, scenarios: { review: { mode: "shadow" } } });
-        f.agent.onSnapshot(f.snapshot);
-        await until(() => f.children.length === 2);
-        const [brief, review] = only(f);
-        assert.deepStrictEqual([brief.scenario, brief.state, brief.headline], ["brief", "done", view.AGENT_CLOSED.reviewed]);
-        assert.deepStrictEqual([review.scenario, review.key, review.carry], ["review", `${big.id}|review|bbb222`, ["Why drop the cache?"]]);
-        assert.match(review.brief, /^Brief\./);
-        assert.match(f.children[1].written, /questions for its author[\s\S]*Why drop the cache\?/);
-      } finally {
-        f.agent.stop();
-      }
-    });
-
-    await atest("agent: #295 — a review the agent published as a plain Comment is your review: the next push gets a re-review of the changes, no brief and no first review again", async () => {
-      const big = reviewPr({ additions: 5000 });
-      const brief = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: [], asks: [] }) + "\n```";
-      // The brief, then the review it is followed by (a Comment), then whatever runs after the push.
-      const scripts = [succeed(brief), reviewWithPlan("COMMENT"), succeed("Re-reviewed.")];
+      // The review (a Comment), then whatever runs after the push.
+      const scripts = [reviewWithPlan("COMMENT"), succeed("Re-reviewed.")];
       let runs = 0;
       let head = "aaa111";
       const posted = [];
@@ -19132,14 +19278,14 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         f.snapshot.pullRequests[0] = { ...reviewPr({ additions: 5000, headOid: head }), lastCommitPushedAt: pushedAt };
         assert.strictEqual(f.snapshot.pullRequests[0].viewerHasReviewed, false);
         f.agent.onSnapshot(f.snapshot);
-        await until(() => f.children.length === 3);
-        const next = only(f)[2];
+        await until(() => f.children.length === 2);
+        const next = only(f)[1];
         assert.deepStrictEqual([next.scenario, next.key], ["rereview", `${big.id}|rereview|bbb222|asked@${pushedAt}`]);
-        assert.ok(!only(f).some((i) => i.key.startsWith(`${big.id}|brief|bbb222`) || i.key.startsWith(`${big.id}|review|bbb222`)), "neither a brief nor a first review of the new head");
-        await until(() => only(f)[2].state !== "queued" && only(f)[2].state !== "working");
+        assert.ok(!only(f).some((i) => i.key.startsWith(`${big.id}|review|bbb222`)), "no first review of the new head");
+        await until(() => only(f)[1].state !== "queued" && only(f)[1].state !== "working");
         f.agent.onSnapshot(f.snapshot);
         await new Promise((r) => setTimeout(r, 50));
-        assert.strictEqual(f.children.length, 3, "and the same head runs nothing again");
+        assert.strictEqual(f.children.length, 2, "and the same head runs nothing again");
       } finally {
         f.agent.stop();
       }

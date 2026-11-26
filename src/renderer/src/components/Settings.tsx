@@ -1192,7 +1192,6 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             </div>
             {(
               [
-                ["triage", "Brief for a big PR"],
                 ["rereview", "Re-review — the author replied in your threads"],
                 ["afterMerge", "After merging your PR"],
                 ["selfReview", "Self-review of your PR, before reviewers"],

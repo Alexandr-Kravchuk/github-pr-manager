@@ -401,11 +401,11 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
       }
       case "draftReview": {
         const lines = pr ? pr.additions + pr.deletions : 0;
-        // A big PR's review follows its brief on its own; a brief waits here only when none did (reviews off, the request gone).
+        // A brief an older release wrote that no review followed (reviews off, the request gone): the agent writes no briefs now.
         now = `A big PR${lines ? ` (${lines.toLocaleString("en-US")} lines)` : ""} — the agent wrote a brief${read.questions.length > 0 ? ` with ${plural(read.questions.length, "question")} for the author` : ""}; no review followed on its own.`;
         ask = "Read the brief, then let the agent draft the review — or review it yourself.";
         choices = [
-          { label: "Draft a review", primary: true, does: "Starts a full review that carries the brief's questions; the draft comes back here for you to send.", act: { type: "reviewAnyway", runId } },
+          { label: "Draft a review", primary: true, does: "Starts a full review with the review skill's workflow; the draft comes back here for you to send.", act: { type: "reviewAnyway", runId } },
           { label: "I'll review myself", does: "Drops the brief; the agent leaves this commit to you.", act: { type: "skip", runId } },
         ];
         next = "The draft comes back to Your turn. Nothing is posted until you send it.";

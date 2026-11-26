@@ -325,10 +325,98 @@ export function agentRules(
   // A small PR's whole workflow on Sonnet, else its reviewers when that is on.
   const workflowRule = pr?.sonnetWorkflow ? SONNET_WORKFLOW_RULE : pr?.sonnetReviewers ? SONNET_REVIEWERS_RULE : null;
   const sonnet = workflowRule && runsReviewWorkflow(scenario, pr?.reasons) ? ` ${workflowRule}` : "";
+  // A review whose skill has a workflow: the session only orchestrates it, with the whole call spelled out.
+  if (pr?.workflow && (scenario === "review" || scenario === "rereview")) {
+    return `${orchestratorRules(scenario, mode, folder, { ...pr, workflow: pr.workflow })} ${resultRuleFor(scenario)} ${languageRule(language)}`;
+  }
   const toolRules = tools
     ? ` ${sessionToolRules(runKindOf(scenario), { ...tools, pr: pr ? { repo: pr.repo, number: pr.number } : null, ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}) })}`
     : "";
   return `${scenarioRules(scenario, mode, folder, pr)}${sonnet}${toolRules} ${resultRuleFor(scenario)} ${languageRule(language)}`;
+}
+
+/** The review skill's workflow call a review or re-review hands its session, spelled out: script and args. */
+export interface ReviewWorkflowCall {
+  scriptPath: string;
+  args: Record<string, string | boolean>;
+}
+
+/**
+ * The args of the review skill's workflow for this run, as the app knows them
+ * — the session only passes them on: the PR, publishing through the app's
+ * wrapper (dry run without one, and no status comment either way), a re-review
+ * over the threads only, and the Sonnet options of Settings › Agent.
+ */
+export function reviewWorkflowArgs(
+  item: Pick<AgentItem, "url" | "scenario" | "threadsOnly">,
+  folder: Pick<RunFolder, "wrapperPath"> | null,
+  models: { sonnetReviewers: boolean; sonnetWorkflow: boolean },
+): Record<string, string | boolean> {
+  return {
+    pr: item.url,
+    dryRun: folder === null,
+    ...(folder ? { publishCommand: gitBashPath(folder.wrapperPath), statusComment: false } : {}),
+    ...(item.scenario === "rereview" && item.threadsOnly ? { rereview: "threads-only" } : {}),
+    ...(models.sonnetWorkflow ? { model: "sonnet" } : {}),
+    ...(models.sonnetWorkflow || models.sonnetReviewers ? { reviewerModel: "sonnet" } : {}),
+  };
+}
+
+/**
+ * The rules of a review's session when its skill has a workflow: start it
+ * with exactly this call, end the turn, then report its result — no review of
+ * its own beside it. On 2026-11-25 the sessions around the workflow cost a
+ * third of the evening by themselves: checking a brief's questions in the
+ * code ($23) and waiting for the workflow by looking ($20). The guard holds
+ * the same line (`checkOrchestratorUse`, `workflowLaunchedThisTurn`), so a
+ * session that forgets this costs one refused call, not a review.
+ */
+export function orchestratorRules(
+  scenario: "review" | "rereview",
+  mode: "shadow" | "on",
+  folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null,
+  pr: RulesPr & { workflow: ReviewWorkflowCall },
+): string {
+  const call = `Workflow({ scriptPath: ${JSON.stringify(pr.workflow.scriptPath.replace(/\\/g, "/"))}, args: ${JSON.stringify(pr.workflow.args)} })`;
+  const later = mode === "shadow" ? " once the user approves it" : " right after this session";
+  const w = folder ? gitBashPath(folder.wrapperPath) : null;
+  return [
+    "You run unattended as the user's PR agent, and in this run you only orchestrate: the review skill's workflow does the whole review — its own agents read the PR, its diff, its threads and its Jira task, review it and record what to publish.",
+    `Your first call, and your only one for now: ${call} — exactly these args. Don't read the skill's files, look for the workflow or check anything first.`,
+    "Then end your turn at once. The workflow runs in the background and its result comes back to you as your next message; until then the guard refuses every call you make, since nothing you could look at changes before it ends.",
+    "Don't read the PR's code, diff or comments, don't query GitHub or Jira and don't start agents of your own: a review of your own beside the workflow is the same work done twice, and the guard refuses it. No task list either — the workflow shows its own phases.",
+    "If the workflow aborts or fails, don't review in its place: say why in your final message.",
+    pr.stack ?? "",
+    folder && w
+      ? `What it publishes goes through the app's wrapper, which records each write for the user and posts nothing; the app publishes what it recorded${later}.`
+      : "This is a dry run: nothing is posted.",
+    scenario === "rereview" && folder && w
+      ? `${threadWorkRule(w, `${pr.repo} ${pr.number}`)}Write each reply's file under ${folder.outDir.replace(/\\/g, "/")}/ and pass its absolute path; never run the wrapper with --help or read it.`
+      : "",
+    folder ? OWN_THREADS_RULE : "",
+    `Once its result is back, end with a short summary of what the workflow ${folder ? `prepared${scenario === "rereview" ? ", resolved and escalated" : ""}` : "found"}, taken from its result.`,
+    NEVER_RULE,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+const NEVER_RULE = "Never push, and never try to work around a refused tool call: if something is refused, say what you would have done and continue without it.";
+
+/** Where a review may reply and resolve: its own threads only — the app holds back the rest. */
+const OWN_THREADS_RULE =
+  "Reply and resolve only in threads you opened (their first comment is yours — `gh api user` gives your login): never in a thread a colleague opened, even to follow up on it — put that point in the review body instead. The app holds back any reply or resolve in a colleague's thread and shows it to the user.";
+
+/**
+ * A re-review's thread work after its workflow returns, through the wrapper:
+ * close what the workflow would have closed, hand a disagreement to the user.
+ */
+function threadWorkRule(w: string, target: string): string {
+  return (
+    `This is a re-review of a PR you reviewed before. After the workflow returns, finish its thread work through the same wrapper — the app checks every call and makes it when it publishes: ` +
+    `each thread its result keeps open with reason "review-not-posted" is one it would have closed — if its verdict was "withdrawn" (the author's argument held), first reply in it with one line acknowledging the point (\`${w} reply ${target} <replyTo> <file>\`), then resolve it (\`${w} resolve <thread-id>\`); otherwise just resolve it. ` +
+    `Where the author disagreed with a finding (rather than saying it is fixed) and the review keeps it as "still applies", don't argue with your colleague: run \`${w} escalate ${target} <replyTo> <file>\` with one line on what the disagreement is about — the app holds back any reply to that thread and asks the user. `
+  );
 }
 
 /** The PR a session's rules name: its place, a drive's base, why it runs — and, in a GitHub stack, its layer (`stackRules`). */
@@ -348,6 +436,8 @@ interface RulesPr {
   sonnetWorkflow?: boolean;
   /** A `feedback` drive: the approvals the Board showed (`PullRequest.reviewFeedback`) — the only ones it may read. */
   feedback?: ReadonlyArray<Pick<ReviewFeedback, "login" | "reviewId">>;
+  /** A review or re-review that only orchestrates its skill's workflow: the call to make (`orchestratorRules`). */
+  workflow?: ReviewWorkflowCall;
 }
 
 /**
@@ -445,8 +535,7 @@ function scenarioRules(
     "You run unattended as the user's PR agent. First write your plan as a task list with TaskCreate — one short task per step — and keep it current with TaskUpdate as you go, so the user can follow along. (A skill that runs as a Workflow shows its own phases; then no task list is needed.)" +
     (stack ? ` ${stack}` : "") +
     (scenario === "rereview" && pr?.threadsOnly ? ` ${THREADS_ONLY_RULE}` : "");
-  const never =
-    "Never push, and never try to work around a refused tool call: if something is refused, say what you would have done and continue without it.";
+  const never = NEVER_RULE;
   const jira =
     "Read Jira and Confluence with the twg CLI (for example `twg jira workitem get KEY -o json --output-summary none`) — there is no Atlassian MCP in this session.";
   if (scenario === "brief") {
@@ -482,19 +571,14 @@ function scenarioRules(
     const out = folder.outDir.replace(/\\/g, "/");
     const w = gitBashPath(folder.wrapperPath);
     const target = pr ? `${pr.repo} ${pr.number}` : "<owner/repo> <number>";
-    const threads =
-      scenario === "rereview"
-        ? `This is a re-review of a PR you reviewed before. After the workflow returns, finish its thread work through the same wrapper — the app checks every call and makes it when it publishes: ` +
-          `each thread its result keeps open with reason "review-not-posted" is one it would have closed — if its verdict was "withdrawn" (the author's argument held), first reply in it with one line acknowledging the point (\`${w} reply ${target} <replyTo> <file>\`), then resolve it (\`${w} resolve <thread-id>\`); otherwise just resolve it. ` +
-          `Where the author disagreed with a finding (rather than saying it is fixed) and the review keeps it as "still applies", don't argue with your colleague: run \`${w} escalate ${target} <replyTo> <file>\` with one line on what the disagreement is about — the app holds back any reply to that thread and asks the user. `
-        : "";
+    const threads = scenario === "rereview" ? threadWorkRule(w, target) : "";
     return (
       `${plan} Publishing goes through the app: run the review with dryRun: false and publishCommand: "${gitBashPath(folder.wrapperPath)}". ` +
       `That wrapper is the app's own — it records each write for the user and posts nothing; the app publishes what it recorded${later}. ` +
       `Write every file the wrapper takes (the review JSON, a comment JSON, a reply's text) under ${out}/ and pass that absolute path — nothing else is writable — and never call gh api for a write. ` +
       threads +
       // The publish check holds such a write back anyway; said here so the session doesn't spend its words on one.
-      `Reply and resolve only in threads you opened (their first comment is yours — \`gh api user\` gives your login): never in a thread a colleague opened, even to follow up on it — put that point in the review body instead. The app holds back any reply or resolve in a colleague's thread and shows it to the user. ` +
+      `${OWN_THREADS_RULE} ` +
       `${jira} End with a short summary of what you prepared${scenario === "rereview" ? ", resolved and escalated" : ""}. ${never}`
     );
   }
@@ -1046,22 +1130,6 @@ export function createAgent(deps: AgentDeps): Agent {
   }
 
   /**
-   * A brief of this PR was written — on any head, the agent's own or one you
-   * asked for: the policy's `briefDone`. Once per PR: a push before the review
-   * sends the new head straight to the review (18 briefs in a day on Opus, four
-   * of one PR in half an hour), and `takeBrief` hands it the older brief.
-   * The PR ids, from one pass over the ledger per plan — it is never trimmed.
-   */
-  function briefedPrs(): Set<string> {
-    const out = new Set<string>();
-    for (const [key, entry] of Object.entries(store.data.ledger)) {
-      const [prId, scenario] = key.split("|");
-      if (scenario === "brief" && (entry.state === "prepared" || entry.state === "published")) out.add(prId);
-    }
-    return out;
-  }
-
-  /**
    * The latest review of each PR the agent published — a review or a
    * re-review, any event, a plain "Comment" too: when, and the head it went out
    * on (its plan's commit while the card is kept, else its key's). From the
@@ -1137,21 +1205,19 @@ export function createAgent(deps: AgentDeps): Agent {
   }
 
   /**
-   * The brief a big PR's review follows: its questions for the author go into
-   * the review's prompt, its text onto the review's card — so what it found
-   * stays readable once the review replaces it — and the brief itself closes.
-   * The PR's latest brief waiting, of this head or an earlier one: a brief is
-   * written once per PR, and the review is told to ask only the questions that
-   * still hold. Null when none waits.
+   * A brief an older release wrote, still waiting on the Board when the PR's
+   * review is queued: it closes, and its text goes onto the review's card so
+   * it stays readable. Its questions don't go into the review's prompt — that
+   * made the review session check the code itself beside its workflow. The
+   * agent writes no briefs any more; null when none waits.
    */
-  function takeBrief(prId: string): Pick<AgentItem, "carry" | "brief"> | null {
+  function takeBrief(prId: string): Pick<AgentItem, "brief"> | null {
     const brief = store.data.items
       .filter((i) => i.prId === prId && i.scenario === "brief" && i.state === "needsYou")
       .sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""))[0];
     if (!brief) return null;
-    const questions = brief.result?.authorQuestions ?? [];
     void closeAs(brief, AGENT_CLOSED.reviewed);
-    return { ...(questions.length > 0 ? { carry: questions } : {}), ...(brief.output?.trim() ? { brief: brief.output } : {}) };
+    return brief.output?.trim() ? { brief: brief.output } : {};
   }
 
   /** Scenarios that are offers with a button, never a session. */
@@ -1653,7 +1719,6 @@ export function createAgent(deps: AgentDeps): Agent {
     };
     const reviewedByAgent = agentReviews();
     const reviewed = reviewedHeads();
-    const briefed = briefedPrs();
     const plan = planJobs(snapshot.pullRequests, s, {
       // No checkout yet is no reason to wait when the agent may clone one: the run makes it.
       noCheckout: (pr) => (cloneOf(pr) || s.cloneMissing ? null : noCheckoutWhy(pr, claudeSettings)),
@@ -1663,7 +1728,6 @@ export function createAgent(deps: AgentDeps): Agent {
         return d && d.attempts >= s.scenarios.driveCi.maxAttempts ? `Yours — the agent tried ${d.attempts} time${d.attempts === 1 ? "" : "s"}; over to you` : null;
       },
       selfReviewed: (pr) => Boolean(store.data.ledger[jobKey(pr, "drive", "self")]) || (pr.headOid !== null && store.data.pushedHeads[pr.id] === pr.headOid),
-      briefDone: (pr) => briefed.has(pr.id),
       agentReviewed: (pr) => reviewedByAgent.get(pr.id) ?? null,
       reviewedHead: (pr) => pr.headOid !== null && reviewed.has(`${pr.id}|${pr.headOid}`),
       reapproveState,
@@ -1707,8 +1771,7 @@ export function createAgent(deps: AgentDeps): Agent {
         continue;
       }
       if (retryOf) delete store.data.ledger[job.key];
-      // A big PR's review follows its brief: closed first, so the review doesn't
-      // merely supersede it, and what it found travels with the review.
+      // A brief an older release left waiting closes with the review: its text goes onto the review's card.
       const brief = job.scenario === "review" ? takeBrief(job.prId) : null;
       const headline = brief ? "Queued: review — after its brief" : retryOf ? `Queued: trying again — the last run failed (${retryOf.headline})` : queuedHeadline(job);
       const item = newItem(job, byId.get(job.prId)!, headline);
@@ -2006,6 +2069,15 @@ export function createAgent(deps: AgentDeps): Agent {
     // The wrapper's own rule, and Write — which the guard holds to the payload folder.
     // The preflight's node, which the guard holds to the helper's two calls.
     const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(preflight ? ["Bash(node *)"] : [])])];
+    // The skill workflows the prompt names, by path: an agent run has no named workflows.
+    const workflows = skillWorkflows(mine.prompt, [...plugins(), ...mine.pluginDirs.map((d) => ({ name: USER_SKILLS_PLUGIN, installPath: d }))]);
+    // A review or re-review whose skill has one workflow: its session only starts
+    // that workflow and reports its result — the workflow's agents do the review
+    // (`orchestratorRules`, held by the guard: `checkOrchestratorUse`).
+    const workflow =
+      !full && (kind === "review" || kind === "rereview") && workflows.length === 1
+        ? { scriptPath: workflows[0], args: reviewWorkflowArgs(item, folder, { sonnetReviewers, sonnetWorkflow }) }
+        : null;
     // The guard's count of repeated reads (`countInARow`) starts over with each run of the item, a resumed one too.
     fs.rmSync(path.join(runDir, "repeats"), { recursive: true, force: true });
     writeGuardFile(guardFile, full ? {
@@ -2029,6 +2101,7 @@ export function createAgent(deps: AgentDeps): Agent {
       ...(preflight ? { preflight } : {}),
       // For the guard's hints only: what a refusal suggests instead must be a call these let through.
       allowedTools,
+      ...(workflow ? { orchestrator: true } : {}),
     });
     writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url, guardFile));
     item.sessionId = sessionId;
@@ -2064,8 +2137,6 @@ export function createAgent(deps: AgentDeps): Agent {
       ...(preflight ? [path.dirname(preflight.installedPlugins), preflight.tmpDir] : []),
       ...(full ? [] : sessionFolders(sessionRoots, dir, sessionId)),
     ];
-    // The skill workflows the prompt names, by path: an agent run has no named workflows.
-    const workflows = skillWorkflows(mine.prompt, [...plugins(), ...mine.pluginDirs.map((d) => ({ name: USER_SKILLS_PLUGIN, installPath: d }))]);
 
     const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false, byAgentPause: false, offStop: false, ...(answer ? { answered: true } : {}) };
     const handle = startRun(
@@ -2079,9 +2150,7 @@ export function createAgent(deps: AgentDeps): Agent {
           ? answer
             ? answerMessage(answer, Boolean(folder))
             : resumePrompt(afterLimit, Boolean(folder))
-          : item.carry?.length
-            ? `${mine.prompt}\n\nA brief of this PR raised these questions for its author — ask the ones that still hold in your review, as comments:\n${item.carry.map((q) => `- ${q}`).join("\n")}`
-            : mine.prompt,
+          : mine.prompt,
         appendSystemPrompt: agentRules(item.scenario, item.mode, folder, {
           repo: item.repo,
           number: item.prNumber,
@@ -2094,6 +2163,7 @@ export function createAgent(deps: AgentDeps): Agent {
           ...(full ? { full: true } : {}),
           ...(sonnetReviewers ? { sonnetReviewers: true } : {}),
           ...(sonnetWorkflow ? { sonnetWorkflow: true } : {}),
+          ...(workflow ? { workflow } : {}),
         }, s.language, full ? null : { allowedTools, workflows }),
         allowedTools,
         // Full context: your own plugins load as in your sessions; the skills this run mounted come on top.
@@ -3376,7 +3446,7 @@ export function createAgent(deps: AgentDeps): Agent {
     scenario: AgentScenario,
     reasons?: string[],
     before?: string | null,
-    from?: Pick<AgentItem, "carry" | "brief" | "clone" | "threadsOnly" | "feedbackShown">,
+    from?: Pick<AgentItem, "brief" | "clone" | "threadsOnly" | "feedbackShown">,
   ): AgentActionResult {
     if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
       return { ok: false, error: "The agent is already on this PR." };
@@ -3418,7 +3488,6 @@ export function createAgent(deps: AgentDeps): Agent {
       const rank = rankBefore(others, before);
       if (rank !== undefined) item.rank = rank;
     }
-    if (from?.carry?.length) item.carry = from.carry;
     if (from?.brief?.trim()) item.brief = from.brief;
     // Your yes counts only while there is nothing to work in: a checkout found since needs none.
     if (from?.clone && !checkout) item.clone = true;
@@ -3511,8 +3580,8 @@ export function createAgent(deps: AgentDeps): Agent {
       }
       if (!pr.roles.includes("reviewer") && !pr.roles.includes("reviewed")) return { ok: false, error: "The agent works on PRs you review or your own." };
       if (pr.viewerHasReviewed) return enqueueAsked(pr, all.agent, "rereview", undefined, action.before, clone);
-      const brief = isBigPr(pr, all.agent);
-      return enqueueAsked(pr, all.agent, brief ? "brief" : "review", undefined, action.before, clone);
+      // A big PR too: the agent writes no briefs.
+      return enqueueAsked(pr, all.agent, "review", undefined, action.before, clone);
     }
     const item = findItem(action.runId);
     if (!item) return { ok: false, error: "That run is gone." };
@@ -3695,8 +3764,8 @@ export function createAgent(deps: AgentDeps): Agent {
         if (item.scenario !== "brief") return { ok: false, error: "Only a brief can be turned into a review." };
         const pr = snapshot?.pullRequests.find((p) => p.id === item.prId);
         if (!pr) return { ok: false, error: "That PR is not on the dashboard any more." };
-        // The brief's questions for the author go into the review it drafts, its text onto the review's card.
-        const queued = enqueueAsked(pr, all.agent, "review", undefined, undefined, { carry: item.result?.authorQuestions, brief: item.output });
+        // A brief an older release wrote: its text goes onto the review's card; the review runs its workflow as any other.
+        const queued = enqueueAsked(pr, all.agent, "review", undefined, undefined, { brief: item.output });
         if (queued.ok) await closeAs(item, AGENT_CLOSED.reviewed);
         return queued;
       }

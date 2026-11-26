@@ -209,12 +209,12 @@ function ScenariosSection({ agent, setAgent, inputCls, onEditPrompts }: SectionP
             onMode={(mode) => patch("review", { mode })}
           >
             <div className="flex flex-wrap items-center gap-2 text-sm text-fg-secondary">
-              Review it straight away when it has at most
+              A PR is small up to
               <Num bound="maxLines" value={sc.review.maxLines} onChange={(maxLines) => patch("review", { maxLines })} unit="lines" />
               and
               <Num bound="maxFiles" value={sc.review.maxFiles} onChange={(maxFiles) => patch("review", { maxFiles })} unit="files" />
             </div>
-            <p className="mt-1 text-xs text-fg-faint">A bigger PR gets the brief below first; the review follows on its own.</p>
+            <p className="mt-1 text-xs text-fg-faint">Every PR gets the review skill&apos;s workflow, big or small; a small one&apos;s can run wholly on Sonnet (Model › Small PRs).</p>
             <div className="mt-2 space-y-2">
               <Check
                 checked={sc.review.teamRequests}
@@ -229,19 +229,6 @@ function ScenariosSection({ agent, setAgent, inputCls, onEditPrompts }: SectionP
                 title="Hold the approve while another reviewer's change request is open"
               />
             </div>
-          </Scenario>
-
-          <Scenario
-            title="A big PR is requested of you"
-            prompt={<PromptLink name="Brief" onClick={onEditPrompts} />}
-            mode={sc.brief.mode}
-            modes={["off", "on"]}
-            onMode={(mode) => patch("brief", { mode: mode === "on" ? "on" : "off" })}
-          >
-            <p className="text-xs text-fg-faint">
-              Writes a brief first — the problem, the approach, the risky parts and the decisions for you — then the review above starts on its own,
-              asking the author the brief&apos;s questions. The brief posts nothing. Off: a big PR goes straight to the review.
-            </p>
           </Scenario>
 
           <Scenario
@@ -419,9 +406,9 @@ function LimitsSection({ agent, setAgent, inputCls }: SectionProps) {
   );
 }
 
-const RUN_KIND_LABEL: Record<AgentRunKind, string> = {
+/** The kinds of run listed with a model of their own — not the brief, which the agent no longer writes. */
+const RUN_KIND_LABEL: Partial<Record<AgentRunKind, string>> = {
   review: "Review",
-  brief: "Brief",
   rereview: "Re-review",
   drive: "Drive to green",
   afterMerge: "After merging",
@@ -450,7 +437,7 @@ function RunModels({ agent, setAgent, inputCls }: SectionProps) {
     <div className="space-y-3">
       <Field
         label="Per kind of run"
-        hint="Drive to green also runs the self-review of your PR and answers reviewers' comments. A brief only reads and writes prose, so it starts on Sonnet."
+        hint="Drive to green also runs the self-review of your PR and answers reviewers' comments. A review's own session only starts the review skill's workflow and reports its result; without the Sonnet options below, the workflow's agents run on this model too."
       >
         <div className="mt-1 grid grid-cols-[auto_1fr_1fr] items-center gap-x-2 gap-y-1.5 text-sm text-fg-secondary">
           {kinds.map((k) => {
