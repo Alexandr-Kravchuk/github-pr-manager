@@ -1,5 +1,5 @@
 import { brokenLayerBelow, STACK_REBASE_HINT } from "./agent-stack";
-import { OWN_SESSION_WHY } from "./agent-view";
+import { localClock, OWN_SESSION_WHY } from "./agent-view";
 import type { AgentRunKind, AgentScenario, AgentSettings, PullRequest } from "./types";
 
 export type { AgentScenario };
@@ -26,6 +26,12 @@ export interface AgentJob {
   createdAt: string;
   /** Drive: what it is driven for — "ci", "conflicts", "comments". */
   reasons?: string[];
+  /**
+   * Re-review: over your threads only — the head had its full review already
+   * (`reviewedHead`), so the author's answer on it, or a new request, is
+   * checked without the review skill's reviewers.
+   */
+  threadsOnly?: true;
 }
 
 /** Why a run on your PR: CI, a conflict, reviewers' comments — or "self", a self-review before reviewers see it. */
@@ -70,10 +76,92 @@ export interface PlanContext {
    */
   noCheckout?: (pr: PullRequest) => string | null;
   /**
-   * A brief of this head was written — a big PR's review then follows on its
-   * own. Absent: never, so a big PR gets its brief.
+   * A brief of this PR was written — on this head or an earlier one: a big
+   * PR's review then follows on its own, and a new head gets no second brief.
+   * Absent: never, so a big PR gets its brief.
    */
   briefDone?: (pr: PullRequest) => boolean;
+  /** The clock a PR's settling is measured against (`settlesUntil`). Absent: the real one. */
+  now?: Date;
+  /**
+   * The ledger has this job already — it ran, failed or was dismissed: the
+   * plan hands it on unsettled, so the PR's reason says how it went rather
+   * than that the agent waits to start it. Absent: none is known.
+   */
+  known?: (key: string) => boolean;
+  /**
+   * The latest review of this PR the agent published — any event, a plain
+   * "Comment" too — or null. It counts as your review where GitHub has none
+   * of yours (`withAgentReview`). Absent: never.
+   */
+  agentReviewed?: (pr: PullRequest) => AgentReview | null;
+  /**
+   * A full review or re-review of this head already went over it — the
+   * agent's own or one you asked for, by the agent's ledger. What the author
+   * does next on the same head (a thread answer, a new request) then gets a
+   * re-review of your threads only (`threadsOnly`): one full re-review per
+   * head, not one per answer. Absent: never — every re-review is full.
+   */
+  reviewedHead?: (pr: PullRequest) => boolean;
+}
+
+/** A review the agent published: when it went out, and the head it was of. */
+export interface AgentReview {
+  at: string;
+  head: string;
+}
+
+/**
+ * The PR as the re-review rules read it. GitHub's "you reviewed it"
+ * (`viewerHasReviewed`) counts an approval or a change request only, so after
+ * a review the agent published as a plain "Comment" every new head looked
+ * like a first review again — a brief and a whole review on each push (#295:
+ * six of each). Then the agent's review stands in for yours: its time and head
+ * become `viewerReviewedAt` / `viewerReviewedOid`, and a new head gets a
+ * re-review of what changed since. Your own review on GitHub wins whenever
+ * there is one. Only the plan reads this — the filters, the roles and the
+ * Board keep GitHub's answer. A Comment review of your own is not counted: one
+ * per reviewer is all `latestReviews` returns, a reply in someone's thread is
+ * such a review too, and a plain question would turn the whole review into a
+ * look at the latest changes only.
+ */
+export function withAgentReview(pr: PullRequest, review: AgentReview | null): PullRequest {
+  if (pr.viewerHasReviewed || !review) return pr;
+  return {
+    ...pr,
+    viewerHasReviewed: true,
+    viewerReviewedAt: review.at,
+    viewerReviewedHead: pr.headOid !== null && pr.headOid === review.head,
+    viewerReviewedOid: review.head,
+  };
+}
+
+/** The start of the idle reason of a PR the agent waits on to settle. */
+export const SETTLING_WHY = "Waiting for the PR to settle";
+
+/**
+ * Until when a review, brief or re-review the agent would plan itself waits
+ * for the PR to settle, or null when it has: authors — and their own agents —
+ * push every 10–30 minutes, and a run on a head replaced while it ran is a
+ * whole run for nothing. Settled is `settleMinutes` with no push, no answer of
+ * the author's in a thread and no review asked for. A time further ahead than
+ * the wait itself (a committer's clock gone wrong — the push time falls back
+ * to the commit's date) says nothing, or it would hold the PR for as long.
+ */
+export function settlesUntil(
+  pr: Pick<PullRequest, "lastCommitPushedAt" | "authorRepliedAt" | "reviewRequestedAt">,
+  s: AgentSettings,
+  now: Date,
+): Date | null {
+  const wait = s.limits.settleMinutes * 60_000;
+  if (!(wait > 0)) return null;
+  const t = now.getTime();
+  let latest = -Infinity;
+  for (const at of [pr.lastCommitPushedAt, pr.authorRepliedAt, pr.reviewRequestedAt]) {
+    const v = at ? Date.parse(at) : NaN;
+    if (Number.isFinite(v) && v <= t + wait && v > latest) latest = v;
+  }
+  return latest + wait > t ? new Date(latest + wait) : null;
 }
 
 /** Why your PR gets no self-review now, or null when it should get one. */
@@ -102,6 +190,8 @@ export interface PlanResult {
   baseChecks: AgentJob[];
   /** Why each PR the agent leaves alone is idle — shown on the Board's Idle column. */
   idle: Map<string, string>;
+  /** When the first PR waiting to settle has (ISO), or null: the agent plans again then, not at the next poll. */
+  wakeAt: string | null;
 }
 
 /**
@@ -145,7 +235,8 @@ export function jobKey(pr: Pick<PullRequest, "id" | "headOid">, scenario: AgentS
  * The latest thing the author did after your review — a push, or an answer in
  * a thread — or null when nothing since. Your review is the latest
  * opinionated one (approve / request changes); after a plain "Comment" review
- * there is no time to compare with, and nothing triggers.
+ * there is no time to compare with, and nothing triggers — unless the agent
+ * published it, whose time the plan puts in (`withAgentReview`).
  */
 export function authorActivitySince(
   pr: Pick<PullRequest, "viewerReviewedAt" | "viewerReviewedHead" | "lastCommitPushedAt" | "authorRepliedAt">,
@@ -227,12 +318,29 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
   const reapprovals: AgentJob[] = [];
   const baseChecks: AgentJob[] = [];
   const idle = new Map<string, string>();
+  let wakeAt: Date | null = null;
   if (!s.enabled) {
     for (const pr of prs) idle.set(pr.id, "The agent is off");
-    return { jobs, merges, reapprovals, baseChecks, idle };
+    return { jobs, merges, reapprovals, baseChecks, idle, wakeAt: null };
   }
-  for (const pr of prs) {
+  const clock = ctx.now ?? new Date();
+  // `let`: the re-review rules below read the PR with the agent's own review in it (`withAgentReview`).
+  for (let pr of prs) {
     const skip = (reason: string) => idle.set(pr.id, reason);
+    /**
+     * A review, brief or re-review the agent would start on its own waits for
+     * the PR to settle: false (with its reason) while it still moves. Drives
+     * and offers never wait; nor does a run you ask for — it is no plan's —
+     * nor a job the ledger already has, whose reason is the ledger's.
+     */
+    const settled = (key: string): boolean => {
+      if (ctx.known?.(key)) return true;
+      const until = settlesUntil(pr, s, clock);
+      if (!until) return true;
+      skip(`${SETTLING_WHY} — no push, reply or review request for ${s.limits.settleMinutes} min; the agent starts at ${localClock(until.toISOString())}`);
+      if (!wakeAt || until < wakeAt) wakeAt = until;
+      return false;
+    };
     if (pr.isIgnored) {
       skip("Ignored");
       continue;
@@ -348,7 +456,12 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     }
     // Reviewed before: a re-review once the author answers — a push, a reply in
     // a thread — or asks you again. The cursor (that moment) makes each answer
-    // its own ledger key, so a reply without a push is new work too.
+    // its own ledger key, so a reply without a push is new work too. A review
+    // the agent published counts as yours, a plain "Comment" too. A head
+    // gets one full re-review: once one went over it (`reviewedHead`), a later
+    // answer or request on that head is checked over your threads only.
+    const agentReview = pr.viewerHasReviewed ? null : (ctx.agentReviewed?.(pr) ?? null);
+    if (agentReview) pr = withAgentReview(pr, agentReview);
     if (pr.viewerHasReviewed) {
       const rr = s.scenarios.rereview.mode;
       if (rr === "off") {
@@ -359,6 +472,13 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
       const since = authorActivitySince(pr);
       if (!asked && !since) {
         skip("Reviewed — nothing new from the author since");
+        continue;
+      }
+      // The agent's review went out on this very head and the author has done
+      // nothing since: a request still standing — a team's may outlive a
+      // member's review — asks for nothing that review didn't answer.
+      if (agentReview && !since && pr.viewerReviewedHead) {
+        skip("Reviewed by the agent on this head — nothing new from the author since");
         continue;
       }
       // Asked again with nothing new while your approval stands on this very
@@ -394,8 +514,10 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
           continue;
         }
       }
+      const rereviewKey = jobKey(pr, "rereview", `${asked ? "asked" : "reply"}@${since ?? "-"}`);
+      if (!settled(rereviewKey)) continue;
       jobs.push({
-        key: jobKey(pr, "rereview", `${asked ? "asked" : "reply"}@${since ?? "-"}`),
+        key: rereviewKey,
         prId: pr.id,
         prNumber: pr.number,
         repo: pr.repo,
@@ -404,6 +526,8 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
         kind: "rereview",
         mode: rr,
         createdAt: pr.createdAt,
+        // The key stays the trigger's either way: a full run's own trigger never comes back as a light one.
+        ...(ctx.reviewedHead?.(pr) ? { threadsOnly: true as const } : {}),
       });
       continue;
     }
@@ -422,6 +546,7 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     // to the review. Nothing waits for a click in between.
     const big = isBigPr(pr, s);
     if (big && s.scenarios.brief.mode !== "off" && !ctx.briefDone?.(pr)) {
+      if (!settled(jobKey(pr, "brief"))) continue;
       jobs.push({ key: jobKey(pr, "brief"), prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario: "brief", kind: "brief", mode: "on", createdAt: pr.createdAt });
       continue;
     }
@@ -430,6 +555,7 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
       skip(big && s.scenarios.brief.mode !== "off" ? "Reviews are off — a big PR gets its brief only" : "Reviews are off");
       continue;
     }
+    if (!settled(jobKey(pr, "review"))) continue;
     jobs.push({ key: jobKey(pr, "review"), prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario: "review", kind: "review", mode, createdAt: pr.createdAt });
   }
   // A session works in a clone of the PR's repository: without one the PR
@@ -442,7 +568,9 @@ export function planJobs(prs: readonly PullRequest[], s: AgentSettings, ctx: Pla
     return !why;
   });
   runnable.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  return { jobs: runnable, merges, reapprovals, baseChecks, idle };
+  // TypeScript can't see the closure assign it.
+  const wake = wakeAt as Date | null;
+  return { jobs: runnable, merges, reapprovals, baseChecks, idle, wakeAt: wake ? wake.toISOString() : null };
 }
 
 /** `{url}` filled in; an empty template falls back to the given default. */

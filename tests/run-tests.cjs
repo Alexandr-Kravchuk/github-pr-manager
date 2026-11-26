@@ -5778,6 +5778,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     assert.ok(!/reviewThreads\(first:/.test(sent.hydrate.query));
   });
 
+  await atest("fetchHost: reads when a review was last asked for — one request event per PR", async () => {
+    const { sent, result } = await runFetchHost({ authored: [rawPr({ id: "PR_a", timelineItems: { nodes: [{ createdAt: "2026-07-08T00:00:00Z" }] } })] });
+    assert.match(sent.hydrate.query, /timelineItems\(last: 1, itemTypes: \[REVIEW_REQUESTED_EVENT\]\) \{ nodes \{ \.\.\. on ReviewRequestedEvent \{ createdAt \} \} \}/);
+    assert.strictEqual(result.pullRequests[0].reviewRequestedAt, "2026-07-08T00:00:00Z");
+  });
+
   // The full selection is what GitHub bills for: 30 points per search carrying
   // it on github.com whatever it matched, against 1 for a search of ids. Nine
   // searches made a tick cost 270 points; the searches must stay ids-only and
@@ -9005,7 +9011,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       ]);
       assert.deepStrictEqual(ids("mermaid"), ["agentDiagrams"]);
       assert.deepStrictEqual(ids("quiet hours"), ["agentLimits"]);
+      assert.deepStrictEqual(ids("settle"), ["agentLimits"]);
       assert.deepStrictEqual(ids("worktree"), ["agent"]);
+      assert.deepStrictEqual(ids("reviewers on sonnet"), ["agent"]);
+      assert.deepStrictEqual(ids("model per run"), ["agent"]);
       assert.deepStrictEqual(ids("squash"), ["agentScenarios"]);
       assert.deepStrictEqual(ids("tray icon"), ["agentCompanion"]);
       assert.deepStrictEqual(ids("signature"), ["agentPolicy"]);
@@ -9025,6 +9034,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(a.scenarios.merge.mode, "offer", "a merge waits for your click, always");
       assert.strictEqual(a.cloneMissing, true);
       assert.deepStrictEqual([a.scenarios.review.maxLines, a.scenarios.review.maxFiles, a.limits.parallel, a.limits.perDay], [400, 15, 2, 30]);
+      // A PR waits 15 quiet minutes before the agent reviews it on its own; bounds 0 (off) to 240, clamped like every number.
+      assert.strictEqual(a.limits.settleMinutes, 15);
+      const settle = (v) => cfg.validateAgent({ limits: { settleMinutes: v } }).limits.settleMinutes;
+      assert.deepStrictEqual([settle(0), settle(-5), settle(999), settle("30"), settle(7.6), settle("x"), settle(undefined)], [0, 0, 240, 30, 8, 15, 15]);
+      // A fifth of each Claude window stays yours; a dollar budget is opt-in.
+      assert.deepStrictEqual([a.limits.usageCap, a.limits.costPerDay], [80, 0]);
       for (const rule of a.permissions.tools.review) assert.ok(!/push|Edit|Write/.test(rule), `review must not write: ${rule}`);
     });
 
@@ -9062,6 +9077,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(a.scenarios.driveCi.maxAttempts, 10);
       assert.deepStrictEqual([a.limits.parallel, a.limits.perDay, a.limits.maxMinutes], [1, 500, 5]);
       assert.deepStrictEqual(a.limits.quietHours, { enabled: true, from: "20:00", to: "07:30" });
+      const b = cfg.validateAgent({ limits: { parallel: 8, usageCap: 150, costPerDay: 12.6 } });
+      assert.deepStrictEqual([b.limits.parallel, b.limits.usageCap, b.limits.costPerDay], [5, 100, 13], "at most 5 at a time: each run in flight goes on past the usage cap");
+      const c = cfg.validateAgent({ limits: { usageCap: -5, costPerDay: "x" } });
+      assert.deepStrictEqual([c.limits.usageCap, c.limits.costPerDay], [0, 0], "0 turns either off");
       assert.strictEqual(a.policy.signature, cfg.validateAgent(undefined).policy.signature, "the signature can't be blanked out");
       assert.strictEqual(a.policy.logRetentionDays, 1);
     });
@@ -10754,13 +10773,98 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(r.jobs.map((j) => j.prId), ["OLD", "NEW"]);
     });
 
-    test("agent-stream: only a rejected usage limit holds the queue, a warning does not", () => {
+    test("agent-stream: a rejected usage limit holds the queue until it resets, a warning alone does not", () => {
+      const now = 1794500000000;
       // The seven-day window past 75% reads "allowed_warning" (recorded from claude 2.1.314).
-      assert.strictEqual(stream.usageHoldUntil({ status: "allowed_warning", resetsAt: 1794592800 }), null);
-      assert.strictEqual(stream.usageHoldUntil({ status: "allowed", resetsAt: 1794592800 }), null);
-      assert.strictEqual(stream.usageHoldUntil({ status: "rejected", resetsAt: 1794592800 }), 1794592800000);
-      assert.strictEqual(stream.usageHoldUntil({ status: "rejected", resetsAt: null }), null);
-      assert.strictEqual(stream.usageHoldUntil(null), null);
+      assert.strictEqual(stream.usageHold({ status: "allowed_warning", resetsAt: 1794592800 }, 80, now), null);
+      assert.strictEqual(stream.usageHold({ status: "allowed", resetsAt: 1794592800 }, 80, now), null);
+      assert.deepStrictEqual(stream.usageHold({ status: "rejected", resetsAt: 1794592800, type: "five_hour" }, 80, now), { until: 1794592800000, why: "Claude's session limit reached", limitName: "Claude's session limit" });
+      assert.deepStrictEqual(stream.usageHold({ status: "rejected", resetsAt: 1794592800, type: "seven_day" }, 0, now), { until: 1794592800000, why: "Claude's weekly limit reached", limitName: "Claude's weekly limit" }, "the limit holds with the cap off too");
+      assert.strictEqual(stream.usageHold({ status: "rejected", resetsAt: 1794592800 }, 80, now).why, "Claude's usage limit reached");
+      assert.strictEqual(stream.usageHold({ status: "rejected", resetsAt: null }, 80, now), null);
+      assert.strictEqual(stream.usageHold(null, 80, now), null);
+    });
+
+    test("agent-stream: a rate_limit_event carries the session and weekly windows' use (recorded from claude 2.1.270)", () => {
+      // stdout of `claude -p --output-format stream-json --verbose` on a subscription, 2026-11-25.
+      const ev = stream.parseStreamLine(
+        '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1795639800,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.15,"resetsAt":1795639800},"seven_day":{"utilization":0.02,"resetsAt":1795658400}}},"uuid":"b130a5ec-ad84-42eb-8667-ac04f3cf7f18","session_id":"1789ed41-80e6-4c61-a662-7a5915715dc0"}',
+      );
+      const p = stream.applyStreamEvent(stream.initialProgress(), ev);
+      assert.deepStrictEqual(p.rateLimit, {
+        status: "allowed",
+        resetsAt: 1795639800,
+        type: "five_hour",
+        windows: { fiveHour: { utilization: 0.15, resetsAt: 1795639800 }, sevenDay: { utilization: 0.02, resetsAt: 1795658400 } },
+      });
+      // An older Claude Code: only the limiting window's share, at the top level.
+      assert.deepStrictEqual(stream.readUsage({ status: "allowed_warning", resetsAt: 1795658400, rateLimitType: "seven_day", utilization: 0.81 }).windows, {
+        sevenDay: { utilization: 0.81, resetsAt: 1795658400 },
+      });
+      // An API key: no windows at all; junk in them is dropped.
+      assert.deepStrictEqual(stream.readUsage({ status: "allowed", unifiedWindows: { five_hour: { utilization: "lots" } } }), { status: "allowed", resetsAt: null });
+    });
+
+    test("agent-stream: a window used up to the agent's cap holds new runs until that window resets", () => {
+      const now = Date.parse("2026-11-25T16:00:00Z");
+      const session = Math.floor(Date.parse("2026-11-25T20:50:00Z") / 1000);
+      const week = Math.floor(Date.parse("2026-11-28T08:00:00Z") / 1000);
+      const reading = (five, seven) => ({ status: "allowed", resetsAt: session, type: "five_hour", windows: { fiveHour: { utilization: five, resetsAt: session }, sevenDay: { utilization: seven, resetsAt: week } } });
+      assert.strictEqual(stream.usageHold(reading(0.15, 0.02), 80, now), null);
+      assert.strictEqual(stream.usageHold(reading(0.795, 0.5), 80, now), null, "79.5% is under 80");
+      assert.deepStrictEqual(stream.usageHold(reading(0.8, 0.5), 80, now), { until: session * 1000, why: "Claude's session usage at 80% (agent cap 80%)", usage: 80 });
+      assert.deepStrictEqual(stream.usageHold(reading(0.5, 0.29), 29, now), { until: week * 1000, why: "Claude's weekly usage at 29% (agent cap 29%)", usage: 29 }, "no float error at the edge");
+      assert.strictEqual(stream.usageHold(reading(0.9, 0.85), 80, now).until, week * 1000, "both past the cap: the later reset frees both");
+      assert.strictEqual(stream.usageHold(reading(1.2, 0.1), 80, now).why, "Claude's session usage at 120% (agent cap 80%)", "a window can run past its cap");
+      assert.strictEqual(stream.usageHold(reading(0.95, 0.1), 0, now), null, "0 turns the cap off");
+      assert.strictEqual(stream.usageHold(reading(0.95, 0.1), 80, session * 1000), null, "a window that has reset since is no hold");
+      assert.strictEqual(stream.usageHold({ status: "allowed_warning", resetsAt: week, type: "seven_day" }, 80, now), null, "no share, no cap hold");
+    });
+
+    test("agent-stream: Claude Code's limit line says when the limit resets, in its own time zone", () => {
+      const at = (iso) => new Date(iso);
+      const hold = (text, now) => stream.limitResetFromText(text, at(now));
+      // As the agent's runs ended on 2026-11-25 and 2026-11-24 (Kyiv is UTC+2 in winter).
+      assert.deepStrictEqual(hold("You've hit your session limit · resets 9:50pm (Europe/Kyiv)", "2026-11-25T15:50:01Z"), {
+        until: Date.parse("2026-11-25T19:50:00Z"),
+        why: "Claude's session limit reached",
+        limitName: "Claude's session limit",
+      });
+      assert.strictEqual(hold("You've hit your session limit · resets 7pm (Europe/Kyiv)", "2026-11-24T16:49:24Z").until, Date.parse("2026-11-24T17:00:00Z"), "minutes left out on the hour");
+      assert.strictEqual(hold("You’ve hit your session limit · resets 1:15am (Europe/Kyiv) · progress saved", "2026-11-25T21:30:00Z").until, Date.parse("2026-11-25T23:15:00Z"), "a clock already past today is tomorrow's");
+      // More than a day away: the date; another year: the year too.
+      assert.deepStrictEqual(hold("You've hit your weekly limit · resets Nov 28, 10am (Europe/Kyiv)", "2026-11-25T10:00:00Z"), {
+        until: Date.parse("2026-11-28T08:00:00Z"),
+        why: "Claude's weekly limit reached",
+        limitName: "Claude's weekly limit",
+      });
+      assert.strictEqual(hold("You've hit your weekly limit · resets Jan 2, 2027, 9:30am (Europe/Kyiv)", "2026-12-30T10:00:00Z").until, Date.parse("2027-01-02T07:30:00Z"));
+      assert.strictEqual(hold("You've hit your weekly limit · resets Jan 2, 9am (Europe/Kyiv)", "2026-12-30T10:00:00Z").until, Date.parse("2027-01-02T07:00:00Z"), "no year: the next one");
+      // Summer time, and the morning the clocks go forward (03:00 → 04:00 on 2027-03-28).
+      assert.strictEqual(hold("You've hit your weekly limit · resets Jul 1, 10am (Europe/Kyiv)", "2027-06-28T10:00:00Z").until, Date.parse("2027-07-01T07:00:00Z"));
+      assert.strictEqual(hold("You've hit your weekly limit · resets Mar 28, 5am (Europe/Kyiv)", "2027-03-25T10:00:00Z").until, Date.parse("2027-03-28T02:00:00Z"));
+      assert.strictEqual(hold("You've hit your session limit · resets 9:50pm (America/New_York)", "2026-11-25T15:50:00Z").until, Date.parse("2026-11-26T02:50:00Z"));
+      assert.strictEqual(hold("You're out of usage credits · resets 9:50pm (Europe/Kyiv)", "2026-11-25T15:50:00Z").why, "Out of Claude usage credits");
+      assert.strictEqual(hold("You're out of usage credits · resets 9:50pm (Europe/Kyiv)", "2026-11-25T15:50:00Z").limitName, undefined, "credits name no limit: a run it stops says what the hold says");
+      // No zone, or one Intl doesn't know: the machine's own clock.
+      const local = new Date(2026, 10, 25, 12, 0);
+      assert.strictEqual(stream.limitResetFromText("You've hit your session limit · resets 9:50pm", local).until, new Date(2026, 10, 25, 21, 50).getTime());
+      assert.strictEqual(stream.limitResetFromText("You've hit your session limit · resets 9:50pm (Mars/Base)", local).until, new Date(2026, 10, 25, 21, 50).getTime());
+      // Not a limit line, or one with no reset.
+      for (const text of ["The run failed", "You've hit your monthly spend limit.", "You've hit your session limit · resets 13:50pm (Europe/Kyiv)", ""]) {
+        assert.strictEqual(stream.limitResetFromText(text, local), null, text);
+      }
+      // A hold stops every run, and a PR can make a session write this line: only the whole
+      // text counts, the year is this one or the next, and no reset lies past eight days.
+      for (const text of [
+        "Done. You've hit your session limit · resets 9:50pm (Europe/Kyiv)",
+        "Reviewed.\nYou've hit your session limit · resets 9:50pm (Europe/Kyiv)",
+        "You've hit your weekly limit · resets Jan 2, 2099, 9am (Europe/Kyiv)",
+        "You've hit your weekly limit · resets Dec 31, 9am (Europe/Kyiv)",
+      ]) {
+        assert.strictEqual(hold(text, "2026-11-25T15:50:00Z"), null, text);
+      }
+      assert.strictEqual(stream.MAX_USAGE_HOLD_MS, 8 * 86_400_000);
     });
 
     // Events recorded from a real `claude -p` session (2.1.270), trimmed.
@@ -11200,6 +11304,35 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await until(() => JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).board === undefined);
       } finally {
         f.agent.stop();
+      }
+    });
+
+    await atest("agent models: a run starts with its kind's model and effort, the agent's filling an empty one, and run/started logs what it used", async () => {
+      const f = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, agent: { model: "opus", effort: "high", runModels: { review: { model: "haiku", effort: "" } } } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.agent.getState().items.some((i) => i.state === "needsYou"));
+        const args = f.children[0].args;
+        assert.strictEqual(args[args.indexOf("--model") + 1], "haiku", "the review's own model");
+        assert.strictEqual(args[args.indexOf("--effort") + 1], "high", "an empty effort takes the agent's");
+        assert.match(args[args.indexOf("--append-system-prompt") + 1], /reviewerModel: "sonnet"/, "reviewers on Sonnet by default");
+        const started = readLog(f).find((l) => l.kind === "run" && l.event === "started");
+        assert.deepStrictEqual([started.data.model, started.data.effort, started.data.reviewerModel], ["haiku", "high", "sonnet"]);
+      } finally {
+        f.agent.stop();
+      }
+      // Nothing chosen anywhere: no flag, Claude Code's default — and with Reviewers on Sonnet off, nothing said about them.
+      const g = agentFixture({ script: reviewWithPlan(), captureScript: captureJs, agent: { sonnetReviewers: false } });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.agent.getState().items.some((i) => i.state === "needsYou"));
+        const args = g.children[0].args;
+        assert.ok(!args.includes("--model") && !args.includes("--effort"));
+        assert.ok(!args[args.indexOf("--append-system-prompt") + 1].includes("reviewerModel"));
+        const started = readLog(g).find((l) => l.kind === "run" && l.event === "started");
+        assert.deepStrictEqual([started.data.model, started.data.effort, "reviewerModel" in started.data], ["", "", false]);
+      } finally {
+        g.agent.stop();
       }
     });
 
@@ -11672,6 +11805,91 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: a review it started itself stops the moment the PR gets a new head — superseded, logged; the new head is reviewed once it settles", async () => {
+      let t = Date.parse("2026-11-25T12:00:00Z");
+      const titles = [];
+      // A short tick: the stop and the wake-up are the tick's, not a snapshot's.
+      const f = agentFixture({ now: () => new Date(t), script: keepWorking, tickMs: 20, notify: (n) => titles.push(n.kind) });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1 && only(f)[0].state === "working" && f.agent.getState().running.length === 1);
+        // The author pushes again a minute ago: the poller's latest read has it, no snapshot reported yet.
+        f.snapshot.pullRequests[0] = { ...f.snapshot.pullRequests[0], headOid: "bbb222", lastCommitPushedAt: new Date(t - 60_000).toISOString() };
+        await until(() => only(f)[0].state === "done");
+        const [old] = only(f);
+        assert.deepStrictEqual([old.key, old.headline], ["PR_R|review|aaa111", view.AGENT_CLOSED.superseded]);
+        const state = JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8"));
+        assert.strictEqual(state.ledger["PR_R|review|aaa111"].state, "failed");
+        const line = readLog(f).find((l) => l.kind === "run" && l.event === "superseded");
+        assert.ok(line, "the run's end says why it ended");
+        assert.deepStrictEqual([line.headOid, line.data.was, typeof line.data.ms === "number" || typeof line.ms === "number"], ["bbb222", "aaa111", true]);
+        assert.deepStrictEqual(titles, [], "nothing to tell you: it was the agent's own");
+        // The new head was pushed a minute ago: it waits 14 more, and the Board says until when.
+        await until(() => (f.agent.getState().idle.PR_R ?? "").startsWith(policy.SETTLING_WHY));
+        assert.match(f.agent.getState().idle.PR_R, / the agent starts at \d\d:\d\d$/);
+        t += 13 * 60_000;
+        await new Promise((r) => setTimeout(r, 100));
+        assert.deepStrictEqual([f.children.length, only(f).length], [1, 1], "not before it settled");
+        // Settled: the tick plans again by itself — no new snapshot came.
+        t += 60_000;
+        await until(() => f.children.length === 2);
+        assert.strictEqual(only(f)[1].key, "PR_R|review|bbb222");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a review you asked for whose PR gets a new head stops and starts over on that head, at once", async () => {
+      let t = Date.parse("2026-11-25T12:00:00Z");
+      const f = agentFixture({ pr: reviewPr({ requestedOfMe: false }), now: () => new Date(t), script: keepWorking, tickMs: 20 });
+      try {
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: "PR_R" }), { ok: true });
+        await until(() => f.children.length === 1 && f.agent.getState().running.length === 1);
+        f.snapshot.pullRequests[0] = { ...f.snapshot.pullRequests[0], headOid: "bbb222", lastCommitPushedAt: new Date(t).toISOString() };
+        // Yours never waits for the PR to settle.
+        await until(() => f.children.length === 2);
+        const [old, again] = only(f);
+        assert.deepStrictEqual([old.key, old.state, old.headline], ["PR_R|review|aaa111|asked", "done", view.AGENT_CLOSED.rerun]);
+        assert.deepStrictEqual([again.key, again.scenario], ["PR_R|review|bbb222|asked", "review"]);
+        assert.ok(readLog(f).some((l) => l.kind === "run" && l.event === "superseded" && l.headOid === "bbb222"));
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a new head leaves a drive running, and a session going on with your answer", async () => {
+      const f = agentFixture({ pr: { ...reviewPr({ role: "author" }), ciState: "failure" }, script: keepWorking, tickMs: 20 });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1 && f.agent.getState().running.length === 1);
+        assert.strictEqual(only(f)[0].scenario, "drive");
+        f.snapshot.pullRequests[0] = { ...f.snapshot.pullRequests[0], headOid: "bbb222" };
+        await new Promise((r) => setTimeout(r, 150));
+        assert.deepStrictEqual([only(f)[0].state, f.children.length], ["working", 1], "a drive commits on top of the head and goes on");
+        assert.ok(!readLog(f).some((l) => l.event === "superseded"), "and nothing is logged as stopped");
+      } finally {
+        f.agent.stop();
+      }
+      // A brief that asked you something, going on with your answer: your answer would go with a stop.
+      const asks = "Prose.\n\n```prd-result\n" + JSON.stringify({ summary: "A decision for you.", asks: [{ question: "Keep the old API?", options: ["Yes", "No"] }], findings: [] }) + "\n```";
+      let runs = 0;
+      const g = agentFixture({ pr: reviewPr({ additions: 900 }), agent: { scenarios: { review: { mode: "off" } } }, script: (c) => (++runs === 1 ? succeed(asks)(c) : keepWorking(c)), tickMs: 20 });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => only(g)[0]?.state === "needsYou");
+        const brief = only(g)[0];
+        assert.strictEqual(brief.scenario, "brief");
+        nfsA.mkdirSync(brief.worktree, { recursive: true });
+        assert.deepStrictEqual(await g.agent.act({ type: "answer", runId: brief.runId, text: "Yes" }), { ok: true });
+        await until(() => g.children.length === 2 && g.agent.getState().running.length === 1);
+        g.snapshot.pullRequests[0] = { ...g.snapshot.pullRequests[0], headOid: "bbb222" };
+        await new Promise((r) => setTimeout(r, 150));
+        assert.strictEqual(only(g)[0].state, "working", "your answer goes on");
+      } finally {
+        g.agent.stop();
+      }
+    });
+
     await atest("agent: a failure you asked for, or one the PR no longer wants, isn't tried again", async () => {
       let t = Date.parse("2026-11-10T10:00:00Z");
       const f = agentFixture({ pr: reviewPr({ requestedOfMe: false }), now: () => new Date(t), script: (c) => setImmediate(() => c.emit("exit", 1)) });
@@ -11695,6 +11913,240 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.deepStrictEqual([only(g)[0].retryAt, g.children.length], [undefined, 1]);
       } finally {
         g.agent.stop();
+      }
+    });
+
+    await atest("agent: a run Claude's session limit stopped holds the whole queue until the reset, and is tried again then — across a restart", async () => {
+      // As on 2026-11-25: five runs refused at 17:50 Kyiv, the limit back at 21:50.
+      let t = Date.parse("2026-11-25T15:50:00Z");
+      const reset = Date.parse("2026-11-25T19:50:00Z");
+      const f = agentFixture({
+        now: () => new Date(t),
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, { type: "result", subtype: "success", is_error: true, result: "You've hit your session limit · resets 9:50pm (Europe/Kyiv)", total_cost_usd: 1.45 });
+          setImmediate(() => c.emit("exit", 1));
+        },
+      });
+      let first;
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.state === "error"));
+        first = only(f)[0];
+        assert.deepStrictEqual([first.headline, first.retryAt], ["Stopped by Claude's session limit", new Date(reset).toISOString()], "tried again once the limit resets, not ten minutes on");
+        const st = f.agent.getState();
+        assert.deepStrictEqual([st.heldUntil, st.heldWhy], [new Date(reset).toISOString(), "Claude's session limit reached"]);
+        assert.match(view.agentSummary(st, new Date(t)).blockText, /^Claude's session limit reached — waits until \d\d:\d\d$/);
+        await until(() => /^Its last run on this head failed \(Stopped by Claude's session limit\) — it tries again by itself at \d\d:\d\d$/.test(f.agent.getState().idle.PR_R ?? ""));
+        // Past the usual ten minutes, and another PR asks for a review: nothing starts into the limit.
+        t += agentCore.RETRY_AFTER_MS + 60_000;
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_2", number: 8 }));
+        f.agent.onSnapshot(f.snapshot);
+        assert.ok(only(f).some((i) => i.prId === "PR_2" && i.state === "queued"));
+        assert.strictEqual(f.children.length, 1);
+      } finally {
+        f.agent.stop();
+      }
+      // The app started again: the hold is in state.json, not lost with the process.
+      const g = agentFixture({ home: f.dir, now: () => new Date(t), script: succeed("Reviewed.") });
+      try {
+        assert.strictEqual(g.agent.getState().heldUntil, new Date(reset).toISOString());
+        g.agent.onSnapshot(g.snapshot);
+        assert.strictEqual(g.children.length, 0);
+        t = reset + 1000;
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length === 1);
+        assert.ok(only(g).some((i) => i.retryOf === first.runId), "its one try again");
+        assert.strictEqual(g.agent.getState().heldUntil, null);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: the model writing Claude's limit line holds nothing — only Claude Code's own error result counts", async () => {
+      const t = Date.parse("2026-11-25T15:50:00Z");
+      const line = "You've hit your weekly limit · resets Nov 30, 9am (Europe/Kyiv)";
+      for (const ending of [
+        // The session's last words, then a run that fails for another reason.
+        (c) => {
+          emit(c, { type: "assistant", message: { content: [{ type: "text", text: line }] } });
+          emit(c, { type: "result", subtype: "error_max_turns", is_error: true, result: "" });
+        },
+        // An error result that only quotes the line.
+        (c) => emit(c, { type: "result", subtype: "success", is_error: true, result: `The PR says: ${line}` }),
+      ]) {
+        const f = agentFixture({
+          now: () => new Date(t),
+          script: (c) => {
+            emit(c, { type: "system", subtype: "init", session_id: "s" });
+            ending(c);
+            setImmediate(() => c.emit("exit", 1));
+          },
+        });
+        try {
+          f.agent.onSnapshot(f.snapshot);
+          await until(() => only(f).some((i) => i.state === "error"));
+          assert.deepStrictEqual([only(f)[0].headline, only(f)[0].retryAt], ["The run failed", new Date(t + agentCore.RETRY_AFTER_MS).toISOString()]);
+          assert.strictEqual(f.agent.getState().heldUntil, null);
+        } finally {
+          f.agent.stop();
+        }
+      }
+    });
+
+    await atest("agent: Claude's usage past the agent's cap holds new runs until that window resets; a raised cap lets go", async () => {
+      let t = Date.parse("2026-11-25T16:00:00Z");
+      const session = Math.floor(Date.parse("2026-11-25T20:50:00Z") / 1000);
+      const f = agentFixture({
+        now: () => new Date(t),
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, {
+            type: "rate_limit_event",
+            rate_limit_info: { status: "allowed", resetsAt: session, rateLimitType: "five_hour", unifiedWindows: { five_hour: { utilization: 0.83, resetsAt: session }, seven_day: { utilization: 0.4, resetsAt: session + 86_400 } } },
+          });
+          emit(c, { type: "result", subtype: "success", is_error: false, result: "Reviewed." });
+          setImmediate(() => c.emit("exit", 0));
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f)[0]?.finishedAt !== undefined);
+        assert.notStrictEqual(only(f)[0].state, "error", "the run itself went on to its end");
+        const st = f.agent.getState();
+        assert.deepStrictEqual([st.heldUntil, st.heldWhy], [new Date(session * 1000).toISOString(), "Claude's session usage at 83% (agent cap 80%)"]);
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_2", number: 8 }));
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 1, "the default cap, 80%, leaves the rest of the window to you");
+        // Raised past the reading: the hold lets go at once.
+        f.setAgent({ enabled: true, limits: { usageCap: 90 } });
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: once the day's runs cost the daily budget, no new run starts — the budget is the local day's, 0 is none", async () => {
+      const f = agentFixture({
+        agent: { limits: { costPerDay: 3 } },
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, { type: "result", subtype: "success", is_error: false, result: "Reviewed.", total_cost_usd: 3.25 });
+          setImmediate(() => c.emit("exit", 0));
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f)[0]?.finishedAt !== undefined);
+        const st = f.agent.getState();
+        assert.deepStrictEqual([st.costToday, st.costPerDay], [3.25, 3]);
+        assert.deepStrictEqual([view.agentSummary(st).block, view.agentSummary(st).blockText], ["budget", "Daily budget reached ($3.25 of $3)"]);
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_2", number: 8 }));
+        f.agent.onSnapshot(f.snapshot);
+        assert.ok(only(f).some((i) => i.prId === "PR_2" && i.state === "queued"));
+        assert.strictEqual(f.children.length, 1);
+        f.setAgent({ enabled: true, limits: { costPerDay: 0 } });
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: the daily budget is the local day's — past midnight the count starts over and the run it held starts", async () => {
+      let t = new Date(2026, 10, 25, 23, 0).getTime();
+      const f = agentFixture({
+        now: () => new Date(t),
+        agent: { limits: { costPerDay: 3 } },
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          emit(c, { type: "result", subtype: "success", is_error: false, result: "Reviewed.", total_cost_usd: 3.25 });
+          setImmediate(() => c.emit("exit", 0));
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f)[0]?.finishedAt !== undefined);
+        f.snapshot.pullRequests.push(reviewPr({ id: "PR_2", number: 8 }));
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 1, "held by the day's budget");
+        t = new Date(2026, 10, 26, 0, 5).getTime();
+        assert.strictEqual(f.agent.getState().costToday, 0, "a new day counts from nothing");
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+        await until(() => only(f).every((i) => i.finishedAt !== undefined));
+        assert.strictEqual(f.agent.getState().costToday, 3.25, "only the new day's run");
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: a usage hold of the agent's cap lets go when the cap is switched off; the limit's own hold doesn't — and an expired one leaves state.json", async () => {
+      let t = Date.parse("2026-11-25T16:00:00Z");
+      const statePath = (dir) => path.join(dir, "agent", "state.json");
+      const seed = (hold) => {
+        const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+        const st = agentStore.emptyStore("2026-11-25");
+        st.usageHold = hold;
+        agentStore.writeFileAtomic(statePath(home), JSON.stringify(st));
+        return home;
+      };
+      // The cap's hold: 85% of the window against a cap of 80.
+      const capHome = seed({ until: new Date(t + 2 * 3_600_000).toISOString(), why: "Claude's session usage at 85% (agent cap 80%)", usage: 85 });
+      const f = agentFixture({ home: capHome, now: () => new Date(t), script: succeed("Reviewed.") });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        assert.strictEqual(f.children.length, 0, "held by the cap");
+        f.setAgent({ enabled: true, limits: { usageCap: 0 } });
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 1);
+        await until(() => JSON.parse(nfsA.readFileSync(statePath(capHome), "utf8")).usageHold === undefined);
+      } finally {
+        f.agent.stop();
+      }
+      // The limit's own hold names no usage: the cap, even off, doesn't lift it — its reset does.
+      const limitHome = seed({ until: new Date(t + 3_600_000).toISOString(), why: "Claude's session limit reached" });
+      const g = agentFixture({ home: limitHome, now: () => new Date(t), agent: { limits: { usageCap: 0 } }, script: succeed("Reviewed.") });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        assert.deepStrictEqual([g.children.length, g.agent.getState().heldWhy], [0, "Claude's session limit reached"]);
+        t += 3_600_000 + 1000;
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length === 1);
+        await until(() => JSON.parse(nfsA.readFileSync(statePath(limitHome), "utf8")).usageHold === undefined);
+        assert.strictEqual(g.agent.getState().heldUntil, null);
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: a usage reading during a run is held against the cap as it is now — a cap raised mid-run holds nothing", async () => {
+      const t = Date.parse("2026-11-25T16:00:00Z");
+      const session = Math.floor(Date.parse("2026-11-25T20:50:00Z") / 1000);
+      let go = null;
+      const f = agentFixture({
+        now: () => new Date(t),
+        script: (c) => {
+          emit(c, { type: "system", subtype: "init", session_id: "s" });
+          go = () => {
+            emit(c, { type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: session, rateLimitType: "five_hour", unifiedWindows: { five_hour: { utilization: 0.83, resetsAt: session } } } });
+            emit(c, { type: "result", subtype: "success", is_error: false, result: "Reviewed." });
+            setImmediate(() => c.emit("exit", 0));
+          };
+        },
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => go !== null && f.agent.getState().running.length === 1);
+        // Raised from the default 80 while the run works: its 83% is under the cap now.
+        f.setAgent({ enabled: true, limits: { usageCap: 90 } });
+        go();
+        await until(() => only(f)[0]?.finishedAt !== undefined);
+        assert.strictEqual(f.agent.getState().heldUntil, null);
+        assert.strictEqual(JSON.parse(nfsA.readFileSync(path.join(f.dir, "agent", "state.json"), "utf8")).usageHold, undefined);
+      } finally {
+        f.agent.stop();
       }
     });
 
@@ -11778,7 +12230,8 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
     await atest("agent: a re-review you asked for covers the author's answers before it — only a later answer starts another", async () => {
       const iso = (min) => new Date(Date.now() + min * 60_000).toISOString();
       const pr = { ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), viewerReviewedAt: iso(-60), viewerReviewedHead: true, authorRepliedAt: null };
-      const f = agentFixture({ pr, script: succeed("Re-reviewed.") });
+      // An answer after your ask is a minute old here: no wait for the PR to settle (its own test has that).
+      const f = agentFixture({ pr, script: succeed("Re-reviewed."), agent: { limits: { settleMinutes: 0 } } });
       try {
         f.agent.onSnapshot(f.snapshot);
         assert.strictEqual(only(f).length, 0, "nothing new from the author: no re-review of its own");
@@ -11794,6 +12247,66 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         f.agent.onSnapshot(f.snapshot);
         await until(() => only(f).length === 2);
         assert.match(only(f).find((i) => !i.key.endsWith("|asked")).key, /\|rereview\|aaa111\|reply@/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: one full re-review per head (#294) — the author's answer on the head it re-reviewed gets a run over the threads only", async () => {
+      const iso = (min) => new Date(Date.now() + min * 60_000).toISOString();
+      // creatio-ai-app-development-toolkit#294: asked again on e54f58b — a full re-review — then the author answered on that same head.
+      const pr = { ...reviewPr({ viewerHasReviewed: true, role: "reviewer", requestedOfMe: true, headOid: "e54f58b" }), viewerReviewedAt: iso(-60), viewerReviewedHead: true, viewerApproved: false, authorRepliedAt: null };
+      // The author's answers land minutes ahead: no settling wait, so each one's run starts at once.
+      const f = agentFixture({ pr, script: succeed("Re-reviewed."), agent: { limits: { settleMinutes: 0 } } });
+      const rules = (c) => c.args[c.args.indexOf("--append-system-prompt") + 1];
+      const queued = () =>
+        nfsA
+          .readFileSync(path.join(f.dir, "agent", "log.jsonl"), "utf8")
+          .trim()
+          .split("\n")
+          .map((l) => JSON.parse(l))
+          .filter((e) => e.kind === "run" && e.event === "queued");
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).length === 1 && only(f)[0].state === "done");
+        const full = only(f)[0];
+        assert.deepStrictEqual([full.key, full.threadsOnly], ["PR_R|rereview|e54f58b|asked@-", undefined], "the head's first re-review is full");
+        assert.doesNotMatch(rules(f.children[0]), /threads-only/);
+        // The author answers on the same head: the plan's next run is over the threads only.
+        f.snapshot.pullRequests[0] = { ...pr, roles: ["reviewed"], requestedOfMe: false, authorRepliedAt: iso(1) };
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).length === 2 && only(f)[1].state === "done");
+        const light = only(f)[1];
+        assert.match(light.key, /^PR_R\|rereview\|e54f58b\|reply@/);
+        assert.strictEqual(light.threadsOnly, true);
+        assert.ok(rules(f.children[1]).includes(agentCore.THREADS_ONLY_RULE));
+        assert.match(rules(f.children[1]), /rereview: "threads-only" and statusComment: false/);
+        // The log and the Board tell the two apart.
+        assert.deepStrictEqual(
+          queued().map((e) => [e.data.rereview, e.detail]),
+          [
+            ["full", "Queued: re-review — you were asked again"],
+            ["threads", "Queued: re-review of your threads only — the author answered; this head had its full re-review"],
+          ],
+        );
+        assert.strictEqual(view.workLine(light), "Checking the author's answers in your threads");
+        assert.strictEqual(view.workLine(full), "Re-reviewing — the author answered");
+        assert.strictEqual(view.itemVerb(light), "Checking threads on");
+        // Asked again on that head: threads only too.
+        f.snapshot.pullRequests[0] = { ...pr, authorRepliedAt: iso(2) };
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).length === 3 && only(f)[2].state === "done");
+        assert.deepStrictEqual([only(f)[2].threadsOnly, queued()[2].data.rereview], [true, "threads"]);
+        // A push: a new head gets its full re-review.
+        f.snapshot.pullRequests[0] = { ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false, headOid: "f00ba12" }), viewerReviewedAt: iso(-60), viewerReviewedHead: false, lastCommitPushedAt: iso(3), authorRepliedAt: null };
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).length === 4 && only(f)[3].state === "done");
+        assert.deepStrictEqual([view.keyHead(only(f)[3].key), only(f)[3].threadsOnly, queued()[3].data.rereview], ["f00ba12", undefined, "full"]);
+        // You ask for one yourself on a head the agent went over: yours is always full.
+        assert.deepStrictEqual(await f.agent.act({ type: "enqueue", prId: pr.id }), { ok: true });
+        await until(() => only(f).length === 5 && only(f)[4].state === "done");
+        assert.deepStrictEqual([only(f)[4].key, only(f)[4].threadsOnly], ["PR_R|rereview|f00ba12|asked", undefined]);
+        assert.doesNotMatch(rules(f.children[4]), /threads-only/);
       } finally {
         f.agent.stop();
       }
@@ -12600,6 +13113,9 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         running: [{ runId, paused: false, progress: { steps: [{ id: "1", subject: "Read the diff", status: "completed" }, { id: "2", subject: "Check the answers", status: "in_progress" }], activity: "Read x.ts" } }],
       });
       assert.deepStrictEqual([working.owner, working.now, working.progress], ["agent", "The agent is re-reviewing it.", { step: "Check the answers", done: 1, total: 2, activity: "Read x.ts" }]);
+      // Over the threads only (that commit had its full re-review), the card says so.
+      const light = xOne(xPr({ roles: ["reviewer"] }), [sIt({ runId, state: "working", scenario: "rereview", threadsOnly: true })], { running: [{ runId, paused: false, progress: { steps: [], activity: null } }] });
+      assert.strictEqual(light.now, "The agent is checking the author's answers in your threads.");
       assert.deepStrictEqual(working.choices.map((c) => c.act.type), ["stop"]);
       assert.match(working.next, /Nothing is posted on GitHub until you send it/);
       const queued = xBoard([xPr({ id: "Q1", roles: ["reviewer"] }), xPr({ id: "Q2", roles: ["reviewer"] })], [sIt({ prId: "Q1", state: "queued", queuedAt: sAgo(10) }), sIt({ prId: "Q2", state: "queued", queuedAt: sAgo(5) })]).entries;
@@ -13384,6 +13900,207 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(guard.checkToolUse("review", "Workflow", { scriptPath: "C:/x.js" }, gpr, null).allow, false, "no guard file, no workflow");
     });
 
+    // Every refusal is a step the model spends re-reading its context (2026-11-25:
+    // 469 refused tool calls in 68 runs). A refusal says what to do instead — and
+    // stays a refusal: hints never change a decision.
+    {
+      const HINT_PLUGIN = "C:/Users/me/.claude/plugins/cache/x/creatio-development/1.7.142";
+      const HINT_HELPER = `${HINT_PLUGIN}/skills/creatio-code-review/scripts/rereview-context.cjs`;
+      const hintRun = {
+        ...readRun,
+        wrapperPath: "C:/T/prd-agent/r/bin/pr-review-publish.sh",
+        workflowDirs: [HINT_PLUGIN],
+        preflight: { helpers: [HINT_HELPER], installedPlugins: "C:/Users/me/.claude/plugins/installed_plugins.json", tmpDir: "C:/Users/me/AppData/Roaming/PR Dashboard/agent/runs/r/tmp" },
+      };
+      const W = "/c/T/prd-agent/r/bin/pr-review-publish.sh";
+      const refusedWith = (kind, tool, input, why, run = hintRun) => {
+        const d = guard.checkToolUse(kind, tool, input, gpr, run);
+        assert.strictEqual(d.allow, false, `${tool} ${JSON.stringify(input)} stays refused`);
+        if (why) assert.match(d.reason, why, `${tool} ${JSON.stringify(input)}`);
+        return d.reason;
+      };
+      const bashRefused = (command, why, kind = "review", run = hintRun) => refusedWith(kind, "Bash", { command }, why, run);
+
+      test("agent guard hints: a program a read-only run doesn't run says which tool to use instead", () => {
+        for (const [command, why] of [
+          ['ls "C:/Users/me/.claude/plugins/cache/x/creatio-development/1.7.142/skills/creatio-code-review/"', /Bash runs gh, twg, the publish wrapper, the review preflight's node only\. Instead of ls: find files with the Glob tool/],
+          ['cat "C:/wt/docs/notes.md"', /Instead of cat: read a file with the Read tool \(offset and limit/],
+          ['cat "C:/T/prd-agent/r/bin/pr-review-publish.sh"', /that is the app's publish wrapper — run it, don't read it — usage: pr-review-publish\.sh/],
+          ['grep -n summary "C:/wt/x.json"', /Instead of grep: search with the Grep tool/],
+          ["jq -r .x C:/wt/a.json", /shape gh's JSON with its own --jq/],
+          ["sleep 120", /reports to you by itself when it ends/],
+          ["cmd /c dir", /run the program itself, as one plain command/],
+          ["python -m json.tool x", /no script or program from the PR's repository/],
+        ]) bashRefused(command, why);
+        // The preflight's node: told the two calls, with this run's helper and payload folder.
+        for (const command of ["node --version", `node "C:/T/prd-agent/r/out/run-preflight.cjs"`, `node -e "require('${HINT_HELPER}')"`]) {
+          bashRefused(command, /node runs only the review preflight here, as node "C:\/Users\/me\/\.claude\/plugins\/cache\/x\/creatio-development\/1\.7\.142\/skills\/creatio-code-review\/scripts\/rereview-context\.cjs" < "C:\/T\/prd-agent\/r\/out\/<request>\.json"/);
+        }
+        // Without a preflight, node runs nothing at all.
+        bashRefused("node --version", /Instead of node: nothing else runs here/, "review", readRun);
+        // A shell around the wrapper: run the wrapper itself.
+        bashRefused(`bash ${W} --help`, /run the publish wrapper itself, not through bash — usage: pr-review-publish\.sh review\|comment/);
+        // A brief runs no wrapper and no preflight: it isn't told of them.
+        assert.doesNotMatch(bashRefused("ls", /Bash runs gh, twg only/, "brief", readRun), /wrapper|preflight/);
+      });
+
+      test("agent guard hints: shell syntax says what to drop, and which programs don't run either", () => {
+        const piped = bashRefused("gh api user --jq .login 2>&1 | head -20", /^Shell operators \(pipes, redirection, chaining\) are not allowed in agent runs — run one plain command\./);
+        assert.match(piped, /drop 2>&1 and 2>\/dev\/null/);
+        assert.match(piped, /no pipes — shape JSON with gh's --jq; a result too long to show is saved to a file you can Read/);
+        assert.match(piped, /instead of head: read a file with the Read tool/);
+        assert.doesNotMatch(piped, /instead of gh/, "gh runs: only what doesn't is named");
+        const chained = bashRefused('gh api user --jq .login; ls "C:/T/prd-agent/r/bin/"', /one command per call/);
+        assert.match(chained, /instead of ls: find files with the Glob tool/);
+        assert.doesNotMatch(bashRefused('cd "C:/wt" && gh pr view 12 --json title', /no cd — commands already run in the run's working folder/), /instead of cd/, "said once");
+        bashRefused("ls ~/.claude/workflows/ 2>/dev/null", /Unquoted \{ \} ~ #.*~ isn't expanded — write the full path.*instead of ls.*no named workflows.*\*\.workflow\.js/);
+        bashRefused('ls "$HOME/.claude/workflows/"', /^Expansion .*no \$VARIABLES — write the value out/);
+        bashRefused("cat <<'EOF' > /tmp/q.graphql", /no heredocs — write a file with the Write tool/);
+        // An operator inside quotes is the command's own: no hint about it.
+        assert.doesNotMatch(bashRefused("gh api repos/acme/widgets/pulls/12/files --jq '.[] | .filename' | head", /no pipes/), /one command per call/);
+        // A drive runs other programs: it is told only what to drop.
+        const drive = bashRefused("npm run typecheck 2>&1 | tail -15", /drop 2>&1/, "drive", { workDir: "C:/wt" });
+        assert.doesNotMatch(drive, /Bash runs gh/);
+        bashRefused('git -C "C:/wt" log --oneline -1', /drop -C <dir>/, "drive", { workDir: "C:/wt" });
+      });
+
+      test("agent guard hints: git in a read-only run names the gh reads that work — and each one passes the guard", () => {
+        // The guard file carries the run's own --allowedTools, for the hints alone.
+        const reason = bashRefused('git -C "C:/wt" diff a1b2..c3d4 --stat', /so no git; use gh: /, "review", { ...hintRun, allowedTools: ad.DEFAULT_AGENT_TOOLS.review });
+        for (const named of [
+          "gh pr view 12 --json headRefOid,baseRefOid,commits",
+          "gh pr diff 12",
+          `gh api repos/acme/widgets/pulls/12/files --paginate --jq '.[] | select(.filename == "PATH") | .patch'`,
+          "gh api 'repos/acme/widgets/contents/PATH?ref=SHA' -H 'Accept: application/vnd.github.raw'",
+        ]) {
+          assert.ok(reason.includes(named), `the hint names ${named}`);
+          const cmd = named.replace(/PATH/g, "src/a.ts").replace(/SHA/g, "abc123");
+          assert.deepStrictEqual(guard.checkBash("review", cmd, gpr), { allow: true }, cmd);
+          assert.ok(guard.ruleAllows(ad.DEFAULT_AGENT_TOOLS.review, cmd), `the default review tools let ${cmd} run`);
+        }
+        // A brief's default tools have no gh api: its hint doesn't send it there.
+        assert.doesNotMatch(bashRefused("git log --oneline -3", /gh pr diff 12/, "brief", { ...readRun, allowedTools: ad.DEFAULT_AGENT_TOOLS.brief }), /gh api/);
+        // Nor does a review whose own tools leave gh api out — the hint follows the run's tools, not the defaults.
+        assert.doesNotMatch(bashRefused("git log --oneline -3", /gh pr diff 12/, "review", { ...readRun, allowedTools: ad.DEFAULT_AGENT_TOOLS.review.filter((r) => !r.startsWith("Bash(gh api")) }), /gh api/);
+        // A guard file with no tools in it: the plain hint.
+        assert.match(bashRefused("git log --oneline -3", null, "review", readRun), /so no git; use gh pr diff \/ gh pr view\.$/);
+        // gh pr diff takes no paths: the one file's patch is named instead.
+        bashRefused("gh pr diff 12 --patch -- src/a.ts", /takes no file paths.*gh api repos\/acme\/widgets\/pulls\/12\/files --paginate/);
+        bashRefused("gh api repos/acme/widgets/contents/CONTEXT.md --ref abc123 --jq .content", /A ref goes in the quoted path: 'repos\/<owner>\/<repo>\/contents\/PATH\?ref=SHA'/);
+        bashRefused("gh api repos/acme/widgets/git/trees/abc -X GET -f recursive=1", /drop -X, and put query parameters in the quoted path/);
+        bashRefused("gh api repos/acme/widgets/pulls/12/files --paginate --jq '.[] | .patch' --template '{{.}}'", /--jq already prints a string as it is: drop --template/);
+        bashRefused("GH_HOST=github.com gh api user --jq .login", /gh already points at this PR's host and repository: run the command without GH_HOST=…/);
+      });
+
+      test("agent guard hints: the publish wrapper is run, never read or asked for --help, and posts no status comment", () => {
+        const run = { ...hintRun, outDir: "C:\\T\\prd-agent\\r\\out" };
+        bashRefused(`${W} --help`, /^PUBLISH-REJECTED: usage: pr-review-publish\.sh .* — the app's own wrapper: it records each write and posts nothing; write every file under C:\/T\/prd-agent\/r\/out\/ and pass its absolute path\./, "review", run);
+        bashRefused(W, /the app's own wrapper/, "review", run);
+        bashRefused(`${W} status acme/widgets 12 C:/T/prd-agent/r/out/status.md`, /^PUBLISH-REJECTED: the app's wrapper posts no status comment — skip it and go on \(start the review workflow with statusComment: false\)/, "review", run);
+        assert.doesNotMatch(bashRefused(`${W} delete acme/widgets 12 x`, /^PUBLISH-REJECTED: usage/, "review", run), /records each write/, "a wrong call gets the usage alone");
+        refusedWith("review", "Read", { file_path: "C:/T/prd-agent/r/bin/pr-review-publish.sh" }, /is outside them\. That is the app's publish wrapper: run it, don't read it — usage: /);
+      });
+
+      test("agent guard hints: named workflows, and the preflight's request written to the wrong folder", () => {
+        refusedWith("review", "Glob", { pattern: "*.js", path: "C:/Users/me/.claude/workflows" }, /is outside them\. Agent runs have no named workflows \(nothing from ~\/\.claude\/workflows\)/);
+        refusedWith("review", "Glob", { pattern: "~/.claude/workflows/*.js" }, /don't glob under ~\. Agent runs have no named workflows/);
+        refusedWith("review", "Workflow", { name: "creatio-code-review-workflow" }, /by its script path — the skill's \*\.workflow\.js, inside C:\/Users\/me\/\.claude\/plugins\/cache\/x\/creatio-development\/1\.7\.142 — not by name/);
+        // The preflight's agent writes its request where TEMP points: told to write it under the payload folder.
+        refusedWith(
+          "rereview",
+          "Write",
+          { file_path: "C:\\Users\\me\\AppData\\Roaming\\PR Dashboard\\agent\\runs\\r\\tmp\\rereview-request.json", content: "{}" },
+          /writes payload files under C:\/T\/prd-agent\/r\/out and nothing else\. The review preflight's request goes there too — node runs only the review preflight here, as node ".*rereview-context\.cjs" < "C:\/T\/prd-agent\/r\/out\/<request>\.json"/,
+        );
+        assert.doesNotMatch(refusedWith("review", "Write", { file_path: "C:/wt/src/x.ts", content: "" }, /payload files under/), /preflight/, "a write elsewhere is told nothing about the preflight");
+      });
+
+      test("agent rules: a restricted run is told its tools up front — only commands the guard and its tools let through", () => {
+        const folder = { wrapperPath: "C:\\T\\prd-agent\\r\\bin\\pr-review-publish.sh", outDir: "C:\\T\\prd-agent\\r\\out" };
+        const workflow = "C:\\Users\\me\\.claude\\plugins\\cache\\x\\creatio-development\\1.7.142\\skills\\creatio-code-review\\creatio-code-review-workflow.workflow.js";
+        const review = agentCore.agentRules("review", "on", folder, { repo: "Acme/Widgets", number: 12 }, "en", { allowedTools: ad.DEFAULT_AGENT_TOOLS.review, workflows: [workflow] });
+        for (const said of [
+          /Bash runs one plain command per call: gh, twg, the publish wrapper only — no ls, cat, grep, node, sleep, cd or git; no pipes, redirection, 2>&1, ; or &&; quote any \* \? \{ \} ~ #\./,
+          /Files: Read \(offset\/limit for a part\), Glob, Grep\./,
+          /gh pr diff 12 \(--name-only for its files\)/,
+          /rows with @tsv, never \\t/,
+          /twg's -o takes json, jsonl, yaml or text/,
+          /A result too long to show is saved to a file you are told of: Read that file/,
+          /Named workflows don't exist here: .* Workflow\(\{ scriptPath: "C:\/Users\/me\/\.claude\/plugins\/cache\/x\/creatio-development\/1\.7\.142\/skills\/creatio-code-review\/creatio-code-review-workflow\.workflow\.js", args \}\)/,
+          /The publish wrapper \(run it — never with --help, never read it\): \/c\/T\/prd-agent\/r\/bin\/pr-review-publish\.sh review\|comment Acme\/Widgets 12 FILE\.json · reply\|escalate Acme\/Widgets 12 COMMENT-ID FILE\.txt · resolve THREAD-ID; every FILE written under C:\/T\/prd-agent\/r\/out\//,
+          /start the review workflow with statusComment: false/,
+        ]) assert.match(review, said);
+        // Every command the rules name passes the guard for this PR, and the run's own tools.
+        for (const named of [
+          "gh pr view 12 --json headRefOid,baseRefOid,commits",
+          "gh pr diff 12",
+          `gh api repos/Acme/Widgets/pulls/12/files --paginate --jq '.[] | select(.filename == "PATH") | .patch'`,
+          "gh api 'repos/Acme/Widgets/contents/PATH?ref=SHA' -H 'Accept: application/vnd.github.raw'",
+        ]) {
+          assert.ok(review.includes(named), `the rules name ${named}`);
+          const cmd = named.replace(/PATH/g, "src/a.ts").replace(/SHA/g, "abc123");
+          assert.deepStrictEqual(guard.checkBash("review", cmd, gpr), { allow: true }, cmd);
+          assert.ok(guard.ruleAllows(ad.DEFAULT_AGENT_TOOLS.review, cmd), cmd);
+        }
+        // A wrapper call as the rules spell it passes too.
+        assert.deepStrictEqual(guard.checkBash("review", "/c/T/prd-agent/r/bin/pr-review-publish.sh review Acme/Widgets 12 C:/T/prd-agent/r/out/review.json", gpr, { ...folder }), { allow: true });
+        // A review whose plugin carries the preflight helper is granted its node: the rules don't forbid it then.
+        const withPreflight = agentCore.agentRules("review", "on", folder, { repo: "Acme/Widgets", number: 12 }, "en", { allowedTools: [...ad.DEFAULT_AGENT_TOOLS.review, "Bash(node *)"], workflows: [workflow] });
+        assert.match(withPreflight, /Bash runs one plain command per call: gh, twg, the publish wrapper, the review preflight's node only — no ls, cat, grep, sleep, cd or git; node only as the review skill's preflight runs it; no pipes/);
+        // A brief's tools have no gh api, no wrapper and no workflow: none of them is named.
+        const brief = agentCore.agentRules("brief", "on", null, { repo: "Acme/Widgets", number: 12 }, "en", { allowedTools: ad.DEFAULT_AGENT_TOOLS.brief, workflows: [] });
+        assert.match(brief, /gh pr diff 12/);
+        assert.doesNotMatch(brief, /gh api|publish wrapper|Workflow\(/);
+        // A drive may use git and other programs: told only the shell rules, and its wrapper line is its own.
+        const drive = agentCore.agentRules("drive", "shadow", folder, { repo: "Acme/Widgets", number: 12, reasons: ["ci"] }, "en", { allowedTools: ad.DEFAULT_AGENT_TOOLS.drive, workflows: [] });
+        assert.match(drive, /no cd \(you are in the worktree\) and no git -C/);
+        assert.doesNotMatch(drive, /no ls, cat|Instead of git|statusComment/);
+        // Without tools (a full-context drive, older callers): no tool rules at all.
+        assert.doesNotMatch(agentCore.agentRules("review", "on", folder, { repo: "Acme/Widgets", number: 12 }), /Tools here/);
+        // It rides on every step of every run: kept short.
+        const added = review.length - agentCore.agentRules("review", "on", folder, { repo: "Acme/Widgets", number: 12 }).length;
+        assert.ok(added < 2200, `the tool rules add ${added} characters`);
+      });
+    }
+
+    test("agent plugins: the workflow scripts of the skills a prompt names — an agent run has no named workflows", () => {
+      const root = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-wf-"));
+      const skill = path.join(root, "skills", "creatio-code-review");
+      nfsA.mkdirSync(skill, { recursive: true });
+      nfsA.writeFileSync(path.join(skill, "creatio-code-review-workflow.workflow.js"), "");
+      nfsA.writeFileSync(path.join(skill, "SKILL.md"), "");
+      nfsA.mkdirSync(path.join(root, "skills", "code-delivery"), { recursive: true });
+      nfsA.writeFileSync(path.join(root, "skills", "code-delivery", "code-delivery-verify.workflow.js"), "");
+      const cat = [{ name: "creatio-development", installPath: root }];
+      assert.deepStrictEqual(plugins.skillWorkflows("/creatio-development:creatio-code-review https://x/pull/1 — a re-review", cat), [path.join(skill, "creatio-code-review-workflow.workflow.js")]);
+      assert.deepStrictEqual(plugins.skillWorkflows("/creatio-code-review https://x/pull/1", cat), [], "an unresolved bare name names no plugin");
+      assert.deepStrictEqual(plugins.skillWorkflows("/creatio-development:nope x", cat), [], "no such skill folder");
+      assert.deepStrictEqual(plugins.skillWorkflows("/other:creatio-code-review x", cat), [], "another plugin's skill");
+      nfsA.rmSync(root, { recursive: true, force: true });
+    });
+
+    test("agent runner: --add-dir opens the session's own folders — exactly what the guard lets it read, made in advance", () => {
+      const base = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-sf-"));
+      const roots = [path.join(base, "projects"), path.join(base, "tmp", "claude")];
+      const cwd = path.join(base, "wt", "agent-x-12");
+      nfsA.mkdirSync(cwd, { recursive: true });
+      const sid = "6250ec40-5c65-407c-8b04-61b1dba8fae7";
+      const dirs = runner.sessionFolders(roots, cwd, sid);
+      const name = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+      for (const root of roots) assert.ok(dirs.includes(path.join(root, name, sid)), `${root}: ${dirs.join(", ")}`);
+      for (const d of dirs) assert.ok(nfsA.statSync(d).isDirectory(), `${d} exists for --add-dir`);
+      // The guard reads in them — the Workflow's journal the session was refused — and in no other session's.
+      const run = { workDir: cwd, readDirs: [cwd], sessionId: sid, sessionRoots: roots };
+      for (const d of dirs) {
+        assert.deepStrictEqual(guard.checkToolUse("review", "Read", { file_path: path.join(d, "subagents", "workflows", "wf_1", "journal.jsonl") }, gpr, run), { allow: true }, d);
+      }
+      assert.strictEqual(guard.checkToolUse("review", "Read", { file_path: path.join(roots[0], name, "11111111-2222-3333-4444-555555555555", "x.jsonl") }, gpr, run).allow, false, "another session's folder");
+      assert.deepStrictEqual(runner.sessionFolders(roots, cwd, "../.."), [], "only a session id's characters name a folder");
+      const args = runner.buildClaudeArgs({ cwd, sessionId: sid, kind: "review", prompt: "p", appendSystemPrompt: "r", allowedTools: ["Read"], pluginDirs: [], model: "", effort: "", settingsFile: "s.json", timeoutMs: 1, addDirs: dirs });
+      for (const d of dirs) assert.strictEqual(args[args.indexOf(d) - 1], "--add-dir", d);
+      nfsA.rmSync(base, { recursive: true, force: true });
+    });
+
     test("capture: the review's wrapper records a checked call and posts nothing", () => {
       const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-cap-"));
       const outDir = path.join(runDir, "out");
@@ -13685,6 +14402,53 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       });
       assert.strictEqual(cfg.validateAgent({ diagrams: { model: "--dangerously-skip-permissions" } }).diagrams.model, "sonnet", "it goes on a command line");
       assert.strictEqual(cfg.validateAgent({ diagrams: { model: "claude-sonnet-5-5" } }).diagrams.model, "claude-sonnet-5-5");
+    });
+
+    test("agent models: per kind of run — a brief on Sonnet, the rest as the agent's; settings saved before read the defaults", () => {
+      const ad = require(path.join(__dirname, "../dist/main/shared/agent-defaults.js"));
+      const none = { model: "", effort: "" };
+      const d = cfg.validateAgent(undefined);
+      assert.deepStrictEqual(d.runModels, { review: none, brief: { model: "sonnet", effort: "" }, rereview: none, drive: none, afterMerge: none });
+      assert.strictEqual(d.sonnetReviewers, true, "reviewers on Sonnet by default");
+      // Agent settings from before these fields: the defaults, the agent's own model and effort kept as the fallback.
+      const old = cfg.validateAgent({ enabled: true, model: "opus", effort: "high" });
+      assert.deepStrictEqual([old.runModels, old.sonnetReviewers], [d.runModels, true]);
+      assert.deepStrictEqual(ad.runModelFor(old, "brief"), { model: "sonnet", effort: "high" });
+      for (const kind of ["review", "rereview", "drive", "afterMerge"]) assert.deepStrictEqual(ad.runModelFor(old, kind), { model: "opus", effort: "high" }, kind);
+      assert.deepStrictEqual(cfg.validateSettings({ hosts: [], agent: { enabled: true } }).agent.runModels, d.runModels, "a whole settings file too");
+      // Saved per kind: kept; empty means the agent's (not the default Sonnet); a flag or an unknown effort falls back.
+      const s = cfg.validateAgent({
+        model: "opus",
+        runModels: {
+          brief: { model: "", effort: "low" },
+          drive: { model: " claude-sonnet-5-5 ", effort: "medium" },
+          review: { model: "--dangerously-skip-permissions", effort: "max" },
+          rereview: "sonnet",
+        },
+        sonnetReviewers: false,
+      });
+      assert.deepStrictEqual(s.runModels.brief, { model: "", effort: "low" });
+      assert.deepStrictEqual(ad.runModelFor(s, "brief"), { model: "opus", effort: "low" });
+      assert.deepStrictEqual(s.runModels.drive, { model: "claude-sonnet-5-5", effort: "medium" });
+      assert.deepStrictEqual(s.runModels.review, none, "it goes on a command line");
+      assert.deepStrictEqual([s.runModels.rereview, s.runModels.afterMerge], [none, none]);
+      assert.strictEqual(s.sonnetReviewers, false);
+      assert.strictEqual(cfg.validateAgent({ sonnetReviewers: "no" }).sonnetReviewers, true);
+      // Nothing chosen anywhere: Claude Code's default.
+      assert.deepStrictEqual(ad.runModelFor(cfg.validateAgent({ runModels: { brief: { model: "" } } }), "brief"), none);
+      // A save writes them, and a save of this build keeps another build's field beside them.
+      const kept = cfg.keepUnknownSettings({ agent: { runModels: { brief: { model: "opus", future: 1 } } } }, cfg.validateSettings({ hosts: [] }));
+      assert.deepStrictEqual(kept.agent.runModels.brief, { model: "sonnet", effort: "", future: 1 });
+    });
+
+    test("agent models: Reviewers on Sonnet — the review workflow's runs are told to pass reviewerModel, no other run is", () => {
+      const pr = { repo: "a/b", number: 7, sonnetReviewers: true };
+      for (const scenario of ["review", "rereview"]) assert.match(agentCore.agentRules(scenario, "shadow", null, pr), /reviewerModel: "sonnet"/, scenario);
+      assert.match(agentCore.agentRules("drive", "shadow", null, { ...pr, reasons: ["self"] }), /reviewerModel: "sonnet"/, "a self-review runs the same workflow");
+      for (const [scenario, reasons] of [["brief"], ["afterMerge"], ["drive", ["ci"]], ["drive", ["comments"]]]) {
+        assert.ok(!agentCore.agentRules(scenario, "shadow", null, { ...pr, reasons }).includes("reviewerModel"), `${scenario} ${reasons ?? ""}`);
+      }
+      assert.ok(!agentCore.agentRules("review", "shadow", null, { repo: "a/b", number: 7 }).includes("reviewerModel"), "off: nothing said");
     });
 
     test("agent diagrams: the drawing run answers once, with no tools and nothing of yours loaded or saved", () => {
@@ -14706,6 +15470,139 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const answered = policy.planJobs([rv({ roles: ["reviewer"], requestedOfMe: true, viewerReviewedHead: true, authorRepliedAt: at(7) })], agentOn(), noSessions).jobs[0];
       assert.strictEqual(answered.key, `PR_R|rereview|aaa111|asked@${at(7)}`, "an answer in a thread since your review is new work on the same head");
       assert.match(policy.planJobs([rv({ authorRepliedAt: at(7) })], agentOn({ scenarios: { rereview: { mode: "off" } } }), noSessions).idle.get("PR_R"), /re-reviews are off/);
+    });
+
+    test("mapPr: when a review was last asked for — the latest review-request event, of anyone", () => {
+      const events = (...at) => ({ timelineItems: { nodes: at.map((createdAt) => ({ createdAt })) } });
+      assert.strictEqual(github.mapPr(rawPr(events("2026-07-08T00:00:00Z")), "GH", ["reviewer"], "me").reviewRequestedAt, "2026-07-08T00:00:00Z");
+      assert.strictEqual(github.mapPr(rawPr(events("2026-07-08T00:00:00Z", "2026-07-09T00:00:00Z")), "GH", ["reviewer"], "me").reviewRequestedAt, "2026-07-09T00:00:00Z", "last: the newest");
+      assert.strictEqual(github.mapPr(rawPr(events()), "GH", ["reviewer"], "me").reviewRequestedAt, null);
+      assert.strictEqual(github.mapPr(rawPr(), "GH", ["reviewer"], "me").reviewRequestedAt, null, "an older read without the field");
+    });
+
+    test("agent policy: what the agent would review on its own waits until the PR settles — no push, author's reply or review request for settleMinutes", () => {
+      const t0 = Date.parse("2026-11-25T12:00:00Z");
+      const ago = (min) => new Date(t0 - min * 60_000).toISOString();
+      const ctx = { ...noSessions, now: new Date(t0) };
+      const clock = (min) => view.localClock(ago(-min));
+      const quiet = { lastCommitPushedAt: ago(60), authorRepliedAt: null, reviewRequestedAt: ago(60) };
+      const first = (o = {}, over = {}) => ({ ...reviewPr(over), ...quiet, ...o });
+      const again = (o = {}) => ({ ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false }), ...quiet, viewerReviewedAt: ago(120), viewerReviewedHead: false, ...o });
+      const mine = (o = {}) => ({ ...reviewPr({ role: "author" }), ciState: "failure", ...quiet, ...o });
+      // [what, PR, settings, ctx extra, the job it plans or null, when the plan wakes (minutes from now) or null]
+      const rows = [
+        ["quiet for an hour: the review starts", first(), {}, {}, "review", null],
+        ["pushed 5 min ago: waits 10 more", first({ lastCommitPushedAt: ago(5) }), {}, {}, null, 10],
+        ["a review asked for a minute ago", first({ reviewRequestedAt: ago(1) }), {}, {}, null, 14],
+        ["the author answered in a thread 14 min ago", first({ authorRepliedAt: ago(14) }), {}, {}, null, 1],
+        ["the latest of the three counts", first({ lastCommitPushedAt: ago(12), authorRepliedAt: ago(3), reviewRequestedAt: ago(8) }), {}, {}, null, 12],
+        ["exactly settleMinutes ago is settled", first({ lastCommitPushedAt: ago(15) }), {}, {}, "review", null],
+        ["the wait is a setting", first({ lastCommitPushedAt: ago(20) }), { limits: { settleMinutes: 30 } }, {}, null, 10],
+        ["0 switches it off", first({ lastCommitPushedAt: ago(0) }), { limits: { settleMinutes: 0 } }, {}, "review", null],
+        ["a big PR's brief waits too", first({ lastCommitPushedAt: ago(2) }, { additions: 900 }), {}, {}, null, 13],
+        ["a re-review on the author's reply waits too", again({ authorRepliedAt: ago(4) }), {}, {}, null, 11],
+        ["…and runs once the reply is old enough", again({ authorRepliedAt: ago(40) }), {}, {}, "rereview", null],
+        ["a re-request waits like a first one", again({ roles: ["reviewer"], requestedOfMe: true, reviewRequestedAt: ago(2) }), {}, {}, null, 13],
+        ["a time far ahead of the clock says nothing", first({ lastCommitPushedAt: ago(-600) }), {}, {}, "review", null],
+        ["a little ahead counts from that time", first({ lastCommitPushedAt: ago(-5) }), {}, {}, null, 20],
+        ["a job the ledger knows is handed on: its reason is the ledger's", first({ lastCommitPushedAt: ago(1) }), {}, { known: (k) => k === "PR_R|review|aaa111" }, "review", null],
+        ["a drive never waits", mine({ lastCommitPushedAt: ago(1) }), {}, {}, "drive", null],
+      ];
+      for (const [what, pr, over, extra, scenario, wake] of rows) {
+        const r = policy.planJobs([pr], agentOn(over), { ...ctx, ...extra });
+        assert.deepStrictEqual(r.jobs.map((j) => j.scenario), scenario ? [scenario] : [], what);
+        assert.strictEqual(r.wakeAt, wake === null ? null : ago(-wake), what);
+        if (scenario) continue;
+        const minutes = (over.limits?.settleMinutes ?? 15);
+        assert.strictEqual(r.idle.get("PR_R"), `${policy.SETTLING_WHY} — no push, reply or review request for ${minutes} min; the agent starts at ${clock(wake)}`, what);
+      }
+      // Several PRs waiting: the plan wakes for the first to settle.
+      const two = policy.planJobs([first({ lastCommitPushedAt: ago(2) }), first({ lastCommitPushedAt: ago(9) }, { id: "PR_S" })], agentOn(), ctx);
+      assert.strictEqual(two.wakeAt, ago(-6));
+      // Without a clock of its own the plan reads the real one: a PR quiet since July is settled.
+      assert.strictEqual(policy.planJobs([first({ lastCommitPushedAt: "2026-07-07T00:00:00Z", reviewRequestedAt: null })], agentOn(), noSessions).jobs.length, 1);
+      assert.strictEqual(policy.planJobs([first()], cfg.validateAgent(undefined), ctx).wakeAt, null, "the agent off plans nothing, wakes for nothing");
+    });
+
+    test("agent policy: a review the agent published — a plain Comment too — counts as yours: a new head gets a re-review of what changed, not a brief and a first review again (#295)", () => {
+      const at = (h) => `2026-07-0${h}T00:00:00Z`;
+      // A big PR — over the limit, so a first review of it would start with a brief.
+      const pr = (o = {}) => ({ ...reviewPr({ additions: 900, headOid: o.headOid ?? "bbb222", role: o.role ?? "reviewer", requestedOfMe: o.requestedOfMe ?? true }), lastCommitPushedAt: at(6), authorRepliedAt: null, ...o });
+      const agentComment = { at: at(5), head: "aaa111" };
+      const rows = [
+        // [what, PR, the agent's review, more of the plan's context, settings, jobs as [scenario, key], idle, base checks]
+        ["#295: the agent's Comment review, then a push and the review asked again", pr(), agentComment, {}, null, [["rereview", `PR_R|rereview|bbb222|asked@${at(6)}`]], undefined, []],
+        ["no review of the agent's: a first review, its brief first", pr(), null, {}, null, [["brief", "PR_R|brief|bbb222"]], undefined, []],
+        ["a push alone: first checked for the same change on a new base", pr({ role: "reviewed", requestedOfMe: false }), agentComment, { baseOnlyState: () => "unchecked" }, null, [], "Reviewed — checking whether only the base changed under your review", ["PR_R|rereview|bbb222|base"]],
+        ["a push alone that changed the code: the re-review", pr({ role: "reviewed", requestedOfMe: false }), agentComment, { baseOnlyState: () => "changed" }, null, [["rereview", `PR_R|rereview|bbb222|reply@${at(6)}`]], undefined, []],
+        ["only the base changed: nothing to re-review", pr({ role: "reviewed", requestedOfMe: false }), agentComment, { baseOnlyState: () => "same" }, null, [], "Reviewed — only the base changed under your review since", []],
+        ["an answer in a thread since the agent's review", pr({ role: "reviewed", requestedOfMe: false, authorRepliedAt: at(7) }), agentComment, {}, null, [["rereview", `PR_R|rereview|bbb222|reply@${at(7)}`]], undefined, []],
+        ["the agent's review is of this head and a request still stands: nothing it didn't answer", pr({ headOid: "aaa111", lastCommitPushedAt: at(4) }), agentComment, {}, null, [], "Reviewed by the agent on this head — nothing new from the author since", []],
+        ["the agent's review is of this head, not asked again", pr({ headOid: "aaa111", lastCommitPushedAt: at(4), role: "reviewed", requestedOfMe: false }), agentComment, {}, null, [], "Reviewed — nothing new from the author since", []],
+        ["re-reviews off: no re-review — and no first review either", pr(), agentComment, {}, agentOn({ scenarios: { rereview: { mode: "off" } } }), [], "Reviewed — re-reviews are off", []],
+        // Your own review on GitHub wins: its time (3) makes the push (4) new, the agent's later one (5) would not.
+        ["your own review on GitHub comes first", pr({ viewerHasReviewed: true, viewerReviewedAt: at(3), viewerReviewedOid: "zzz999", role: "reviewed", requestedOfMe: false, lastCommitPushedAt: at(4) }), agentComment, {}, null, [["rereview", `PR_R|rereview|bbb222|reply@${at(4)}`]], undefined, []],
+      ];
+      for (const [what, p, review, extra, settings, jobs, idle, baseChecks] of rows) {
+        const r = policy.planJobs([p], settings ?? agentOn(), { ...noSessions, agentReviewed: () => review, ...extra });
+        assert.deepStrictEqual(r.jobs.map((j) => [j.scenario, j.key]), jobs, what);
+        assert.strictEqual(r.idle.get("PR_R"), idle, what);
+        assert.deepStrictEqual(r.baseChecks.map((j) => j.key), baseChecks, what);
+      }
+      // What the re-review rules read: the agent's time and head in place of yours — the roles and the verdict untouched.
+      const seen = policy.withAgentReview(pr(), agentComment);
+      assert.deepStrictEqual(
+        [seen.viewerHasReviewed, seen.viewerReviewedAt, seen.viewerReviewedOid, seen.viewerReviewedHead, seen.viewerApproved, seen.roles],
+        [true, at(5), "aaa111", false, false, ["reviewer"]],
+      );
+      assert.strictEqual(policy.withAgentReview(pr({ headOid: "aaa111" }), agentComment).viewerReviewedHead, true);
+      const own = pr({ viewerHasReviewed: true, viewerReviewedAt: at(3) });
+      assert.strictEqual(policy.withAgentReview(own, agentComment), own, "yours stands as it is");
+      const none = pr();
+      assert.strictEqual(policy.withAgentReview(none, null), none);
+      assert.strictEqual(policy.authorActivitySince(seen), at(6), "a push after the agent's review is the author's answer");
+      assert.strictEqual(policy.authorActivitySince(none), null, "without it there is nothing to compare with");
+    });
+
+    test("agent policy: one full re-review per head — what the author does next on a head a full one went over is checked over your threads only", () => {
+      // creatio-ai-app-development-toolkit#294 on 2026-11-24: asked again on e54f58b at 00:48, the author answered at 00:53 —
+      // two full re-reviews of the same commit, ~$2.2 each.
+      const at = (m) => `2026-11-25T00:${m}:00Z`;
+      const pr294 = (o = {}) => ({
+        ...reviewPr({ viewerHasReviewed: true, role: "reviewer", requestedOfMe: true, headOid: "e54f58b" }),
+        viewerReviewedAt: at(30),
+        viewerReviewedHead: true,
+        viewerApproved: false,
+        lastCommitPushedAt: at(20),
+        authorRepliedAt: null,
+        ...o,
+      });
+      const answered = (o = {}) => pr294({ roles: ["reviewed"], requestedOfMe: false, authorRepliedAt: at(53), ...o });
+      // The agent's ledger, as the policy sees it: the heads a full review or re-review went over.
+      const ledger = (...heads) => ({ ...noSessions, reviewedHead: (pr) => heads.includes(pr.headOid) });
+      const cases = [
+        // [what, pr, ctx, [ledger key's cursor, threads only]]
+        ["asked again, no full re-review of this head yet: full", pr294(), ledger(), ["asked@-", false]],
+        ["no ledger in the context at all: full, as before", pr294(), noSessions, ["asked@-", false]],
+        ["the ledger knows only an older head: full", pr294(), ledger("84f5d22"), ["asked@-", false]],
+        ["#294: the author answered on the head re-reviewed in full: threads only", answered(), ledger("e54f58b"), [`reply@${at(53)}`, true]],
+        ["asked again on that head, after an answer: threads only", pr294({ authorRepliedAt: at(55) }), ledger("e54f58b"), [`asked@${at(55)}`, true]],
+        ["asked again on that head, nothing else: threads only", pr294(), ledger("e54f58b"), ["asked@-", true]],
+        ["a push since: a new head gets its full re-review", answered({ headOid: "f00ba12", viewerReviewedHead: false, lastCommitPushedAt: at(58), authorRepliedAt: null }), ledger("e54f58b"), [`reply@${at(58)}`, false]],
+      ];
+      for (const [what, pr, ctx, [cursor, light]] of cases) {
+        const jobs = policy.planJobs([pr], agentOn(), ctx).jobs;
+        assert.deepStrictEqual(
+          jobs.map((j) => [j.scenario, j.kind, j.key, j.threadsOnly === true]),
+          [["rereview", "rereview", `PR_R|rereview|${pr.headOid}|${cursor}`, light]],
+          what,
+        );
+      }
+      // The key is the trigger's either way: the full run's own trigger never comes back as a light run of its own.
+      assert.strictEqual(policy.planJobs([answered()], agentOn(), ledger()).jobs[0].key, policy.planJobs([answered()], agentOn(), ledger("e54f58b")).jobs[0].key);
+      // A first review is never light: the ledger counts only for a PR you reviewed before.
+      const first = policy.planJobs([reviewPr({ headOid: "e54f58b" })], agentOn(), ledger("e54f58b")).jobs;
+      assert.deepStrictEqual(first.map((j) => [j.scenario, j.threadsOnly]), [["review", undefined]]);
     });
 
     test("agent policy: a PR with no clone of its repository gets no run — it waits and says why; offers need none", () => {
@@ -16169,7 +17066,17 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const queued = [vItem({ prId: "F", state: "queued" })];
       assert.strictEqual(view.agentTrayLine({ ...base, quietUntil: "08:00", items: queued }), "Quiet hours until 08:00 · 1 in line");
       assert.strictEqual(view.agentTrayLine({ ...base, items: queued }), "1 in line");
-      assert.match(view.agentTrayLine({ ...base, heldUntil: new Date(2026, 10, 5, 14, 5).toISOString() }), /^Usage limit — waits until 14:05$/);
+      const day = new Date(2026, 10, 5, 9, 0);
+      assert.strictEqual(view.agentTrayLine({ ...base, heldUntil: new Date(2026, 10, 5, 14, 5).toISOString() }, day), "Claude's usage limit — waits until 14:05", "a state from before the reason was sent");
+      assert.strictEqual(
+        view.agentTrayLine({ ...base, heldUntil: new Date(2026, 10, 5, 14, 5).toISOString(), heldWhy: "Claude's session usage at 83% (agent cap 80%)", items: queued }, day),
+        "Claude's session usage at 83% (agent cap 80%) — waits until 14:05 · 1 in line",
+      );
+      // A weekly window resets days on: the day is said too.
+      assert.strictEqual(view.agentTrayLine({ ...base, heldUntil: new Date(2026, 10, 7, 10, 0).toISOString(), heldWhy: "Claude's weekly limit reached" }, day), "Claude's weekly limit reached — waits until Sat 10:00");
+      // The day's budget, like the run limit: said while something waits for it.
+      assert.strictEqual(view.agentTrayLine({ ...base, costToday: 20.4, costPerDay: 20, items: queued }), "Daily budget reached ($20.40 of $20) · 1 in line");
+      assert.strictEqual(view.agentTrayLine({ ...base, costToday: 20.4, costPerDay: 20 }), "Idle");
     });
 
     test("agent toasts: a trigger the agent took in On is left to the agent; Shadow, other PRs and other triggers still toast", () => {
@@ -17211,6 +18118,92 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       }
     });
 
+    await atest("agent: an interrupted re-review over the threads only that starts over stays one — not a full re-review of a head that had its own", async () => {
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const runId = "00000000-0000-4000-8000-0000000000d2";
+      const st = agentStore.emptyStore("2026-11-05");
+      st.items = [
+        { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", state: "working", headline: "h", queuedAt: "2026-11-05T00:00:00Z", runId, key: "PR_R|rereview|aaa111|reply@2026-11-05T00:00:00Z", scenario: "rereview", threadsOnly: true, sessionId: "11111111-1111-4111-8111-111111111111", worktree: path.join(home, "gone") },
+      ];
+      // The head's full re-review, published before it: what made this one light.
+      st.ledger["PR_R|rereview|aaa111|asked@-"] = { state: "published", at: "2026-11-04T23:00:00Z", runId: "00000000-0000-4000-8000-0000000000d1" };
+      agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
+      const g = agentFixture({ home, script: keepWorking });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length > 0);
+        const again = only(g).find((i) => i.key === "PR_R|rereview|aaa111|asked");
+        const queued = readLog(g).find((l) => l.event === "queued" && l.runId === again.runId);
+        assert.deepStrictEqual([again.threadsOnly, queued.detail, queued.data.rereview], [true, "Queued: re-review of your threads only (asked by you)", "threads"]);
+        const rules = g.children[0].args[g.children[0].args.indexOf("--append-system-prompt") + 1];
+        assert.ok(rules.includes(agentCore.THREADS_ONLY_RULE));
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: a run planned over the threads only while the head's full re-review still ran goes full when that one failed — the head still gets its full re-review", async () => {
+      // The review of #72: a full re-review of the head starts, the author answers, a light run is planned on the
+      // running one — and then the full one fails (a usage limit, its time limit, a stop).
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const full = "00000000-0000-4000-8000-0000000000f1";
+      const light = "00000000-0000-4000-8000-0000000000f2";
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", headline: "h", queuedAt: "2026-11-05T00:00:00Z", scenario: "rereview" };
+      const st = agentStore.emptyStore("2026-11-05");
+      st.items = [
+        { ...base, runId: full, key: "PR_R|rereview|aaa111|asked@-", state: "error", finishedAt: "2026-11-05T00:20:00Z" },
+        { ...base, runId: light, key: "PR_R|rereview|aaa111|reply@2026-11-05T00:10:00Z", state: "working", threadsOnly: true, sessionId: "11111111-1111-4111-8111-111111111111", worktree: path.join(home, "gone") },
+      ];
+      st.ledger["PR_R|rereview|aaa111|asked@-"] = { state: "failed", at: "2026-11-05T00:00:00Z", runId: full };
+      st.ledger["PR_R|rereview|aaa111|reply@2026-11-05T00:10:00Z"] = { state: "started", at: "2026-11-05T00:21:00Z", runId: light };
+      agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
+      const g = agentFixture({ home, script: keepWorking });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length > 0);
+        const again = only(g).find((i) => i.key === "PR_R|rereview|aaa111|asked");
+        assert.strictEqual(again.threadsOnly, undefined, "nothing full got through on this head: this run is the full one");
+        const started = readLog(g).find((l) => l.event === "started" && l.runId === again.runId);
+        assert.deepStrictEqual([started.data.rereview, started.data.widened], ["full", true]);
+        const rules = g.children[0].args[g.children[0].args.indexOf("--append-system-prompt") + 1];
+        assert.ok(!rules.includes(agentCore.THREADS_ONLY_RULE));
+      } finally {
+        g.agent.stop();
+      }
+    });
+
+    await atest("agent: neither a run over the threads only nor a full one that never got through counts as the head's full re-review", async () => {
+      const iso = (min) => new Date(Date.now() + min * 60_000).toISOString();
+      const lightAt = iso(-70);
+      const repliedAt = iso(-30);
+      const home = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
+      const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", headline: "h", queuedAt: iso(-90), finishedAt: iso(-80), scenario: "rereview" };
+      const cut = "00000000-0000-4000-8000-0000000000f3";
+      const light = "00000000-0000-4000-8000-0000000000f4";
+      const st = agentStore.emptyStore("2026-11-05");
+      st.items = [
+        // A full re-review the app's closing cut short: its entry still reads "started", its run is over.
+        { ...base, runId: cut, key: "PR_R|rereview|aaa111|asked@-", state: "done", headline: "Stopped by you" },
+        // A light run that went out: it read none of the code.
+        { ...base, runId: light, key: `PR_R|rereview|aaa111|reply@${lightAt}`, state: "done", threadsOnly: true },
+      ];
+      st.ledger["PR_R|rereview|aaa111|asked@-"] = { state: "started", at: iso(-90), runId: cut };
+      st.ledger[`PR_R|rereview|aaa111|reply@${lightAt}`] = { state: "published", at: iso(-60), runId: light };
+      agentStore.writeFileAtomic(path.join(home, "agent", "state.json"), JSON.stringify(st));
+      // The author answers again on the same head.
+      const pr = { ...reviewPr({ viewerHasReviewed: true, role: "reviewed", requestedOfMe: false, headOid: "aaa111" }), viewerReviewedAt: iso(-120), viewerReviewedHead: true, viewerApproved: false, authorRepliedAt: repliedAt };
+      const g = agentFixture({ home, pr, script: keepWorking, agent: { limits: { settleMinutes: 0 } } });
+      try {
+        g.agent.onSnapshot(g.snapshot);
+        await until(() => g.children.length === 1);
+        const next = only(g).find((i) => i.state === "working");
+        assert.deepStrictEqual([next.key, next.threadsOnly], [`PR_R|rereview|aaa111|reply@${repliedAt}`, undefined], "a full re-review, the head's first that counts");
+        assert.strictEqual(readLog(g).find((l) => l.event === "queued" && l.runId === next.runId).data.rereview, "full");
+      } finally {
+        g.agent.stop();
+      }
+    });
+
     await atest("agent: a run cut short on a head that has moved isn't resumed — what you asked for starts over on the new head, with no automatic one beside it", async () => {
       const base = { prId: "PR_R", prNumber: 7, repo: "a/b", url: "https://github.com/a/b/pull/7", title: "t", hostLabel: "GH", mode: "shadow", state: "working", headline: "h", queuedAt: "2026-11-05T00:00:00Z", scenario: "review" };
       for (const asked of [false, true]) {
@@ -17471,6 +18464,75 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         const [brief, review] = only(f);
         assert.match(brief.key, /\|brief\|aaa111\|asked$/);
         assert.deepStrictEqual([brief.headline, review.scenario], [view.AGENT_CLOSED.reviewed, "review"]);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent brief: written once per PR — a new head before any review gets no second brief; its review takes the older brief's questions", async () => {
+      const big = reviewPr({ additions: 5000 });
+      const text = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: ["Why drop the cache?"], asks: [] }) + "\n```";
+      const f = agentFixture({ pr: big, script: succeed(text), agent: { scenarios: { review: { mode: "off" } } } });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.scenario === "brief" && i.state === "needsYou"));
+        // A push while reviews are off: the brief stands for the PR, none is written for the new head.
+        f.snapshot.pullRequests[0] = reviewPr({ additions: 5000, headOid: "bbb222" });
+        f.agent.onSnapshot(f.snapshot);
+        await new Promise((r) => setTimeout(r, 50));
+        assert.strictEqual(f.children.length, 1, "no second brief");
+        assert.strictEqual(f.agent.getState().idle.PR_R, "Reviews are off — a big PR gets its brief only");
+        // Reviews on: the new head's review follows that brief, its questions in the prompt.
+        f.setAgent({ enabled: true, scenarios: { review: { mode: "shadow" } } });
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 2);
+        const [brief, review] = only(f);
+        assert.deepStrictEqual([brief.scenario, brief.state, brief.headline], ["brief", "done", view.AGENT_CLOSED.reviewed]);
+        assert.deepStrictEqual([review.scenario, review.key, review.carry], ["review", `${big.id}|review|bbb222`, ["Why drop the cache?"]]);
+        assert.match(review.brief, /^Brief\./);
+        assert.match(f.children[1].written, /questions for its author[\s\S]*Why drop the cache\?/);
+      } finally {
+        f.agent.stop();
+      }
+    });
+
+    await atest("agent: #295 — a review the agent published as a plain Comment is your review: the next push gets a re-review of the changes, no brief and no first review again", async () => {
+      const big = reviewPr({ additions: 5000 });
+      const brief = "Brief.\n\n```prd-result\n" + JSON.stringify({ summary: "Big change.", findings: [], authorQuestions: [], asks: [] }) + "\n```";
+      // The brief, then the review it is followed by (a Comment), then whatever runs after the push.
+      const scripts = [succeed(brief), reviewWithPlan("COMMENT"), succeed("Re-reviewed.")];
+      let runs = 0;
+      let head = "aaa111";
+      const posted = [];
+      const f = agentFixture({
+        pr: big,
+        script: (c) => scripts[runs++](c),
+        captureScript: captureJs,
+        // The push lands a minute ahead: no settling wait, so the re-review it brings starts at once.
+        agent: { limits: { settleMinutes: 0 } },
+        fetchPr: async () => ({ pr: { ...big, headOid: head }, state: "OPEN", viewer: "me" }),
+        gh: async (args, opts) => (posted.push({ args, body: JSON.parse(opts.input) }), { code: 0, stdout: "{}", stderr: "" }),
+      });
+      try {
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => only(f).some((i) => i.scenario === "review" && i.state === "needsYou"));
+        const review = only(f).find((i) => i.scenario === "review");
+        assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: review.runId }), { ok: true });
+        assert.deepStrictEqual(posted.map((p) => p.body.event), ["COMMENT"], "GitHub keeps no approve or change request of yours");
+        // The author pushes and asks again; GitHub still says you haven't reviewed it.
+        head = "bbb222";
+        const pushedAt = new Date(Date.now() + 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+        f.snapshot.pullRequests[0] = { ...reviewPr({ additions: 5000, headOid: head }), lastCommitPushedAt: pushedAt };
+        assert.strictEqual(f.snapshot.pullRequests[0].viewerHasReviewed, false);
+        f.agent.onSnapshot(f.snapshot);
+        await until(() => f.children.length === 3);
+        const next = only(f)[2];
+        assert.deepStrictEqual([next.scenario, next.key], ["rereview", `${big.id}|rereview|bbb222|asked@${pushedAt}`]);
+        assert.ok(!only(f).some((i) => i.key.startsWith(`${big.id}|brief|bbb222`) || i.key.startsWith(`${big.id}|review|bbb222`)), "neither a brief nor a first review of the new head");
+        await until(() => only(f)[2].state !== "queued" && only(f)[2].state !== "working");
+        f.agent.onSnapshot(f.snapshot);
+        await new Promise((r) => setTimeout(r, 50));
+        assert.strictEqual(f.children.length, 3, "and the same head runs nothing again");
       } finally {
         f.agent.stop();
       }
@@ -17750,6 +18812,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(view.readyItems([...items, vItem({ prId: "C", state: "queued" })]).length, 0, "not while the agent is on the PR again");
       assert.deepStrictEqual([view.agentSummary({ ...base, paused: true }).block, view.agentSummary({ ...base, quietUntil: "08:00" }).blockText], ["paused", "Quiet hours until 08:00"]);
       assert.strictEqual(view.agentSummary({ ...base, runsToday: 30 }).blockText, "Daily limit reached (30)");
+      assert.strictEqual(view.agentSummary({ ...base, costToday: 2.999, costPerDay: 3 }).block, null, "under the budget");
+      assert.deepStrictEqual(
+        [view.agentSummary({ ...base, costToday: 3, costPerDay: 3 }).block, view.agentSummary({ ...base, costToday: 300, costPerDay: 0 }).block],
+        ["budget", null],
+        "0 is no budget",
+      );
       assert.deepStrictEqual([view.stepLabel([]), view.stepLabel([{ status: "completed" }, { status: "pending" }]), view.stepLabel([{ status: "completed" }])], ["", "2/2", "1/1"]);
       assert.strictEqual(actionLabel(vItem({ prId: "P", state: "error", scenario: "afterMerge" })), null, "the Jira run after a merge can't run again: a note");
     });

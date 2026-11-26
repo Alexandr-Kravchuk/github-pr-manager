@@ -2,14 +2,14 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { DEFAULT_AGENT_PROMPTS, languageRule } from "../../shared/agent-defaults";
-import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, type AgentJob, type AgentScenario } from "../../shared/agent-policy";
+import { DEFAULT_AGENT_PROMPTS, languageRule, runModelFor, runsReviewWorkflow, SONNET_REVIEWERS_RULE } from "../../shared/agent-defaults";
+import { driveReasons, isBigPr, jobKey, mergeBlocker, planJobs, renderAgentPrompt, withAgentReview, type AgentJob, type AgentReview, type AgentScenario } from "../../shared/agent-policy";
 import { describePlan, disputeSteps, gitBashPath, readPlanLines, shasNotOnPr, summarizePlan, type PublishStep, type PublishSummary } from "../../shared/agent-publish";
-import { describeToolUse, usageHoldUntil, type RunProgress } from "../../shared/agent-stream";
+import { describeToolUse, limitResetFromText, MAX_USAGE_HOLD_MS, usageHold, type RunProgress, type UsageHold } from "../../shared/agent-stream";
 import { goneItems, nothingForYou, supersededBy } from "../../shared/agent-reconcile";
 import { FOLLOWED, followedOutcome, isNewTurn, resultOfTurn, unreadHeadline, type UnreadWork } from "../../shared/agent-followup";
 import { answerMessage, parseRunResult, resultRuleFor } from "../../shared/agent-result";
-import { AGENT_CLOSED, approvableRun, approvalStands, boardStage, cardKey, keyHead, NO_CHECKOUT_WHY, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
+import { AGENT_CLOSED, approvableRun, approvalStands, boardStage, budgetSpent, cardKey, keyHead, NO_CHECKOUT_WHY, queueOrder, quietUntil, rankBefore, todayKey } from "../../shared/agent-view";
 import { cloneCommand, DEFAULT_CLAUDE_PROMPTS } from "../../shared/claude-launch";
 import { sessionsForPr } from "../../shared/claude-sessions";
 import type { FreshPullRequest } from "../../shared/github";
@@ -29,7 +29,8 @@ import type {
   Settings,
 } from "../../shared/types";
 import { builtOn, chooseMergeMethod, mergeArgs } from "./merge";
-import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, type InstalledPlugin } from "./plugins";
+import { mountUserSkills, readInstalledPlugins, resolveSkillRefs, skillWorkflows, USER_SKILLS_PLUGIN, type InstalledPlugin } from "./plugins";
+import { sessionToolRules, type ToolRulesRun } from "../../shared/agent-guard";
 import {
   ghApiArgs,
   ghError,
@@ -50,7 +51,7 @@ import { execFileSync } from "node:child_process";
 
 import { launcherEnv } from "../../shared/claude-launch";
 import { collectDrive, gitFingerprint, isPlainBranch, pushArgs, redirectingKeys, safeGit, snapshotSsh, withNoHooks, withSshSnapshot, type GitPlace } from "./drive";
-import { claudeSessionRoots, cutShort, preflightFor, runTempEnv, freshHooksDir, hookCommand, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
+import { claudeSessionRoots, cutShort, preflightFor, runTempEnv, freshHooksDir, hookCommand, sessionFolders, sessionGitEnv, spawnClaude, startRun, writeGuardFile, writeRunSettings, type RunHandle, type Spawner } from "./runner";
 import { drawDiagrams, existingDiagramUrl, type MermaidChecker } from "./diagrams";
 import { approveAgainRequest, approveRequest, checkBaseOnly, checkReapproval, reapproveRequest, reaskRequest } from "./reapprove";
 import { STACK_REBASE_HINT, stackLayer, stackRules } from "../../shared/agent-stack";
@@ -172,12 +173,14 @@ export function describeReasons(reasons: readonly string[]): string {
   return words.length > 1 ? `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}` : (words[0] ?? "");
 }
 
-function queuedHeadline(job: Pick<AgentJob, "scenario" | "key" | "reasons">): string {
+function queuedHeadline(job: Pick<AgentJob, "scenario" | "key" | "reasons" | "threadsOnly">): string {
   switch (job.scenario) {
     case "brief":
       return "Queued: a brief first — a big PR; the review follows";
-    case "rereview":
-      return job.key.includes("|asked@") ? "Queued: re-review — you were asked again" : "Queued: re-review — the author answered";
+    case "rereview": {
+      const why = job.key.includes("|asked@") ? "you were asked again" : "the author answered";
+      return job.threadsOnly ? `Queued: re-review of your threads only — ${why}; this head had its full re-review` : `Queued: re-review — ${why}`;
+    }
     case "drive":
       return job.reasons?.includes("self")
         ? "Queued: self-review before reviewers"
@@ -205,7 +208,8 @@ function workingHeadline(scenario: AgentScenario): string {
 }
 
 /** A running item's line: what it drives for, or what its scenario does. */
-function runningHeadline(item: Pick<AgentItem, "scenario" | "reasons">): string {
+function runningHeadline(item: Pick<AgentItem, "scenario" | "reasons" | "threadsOnly">): string {
+  if (item.threadsOnly) return "Re-reviewing your threads";
   if (item.reasons?.includes("self")) return "Self-reviewing before reviewers";
   if (item.reasons?.length && item.reasons.every((r) => r === "comments")) return "Checking reviewers' comments";
   return item.reasons?.length ? `Driving — ${describeReasons(item.reasons)}` : workingHeadline(item.scenario);
@@ -249,16 +253,26 @@ export const RESUME_PROMPT = "The app running you closed while you worked and ha
 /** …and of one with a publish wrapper, whose folder the app makes afresh. */
 export const RESUME_PROMPT_WRAPPER = `${RESUME_PROMPT} Whatever you recorded through the publish wrapper before is gone: if you had recorded your review, replies or resolves already, record them again — once.`;
 
-/** The rules every agent session gets on top of its prompt. */
-/** The rules every agent session gets on top of its prompt — ending with how to close its final message for the card. */
+/**
+ * The rules every agent session gets on top of its prompt — ending with how to
+ * close its final message for the card. `tools` (a restricted run's own
+ * `--allowedTools` and the skill workflows its prompt names) adds what the
+ * guard refuses and what works instead (`sessionToolRules`), so the session
+ * doesn't learn each rule from a refused call.
+ */
 export function agentRules(
   scenario: AgentScenario,
   mode: "shadow" | "on",
   folder: Pick<RunFolder, "wrapperPath" | "outDir"> | null = null,
   pr: RulesPr | null = null,
   language: AgentLanguage = "en",
+  tools: Pick<ToolRulesRun, "allowedTools" | "workflows"> | null = null,
 ): string {
-  return `${scenarioRules(scenario, mode, folder, pr)} ${resultRuleFor(scenario)} ${languageRule(language)}`;
+  const sonnet = pr?.sonnetReviewers && runsReviewWorkflow(scenario, pr.reasons) ? ` ${SONNET_REVIEWERS_RULE}` : "";
+  const toolRules = tools
+    ? ` ${sessionToolRules(runKindOf(scenario), { ...tools, pr: pr ? { repo: pr.repo, number: pr.number } : null, ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}) })}`
+    : "";
+  return `${scenarioRules(scenario, mode, folder, pr)}${sonnet}${toolRules} ${resultRuleFor(scenario)} ${languageRule(language)}`;
 }
 
 /** The PR a session's rules name: its place, a drive's base, why it runs — and, in a GitHub stack, its layer (`stackRules`). */
@@ -270,7 +284,20 @@ interface RulesPr {
   stack?: string | null;
   /** A full-context drive: the user's own Claude setup is loaded (`fullContextDrive`). */
   full?: boolean;
+  /** A re-review over the user's threads only (`AgentItem.threadsOnly`). */
+  threadsOnly?: boolean;
+  /** Settings › Agent › "Reviewers on Sonnet": a run of the review workflow passes it `reviewerModel: "sonnet"`. */
+  sonnetReviewers?: boolean;
 }
+
+/**
+ * A re-review over your threads only: the review skill's own mode for it
+ * (`rereview: "threads-only"` — your open threads verified against the head and
+ * the author's replies, none of its reviewers, no Blocker hunt on a head your
+ * review covers) and no "Reviewing now" comment for an answer in a thread.
+ */
+export const THREADS_ONLY_RULE =
+  'This head had its full review already: this run is only about the author\'s answers in your threads and the request to look again. Run the review skill with rereview: "threads-only" and statusComment: false — it checks your open threads against the head commit and the replies, without its reviewers — and raise nothing new about code your earlier review covered.';
 
 /** What a run on your own PR is for, on top of the drive rules. */
 function driveFocus(reasons: readonly string[]): string {
@@ -298,7 +325,8 @@ function scenarioRules(
   const stack = pr?.stack ?? null;
   const plan =
     "You run unattended as the user's PR agent. First write your plan as a task list with TaskCreate — one short task per step — and keep it current with TaskUpdate as you go, so the user can follow along. (A skill that runs as a Workflow shows its own phases; then no task list is needed.)" +
-    (stack ? ` ${stack}` : "");
+    (stack ? ` ${stack}` : "") +
+    (scenario === "rereview" && pr?.threadsOnly ? ` ${THREADS_ONLY_RULE}` : "");
   const never =
     "Never push, and never try to work around a refused tool call: if something is refused, say what you would have done and continue without it.";
   const jira =
@@ -431,6 +459,10 @@ interface Running {
   byAgentPause: boolean;
   /** Stopped because the agent was switched off. */
   offStop: boolean;
+  /** Stopped because the PR got this new head while it ran (`stopMovedRuns`). */
+  headMoved?: string;
+  /** Going on with your answer: a new head doesn't stop it — your answer would go with it. */
+  answered?: boolean;
 }
 
 /** What starts a session — refused while the agent is off; everything else is your own click and works. */
@@ -452,7 +484,8 @@ export function createAgent(deps: AgentDeps): Agent {
   });
   const running = new Map<string, Running>();
   let idle: Record<string, string> = {};
-  let heldUntil: number | null = null;
+  /** When the last plan's first PR waiting to settle has (`PlanResult.wakeAt`): the tick plans again then. */
+  let replanAt: number | null = null;
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
 
@@ -549,6 +582,32 @@ export function createAgent(deps: AgentDeps): Agent {
     for (const e of board.entries) store.log(e);
     store.data.board = board.marks;
     return board.entries.length > 0;
+  }
+
+  /**
+   * Claude's usage holding the queue now, or null: kept in state.json
+   * (`usageHold`), so a restart doesn't start runs straight into the limit. A
+   * hold of the agent's cap lets go once the cap is raised past it or off.
+   */
+  function usageHoldNow(cap = settings()?.limits.usageCap ?? 0): UsageHold | null {
+    const h = store.data.usageHold;
+    if (!h) return null;
+    const until = Date.parse(h.until);
+    if (!Number.isFinite(until) || now().getTime() >= until) return null;
+    if (h.usage !== undefined && !(cap > 0 && h.usage >= cap)) return null;
+    return { until, why: h.why, ...(h.usage !== undefined ? { usage: h.usage } : {}) };
+  }
+  /** A new usage hold: the latest reading wins — it knows the windows as they are now. Never past `MAX_USAGE_HOLD_MS`. */
+  function holdForUsage(hold: UsageHold): void {
+    const until = new Date(Math.min(hold.until, now().getTime() + MAX_USAGE_HOLD_MS)).toISOString();
+    const was = store.data.usageHold;
+    if (was && was.until === until && was.why === hold.why && was.usage === hold.usage) return;
+    store.data.usageHold = { until, why: hold.why, ...(hold.usage !== undefined ? { usage: hold.usage } : {}) };
+    void store.save();
+  }
+  /** What a run's end cost counts toward the day's budget. */
+  function spend(costUsd: unknown): void {
+    if (typeof costUsd === "number" && Number.isFinite(costUsd) && costUsd > 0) store.data.costToday = (store.data.costToday ?? 0) + costUsd;
   }
 
   /** What holds the queue, logged when it changes: paused, quiet hours, the usage or daily limit, a host's budget. */
@@ -723,9 +782,54 @@ export function createAgent(deps: AgentDeps): Agent {
       }
       const found = item.scenario === "drive" ? driveReasons(pr, s) : undefined;
       // Cut short while it cloned: your yes to the clone goes on with it, or it would be refused for the missing checkout.
-      const queued = enqueueAsked(pr, s, item.scenario, found && found.length === 0 ? ["self"] : (found ?? item.reasons), undefined, item.clone ? { clone: true } : undefined);
+      // A run over the threads only stays one: going on is not a new full re-review of a head that had its own.
+      const carried = { ...(item.clone ? { clone: true as const } : {}), ...(item.threadsOnly ? { threadsOnly: true as const } : {}) };
+      const queued = enqueueAsked(pr, s, item.scenario, found && found.length === 0 ? ["self"] : (found ?? item.reasons), undefined, Object.keys(carried).length > 0 ? carried : undefined);
       void closeAs(item, queued.ok ? AGENT_CLOSED.rerun : item.headline);
     }
+  }
+
+  /** The runs a new head of their PR stops: they read that head. A drive commits on top of it and goes on. */
+  const STOP_ON_NEW_HEAD: ReadonlySet<AgentScenario> = new Set(["review", "brief", "rereview"]);
+
+  /**
+   * A review, brief or re-review whose PR got a new head while it ran stops at
+   * once, not at its end: what it would post is about a head that is gone, and
+   * GitHub would refuse it ("new commits since this review") after a whole run.
+   * The run's end closes it — the agent's own as superseded, one you asked for
+   * asked again on the new head (`askAgainOnNewHead`). Not one going on with
+   * your answer: your answer would go with it.
+   */
+  function stopMovedRuns(snapshot: DashboardResponse | null): void {
+    if (!snapshot) return;
+    for (const [runId, r] of running) {
+      if (r.headMoved || r.offStop || r.takeOver || r.answered) continue;
+      const item = findItem(runId);
+      if (!item || item.state !== "working" || !STOP_ON_NEW_HEAD.has(item.scenario)) continue;
+      const was = keyHead(item.key);
+      const head = snapshot.pullRequests.find((p) => p.id === item.prId)?.headOid ?? null;
+      if (!was || !head || head === was) continue;
+      r.headMoved = head;
+      r.handle.stop();
+    }
+  }
+
+  /**
+   * A run you asked for whose PR got a new head while it ran starts over on
+   * that head, as one the app's closing cut short does (`recoverInterrupted`):
+   * your ask goes first, so a review or brief the agent queued on its own for
+   * the new head closes. The line the old run closes with.
+   */
+  function askAgainOnNewHead(item: AgentItemRecord, s: AgentSettings): string {
+    const pr = snapshotPr(item.prId);
+    if (!pr) return "Stopped — the PR got a new head";
+    if (FRESH_REVIEW.has(item.scenario)) {
+      for (const other of store.data.items) {
+        if (other !== item && other.prId === item.prId && other.state === "queued" && FRESH_REVIEW.has(other.scenario) && !other.key.endsWith("|asked")) void closeAs(other, AGENT_CLOSED.superseded);
+      }
+    }
+    const queued = enqueueAsked(pr, s, item.scenario, item.reasons, undefined, item.clone ? { clone: true } : undefined);
+    return queued.ok ? AGENT_CLOSED.rerun : `Stopped — the PR got a new head; ${queued.error}`;
   }
 
   /**
@@ -789,12 +893,94 @@ export function createAgent(deps: AgentDeps): Agent {
     return run?.state === "error" && run.retryAt && Date.parse(run.retryAt) <= now().getTime() ? run : null;
   }
 
-  /** A brief of this head was written — the agent's own or one you asked for: the policy's `briefDone`. */
-  function briefDone(pr: Pick<PullRequest, "id" | "headOid">): boolean {
-    const key = jobKey(pr, "brief");
-    return [key, `${key}|asked`].some((k) => {
-      const state = store.data.ledger[k]?.state;
-      return state === "prepared" || state === "published";
+  /**
+   * A brief of this PR was written — on any head, the agent's own or one you
+   * asked for: the policy's `briefDone`. Once per PR: a push before the review
+   * sends the new head straight to the review (18 briefs in a day on Opus, four
+   * of one PR in half an hour), and `takeBrief` hands it the older brief.
+   * The PR ids, from one pass over the ledger per plan — it is never trimmed.
+   */
+  function briefedPrs(): Set<string> {
+    const out = new Set<string>();
+    for (const [key, entry] of Object.entries(store.data.ledger)) {
+      const [prId, scenario] = key.split("|");
+      if (scenario === "brief" && (entry.state === "prepared" || entry.state === "published")) out.add(prId);
+    }
+    return out;
+  }
+
+  /**
+   * The latest review of each PR the agent published — a review or a
+   * re-review, any event, a plain "Comment" too: when, and the head it went out
+   * on (its plan's commit while the card is kept, else its key's). From the
+   * ledger, which is never trimmed. The policy's `agentReviewed`.
+   */
+  function agentReviews(): Map<string, AgentReview> {
+    const byRun = new Map(store.data.items.map((i) => [i.runId, i]));
+    const out = new Map<string, AgentReview>();
+    for (const [key, entry] of Object.entries(store.data.ledger)) {
+      if (entry.state !== "published") continue;
+      const [prId, scenario] = key.split("|");
+      if (scenario !== "review" && scenario !== "rereview") continue;
+      const head = byRun.get(entry.runId)?.plan?.commitId ?? keyHead(key);
+      if (!head) continue;
+      const was = out.get(prId);
+      if (!was || entry.at > was.at) out.set(prId, { at: entry.at, head });
+    }
+    return out;
+  }
+
+  /**
+   * The heads ("<prId>|<head>") a full review or re-review already went over,
+   * by the ledger — the agent's own or one you asked for: running now, or
+   * ended prepared or published. Not a run that failed or that you took out of
+   * the queue, and not one still waiting on you (a plan to send, a question):
+   * the next run on its PR replaces that card, so it has to be a full one
+   * again. A "started" entry counts only while its run is still queued or
+   * working — one that ended any other way left it "started" with nothing
+   * behind it — and a run over the threads only never counts: it read none of
+   * the code. The policy's `reviewedHead`, read once per plan; a run planned
+   * light on a full run still going is checked again when it starts
+   * (`fullyReviewed`).
+   */
+  function reviewedHeads(): Set<string> {
+    const runs = new Map(store.data.items.map((i) => [i.runId, i]));
+    const out = new Set<string>();
+    for (const [key, entry] of Object.entries(store.data.ledger)) {
+      const [prId, scenario, head] = key.split("|");
+      if (!countsAsFullReview(scenario, head, entry, runs.get(entry.runId), true)) continue;
+      out.add(`${prId}|${head}`);
+    }
+    return out;
+  }
+
+  /**
+   * Whether a ledger entry is a full review or re-review of its head that got
+   * somewhere: prepared (and not still waiting on you) or published — or, with
+   * `running`, started and still queued or working. Never a run over the
+   * threads only.
+   */
+  function countsAsFullReview(scenario: string | undefined, head: string | undefined, entry: LedgerEntry, item: AgentItemRecord | undefined, running: boolean): boolean {
+    if ((scenario !== "review" && scenario !== "rereview") || !head || head === "-") return false;
+    if (item?.threadsOnly) return false;
+    if (entry.state === "started") return running && (item?.state === "queued" || item?.state === "working");
+    if (entry.state === "prepared") return item?.state !== "needsYou";
+    return entry.state === "published";
+  }
+
+  /**
+   * A full review or re-review of this head ended prepared or published — the
+   * check a run planned over the threads only passes as it starts. Its plan may
+   * have counted a full run still going that then failed (a usage limit, its
+   * time limit, a stop): without this, every later answer on the head would
+   * run light and the head never get its full re-review.
+   */
+  function fullyReviewed(prId: string, head: string, except: string): boolean {
+    const runs = new Map(store.data.items.map((i) => [i.runId, i]));
+    return Object.entries(store.data.ledger).some(([key, entry]) => {
+      if (key === except) return false;
+      const [id, scenario, h] = key.split("|");
+      return id === prId && h === head && countsAsFullReview(scenario, h, entry, runs.get(entry.runId), false);
     });
   }
 
@@ -802,11 +988,13 @@ export function createAgent(deps: AgentDeps): Agent {
    * The brief a big PR's review follows: its questions for the author go into
    * the review's prompt, its text onto the review's card — so what it found
    * stays readable once the review replaces it — and the brief itself closes.
-   * Null when no brief of that head waits.
+   * The PR's latest brief waiting, of this head or an earlier one: a brief is
+   * written once per PR, and the review is told to ask only the questions that
+   * still hold. Null when none waits.
    */
-  function takeBrief(prId: string, head: string | null): Pick<AgentItem, "carry" | "brief"> | null {
+  function takeBrief(prId: string): Pick<AgentItem, "carry" | "brief"> | null {
     const brief = store.data.items
-      .filter((i) => i.prId === prId && i.scenario === "brief" && i.state === "needsYou" && keyHead(i.key) === head)
+      .filter((i) => i.prId === prId && i.scenario === "brief" && i.state === "needsYou")
       .sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""))[0];
     if (!brief) return null;
     const questions = brief.result?.authorQuestions ?? [];
@@ -843,7 +1031,7 @@ export function createAgent(deps: AgentDeps): Agent {
       ? `Your Claude session "${x.name}" is on this PR, paused in Claude Desktop — carry on there, or archive it first.`
       : `Your Claude session "${x.name}" is on this PR — carry on there, or end it first.`;
 
-  function newItem(job: Pick<AgentJob, "key" | "prId" | "prNumber" | "repo" | "url" | "scenario" | "mode" | "reasons">, pr: PullRequest, headline: string): AgentItemRecord {
+  function newItem(job: Pick<AgentJob, "key" | "prId" | "prNumber" | "repo" | "url" | "scenario" | "mode" | "reasons" | "threadsOnly">, pr: PullRequest, headline: string): AgentItemRecord {
     const item: AgentItemRecord = {
       runId: randomUUID(),
       key: job.key,
@@ -859,6 +1047,7 @@ export function createAgent(deps: AgentDeps): Agent {
       headline,
       queuedAt: stamp(),
       ...(job.reasons ? { reasons: job.reasons } : {}),
+      ...(job.threadsOnly ? { threadsOnly: true as const } : {}),
     };
     store.data.items.push(item);
     // An offer (a merge, an approval to give again) is never queued: it waits for your click from the start.
@@ -868,6 +1057,8 @@ export function createAgent(deps: AgentDeps): Agent {
       data: {
         mode: job.mode,
         ...(job.reasons ? { reasons: job.reasons } : {}),
+        // A full re-review, or one over your threads only — the log tells them apart.
+        ...(job.scenario === "rereview" ? { rereview: job.threadsOnly ? "threads" : "full" } : {}),
         asked: job.key.endsWith("|asked"),
         size: { additions: pr.additions, deletions: pr.deletions, files: pr.changedFiles },
       },
@@ -1195,6 +1386,7 @@ export function createAgent(deps: AgentDeps): Agent {
       idle = Object.fromEntries(snapshot.pullRequests.map((p) => [p.id, "The agent is off"]));
       sdlcBadges = {};
       noCheckoutIds = [];
+      replanAt = null;
       stopRunsForOff();
       // Switched on again, the journal starts from where things stand then.
       loggedIdle = null;
@@ -1240,6 +1432,9 @@ export function createAgent(deps: AgentDeps): Agent {
       if (!roots) rootsByClone.set(clone, (roots = orchestratorRoots(clone, claudeSettings)));
       return orchestratorRunFor(roots, pr.url);
     };
+    const reviewedByAgent = agentReviews();
+    const reviewed = reviewedHeads();
+    const briefed = briefedPrs();
     const plan = planJobs(snapshot.pullRequests, s, {
       // No checkout yet is no reason to wait when the agent may clone one: the run makes it.
       noCheckout: (pr) => (cloneOf(pr) || s.cloneMissing ? null : noCheckoutWhy(pr, claudeSettings)),
@@ -1249,9 +1444,13 @@ export function createAgent(deps: AgentDeps): Agent {
         return d && d.attempts >= s.scenarios.driveCi.maxAttempts ? `Yours — the agent tried ${d.attempts} time${d.attempts === 1 ? "" : "s"}; over to you` : null;
       },
       selfReviewed: (pr) => Boolean(store.data.ledger[jobKey(pr, "drive", "self")]) || (pr.headOid !== null && store.data.pushedHeads[pr.id] === pr.headOid),
-      briefDone,
+      briefDone: (pr) => briefed.has(pr.id),
+      agentReviewed: (pr) => reviewedByAgent.get(pr.id) ?? null,
+      reviewedHead: (pr) => pr.headOid !== null && reviewed.has(`${pr.id}|${pr.headOid}`),
       reapproveState,
       baseOnlyState,
+      now: now(),
+      known: (key) => Boolean(store.data.ledger[key]),
       orchestrated: (pr) => {
         const run = sdlcRun(pr);
         if (!run) return null;
@@ -1260,6 +1459,9 @@ export function createAgent(deps: AgentDeps): Agent {
       },
     });
     sdlcBadges = badges;
+    // A PR waiting to settle starts once it has, not at the next poll: the
+    // poller reports only a snapshot that changed, and a quiet PR doesn't.
+    replanAt = plan.wakeAt ? Date.parse(plan.wakeAt) : null;
     // Every card's button that starts a run asks for the clone on these — not
     // only Your turn's, whose idle reason says so: "Re-review now" and
     // "Self-review again" were refused for it. Looked up only while the agent
@@ -1288,7 +1490,7 @@ export function createAgent(deps: AgentDeps): Agent {
       if (retryOf) delete store.data.ledger[job.key];
       // A big PR's review follows its brief: closed first, so the review doesn't
       // merely supersede it, and what it found travels with the review.
-      const brief = job.scenario === "review" ? takeBrief(job.prId, keyHead(job.key)) : null;
+      const brief = job.scenario === "review" ? takeBrief(job.prId) : null;
       const headline = brief ? "Queued: review — after its brief" : retryOf ? `Queued: trying again — the last run failed (${retryOf.headline})` : queuedHeadline(job);
       const item = newItem(job, byId.get(job.prId)!, headline);
       if (brief) Object.assign(item, brief);
@@ -1371,8 +1573,9 @@ export function createAgent(deps: AgentDeps): Agent {
         }
       }
     }
-    // Re-reviews after a push alone: checked once per head whether only the base moved under your review.
-    for (const job of plan.baseChecks) startBaseOnlyCheck(job, byId.get(job.prId)!);
+    // Re-reviews after a push alone: checked once per head whether only the base
+    // moved under your review — or under the agent's, as the plan read it.
+    for (const job of plan.baseChecks) startBaseOnlyCheck(job, withAgentReview(byId.get(job.prId)!, reviewedByAgent.get(job.prId) ?? null));
     if (store.data.baseOnly) {
       for (const key of Object.keys(store.data.baseOnly)) {
         if (!byId.has(key.split("|")[0])) {
@@ -1397,7 +1600,8 @@ export function createAgent(deps: AgentDeps): Agent {
     const s = all.agent;
     /** How the session went, once it has ended — on the run's end line, failed or not. */
     let endStats: Record<string, unknown> | undefined;
-    const fail = (headline: string, error?: string) => {
+    /** `limitUntil`: Claude's limit refused the run — tried again once it resets, not in ten minutes. */
+    const fail = (headline: string, error?: string, limitUntil?: number) => {
       item.state = "error";
       item.headline = headline;
       item.error = error;
@@ -1407,7 +1611,7 @@ export function createAgent(deps: AgentDeps): Agent {
       // run that is a try again already, not one cut short again and again, and
       // not one with no checkout: the plan holds such a PR back, so the try would never come.
       if (RETRIED.has(item.scenario) && !item.key.endsWith("|asked") && !item.retryOf && !headline.startsWith("Cut short") && !headline.startsWith(NO_CHECKOUT_WHY)) {
-        item.retryAt = new Date(now().getTime() + RETRY_AFTER_MS).toISOString();
+        item.retryAt = new Date(Math.max(now().getTime() + RETRY_AFTER_MS, limitUntil ?? 0)).toISOString();
       }
       // Recorded even when the run never started, or every tick would queue the
       // same PR again; a new head commit is a new key and gets another try.
@@ -1447,6 +1651,16 @@ export function createAgent(deps: AgentDeps): Agent {
       }
     }
 
+    // Planned over the threads only while a full run of this head was still
+    // going: if none got through since, this run is the head's full one.
+    let widened = false;
+    if (item.threadsOnly && !resume) {
+      const head = keyHead(item.key);
+      if (!head || !fullyReviewed(item.prId, head, item.key)) {
+        item.threadsOnly = undefined;
+        widened = true;
+      }
+    }
     store.data.ledger[item.key] = { state: "started", at: stamp(), runId: item.runId };
     store.data.runsToday += 1;
     item.state = "working";
@@ -1562,6 +1776,14 @@ export function createAgent(deps: AgentDeps): Agent {
     // Your own PR: your whole Claude setup (Settings › Agent › "Your PRs: full
     // context"). Not the after-merge Jira run, which only reads.
     const full = kind === "drive" && s.permissions.fullContextDrive;
+    // This kind's own model and effort, else the agent's (Settings › Agent).
+    const used = runModelFor(s, kind);
+    const sonnetReviewers = s.sonnetReviewers && runsReviewWorkflow(item.scenario, item.reasons);
+    // Where Claude Code files what this session spills over (a long tool result, a Workflow's journal, a background task's output).
+    const sessionRoots = claudeSessionRoots({ ...launcherEnv(process.env), ...tempEnv });
+    // The wrapper's own rule, and Write — which the guard holds to the payload folder.
+    // The preflight's node, which the guard holds to the helper's two calls.
+    const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(preflight ? ["Bash(node *)"] : [])])];
     writeGuardFile(guardFile, full ? {
       mode: "full",
       ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),
@@ -1577,10 +1799,12 @@ export function createAgent(deps: AgentDeps): Agent {
       // home folder, gh's or ssh's keys, this app's settings.
       readDirs: [dir, ...(folder ? [folder.outDir] : []), ...pluginDirs],
       sessionId,
-      sessionRoots: claudeSessionRoots({ ...launcherEnv(process.env), ...tempEnv }),
+      sessionRoots,
       // A skill's Workflow may run its script from the plugins this run mounted — never one from the PR.
       workflowDirs: pluginDirs,
       ...(preflight ? { preflight } : {}),
+      // For the guard's hints only: what a refusal suggests instead must be a call these let through.
+      allowedTools,
     });
     writeRunSettings(settingsFile, hookCommand(deps.execPath, deps.hookScript, kind, item.url, guardFile));
     item.sessionId = sessionId;
@@ -1592,27 +1816,33 @@ export function createAgent(deps: AgentDeps): Agent {
       data: {
         cwd: dir,
         mode: item.mode,
-        model: s.model,
-        effort: s.effort,
+        // What this run was started with ("" = Claude Code's default), and the review workflow's reviewers when they were moved to Sonnet.
+        model: used.model,
+        effort: used.effort,
+        ...(sonnetReviewers ? { reviewerModel: "sonnet" } : {}),
         isolation: full ? "full" : "restricted",
         ...(item.reasons ? { reasons: item.reasons } : {}),
+        ...(item.scenario === "rereview" ? { rereview: item.threadsOnly ? "threads" : "full" } : {}),
+        // Planned over the threads only, but no full run of the head got through: this one is full.
+        ...(widened ? { widened: true } : {}),
         // How long it stood in the queue (a resumed run's queue time is its first run's).
         ...(!resume ? { waitedMs: Math.max(0, Date.parse(item.startedAt ?? stamp()) - Date.parse(item.queuedAt)) } : {}),
       },
     });
 
-    // The wrapper's own rule, and Write — which the guard holds to the payload folder.
-    // The preflight's node, which the guard holds to the helper's two calls.
-    const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(preflight ? ["Bash(node *)"] : [])])];
     // Read-only runs may read the plugins' folders (a skill's Workflow reads its script from there); a run that edits never gets them.
     // The preflight's file and payload folders too — the guard narrows them to installed_plugins.json and the helper's own folders.
+    // And the session's own folders, which the guard already lets it read: `--restricted` refused its Workflow's journal.
     const addDirs = [
       ...(folder ? [folder.outDir] : []),
       ...pluginDirs,
       ...(preflight ? [path.dirname(preflight.installedPlugins), preflight.tmpDir] : []),
+      ...(full ? [] : sessionFolders(sessionRoots, dir, sessionId)),
     ];
+    // The skill workflows the prompt names, by path: an agent run has no named workflows.
+    const workflows = skillWorkflows(mine.prompt, [...plugins(), ...mine.pluginDirs.map((d) => ({ name: USER_SKILLS_PLUGIN, installPath: d }))]);
 
-    const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false, byAgentPause: false, offStop: false };
+    const entry: Running = { handle: null as unknown as RunHandle, progress: null as unknown as RunProgress, recent: [], paused: false, takeOver: false, byAgentPause: false, offStop: false, ...(answer ? { answered: true } : {}) };
     const handle = startRun(
       {
         cwd: dir,
@@ -1634,16 +1864,18 @@ export function createAgent(deps: AgentDeps): Agent {
           number: item.prNumber,
           ...(kind === "drive" && pr && remote ? { baseRef: `${remote}/${pr.baseRefName}` } : {}),
           ...(item.reasons ? { reasons: item.reasons } : {}),
+          ...(item.threadsOnly ? { threadsOnly: true } : {}),
           stack: pr ? stackRules(pr, item.scenario) : null,
           ...(full ? { full: true } : {}),
-        }, s.language),
+          ...(sonnetReviewers ? { sonnetReviewers: true } : {}),
+        }, s.language, full ? null : { allowedTools, workflows }),
         allowedTools,
         // Full context: your own plugins load as in your sessions; the skills this run mounted come on top.
         pluginDirs: full ? mine.pluginDirs : pluginDirs,
         // The payload folder stays named: the session writes its reply files there.
         addDirs: full ? (folder ? [folder.outDir] : []) : addDirs,
-        model: s.model,
-        effort: s.effort,
+        model: used.model,
+        effort: used.effort,
         settingsFile,
         timeoutMs: s.limits.maxMinutes * 60_000,
         env: {
@@ -1662,9 +1894,16 @@ export function createAgent(deps: AgentDeps): Agent {
         if (progress.activity && progress.activity !== entry.progress?.activity) {
           entry.recent = [...entry.recent, { at: stamp(), text: progress.activity }].slice(-RECENT_MAX);
         }
+        const reading = progress.rateLimit;
+        const fresh = reading !== entry.progress?.rateLimit;
         entry.progress = progress;
-        const hold = usageHoldUntil(progress.rateLimit);
-        if (hold !== null) heldUntil = hold;
+        // A new usage reading only, against the cap as it is now — as
+        // `usageHoldNow` reads it: the cap the run started with would write a
+        // hold a raised cap drops on the next tick, and again on every event.
+        if (fresh && reading) {
+          const hold = usageHold(reading, settings()?.limits.usageCap ?? s.limits.usageCap, now().getTime());
+          if (hold) holdForUsage(hold);
+        }
         changed();
       },
       deps.spawner,
@@ -1684,6 +1923,7 @@ export function createAgent(deps: AgentDeps): Agent {
     const result = outcome.progress.result;
     item.finishedAt = stamp();
     endStats = runStats(item, outcome, item.finishedAt, { takeOver: entry.takeOver, offStop: entry.offStop });
+    spend(endStats.costUsd);
     // Ended under it — a Windows restart, Ctrl+C, a workflow still running —
     // rather than by you, by its time limit, or by finishing.
     const cut = entry.takeOver || entry.offStop || outcome.stopped || outcome.timedOut ? null : cutShort(outcome);
@@ -1717,6 +1957,13 @@ export function createAgent(deps: AgentDeps): Agent {
       item.state = "done";
       item.headline = "Stopped — the agent was switched off";
       store.data.ledger[item.key].state = "failed";
+    } else if (entry.headMoved) {
+      // The PR got a new head under it (`stopMovedRuns`): nothing it found is
+      // yours to read — it was about a head that is gone. What you asked for
+      // starts over on the new head.
+      item.state = "done";
+      store.data.ledger[item.key].state = "failed";
+      item.headline = item.key.endsWith("|asked") ? askAgainOnNewHead(item, s) : AGENT_CLOSED.superseded;
     } else if (outcome.stopped) {
       item.state = "done";
       item.headline = "Stopped by you";
@@ -1798,8 +2045,21 @@ export function createAgent(deps: AgentDeps): Agent {
         item.headline = current && approvalStands(current) && current.headOid === keyHead(item.key) ? "Already approved on this head — nothing to post" : "Reviewed — nothing to post";
       }
     } else {
+      const error = result?.text || outcome.stderr.trim().split("\n").slice(-3).join(" ") || `exit ${outcome.exitCode}`;
+      // Refused by Claude's subscription limit: the whole queue waits for its
+      // reset (the stream's own reading first, else the reset in Claude Code's
+      // error result — never the model's words, which a PR can dictate), and
+      // this run is tried again then, not ten minutes on into the same wall.
+      const limit =
+        (outcome.progress.rateLimit?.status === "rejected" ? usageHold(outcome.progress.rateLimit, 0, now().getTime()) : null) ??
+        (result?.isError ? limitResetFromText(result.text, now()) : null);
       // `fail` saves, logs and tells; the rest of this function only cleans up.
-      fail("The run failed", result?.text || outcome.stderr.trim().split("\n").slice(-3).join(" ") || `exit ${outcome.exitCode}`);
+      if (limit && limit.until > now().getTime()) {
+        holdForUsage(limit);
+        fail(limit.limitName ? `Stopped by ${limit.limitName}` : limit.why, error, limit.until);
+      } else {
+        fail("The run failed", error);
+      }
     }
     // Nothing to post, nothing asked, nothing major found: no decision is left.
     // Its diagrams go out with the review, as one comment of their own.
@@ -1811,12 +2071,15 @@ export function createAgent(deps: AgentDeps): Agent {
     // `fail` changes the state behind TypeScript's back; read it afresh.
     const ended = item.state as AgentItem["state"];
     if (ended !== "error") {
-      logRun(item, item.interrupted ? "interrupted" : ended, {
+      logRun(item, item.interrupted ? "interrupted" : entry.headMoved ? "superseded" : ended, {
         sessionId,
         detail: clip(item.headline),
+        ...(entry.headMoved ? { headOid: entry.headMoved } : {}),
         ...(typeof endStats.ms === "number" ? { ms: endStats.ms } : {}),
         data: {
           ...endStats,
+          // What it was spent on: the head it read, gone by its end.
+          ...(entry.headMoved ? { was: keyHead(item.key) } : {}),
           // What it prepared: the review it would post, the commits, the questions it left you.
           ...(item.plan ? { plan: describePlan(item.plan), comments: item.plan.comments.length, replies: item.plan.replies.length, escalations: item.plan.escalations.length } : {}),
           ...(item.drive ? { commits: item.drive.commits.length } : {}),
@@ -2423,6 +2686,7 @@ export function createAgent(deps: AgentDeps): Agent {
       { gh, spawner: deps.spawner ?? spawnClaude, ...(deps.checkMermaid ? { check: deps.checkMermaid } : {}) },
     );
     item.diagrams = out.diagrams;
+    spend(out.costUsd);
     logRun(item, "diagrams", {
       detail: clip(out.diagrams.note ?? `${out.diagrams.list.length} drawn`),
       ms: out.ms,
@@ -2772,10 +3036,23 @@ export function createAgent(deps: AgentDeps): Agent {
       if (!s?.enabled) stopRunsForOff();
       return;
     }
+    // Read every tick, not only on a snapshot: the poller's latest read, whether or not it reported a change.
+    stopMovedRuns(deps.getSnapshot());
+    // A PR the last plan waited on to settle has: planned again now. That plan ends in a tick of its own.
+    if (replanAt !== null && now().getTime() >= replanAt) {
+      replanAt = null;
+      const snapshot = deps.getSnapshot();
+      if (snapshot) {
+        onSnapshot(snapshot);
+        changed();
+        return;
+      }
+    }
     const day = localDay(now());
     if (store.data.day !== day) {
       store.data.day = day;
       store.data.runsToday = 0;
+      store.data.costToday = 0;
       store.prune(s.policy.logRetentionDays, now().getTime());
     }
     const quiet = quietUntil(now(), s.limits.quietHours);
@@ -2795,10 +3072,14 @@ export function createAgent(deps: AgentDeps): Agent {
     const queued = queueOrder(store.data.items.filter((i) => i.state === "queued"));
     // Paused: nothing starts, whoever asked.
     if (store.data.paused) return noteHold(queued.length > 0 ? "paused" : null);
-    if (heldUntil !== null && now().getTime() < heldUntil) {
-      return noteHold(queued.length > 0 ? `Claude usage limit until ${new Date(heldUntil).toISOString()}` : null);
+    // Claude's limit, or the agent's cap on it: nothing starts, whoever asked.
+    const usage = usageHoldNow(s.limits.usageCap);
+    if (usage) return noteHold(queued.length > 0 ? `${usage.why} until ${new Date(usage.until).toISOString()}` : null);
+    if (store.data.usageHold) {
+      delete store.data.usageHold;
+      void store.save();
+      changed();
     }
-    heldUntil = null;
     const snapshot = deps.getSnapshot();
     const byId = new Map((snapshot?.pullRequests ?? []).map((p) => [p.id, p]));
     /** Why queued runs wait this tick — a full house of parallel runs is the queue working, not a hold. */
@@ -2810,6 +3091,10 @@ export function createAgent(deps: AgentDeps): Agent {
       if (busy >= s.limits.parallel) break;
       if (store.data.runsToday >= s.limits.perDay) {
         holds.add(`daily limit of ${s.limits.perDay} runs reached`);
+        break;
+      }
+      if (budgetSpent(store.data.costToday ?? 0, s.limits.costPerDay)) {
+        holds.add(`daily budget of $${s.limits.costPerDay} reached`);
         break;
       }
       // A merged PR has left the snapshot; its Jira dry run goes by the item alone.
@@ -2847,7 +3132,7 @@ export function createAgent(deps: AgentDeps): Agent {
     scenario: AgentScenario,
     reasons?: string[],
     before?: string | null,
-    from?: Pick<AgentItem, "carry" | "brief" | "clone">,
+    from?: Pick<AgentItem, "carry" | "brief" | "clone" | "threadsOnly">,
   ): AgentActionResult {
     if (store.data.items.some((i) => i.prId === pr.id && (i.state === "queued" || i.state === "working"))) {
       return { ok: false, error: "The agent is already on this PR." };
@@ -2875,10 +3160,12 @@ export function createAgent(deps: AgentDeps): Agent {
                 ? "on"
                 : "shadow"
             : on(s.scenarios.review.mode);
+    // Over the threads only just for an interrupted run that was one (`recoverInterrupted`): one you ask for is full.
+    const threadsOnly = scenario === "rereview" && from?.threadsOnly ? (true as const) : undefined;
     const what =
-      { brief: "a brief", rereview: "re-review", drive: reasons?.includes("self") ? "self-review" : `drive — ${describeReasons(reasons ?? [])}` }[scenario as string] ?? "review";
+      { brief: "a brief", rereview: threadsOnly ? "re-review of your threads only" : "re-review", drive: reasons?.includes("self") ? "self-review" : `drive — ${describeReasons(reasons ?? [])}` }[scenario as string] ?? "review";
     const others = store.data.items.filter((i) => i.state === "queued");
-    const item = newItem({ key, prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario, mode, reasons }, pr, `Queued: ${what} (asked by you)`);
+    const item = newItem({ key, prId: pr.id, prNumber: pr.number, repo: pr.repo, url: pr.url, scenario, mode, reasons, threadsOnly }, pr, `Queued: ${what} (asked by you)`);
     // Dropped in front of a queued run: it takes that place.
     if (before) {
       const rank = rankBefore(others, before);
@@ -3191,7 +3478,12 @@ export function createAgent(deps: AgentDeps): Agent {
         runsToday: store.data.runsToday,
         perDay: s?.limits.perDay ?? 0,
         parallel: s?.limits.parallel ?? 0,
-        heldUntil: heldUntil !== null ? new Date(heldUntil).toISOString() : null,
+        ...(() => {
+          const hold = usageHoldNow(s?.limits.usageCap ?? 0);
+          return { heldUntil: hold ? new Date(hold.until).toISOString() : null, heldWhy: hold?.why ?? null };
+        })(),
+        costToday: store.data.day === localDay(now()) ? (store.data.costToday ?? 0) : 0,
+        costPerDay: s?.limits.costPerDay ?? 0,
         headerChip: s?.companion.headerChip ?? true,
         trayState: s?.companion.trayState ?? true,
         paused: store.data.paused,

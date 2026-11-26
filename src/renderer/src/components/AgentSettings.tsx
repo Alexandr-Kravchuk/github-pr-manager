@@ -4,7 +4,7 @@ import { useId, useState, type Dispatch, type ReactNode, type SetStateAction } f
 // the same ones `validateAgent` clamps with in the main process.
 import { AGENT_BOUNDS, AGENT_LANGUAGES, DEFAULT_AGENT_SIGNATURE, DEFAULT_AGENT_TOOLS, type AgentBoundKey } from "../../../shared/agent-defaults";
 import type { SettingsSectionId } from "../../../shared/settings-search";
-import type { AgentLanguage, AgentMode, AgentRunKind, AgentSettings, MergeMethod } from "../../../shared/types";
+import type { AgentEffort, AgentLanguage, AgentMode, AgentRunKind, AgentSettings, MergeMethod } from "../../../shared/types";
 import { cn } from "../format";
 
 /** The Agent tab's sections — their ids, titles and search words live in settings-search.ts. */
@@ -96,6 +96,9 @@ function GeneralSection({ agent, setAgent, inputCls }: SectionProps) {
               <option value="high">High</option>
             </select>
           </Field>
+          <div className="sm:col-span-2">
+            <RunModels agent={agent} setAgent={setAgent} inputCls={inputCls} />
+          </div>
           <div className="sm:col-span-2">
             <Field
               label="Language"
@@ -377,12 +380,29 @@ function LimitsSection({ agent, setAgent, inputCls }: SectionProps) {
           <NumField label="Runs at a time" bound="parallel" value={l.parallel} onChange={(parallel) => patch({ parallel })} />
           <NumField label="Runs per day" bound="perDay" value={l.perDay} onChange={(perDay) => patch({ perDay })} />
           <NumField label="Stop a run after" bound="maxMinutes" value={l.maxMinutes} unit="min" onChange={(maxMinutes) => patch({ maxMinutes })} />
+          <NumField label="Start nothing past Claude usage" bound="usageCap" value={l.usageCap} unit="%" onChange={(usageCap) => patch({ usageCap })} />
+          <NumField label="Daily budget at API prices" bound="costPerDay" value={l.costPerDay} unit="$" onChange={(costPerDay) => patch({ costPerDay })} />
         </div>
+        <p className="text-xs text-fg-faint">
+          Usage: no new run starts while your Claude session (5-hour) or weekly window is used this far — the rest stays yours. Runs in flight finish, so more of
+          them at a time go further past it. Reaching the limit itself holds every run until it resets. Budget: what today&apos;s runs cost as Claude reports it;
+          on a subscription it is a measure, not a bill. 0 turns either off.
+        </p>
         <div className="flex flex-wrap items-center gap-2">
           <Check checked={l.quietHours.enabled} onChange={(enabled) => quiet({ enabled })} title="Quiet hours — start nothing new between" />
           <input type="time" value={l.quietHours.from} disabled={!l.quietHours.enabled} onChange={(e) => e.target.value && quiet({ from: e.target.value })} className={cn(inputCls, "mt-0 w-28")} />
           <span className="text-sm text-fg-subtle">and</span>
           <input type="time" value={l.quietHours.to} disabled={!l.quietHours.enabled} onChange={(e) => e.target.value && quiet({ to: e.target.value })} className={cn(inputCls, "mt-0 w-28")} />
+        </div>
+        <div>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-fg-secondary">
+            Wait for a PR to settle before reviewing it on its own:
+            <Num bound="settleMinutes" value={l.settleMinutes} onChange={(settleMinutes) => patch({ settleMinutes })} unit="min with no push, reply or review request" />
+          </div>
+          <p className="mt-1 text-xs text-fg-faint">
+            Reviews, briefs and re-reviews the agent starts itself; 0 starts them at once. A run on a head the author replaces is stopped either way. What you ask
+            for never waits.
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-sm text-fg-secondary">
           Suggest switching a scenario from Shadow to On after
@@ -400,6 +420,79 @@ const RUN_KIND_LABEL: Record<AgentRunKind, string> = {
   drive: "Drive to green",
   afterMerge: "After merging",
 };
+
+const MODEL_OPTIONS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: "fable", label: "Fable" },
+  { id: "opus", label: "Opus" },
+  { id: "sonnet", label: "Sonnet" },
+  { id: "haiku", label: "Haiku" },
+];
+const EFFORT_LABEL: Record<Exclude<AgentEffort, "">, string> = { low: "Low", medium: "Medium", high: "High" };
+
+/**
+ * Model and effort per kind of run, over the agent's own (`runModelFor`): an
+ * empty choice says what it falls back to. A model saved by hand that isn't a
+ * preset stays listed, so opening Settings doesn't change it.
+ */
+function RunModels({ agent, setAgent, inputCls }: SectionProps) {
+  const kinds = Object.keys(RUN_KIND_LABEL) as AgentRunKind[];
+  const modelLabel = (m: string) => MODEL_OPTIONS.find((o) => o.id === m)?.label ?? (m || "Claude Code's default");
+  const effortLabel = (e: AgentEffort) => (e ? EFFORT_LABEL[e] : "Claude Code's default");
+  const patch = (kind: AgentRunKind, value: Partial<AgentSettings["runModels"][AgentRunKind]>) =>
+    setAgent((a) => ({ ...a, runModels: { ...a.runModels, [kind]: { ...a.runModels[kind], ...value } } }));
+  return (
+    <div className="space-y-3">
+      <Field
+        label="Per kind of run"
+        hint="Drive to green also runs the self-review of your PR and answers reviewers' comments. A brief only reads and writes prose, so it starts on Sonnet."
+      >
+        <div className="mt-1 grid grid-cols-[auto_1fr_1fr] items-center gap-x-2 gap-y-1.5 text-sm text-fg-secondary">
+          {kinds.map((k) => {
+            const own = agent.runModels[k];
+            return (
+              <div key={k} className="contents">
+                <span className="pr-2">{RUN_KIND_LABEL[k]}</span>
+                <select
+                  aria-label={`Model for ${RUN_KIND_LABEL[k]}`}
+                  value={own.model}
+                  onChange={(e) => patch(k, { model: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="">As above: {modelLabel(agent.model)}</option>
+                  {MODEL_OPTIONS.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.label}
+                    </option>
+                  ))}
+                  {own.model && !MODEL_OPTIONS.some((o) => o.id === own.model) && <option value={own.model}>{own.model}</option>}
+                </select>
+                <select
+                  aria-label={`Effort for ${RUN_KIND_LABEL[k]}`}
+                  value={own.effort}
+                  onChange={(e) => patch(k, { effort: e.target.value as AgentEffort })}
+                  className={inputCls}
+                >
+                  <option value="">As above: {effortLabel(agent.effort)}</option>
+                  {(Object.keys(EFFORT_LABEL) as Array<keyof typeof EFFORT_LABEL>).map((e) => (
+                    <option key={e} value={e}>
+                      {EFFORT_LABEL[e]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })}
+        </div>
+      </Field>
+      <Check
+        checked={agent.sonnetReviewers}
+        onChange={(sonnetReviewers) => setAgent((a) => ({ ...a, sonnetReviewers }))}
+        title="Reviewers on Sonnet"
+        hint="A review, a re-review and a self-review ask the review skill's workflow to run its reviewer subagents on Sonnet (its reviewerModel argument); otherwise each of them, up to a dozen per review, runs on the session's model. The session that leads the review keeps the model chosen above."
+      />
+    </div>
+  );
+}
 
 function PermissionsSection({ agent, setAgent, inputCls }: SectionProps) {
   const kinds = Object.keys(RUN_KIND_LABEL) as AgentRunKind[];

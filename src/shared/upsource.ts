@@ -231,6 +231,7 @@ export function toUpsourcePrs(
       isCrossRepository: false,
       authorRepliedAt: null,
       reviewerRepliedAt: null,
+      reviewRequestedAt: null,
       requestedOfMe: myRole === "reviewer",
       issueKey: issueKeyOf(r.title, reviewId),
       issueSummary: null,
