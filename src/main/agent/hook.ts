@@ -62,6 +62,8 @@ export function readGuardFile(file: string | undefined): GuardRun | null {
       run.workDir = raw.workDir;
     }
     if (Array.isArray(raw.workflowDirs)) run.workflowDirs = raw.workflowDirs.filter((d): d is string => typeof d === "string" && d.length > 0);
+    // Hints only, never a decision: a malformed list just leaves the hint plain.
+    if (Array.isArray(raw.allowedTools)) run.allowedTools = raw.allowedTools.filter((r): r is string => typeof r === "string" && r.length > 0);
     if ("readDirs" in raw) {
       const dirs = folders(raw.readDirs);
       if (!dirs) return null;

@@ -220,7 +220,20 @@ Three layers:
   and a merge is only ever offered. Those defaults fill only settings with
   no agent saved at all: in saved ones a posting scenario's mode that is
   missing or unknown is Shadow (`validateAgent`), since falling back to On
-  would post and approve under your name unchosen), `agent-stream.ts` (a run's
+  would post and approve under your name unchosen. Model and effort are per
+  kind of run too (`runModels`, Settings › Agent › "Per kind of run"):
+  `runModelFor` takes the kind's own, else the agent's `model`/`effort`, else
+  Claude Code's default, and `run/started` logs what the run got. A brief
+  defaults to Sonnet, the rest to the agent's; an absent field reads as the
+  default, a saved empty one as the agent's, and a model is a name only
+  (`isModelName`: it goes on a command line). "Reviewers on Sonnet"
+  (`sonnetReviewers`, on by default) adds `SONNET_REVIEWERS_RULE` to the
+  rules of the runs that start the review workflow (`runsReviewWorkflow`: a
+  review, a re-review, a self-review): the creatio-code-review workflow takes
+  `reviewerModel: "sonnet"` and then runs each reviewer as the plugin's
+  `<reviewer>-sonnet` agent, pinned in its frontmatter, since the Workflow
+  runtime's `agent()` has no model option; a host env with
+  `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` overrides that pin), `agent-stream.ts` (a run's
   stream-json read into its plan — the `TaskCreate`/`TaskUpdate` list, or a
   skill Workflow's phases — and current activity), `agent-view.ts` (where a
   PR stands — `boardStage`: the column is whose move it is, the agent's
@@ -237,19 +250,83 @@ Three layers:
   you ask for that finds the same says "Already approved on this head".
   Asked again after a change request of yours on that same head, the
   re-review runs by itself (`planJobs`, once per head and request): the
-  request is the author's "look again". A review asked of you starts without
-  a click on a big PR too: its brief comes first, and once that brief of the
-  head is written (`briefDone`) the plan queues the review, which takes the
-  brief over (`takeBrief`: the brief closes, its questions for the author go
-  into the review's prompt and its text onto the review's card, and the brief
-  alone sends no toast). "Draft a review" is left for a brief no review
+  request is the author's "look again". A head gets one full re-review,
+  not one per answer (#294 got two full runs, ~$2.2 each, on one commit
+  five minutes apart): once a full review or re-review went over it — the
+  agent's own or yours, running or ended prepared or published, by the
+  ledger (`reviewedHead` in `PlanContext`, `reviewedHeads` in
+  `main/agent/index.ts`; not a failed or dismissed run, nor one still
+  waiting on you, whose card the next run replaces, nor a run over the
+  threads only, which read none of the code; a "started" entry counts only
+  while its run is still queued or working) — the author's next
+  answer or request on that head is planned as a run over your threads
+  only (`threadsOnly` on the job and the item). A light run planned while
+  the full one still ran checks again as it starts (`fullyReviewed`: a full
+  run of the head ended prepared or published) and runs full when none got
+  through — the full one hit a usage limit or was stopped — logged as
+  `widened` on its `run/started`. Its ledger key is the
+  trigger's as before, so a full run's own trigger never comes back light.
+  It runs the same skill with the skill's own `rereview: "threads-only"`
+  and `statusComment: false` (`THREADS_ONLY_RULE` in the session's rules):
+  your open threads checked against the head and the replies, none of the
+  workflow's reviewers, no Blocker hunt on a head your review covers. The
+  log says which in `run/queued` and `run/started` (`data.rereview`:
+  `full` / `threads`, and the queued line's own words); the card says
+  "Checking the author's answers in your threads", the chip "Checking
+  threads on #N". A push is a new head, so a full re-review again; one you
+  ask for is always full, while an interrupted run over the threads that
+  starts over (`recoverInterrupted`) stays one. A review the agent published counts
+  as yours in the plan, whatever its event (`agentReviewed` in `PlanContext`,
+  from the ledger's published review and re-review keys, with the head the
+  review went out on; `withAgentReview` puts its time and head in place of
+  `viewerReviewedAt` / `viewerReviewedOid` while GitHub has no approval or
+  change request of yours): GitHub's `viewerHasReviewed` reads
+  `latestOpinionatedReviews` and never sees a plain "Comment", so every push
+  to such a PR was a first review again, brief and all — six of each on one
+  PR in a day. Now a new head gets a re-review of what changed, the
+  base-only check compares with the agent's head, and a request that still
+  stands on the very head the agent's review answered, with nothing from the
+  author since, runs nothing. Only the plan reads it: the roles, `To review` /
+  `Reviewed`, `isReviewDue` and `Hide my approvals` keep GitHub's answer. A
+  Comment review of your own is not counted — `latestReviews` keeps one per
+  reviewer, a reply in someone's thread is such a review too, and a plain
+  question would shrink the whole review to a look at the latest changes. A
+  review asked of you starts without a click on a big PR too: its brief comes
+  first, and once a brief of the PR is written — on any head, once per PR
+  (`briefDone`) — the plan queues the review, which takes the brief over
+  (`takeBrief`, the PR's latest brief still waiting, an older head's too: the
+  brief closes, its questions for the author go into the review's prompt,
+  which asks only those that still hold, and its text onto the review's card,
+  and the brief alone sends no toast). A push before the review sends the new
+  head straight to the review, never to a second brief; a brief you ask for
+  runs as before. "Draft a review" is left for a brief no review
   followed — reviews off, or the request gone. A run the agent planned
   itself that fails (`fail`: a checkout the network refused, a crashed
   session) is tried once more by itself `RETRY_AFTER_MS` later (`retryAt`
   on the failed item, `dueRetry` in the plan; the new run carries
   `retryOf` and is not tried a third time) while the plan still wants that
   head — not a run you asked for, not one cut short again and again; the
-  card, the toast and the PR's reason say when. A PR's reason when it is
+  card, the toast and the PR's reason say when. A review, brief or
+  re-review the agent plans itself waits for the PR to settle first —
+  authors and their own agents push every 10–30 minutes, and a day's log
+  had a third of the runs review a head replaced during the run or right
+  after it: `settlesUntil` in `planJobs` holds it until the PR has had no
+  push, author's reply in a thread and review request (`reviewRequestedAt`,
+  the latest `ReviewRequestedEvent`, of anyone — read in the hydrate) for
+  Settings › Agent › Limits' `settleMinutes` (15; 0 is off). The push time
+  falls back to the commit's date, so a time further ahead than the wait
+  counts for nothing. The PR's reason then says until when
+  (`SETTLING_WHY`), a job the ledger already has keeps the ledger's reason
+  (`known`), and the plan's `wakeAt` — the first PR to settle — has the
+  tick plan again then, since a quiet PR brings no new snapshot. A drive, an
+  offer and a run you ask for never wait. And a review, brief or re-review
+  whose PR gets a new head while it runs is stopped at once
+  (`stopMovedRuns`, on every tick, from the poller's latest read): the
+  agent's own closes as superseded with `run/superseded` (what it cost, the
+  head it read as `was`) and no toast; one you asked for starts over as
+  asked on the new head, as after a restart (`recoverInterrupted`); a drive
+  goes on — it commits on top — and so does a run going on with your
+  answer. A PR's reason when it is
   idle comes from what the head's run really did (`ledgerIdle`): "Running"
   only while it is live, else how it ended, and every run's end plans
   again at once — except one taken over, cut short or ended by the
@@ -814,10 +891,12 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   has `at`, `kind`, `event`; most have `prId`/`prNumber`/`repo`/`runId`, a
   change has `from`/`to` and `ms` (how long the `from` side lasted), the rest is
   in `data`. Kinds: `run` (a run's own steps — `queued` with mode, reasons and
-  PR size; `started` with its folder, model and queue wait; its end,
+  PR size; `started` with its folder, the model and effort it was started
+  with (`reviewerModel` when its reviewers went to Sonnet) and queue wait; its end,
   `needsYou`/`done`/`failed`, with time, turns, cost, tokens, tool calls,
   refused tools and stderr's tail; `interrupted` when its process was ended
-  under it; `diagrams`; `published`/`pushed`/`merged`/`reapproved`/`reasked`
+  under it; `superseded` when the PR got a new head under it, with the same
+  stats and the head it read (`was`); `diagrams`; `published`/`pushed`/`merged`/`reapproved`/`reasked`
   and their `not-*` refusals; `approved-again` (no run: your Approve again);
   `feedback-read` (no run: your Mark as read put 👀 on approvals with feedback);
   `approved` (your Approve on a review that found nothing blocking);
@@ -836,6 +915,41 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   rather than the filtered ones, and only while the agent is on — pruning runs
   only then; their marks persist in `state.json` (`board`), so a restart logs
   what moved while the app was closed rather than every card again.
+- **The agent's share of your Claude usage** (Settings › Agent › Limits). You
+  work in Claude yourself, so the agent must not spend the whole window. Every
+  run's stream-json carries `rate_limit_event`s (`readUsage` in
+  `shared/agent-stream.ts`): `status` (`allowed` / `allowed_warning` /
+  `rejected`), `resetsAt` and `rateLimitType` of the window that limits now,
+  and `unifiedWindows` — `five_hour` (the session) and `seven_day` (weekly),
+  each `{ utilization, resetsAt }`, `utilization` a fraction that may pass 1 —
+  sent whenever a window's rounded percentage moves (absent for an API key).
+  `usageHold` turns a reading into a hold: `rejected` until its reset, or a
+  window at `limits.usageCap` percent or more (default 80, 0 off) until that
+  window resets; `allowed_warning` alone never holds — it comes at Claude
+  Code's own thresholds (75% of the week), and holding on it stopped every run
+  for days. Runs in flight finish, so the cap is overshot by what they still
+  spend — the reason `limits.parallel` stops at 5. A run refused by the limit
+  ends with Claude Code's line, "You've hit your session limit · resets 9:50pm
+  (Europe/Kyiv)" (a date past a day: "Nov 28, 10am", a year past New Year), in
+  the result's text with `is_error` and `subtype: "success"`;
+  `limitResetFromText` reads it in that zone, and the stream's own `rejected`
+  reading wins when there is one. Only that error result is read, never the
+  model's words: a PR can make a session write the line, and a hold stops
+  every run — so the line must be the whole text, its year this one or the
+  next, and no hold lasts past `MAX_USAGE_HOLD_MS` (8 days). Such a run is "Stopped by Claude's session
+  limit" with its `retryAt` at the reset, not `RETRY_AFTER_MS` on, which only
+  ran it into the same wall. The hold is `usageHold` in `state.json`, not
+  memory — a restart used to start the queue straight into the limit — and
+  holds every run, asked or not; a cap hold keeps the share it was set at
+  (`usage`) and lets go once the cap is raised past it. `limits.costPerDay`
+  (0 off, the default) holds new runs once the runs ended on the local day
+  cost that many dollars at API prices (`costToday`: each run's
+  `total_cost_usd` plus its diagrams' — on a subscription a measure of usage,
+  not a bill), counted like `perDay`. `AgentState` carries `heldUntil` /
+  `heldWhy` and `costToday` / `costPerDay`, and `agentSummary` words them once
+  for the Board, the chip, the popover and the tray ("Claude's weekly usage at
+  82% (agent cap 80%) — waits until Fri 10:00", "Daily budget reached ($20.40
+  of $20)").
 - **Upsource reviews** (Settings › Integrations › Upsource, `Settings.upsource`)
   join the list as items of their own: `shared/upsource.ts` (Node-free) maps
   each open review you wrote or review into a `PullRequest` with
@@ -881,7 +995,9 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   (`main/agent/hook.ts`) reads back every field of the guard file — a `subs`,
   `workDir`, `readDirs`, `sessionId` or `sessionRoots` that is there but
   malformed gives no file access at all, since a missing `subs` means every
-  wrapper subcommand, and a folder list keeps absolute paths only — and
+  wrapper subcommand, and a folder list keeps absolute paths only (the run's
+  `allowedTools` there feed refusal hints alone, never a decision, so a bad
+  entry is dropped rather than refused) — and
   follows a drive's write through links (`checkRealWrite`): `checkDriveWrite`
   alone is lexical, and a link committed in the branch would lead it out of
   the worktree. A merge
@@ -945,7 +1061,11 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   `projects` in its config folder, `claude` in its temp folder), where it
   spills a tool result too long to show and a background Workflow's output
   and tells the session to read them; another session's folder there is
-  refused. `~`, `..`, a colon past the drive letter and an absolute Glob
+  refused. `--restricted` refused that folder on its own (the session
+  reading its Workflow's `journal.jsonl` to see why it stopped), so a
+  restricted run also passes it with `--add-dir` (`sessionFolders`:
+  `<root>/<projectDirName(cwd)>/<sessionId>`, made in advance — this
+  session's only, never a root). `~`, `..`, a colon past the drive letter and an absolute Glob
   pattern or brace alternative outside those folders are refused. The hook
   passes `realRead` (links and junctions followed, Git Bash `/c/…` read as
   `C:\…`, 8.3 short names resolved), so a link the PR's branch carries is
@@ -991,6 +1111,32 @@ separate directory. Skill resources and scripts stay beside their `SKILL.md`.
   your shared one keeps the payloads of every other review of the last day.
   Without this every review aborted at the preflight (`preflight-unverified`)
   and was reported as "Reviewed — nothing to post".
+- **A refused call is a wasted step, so the rules say what works first and a
+  refusal says what to do instead.** Each refusal costs a step that re-reads
+  the whole context (2026-11-25: 469 refused calls in 68 runs, ~16% of the
+  main sessions' context tokens). `sessionToolRules`
+  (`shared/agent-guard.ts`, appended by `agentRules` to a restricted run's
+  system prompt from its own `--allowedTools` and the workflows its prompt
+  names) says up front: one plain command per call, which programs a
+  read-only run's Bash runs, Read/Glob/Grep instead of `ls`/`cat`/`grep`,
+  the `gh` reads that replace git — only commands both the guard and the
+  run's tools let through (`ruleAllows`; a test runs each through
+  `checkBash`) — `twg -o json`, reading a spilled result rather than running
+  the command again, the publish wrapper's usage (`PUBLISH_USAGE`: never
+  `--help`, never read; it posts no status comment, so `statusComment:
+  false`), and each skill workflow by its script path. That last one is why
+  every review's first Workflow call said `not found. Available:
+  deep-research`: the creatio-code-review skill says to start its workflow
+  by name, a name its installer copies into `~/.claude/workflows`, which
+  `--restricted` doesn't load — and the guard refuses names anyway
+  (`checkWorkflow`). `skillWorkflows` (`main/agent/plugins.ts`) finds the
+  `*.workflow.js` of the skills the prompt names. A Workflow's own agents
+  don't get the rules, so every refusal carries its hint too
+  (`readOnlyRefusal`, `refusedSyntax`, and the git, gh, wrapper, read and
+  preflight-request refusals). Hints only explain: no decision depends on
+  them, and the tests assert each hinted call stays refused — add a hint
+  where the refusal is, never an allow. The rules ride on every step of
+  every run: keep them short.
 - **Except a drive on your own PR, with full context** (Settings › Agent ›
   "Your PRs: full context", `permissions.fullContextDrive`, on by default).
   Its diff and comments are yours and your reviewers', so it runs with your

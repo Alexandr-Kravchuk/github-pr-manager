@@ -145,7 +145,8 @@ function doing(item: AgentItem): string {
     case "review":
       return "reviewing it";
     case "rereview":
-      return "re-reviewing it";
+      // Over the threads only: this commit had its full re-review already.
+      return item.threadsOnly ? "checking the author's answers in your threads" : "re-reviewing it";
     case "brief":
       return "writing a brief of this big PR";
     case "drive": {
@@ -360,7 +361,9 @@ export function explainCard(card: StageCard, lane: "mine" | "review", state: Age
         const pushedBack = plan?.escalations.length ?? 0;
         if (item?.scenario === "rereview") {
           const did = [resolves > 0 && `would resolve ${plural(resolves, "thread")}`, replies > 0 && `drafted ${plural(replies, "reply", "replies")}`, n > 0 && `added ${plural(n, "comment")}`].filter(Boolean).join(", ");
-          now = `The author answered. The agent checked the answers${did ? ` — ${did}` : ""}${approve ? ", and suggests approving now" : ""}.`;
+          // Over the threads only: this commit had its full re-review, so nothing else of it was read again.
+          const checked = item.threadsOnly ? "checked the answers in your threads" : "checked the answers";
+          now = `The author answered. The agent ${checked}${did ? ` — ${did}` : ""}${approve ? ", and suggests approving now" : ""}.`;
         } else {
           now = approve
             ? "The agent reviewed the latest commit and suggests approving."

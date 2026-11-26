@@ -1,4 +1,4 @@
-import { gitBashPath, isInsideDir, parsePublishCall, samePath, type PublishSub } from "./agent-publish";
+import { gitBashPath, isInsideDir, parsePublishCall, PUBLISH_USAGE, samePath, type PublishSub } from "./agent-publish";
 import type { AgentRunKind } from "./types";
 
 // The agent's PreToolUse guard: what an agent session may actually run,
@@ -78,6 +78,12 @@ export interface GuardRun {
   sessionRoots?: string[];
   /** The review skill's preflight, when a mounted plugin carries its helper (`checkPreflight`). */
   preflight?: GuardPreflight;
+  /**
+   * The run's `--allowedTools` rules — for hints only, never a decision: a
+   * refusal suggests instead only calls these let through. Absent: the plain
+   * `gh pr diff` / `gh pr view`.
+   */
+  allowedTools?: string[];
 }
 
 /**
@@ -158,7 +164,7 @@ function checkWorkflow(input: unknown, run: GuardRun | null): GuardDecision {
   const script = typeof i.scriptPath === "string" ? i.scriptPath : "";
   const dirs = run?.workflowDirs ?? [];
   if (script && dirs.some((d) => isInsideDir(script, d))) return { allow: true };
-  if (!script) return deny(`Agent runs start a skill's workflow by its script path${dirs.length ? ` (inside ${dirs.join(" or ")})` : ""}, not by name.`);
+  if (!script) return deny(`Agent runs start a skill's workflow by its script path — the skill's *.workflow.js${dirs.length ? `, inside ${dirs.join(" or ")}` : ""} — not by name, even where the skill says so.`);
   return deny(`Agent runs only run a skill's own workflow script${dirs.length ? ` — from ${dirs.join(" or ")}` : ""}, never one from the PR.`);
 }
 
@@ -370,7 +376,10 @@ function inSessionFolder(file: string, run: GuardRun, real: RealPath): boolean {
  */
 export function checkRead(toolName: string, input: unknown, run: GuardRun | null, real: RealPath = asWritten): GuardDecision {
   const targets = readTargets(toolName, input, run?.workDir);
-  if ("error" in targets) return deny(targets.error);
+  if ("error" in targets) {
+    const named = Object.values((input ?? {}) as Record<string, unknown>).filter((v): v is string => typeof v === "string");
+    return deny(targets.error + readHint(named, run));
+  }
   // Absolute folders only: an empty or relative one would be read against wherever the check runs.
   const dirs = (run?.readDirs ?? [])
     .filter(isAbsolutePath)
@@ -383,13 +392,29 @@ export function checkRead(toolName: string, input: unknown, run: GuardRun | null
     if (run?.preflight && preflightReadable(r, run.preflight, real)) continue;
     const really = samePath(r, target) ? "" : ` (it really is ${r})`;
     return deny(
-      dirs.length
+      (dirs.length
         ? `This run reads only its own folders (${dirs.join(", ")}); ${target}${really} is outside them.`
-        : "This run has no folders to read.",
+        : "This run has no folders to read.") + readHint([target, r, toolName === "Glob" ? String((input as { pattern?: unknown } | null)?.pattern ?? "") : ""], run),
     );
   }
   return { allow: true };
 }
+
+/**
+ * What a refused read was most likely after, said with the refusal so the
+ * next call needn't guess: a named workflow (there are none in agent runs),
+ * the publish wrapper (run, never read). Empty when nothing more is known.
+ */
+function readHint(texts: string[], run: GuardRun | null): string {
+  const all = texts.filter(Boolean);
+  if (all.some((t) => /\.claude[\\/]+workflows/i.test(t))) return ` ${NAMED_WORKFLOW_HINT}`;
+  if (run?.wrapperPath && all.some((t) => samePath(t, run.wrapperPath!))) return ` That is the app's publish wrapper: run it, don't read it — ${PUBLISH_USAGE}.`;
+  return "";
+}
+
+/** Agent runs have no named workflows: `--restricted` loads no `~/.claude/workflows`, and the guard refuses names anyway. */
+const NAMED_WORKFLOW_HINT =
+  "Agent runs have no named workflows (nothing from ~/.claude/workflows): start a skill's workflow by its script path, the *.workflow.js in the skill's own folder — Workflow({ scriptPath, args }).";
 
 /** A preflight file a read may open: `installed_plugins.json`, or anything inside one of the helper's payload folders. */
 function preflightReadable(file: string, p: GuardPreflight, real: RealPath): boolean {
@@ -553,6 +578,202 @@ function checkPreflight(command: string, pr: GuardPr | null, run: GuardRun | nul
 
 function deny(reason: string): GuardDecision {
   return { allow: false, reason };
+}
+
+/** The review preflight's two calls, with this run's own helper and folders — what a refused attempt at it is told. */
+function preflightUsage(run: GuardRun, p: GuardPreflight): string {
+  const helper = (p.helpers[0] ?? "<helper>").replace(/\\/g, "/");
+  const out = (run.outDir ?? "<the run's payload folder>").replace(/\\/g, "/");
+  return `node runs only the review preflight here, as node "${helper}" < "${out}/<request>.json" (the request written there with the Write tool) or node "${helper}" --digest "<payload folder>" — no other script, no shell around it.`;
+}
+
+// ---------------------------------------------------------------------------
+// Hints: every refusal is a step the model spends re-reading its whole
+// context, so a refusal says what to do instead — the command that works, or
+// the tool to use. Hints only explain; what is allowed is decided above and
+// below, never here. The same commands go into a run's rules up front
+// (`sessionToolRules`): a Workflow's agents don't get those rules, and learn
+// them only from a refusal.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether Claude Code's `--allowedTools` rules let `command` run without an
+ * approval nobody can give in an agent run: `Bash(prefix *)`, `Bash(prefix*)`,
+ * `Bash(prefix:*)`, an exact `Bash(command)`, or a bare `Bash`. Only for
+ * choosing which commands a hint names — never for a decision.
+ */
+export function ruleAllows(rules: readonly string[], command: string): boolean {
+  return rules.some((rule) => {
+    if (rule === "Bash") return true;
+    const m = /^Bash\((.*)\)$/.exec(rule);
+    if (!m) return false;
+    const p = m[1];
+    if (p.endsWith(":*")) return command.startsWith(p.slice(0, -2));
+    if (p.endsWith("*")) return command.startsWith(p.slice(0, -1));
+    return command === p;
+  });
+}
+
+/** The PR's own words for a hint, or placeholders when the run names none. */
+function prWords(pr: { repo: string; number: number } | null | undefined): { repo: string; n: string } {
+  return { repo: pr?.repo ?? "<owner/repo>", n: pr ? String(pr.number) : "<number>" };
+}
+
+/**
+ * What a run that may not use git reads instead, as commands the guard lets
+ * through for this PR — only those `tools` (the run's `--allowedTools`) let run.
+ */
+function gitInstead(pr: { repo: string; number: number } | null | undefined, tools: readonly string[]): string[] {
+  const { repo, n } = prWords(pr);
+  const out: string[] = [];
+  if (ruleAllows(tools, `gh pr view ${n}`)) out.push(`the head, base and commits: gh pr view ${n} --json headRefOid,baseRefOid,commits (statusCheckRollup for CI)`);
+  if (ruleAllows(tools, `gh pr diff ${n}`)) out.push(`the diff: gh pr diff ${n} (--name-only for its files)`);
+  if (ruleAllows(tools, `gh api repos/${repo}`)) {
+    out.push(`one file's diff: gh api repos/${repo}/pulls/${n}/files --paginate --jq '.[] | select(.filename == "PATH") | .patch'`);
+    out.push(`a file at a commit: gh api 'repos/${repo}/contents/PATH?ref=SHA' -H 'Accept: application/vnd.github.raw'`);
+  }
+  return out;
+}
+
+/** A program as the shell would name it: no folder, no `.exe`, lower case. */
+function programName(word: string): string {
+  return (gitBashPath(word).split("/").pop() ?? "").toLowerCase().replace(/\.exe$/, "");
+}
+
+/** What a read-only run does instead of a program it doesn't run. */
+const INSTEAD: ReadonlyArray<[ReadonlySet<string>, string]> = [
+  [new Set(["ls", "dir", "find", "tree", "stat", "test"]), "find files with the Glob tool"],
+  [new Set(["cat", "head", "tail", "less", "more", "type", "wc", "sed", "awk", "od", "xxd"]), "read a file with the Read tool (offset and limit for a part of it)"],
+  [new Set(["grep", "egrep", "fgrep", "rg", "findstr", "ag", "ack"]), "search with the Grep tool"],
+  [new Set(["jq"]), "shape gh's JSON with its own --jq"],
+  [new Set(["sleep", "timeout", "wait", "ping"]), "don't wait in the shell — a background workflow reports to you by itself when it ends"],
+  [new Set(["echo", "printf", "true", "pwd", "whoami", "date"]), "say it in your reply instead"],
+  [new Set(["cd", "pushd"]), "commands already run in the run's working folder, and gh already points at this PR"],
+  [new Set(["sh", "bash", "zsh", "dash", "cmd", "pwsh", "powershell"]), "run the program itself, as one plain command"],
+  [new Set(["git"]), "use gh (gh pr view, gh pr diff) — git can run the PR's own filters"],
+];
+
+const SHELL_NAMES: ReadonlySet<string> = INSTEAD.find(([names]) => names.has("sh"))![0];
+
+function insteadOf(prog: string): string {
+  return INSTEAD.find(([names]) => names.has(prog))?.[1] ?? "nothing else runs here — no script or program from the PR's repository";
+}
+
+/** What Bash runs in a read-only run, in words. */
+function readOnlyPrograms(run: (Pick<GuardRun, "wrapperPath"> & { preflight?: unknown }) | null): string {
+  return `gh, twg${run?.wrapperPath ? ", the publish wrapper" : ""}${run?.preflight ? ", the review preflight's node" : ""}`;
+}
+
+/** The refusal of a program a read-only run doesn't run, with what to do instead. */
+function readOnlyRefusal(words: string[], run: GuardRun | null): string {
+  const prog = programName(words[0] ?? "");
+  // The wrapper handed to another program: a shell runs it as it is, and there is nothing in it to read.
+  if (run?.wrapperPath && words.slice(1).some((w) => samePath(w, run.wrapperPath!))) {
+    return SHELL_NAMES.has(prog)
+      ? `This run only reads: run the publish wrapper itself, not through ${prog} — ${PUBLISH_USAGE}.`
+      : `This run only reads: that is the app's publish wrapper — run it, don't read it — ${PUBLISH_USAGE}.`;
+  }
+  if (prog === "node" && run?.preflight) return `This run only reads: ${preflightUsage(run, run.preflight)}`;
+  const why = prog === "node" && words.slice(1).some((w) => /\.claude[\\/]+projects[\\/]/i.test(w)) ? "read your workflow's files with the Read tool" : insteadOf(prog);
+  return `This run only reads: Bash runs ${readOnlyPrograms(run)} only. Instead of ${prog || "that"}: ${why}.`;
+}
+
+/** Whether a read-only run's Bash runs this program at all (its arguments are judged elsewhere). */
+function runsInReadOnly(words: string[], run: GuardRun | null): boolean {
+  const prog = programName(words[0] ?? "");
+  if (prog === "gh" || prog === "twg") return true;
+  if (prog === "node" && run?.preflight) return true;
+  return Boolean(run?.wrapperPath && words[0] && samePath(words[0], run.wrapperPath));
+}
+
+/** What to do instead of the shell syntax a command used — the parts that commonly come along. */
+function syntaxHint(command: string): string {
+  // Quoted text is the command's own: an operator inside quotes is not one —
+  // but the shell still expands `$` inside double quotes.
+  const bare = command.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, "''");
+  const expands = command.replace(/'[^']*'/g, "''");
+  const hints: string[] = [];
+  if (/^\s*(cd|pushd)\s/.test(bare)) hints.push("no cd — commands already run in the run's working folder");
+  if (/\d>/.test(bare)) hints.push("drop 2>&1 and 2>/dev/null — errors come back to you anyway");
+  if (/(^|[^|])\|(?!\|)/.test(bare)) hints.push("no pipes — shape JSON with gh's --jq; a result too long to show is saved to a file you can Read");
+  if (/;|&&|\|\||&(?!\d)/.test(bare.replace(/\d>&\d/g, ""))) hints.push("one command per call — make each its own call");
+  if (/<</.test(bare)) hints.push("no heredocs — write a file with the Write tool");
+  if (/\$\(|`/.test(expands)) hints.push("no $(…) — run that command on its own and write its value out");
+  else if (/\$[A-Za-z_{]/.test(expands)) hints.push("no $VARIABLES — write the value out");
+  if (/(^|\s)~/.test(bare)) hints.push("~ isn't expanded — write the full path");
+  return hints.join("; ");
+}
+
+/** A command the shell rules refused, with what to do instead — and, in a read-only run, the programs it doesn't run. */
+function refusedSyntax(kind: AgentRunKind, command: string, error: string, run: GuardRun | null): string {
+  const parts = [error];
+  const syntax = syntaxHint(command);
+  if (syntax) parts.push(`Instead: ${syntax}.`);
+  if (READ_ONLY.has(kind)) {
+    const refused = [
+      ...new Set(
+        looseCommands(command)
+          .filter((w) => /^[A-Za-z]/.test(w[0] ?? "") && !runsInReadOnly(w, run))
+          .map((w) => programName(w[0]))
+          // The syntax hint already says "no cd".
+          .filter((p) => p !== "cd" && p !== "pushd"),
+      ),
+    ].slice(0, 3);
+    if (refused.length) parts.push(`Bash runs ${readOnlyPrograms(run)} only here — ${refused.map((p) => `instead of ${p}: ${insteadOf(p)}`).join("; ")}.`);
+  }
+  if (/\.claude[\\/]+workflows/i.test(command)) parts.push(NAMED_WORKFLOW_HINT);
+  return parts.join(" ");
+}
+
+/**
+ * The rules a session gets up front about its tools (appended to its system
+ * prompt by `agentRules`): what the guard refuses, and what works instead —
+ * only commands both the guard and `allowedTools` let through, so following
+ * them is never a refused call. Kept short: it rides on every step of every
+ * run. The full-context drive doesn't get it (`checkFullToolUse`).
+ */
+export interface ToolRulesRun {
+  /** The run's `--allowedTools` rules. */
+  allowedTools: readonly string[];
+  pr?: { repo: string; number: number } | null;
+  /** A review's own publish wrapper and payload folder (`GuardRun`). */
+  wrapperPath?: string;
+  outDir?: string;
+  /** The skill workflows the run's prompt names, by script path. */
+  workflows?: readonly string[];
+}
+
+export function sessionToolRules(kind: AgentRunKind, t: ToolRulesRun): string {
+  const tools = t.allowedTools;
+  const readOnly = READ_ONLY.has(kind);
+  // The review preflight's node (`preflightFor` grants it): the one node call such a run makes.
+  const preflight = tools.includes("Bash(node *)");
+  const programs = readOnlyPrograms({ ...(t.wrapperPath ? { wrapperPath: t.wrapperPath } : {}), ...(preflight ? { preflight: true } : {}) });
+  const out: string[] = [
+    readOnly
+      ? `Tools here — a guard checks every call, and a refused call is a wasted step. Bash runs one plain command per call: ${programs} only — no ls, cat, grep, ${preflight ? "" : "node, "}sleep, cd or git${preflight ? "; node only as the review skill's preflight runs it" : ""}; no pipes, redirection, 2>&1, ; or &&; quote any * ? { } ~ #. Files: Read (offset/limit for a part), Glob, Grep.`
+      : "Tools here — a guard checks every call, and a refused call is a wasted step. Bash runs one plain command per call: no pipes, redirection, 2>&1, ; or &&; no cd (you are in the worktree) and no git -C; quote any * ? { } ~ #. Files: Read (offset/limit for a part), Glob, Grep.",
+  ];
+  if (readOnly) {
+    const instead = gitInstead(t.pr, tools);
+    if (instead.length) out.push(`Instead of git — ${instead.join("; ")}. Shape JSON with --jq (rows with @tsv, never \\t).`);
+  }
+  if (ruleAllows(tools, "twg jira")) out.push("twg's -o takes json, jsonl, yaml or text.");
+  out.push("A result too long to show is saved to a file you are told of: Read that file (offset/limit) rather than running the command again.");
+  if (t.workflows?.length) {
+    out.push(
+      `Named workflows don't exist here: start a skill's workflow by its script path, even where the skill says to use its name — ${t.workflows.map((w) => `Workflow({ scriptPath: "${w.replace(/\\/g, "/")}", args })`).join(" or ")}. It runs in the background and reports when it ends: don't wait or poll from the shell.`,
+    );
+  }
+  // A drive's rules give its one wrapper call (reply) themselves.
+  if (t.wrapperPath && t.outDir && kind !== "drive") {
+    const w = gitBashPath(t.wrapperPath);
+    const { repo, n } = prWords(t.pr);
+    out.push(
+      `The publish wrapper (run it — never with --help, never read it): ${w} review|comment ${repo} ${n} FILE.json · reply|escalate ${repo} ${n} COMMENT-ID FILE.txt · resolve THREAD-ID; every FILE written under ${t.outDir.replace(/\\/g, "/")}/ and passed by its absolute path. It posts no status comment: start the review workflow with statusComment: false.`,
+    );
+  }
+  return out.join(" ");
 }
 
 /**
@@ -1042,7 +1263,18 @@ function checkGhApi(args: string[], pr: GuardPr | null): GuardDecision {
       const name = long ? a.split("=")[0] : a.slice(0, 2);
       const attached = long ? (a.includes("=") ? a.slice(a.indexOf("=") + 1) : null) : a.length > 2 ? a.slice(2) : null;
       const kind = GH_API_FLAGS[name];
-      if (!kind) return deny("gh api is read-only in agent runs: only --jq, --paginate, --slurp, --cache, --include, --silent, --hostname and Accept headers.");
+      if (!kind) {
+        // What these flags were for, said the way the guard takes it: a query string goes in the quoted path.
+        const why =
+          name === "--ref"
+            ? " A ref goes in the quoted path: 'repos/<owner>/<repo>/contents/PATH?ref=SHA'."
+            : name === "-X" || name === "--method"
+              ? " gh api reads with GET already: drop -X, and put query parameters in the quoted path ('…?recursive=1')."
+              : name === "--template" || name === "-t"
+                ? " --jq already prints a string as it is: drop --template."
+                : " Query parameters go in the quoted path ('…?ref=SHA').";
+        return deny(`gh api is read-only in agent runs: only --jq, --paginate, --slurp, --cache, --include, --silent, --hostname and Accept headers.${why}`);
+      }
       if (kind === "flag") {
         if (attached !== null) return deny("gh api is read-only in agent runs.");
         continue;
@@ -1135,6 +1367,10 @@ function checkGhPr(args: string[], pr: GuardPr | null): GuardDecision {
       const name = long ? a.split("=")[0] : a.slice(0, 2);
       const attached = long ? (a.includes("=") ? a.slice(a.indexOf("=") + 1) : null) : a.length > 2 ? a.slice(2) : null;
       const kind = GH_PR_FLAGS[name];
+      if (a === "--") {
+        const { repo, n } = prWords(pr);
+        return deny(`gh pr diff takes no file paths in agent runs: take the file from the whole diff, or its patch alone with gh api repos/${repo}/pulls/${n}/files --paginate --jq '.[] | select(.filename == "PATH") | .patch'.`);
+      }
       if (!kind) return deny(`gh ${name} is not one of the flags agent runs may use.`);
       if (kind === "flag") {
         if (attached !== null) return deny(`${name} takes no value.`);
@@ -1294,8 +1530,17 @@ function checkTwg(words: string[]): GuardDecision {
 
 /** A call of this run's publish wrapper: checked the way the wrapper checks it, and held to the PR and the run's folder. */
 function checkWrapper(words: string[], pr: GuardPr | null, outDir: string, subs?: PublishSub[]): GuardDecision {
+  const sub = words[1] ?? "";
+  // The skill's own wrapper also edits a "Reviewing now" status comment; the app's posts none.
+  if (sub === "status" || sub === "status-edit") {
+    return deny("PUBLISH-REJECTED: the app's wrapper posts no status comment — skip it and go on (start the review workflow with statusComment: false); the app shows the run's progress itself.");
+  }
   const call = parsePublishCall(words.slice(1));
-  if (!call.ok) return deny(`PUBLISH-REJECTED: ${call.error}`);
+  if (!call.ok) {
+    // `--help`, or nothing: the usage, and where its files go — the wrapper is the app's own, so there is no more to read.
+    const asked = !sub || /^(-h|--help|help|-\?)$/.test(sub);
+    return deny(`PUBLISH-REJECTED: ${call.error}${asked ? ` — the app's own wrapper: it records each write and posts nothing; write every file under ${outDir.replace(/\\/g, "/")}/ and pass its absolute path.` : ""}`);
+  }
   const c = call.value;
   if (subs && !subs.includes(c.sub)) return deny(`PUBLISH-REJECTED: this run may not ${c.sub}; it may ${subs.join(", ")}.`);
   if (c.sub !== "resolve") {
@@ -1305,15 +1550,18 @@ function checkWrapper(words: string[], pr: GuardPr | null, outDir: string, subs?
   return { allow: true };
 }
 
-function checkGit(kind: AgentRunKind, words: string[], run: GuardRun | null, real: RealPath): GuardDecision {
+function checkGit(kind: AgentRunKind, words: string[], pr: GuardPr | null, run: GuardRun | null, real: RealPath): GuardDecision {
   // Not even the reading subcommands: `git diff` and `git log -p` run textconv
   // filters by default, and the PR's own .gitattributes picks which files go
   // through them. A read-only run takes the diff from `gh pr diff`.
-  if (READ_ONLY.has(kind)) return deny("This run only reads, and git can run configured filters on the PR's files — use gh pr diff / gh pr view.");
+  if (READ_ONLY.has(kind)) {
+    const instead = gitInstead(pr, run?.allowedTools ?? []);
+    return deny(`This run only reads, and git can run configured filters on the PR's files — so no git; use gh${instead.length ? `: ${instead.join("; ")}` : " pr diff / gh pr view"}.`);
+  }
   const sub = words[1] ?? "";
   // Global options come before the subcommand: `-C <dir>` moves the
   // repository, `-c` rewrites config (aliases, pagers).
-  if (sub.startsWith("-")) return deny("git global options (-C, -c, --git-dir, …) are not allowed in agent runs.");
+  if (sub.startsWith("-")) return deny(`git global options (-C, -c, --git-dir, …) are not allowed in agent runs${sub === "-C" ? " — git already runs in the worktree: drop -C <dir>" : ""}.`);
   // Drive (stage 5) does not rely on this alone: its worktree has no push URL,
   // and the app pushes the branch itself after checking the commit.
   if (sub === "push") return deny("Agent runs don't push from the shell — the app pushes your branch itself.");
@@ -1335,16 +1583,19 @@ export function checkBash(
   const preflight = kind === "review" || kind === "rereview" ? checkPreflight(rawCommand, pr, run, real, requests) : null;
   if (preflight) return preflight;
   const split = shellWords(rawCommand);
-  if ("error" in split) return deny(split.error);
+  if ("error" in split) return deny(refusedSyntax(kind, rawCommand, split.error, run));
   const words = split.words;
   if (words.length === 0) return deny("An empty command.");
   // `FOO=1 git push` would slip past a check on the program's name.
-  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])) return deny("Commands can't start with environment assignments in agent runs.");
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])) {
+    const gh = /^GH_(HOST|REPO)=/.test(words[0]) ? " — gh already points at this PR's host and repository" : "";
+    return deny(`Commands can't start with environment assignments in agent runs${gh}: run the command without ${words[0].split("=")[0]}=….`);
+  }
   if (run?.wrapperPath && run.outDir && samePath(words[0], run.wrapperPath)) return checkWrapper(words, pr, run.outDir, run.subs);
-  if (words[0] === "git") return checkGit(kind, words, run, real);
+  if (words[0] === "git") return checkGit(kind, words, pr, run, real);
   if (words[0] === "gh") return checkGh(words, pr);
   if (words[0] === "twg") return checkTwg(words);
-  if (READ_ONLY.has(kind)) return deny("This run only reads: it doesn't run commands from the PR's repository.");
+  if (READ_ONLY.has(kind)) return deny(readOnlyRefusal(words, run));
   return { allow: true };
 }
 
@@ -1378,7 +1629,12 @@ export function checkToolUse(
     // new files in its own folder, nothing in the PR's checkout.
     const outDir = run?.outDir;
     if (outDir && toolName === "Write" && isInsideDir(toolFilePath(input), outDir)) return { allow: true };
-    return deny(outDir ? `This run only reads; it writes payload files under ${outDir} and nothing else.` : "This run only reads; it can't change files.");
+    // The preflight's agent writes its request where its TEMP points — the run's own temp folder, which node may not read from.
+    const file = toolFilePath(input);
+    const pf = run?.preflight;
+    const tmp = pf ? real(pf.tmpDir) : null;
+    const toTmp = run && pf && tmp && file && isInsideDir(real(file) ?? file, tmp) ? ` The review preflight's request goes there too — ${preflightUsage(run, pf)}` : "";
+    return deny(outDir ? `This run only reads; it writes payload files under ${outDir} and nothing else.${toTmp}` : "This run only reads; it can't change files.");
   }
   // A drive run edits its own worktree — and writes reply files for its
   // wrapper into its payload folder — and nothing else.

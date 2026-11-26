@@ -129,8 +129,10 @@ export type PublishCall =
 export const PUBLISH_SUBS = ["review", "comment", "reply", "resolve", "escalate"] as const;
 export type PublishSub = (typeof PUBLISH_SUBS)[number];
 
-const USAGE =
+/** The wrapper's usage line: its rejection text, and what the guard's hints and a run's rules quote. */
+export const PUBLISH_USAGE =
   "usage: pr-review-publish.sh review|comment <owner/repo> <number> <file.json> | reply|escalate <owner/repo> <number> <comment-id> <body.txt> | resolve <thread-id>";
+const USAGE = PUBLISH_USAGE;
 
 function checkRepo(v: string): Parsed<string> {
   if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/.test(v)) return fail(`owner/repo must look like owner/name, got: ${v}`);
