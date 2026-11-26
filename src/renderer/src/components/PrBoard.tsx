@@ -2,7 +2,7 @@ import { useContext, useEffect, useState, type FormEvent, type ReactNode } from 
 
 // Node-free (see AGENTS.md): the Board in plain words, the queue, the summary line.
 import { explainBoard, type BoardChoice, type BoardEntry, type BoardOwner } from "../../../shared/agent-explain";
-import { agentSummary, queueOrder, todayKey } from "../../../shared/agent-view";
+import { agentSummary, dollars, queueOrder, todayKey } from "../../../shared/agent-view";
 // Node-free too: a held write is worded once, for the card and the publish refusal alike.
 import { heldLabel, type HeldWrite, type PublishSummary } from "../../../shared/agent-publish";
 import type { FindingSeverity, RunAsk, RunFinding } from "../../../shared/agent-result";
@@ -239,7 +239,7 @@ function Overview({
             {sum.block === "quiet" && <span className="text-amber-700 dark:text-amber-300">{sum.blockText} — only what you ask for starts.</span>}
             {sum.block === "usage" && (
               <span className="text-amber-700 dark:text-amber-300">
-                Claude&apos;s {sum.blockText?.toLowerCase()} — runs wait.{" "}
+                {sum.blockText} — runs wait (Settings › Agent › Limits).{" "}
                 <button
                   type="button"
                   className="font-medium underline"
@@ -250,13 +250,17 @@ function Overview({
                 </button>
               </span>
             )}
-            {sum.block === "daily" && (
+            {(sum.block === "daily" || sum.block === "budget") && (
               <span className="text-amber-700 dark:text-amber-300">
                 {sum.blockText} — {sum.queued > 0 ? `${sum.queued} in line wait` : "new runs wait"} until tomorrow (Settings › Agent › Limits).
               </span>
             )}
             <span>
-              Runs today {state.runsToday} of {state.perDay}.
+              Runs today {state.runsToday} of {state.perDay}
+              {(state.costToday ?? 0) > 0 || (state.costPerDay ?? 0) > 0
+                ? ` · ${dollars(state.costToday ?? 0)}${(state.costPerDay ?? 0) > 0 ? ` of the $${state.costPerDay} budget` : ""} at API prices`
+                : ""}
+              .
             </span>
             {state.suggestOn && <span className="text-emerald-700 dark:text-emerald-300">You sent {state.acceptedUnchanged} reviews exactly as drafted — reviews can go On in Settings › Agent.</span>}
           </>

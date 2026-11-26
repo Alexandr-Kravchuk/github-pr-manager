@@ -1,4 +1,4 @@
-import type { AgentLanguage, AgentPromptKey, AgentRunKind, AgentSettings } from "./types";
+import type { AgentEffort, AgentLanguage, AgentPromptKey, AgentRunKind, AgentScenario, AgentSettings } from "./types";
 
 // The PR agent's defaults and the bounds of its numbers. Node-free like
 // `notify.ts`, because the renderer value-imports it: the Agent tab of Settings
@@ -147,6 +147,54 @@ export function migrateTools(kind: AgentRunKind, saved: readonly string[], saved
 
 export const DEFAULT_AGENT_SIGNATURE = "🤖 Prepared by the PR agent (Claude Code) on my behalf. Reply here — I read every reply.";
 
+/** The efforts an agent run takes, "" first (Claude Code's default, or per kind of run the agent's own). */
+export const AGENT_EFFORTS: readonly AgentEffort[] = ["", "low", "medium", "high"];
+
+/**
+ * A model as it may go on Claude Code's command line: an alias (`sonnet`) or a
+ * model id (`claude-sonnet-5-5`, `fable[1m]`) — never something that starts
+ * with a dash and reads as a flag.
+ */
+export function isModelName(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,79}$/.test(value);
+}
+
+/**
+ * Per kind of run, "" = the agent's own model and effort. A brief reads the
+ * diff and writes prose — Sonnet does that at a fraction of Opus's cost (on a
+ * subscription, of its limit); the other kinds start as the agent's.
+ */
+export const DEFAULT_AGENT_RUN_MODELS: AgentSettings["runModels"] = {
+  review: { model: "", effort: "" },
+  brief: { model: "sonnet", effort: "" },
+  rereview: { model: "", effort: "" },
+  drive: { model: "", effort: "" },
+  afterMerge: { model: "", effort: "" },
+};
+
+/** The model and effort a run of this kind is started with: its own, else the agent's; "" leaves Claude Code's default. */
+export function runModelFor(s: Pick<AgentSettings, "model" | "effort" | "runModels">, kind: AgentRunKind): { model: string; effort: AgentEffort } {
+  const own = s.runModels?.[kind];
+  return { model: own?.model || s.model, effort: own?.effort || s.effort };
+}
+
+/** The runs whose prompt starts the review skill's workflow: a review, a re-review, the self-review of your own PR. */
+export function runsReviewWorkflow(scenario: AgentScenario, reasons: readonly string[] | undefined): boolean {
+  return scenario === "review" || scenario === "rereview" || (scenario === "drive" && (reasons ?? []).includes("self"));
+}
+
+/**
+ * The session rule behind `sonnetReviewers`. The creatio-code-review workflow
+ * takes `reviewerModel: "sonnet"` and then runs each reviewer as the plugin's
+ * `<reviewer>-sonnet` agent, pinned to Sonnet in its frontmatter — the
+ * Workflow runtime's `agent()` has no model option of its own. Without it the
+ * six reviewers and the context, synthesis and publish stages all inherit the
+ * session's model.
+ */
+export const SONNET_REVIEWERS_RULE =
+  'When you start the review skill\'s workflow, pass reviewerModel: "sonnet" in its args too, with the others: its reviewer subagents then run on Sonnet. ' +
+  "If the workflow takes no such argument, go on without it.";
+
 /**
  * Bounds of every number the agent takes. Out-of-range values are clamped by
  * the validator and flagged by the Settings field, so the two can't disagree.
@@ -155,9 +203,13 @@ export const AGENT_BOUNDS = {
   maxLines: { min: 1, max: 100_000 },
   maxFiles: { min: 1, max: 5_000 },
   maxAttempts: { min: 1, max: 10 },
-  parallel: { min: 1, max: 8 },
+  // Every run in flight goes on past the usage cap, so more at a time overshoots it further.
+  parallel: { min: 1, max: 5 },
   perDay: { min: 1, max: 500 },
+  usageCap: { min: 0, max: 100 },
+  costPerDay: { min: 0, max: 10_000 },
   maxMinutes: { min: 5, max: 240 },
+  settleMinutes: { min: 0, max: 240 },
   promoteAfter: { min: 1, max: 100 },
   logRetentionDays: { min: 1, max: 365 },
   diagramMinLines: { min: 0, max: 100_000 },
@@ -176,6 +228,8 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   enabled: false,
   model: "",
   effort: "",
+  runModels: DEFAULT_AGENT_RUN_MODELS,
+  sonnetReviewers: true,
   language: "en",
   worktreeDir: "",
   removeWorktree: true,
@@ -201,8 +255,14 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   limits: {
     parallel: 2,
     perDay: 30,
+    // A fifth of each window stays yours; a budget is opt-in — on a subscription the dollars are only a measure.
+    usageCap: 80,
+    costPerDay: 0,
     maxMinutes: 30,
     quietHours: { enabled: false, from: "20:00", to: "08:00" },
+    // Authors (and their own agents) push every 10–30 min: a review of a head
+    // replaced while it ran is a whole run for nothing.
+    settleMinutes: 15,
     promoteAfter: 10,
   },
   permissions: { tools: DEFAULT_AGENT_TOOLS, toolsVersion: AGENT_TOOLS_VERSION, pushOwnBranch: true, fullContextDrive: true },

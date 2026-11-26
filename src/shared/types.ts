@@ -322,6 +322,9 @@ export type AgentLanguage = "en" | "uk" | "pl";
 /** The kinds of session the agent starts — each has its own tool set. */
 export type AgentRunKind = "review" | "brief" | "rereview" | "drive" | "afterMerge";
 
+/** An agent run's effort; "" = Claude Code's default (per kind of run: the agent's own `effort`). */
+export type AgentEffort = "" | "low" | "medium" | "high";
+
 /** A merge method, in `gh pr merge` terms. */
 export type MergeMethod = "merge" | "squash" | "rebase";
 
@@ -336,7 +339,18 @@ export interface AgentSettings {
   /** Model for agent runs; "" = Claude Code's default. */
   model: string;
   /** Effort for agent runs; "" = Claude Code's default. */
-  effort: "" | "low" | "medium" | "high";
+  effort: AgentEffort;
+  /**
+   * Model and effort per kind of run, over `model` / `effort` above: "" takes
+   * those (`runModelFor` in agent-defaults.ts). A brief only reads and writes
+   * prose, so it starts on Sonnet.
+   */
+  runModels: Record<AgentRunKind, { model: string; effort: AgentEffort }>;
+  /**
+   * The review skill's workflow runs its reviewer subagents on Sonnet: a
+   * review, a re-review and a self-review pass it `reviewerModel: "sonnet"`.
+   */
+  sonnetReviewers: boolean;
   /**
    * What the agent writes to you in: its task list, questions, briefs and
    * results. What it posts on GitHub, commits or writes to Jira is not affected.
@@ -399,10 +413,28 @@ export interface AgentSettings {
   limits: {
     parallel: number;
     perDay: number;
+    /**
+     * No new run starts while Claude's session (5-hour) or weekly window is
+     * used to this percent or more — the rest is left for your own work
+     * (`usageHold`). 0 is off; the limit itself holds the queue either way.
+     */
+    usageCap: number;
+    /**
+     * No new run starts once the runs finished today (the local day, as
+     * `perDay` counts) cost this many dollars at API prices — what Claude
+     * reports as `total_cost_usd`, a measure of usage on a subscription. 0 is off.
+     */
+    costPerDay: number;
     /** A run is stopped (and handed to you) after this many minutes. */
     maxMinutes: number;
     /** No new run starts between `from` and `to` ("HH:MM", may wrap past midnight). */
     quietHours: { enabled: boolean; from: string; to: string };
+    /**
+     * A review, brief or re-review the agent plans itself waits until the PR
+     * has had no push, author's reply or review request for this many minutes
+     * (`settlesUntil` in agent-policy.ts); 0 starts it at once. What you ask for never waits.
+     */
+    settleMinutes: number;
     /** Suggest switching a scenario from shadow to on after this many results accepted unchanged. */
     promoteAfter: number;
   };
@@ -654,6 +686,11 @@ export interface PullRequest {
   authorRepliedAt: string | null;
   /** The latest comment by someone else that ends an unresolved thread. */
   reviewerRepliedAt: string | null;
+  /**
+   * When a review was last asked for on this PR, of anyone — a first request
+   * or a re-request. The PR agent waits for a PR to settle after it.
+   */
+  reviewRequestedAt: string | null;
   /**
    * A review is asked of you by name (`review-requested:@me`), as opposed to of
    * a team you are in — both give the `reviewer` role. The agent takes team
@@ -1199,6 +1236,13 @@ export interface AgentItem {
   /** A drive: what it was queued for — "ci", "conflicts", "comments". */
   reasons?: string[];
   /**
+   * A re-review over your threads only: its head had a full review or
+   * re-review already, so the skill runs with `rereview: "threads-only"` —
+   * your open threads checked against the author's answers, none of its
+   * reviewers. The agent plans it itself; one you ask for is always full.
+   */
+  threadsOnly?: true;
+  /**
    * A drive: where its push goes and what git looked like before the session
    * — the remote URL then (not a remote name the session could repoint), and
    * a fingerprint of the repository's git config and hooks and your global
@@ -1255,8 +1299,13 @@ export interface AgentState {
   runsToday: number;
   perDay: number;
   parallel: number;
-  /** Set while Claude's usage limit holds new runs back. */
+  /** Set while Claude's usage — its limit, or the agent's cap on it — holds new runs back. */
   heldUntil: string | null;
+  /** Why, in words: "Claude's session limit reached", "Claude's weekly usage at 82% (agent cap 80%)". */
+  heldWhy?: string | null;
+  /** What the runs finished today cost at API prices, and the day's budget (0: none) — `limits.costPerDay`. */
+  costToday?: number;
+  costPerDay?: number;
   /** The companion settings, so the header shows the chip only when wanted. */
   headerChip: boolean;
   /** …and the tray its status line and Pause item. */
