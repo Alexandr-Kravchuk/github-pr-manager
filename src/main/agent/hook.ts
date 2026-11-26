@@ -9,7 +9,7 @@
 // Started by the app with ELECTRON_RUN_AS_NODE=1 (so the app's own binary runs
 // it as plain Node) and kept free of Electron imports for the same reason.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -19,6 +19,9 @@ import {
   guardPrFromUrl,
   isAgentRunKind,
   isWriteTool,
+  REPEAT_LIMIT,
+  repeatKey,
+  repeatRefusal,
   toolFilePath,
   type GuardDecision,
   type GuardRun,
@@ -196,6 +199,38 @@ export function checkRealWrite(kind: AgentRunKind, toolName: string, input: unkn
   return decision.allow ? decision : { allow: false, reason: `${file} really is ${real}: ${decision.reason}` };
 }
 
+/**
+ * How many times in a row `agent` has now made this call (`repeatKey`): one
+ * small file per agent in the run's `repeats` folder, next to its guard file,
+ * holding its last call's hash and how many times it came in a row — another
+ * call starts the count over, so a re-read after something else is never held
+ * against it. Written through a temporary file renamed over the old one; a
+ * file that is missing, half written or not ours counts as no call yet, and a
+ * folder that can't be written still answers. Best effort: the count only ever
+ * stops a loop, it never allows anything.
+ */
+export function countInARow(dir: string, agent: string, key: string): number {
+  const hash = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 32);
+  const file = path.join(dir, hash(agent));
+  const id = hash(key);
+  let n = 1;
+  try {
+    const last = JSON.parse(fs.readFileSync(file, "utf8")) as { id?: unknown; n?: unknown } | null;
+    if (last && last.id === id && typeof last.n === "number" && Number.isInteger(last.n) && last.n > 0) n = last.n + 1;
+  } catch {
+    // None yet, or unreadable: a first call.
+  }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ id, n }));
+    fs.renameSync(tmp, file);
+  } catch {
+    // Unwritable: the call still goes through the rest of the guard.
+  }
+  return n;
+}
+
 function main(): void {
   const kind = process.argv[2];
   // The PR the run works on: its gh reads are held to it.
@@ -211,7 +246,7 @@ function main(): void {
       process.stderr.write("PR agent guard: unknown run — refusing every tool call.\n");
       process.exit(2);
     }
-    let call: { tool_name?: unknown; tool_input?: unknown };
+    let call: { tool_name?: unknown; tool_input?: unknown; agent_id?: unknown };
     try {
       call = JSON.parse(input) as typeof call;
     } catch {
@@ -228,6 +263,13 @@ function main(): void {
       if (decision.allow) {
         const real = checkRealWrite(kind, tool, call.tool_input, run);
         decision = real.allow ? decision : real;
+      }
+      // The same read again and again — waiting for a background workflow by looking: stopped after a few in a row.
+      if (decision.allow && guardFile) {
+        const agent = typeof call.agent_id === "string" && call.agent_id ? call.agent_id : null;
+        const key = repeatKey(kind, tool, call.tool_input, agent);
+        const n = key ? countInARow(path.join(path.dirname(guardFile), "repeats"), agent ?? "main", key) : 0;
+        if (n > REPEAT_LIMIT) decision = { allow: false, reason: repeatRefusal(n - 1) };
       }
     } catch (e) {
       decision = { allow: false, reason: `the check failed (${(e as Error).message}) — refusing.` };

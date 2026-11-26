@@ -352,6 +352,19 @@ export interface AgentSettings {
    */
   sonnetReviewers: boolean;
   /**
+   * A review of a PR under the review limit (`isBigPr` false) runs its whole
+   * workflow on Sonnet — context, reviewers, synthesis and publish — passing
+   * it `model: "sonnet"`; a big PR keeps the reviewers-only rule above.
+   */
+  sonnetSmallPrs: boolean;
+  /**
+   * While a run works on AC power, the app asks the OS not to put the
+   * computer to sleep (`powerSaveBlocker`). A run's time limit counts awake
+   * time only either way (`awakeDeadline`), so a run the OS put to sleep goes
+   * on after the wake.
+   */
+  keepAwake: boolean;
+  /**
    * What the agent writes to you in: its task list, questions, briefs and
    * results. What it posts on GitHub, commits or writes to Jira is not affected.
    */
@@ -1229,6 +1242,14 @@ export interface AgentItem {
    * interrupted run, up to a cap; a run that ends any other way clears it.
    */
   cuts?: number;
+  /**
+   * Queued to go on after Claude's usage limit refused it (`usageRefused`,
+   * cleared at the requeue): its session is told to take its review workflow
+   * up from the workflow's own cache (`resumeFromRunId`) rather than run every
+   * agent again — starting over lost ~$87 of work on 2026-11-25. Cleared when
+   * the run starts.
+   */
+  afterLimit?: true;
   /** Diagrams of the change, drawn after the run (Settings › Agent › Diagrams). */
   diagrams?: AgentItemDiagrams;
   /**

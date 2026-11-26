@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { DEFAULT_AGENT_PROMPTS, languageRule, runModelFor, runsReviewWorkflow, SONNET_REVIEWERS_RULE } from "../../shared/agent-defaults";
+import { DEFAULT_AGENT_PROMPTS, languageRule, runModelFor, runsReviewWorkflow, SONNET_REVIEWERS_RULE, SONNET_WORKFLOW_RULE } from "../../shared/agent-defaults";
 import {
   askedDriveReasons,
   driveReasons,
@@ -288,8 +288,24 @@ export function ghTarget(prUrl: string, repo: string): Record<string, string> {
 
 /** The first message of a session Resume picks up again. */
 export const RESUME_PROMPT = "The app running you closed while you worked and has started you again. Continue where you stopped and finish the task.";
-/** …and of one with a publish wrapper, whose folder the app makes afresh. */
-export const RESUME_PROMPT_WRAPPER = `${RESUME_PROMPT} Whatever you recorded through the publish wrapper before is gone: if you had recorded your review, replies or resolves already, record them again — once.`;
+/** What a resumed session with a publish wrapper is told: the app makes its folder afresh. */
+const WRAPPER_AFRESH = " Whatever you recorded through the publish wrapper before is gone: if you had recorded your review, replies or resolves already, record them again — once.";
+/** …and of one with a publish wrapper. */
+export const RESUME_PROMPT_WRAPPER = `${RESUME_PROMPT}${WRAPPER_AFRESH}`;
+/**
+ * …and of one Claude's usage limit refused (`afterLimit`): its review workflow
+ * goes on from the workflow's own cache — same session, so `resumeFromRunId`
+ * finds the agents that finished — instead of all of them running again.
+ */
+export const LIMIT_RESUME_PROMPT =
+  "Claude's usage limit stopped you mid-task; it has reset, and the app has started you again. Continue where you stopped and finish the task. " +
+  'If your review workflow was running, start it again with the same scriptPath and args plus resumeFromRunId set to its run id — the wf_… at the end of the "Transcript dir" its launch printed — so the agents that had finished come back from its cache instead of running again.';
+
+/** The first message of a session the app picks up again: after a restart, or after Claude's usage limit stopped it. */
+function resumePrompt(afterLimit: boolean, wrapper: boolean): string {
+  if (afterLimit) return wrapper ? `${LIMIT_RESUME_PROMPT}${WRAPPER_AFRESH}` : LIMIT_RESUME_PROMPT;
+  return wrapper ? RESUME_PROMPT_WRAPPER : RESUME_PROMPT;
+}
 
 /**
  * The rules every agent session gets on top of its prompt — ending with how to
@@ -306,7 +322,9 @@ export function agentRules(
   language: AgentLanguage = "en",
   tools: Pick<ToolRulesRun, "allowedTools" | "workflows"> | null = null,
 ): string {
-  const sonnet = pr?.sonnetReviewers && runsReviewWorkflow(scenario, pr.reasons) ? ` ${SONNET_REVIEWERS_RULE}` : "";
+  // A small PR's whole workflow on Sonnet, else its reviewers when that is on.
+  const workflowRule = pr?.sonnetWorkflow ? SONNET_WORKFLOW_RULE : pr?.sonnetReviewers ? SONNET_REVIEWERS_RULE : null;
+  const sonnet = workflowRule && runsReviewWorkflow(scenario, pr?.reasons) ? ` ${workflowRule}` : "";
   const toolRules = tools
     ? ` ${sessionToolRules(runKindOf(scenario), { ...tools, pr: pr ? { repo: pr.repo, number: pr.number } : null, ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}) })}`
     : "";
@@ -326,6 +344,8 @@ interface RulesPr {
   threadsOnly?: boolean;
   /** Settings › Agent › "Reviewers on Sonnet": a run of the review workflow passes it `reviewerModel: "sonnet"`. */
   sonnetReviewers?: boolean;
+  /** Settings › Agent › "Small PRs: the whole review on Sonnet": the workflow gets `model: "sonnet"` too. */
+  sonnetWorkflow?: boolean;
   /** A `feedback` drive: the approvals the Board showed (`PullRequest.reviewFeedback`) — the only ones it may read. */
   feedback?: ReadonlyArray<Pick<ReviewFeedback, "login" | "reviewId">>;
 }
@@ -903,6 +923,8 @@ export function createAgent(deps: AgentDeps): Agent {
             ? "Queued: going on — its process was ended"
             : "Queued: going on — the app closed while it ran";
         logRun(item, "resumed", { detail: item.usageRefused ? "after Claude's usage limit refused it" : item.cuts ? `after it was cut short (${item.cuts} in a row)` : "after a restart" });
+        // Told as it starts to take its review workflow up from the workflow's own cache (`LIMIT_RESUME_PROMPT`).
+        if (item.usageRefused) item.afterLimit = true;
         item.usageRefused = undefined;
         continue;
       }
@@ -1864,7 +1886,9 @@ export function createAgent(deps: AgentDeps): Agent {
     item.headline = runningHeadline(item);
     item.resumeSession = undefined;
     // What an earlier run of this item showed (Resume, an answer) gives way to this run's.
-    for (const k of ["output", "result", "plan", "planHash", "planEdited", "drive", "error", "published", "pushed", "interrupted", "usageRefused", "follow"] as const) delete item[k];
+    // Read before it goes: a session going on after Claude's usage limit is told to take its workflow up from its cache.
+    const afterLimit = resume !== null && item.afterLimit === true;
+    for (const k of ["output", "result", "plan", "planHash", "planEdited", "drive", "error", "published", "pushed", "interrupted", "usageRefused", "afterLimit", "follow"] as const) delete item[k];
     const answer = item.answer;
     item.answer = undefined;
     if (!resume) item.checkout = checkout ?? undefined;
@@ -1975,11 +1999,15 @@ export function createAgent(deps: AgentDeps): Agent {
     // This kind's own model and effort, else the agent's (Settings › Agent).
     const used = runModelFor(s, kind);
     const sonnetReviewers = s.sonnetReviewers && runsReviewWorkflow(item.scenario, item.reasons);
+    // A PR under the review limit: the whole workflow on Sonnet (`sonnetSmallPrs`).
+    const sonnetWorkflow = s.sonnetSmallPrs && runsReviewWorkflow(item.scenario, item.reasons) && pr !== null && !isBigPr(pr, s);
     // Where Claude Code files what this session spills over (a long tool result, a Workflow's journal, a background task's output).
     const sessionRoots = claudeSessionRoots({ ...launcherEnv(process.env), ...tempEnv });
     // The wrapper's own rule, and Write — which the guard holds to the payload folder.
     // The preflight's node, which the guard holds to the helper's two calls.
     const allowedTools = [...new Set([...s.permissions.tools[kind], ...(folder ? [`Bash(${gitBashPath(folder.wrapperPath)} *)`, "Write"] : []), ...(preflight ? ["Bash(node *)"] : [])])];
+    // The guard's count of repeated reads (`countInARow`) starts over with each run of the item, a resumed one too.
+    fs.rmSync(path.join(runDir, "repeats"), { recursive: true, force: true });
     writeGuardFile(guardFile, full ? {
       mode: "full",
       ...(folder ? { wrapperPath: folder.wrapperPath, outDir: folder.outDir } : {}),
@@ -2015,7 +2043,8 @@ export function createAgent(deps: AgentDeps): Agent {
         // What this run was started with ("" = Claude Code's default), and the review workflow's reviewers when they were moved to Sonnet.
         model: used.model,
         effort: used.effort,
-        ...(sonnetReviewers ? { reviewerModel: "sonnet" } : {}),
+        ...(sonnetReviewers || sonnetWorkflow ? { reviewerModel: "sonnet" } : {}),
+        ...(sonnetWorkflow ? { workflowModel: "sonnet" } : {}),
         isolation: full ? "full" : "restricted",
         ...(item.reasons ? { reasons: item.reasons } : {}),
         ...(item.scenario === "rereview" ? { rereview: item.threadsOnly ? "threads" : "full" } : {}),
@@ -2049,9 +2078,7 @@ export function createAgent(deps: AgentDeps): Agent {
         prompt: resume
           ? answer
             ? answerMessage(answer, Boolean(folder))
-            : folder
-              ? RESUME_PROMPT_WRAPPER
-              : RESUME_PROMPT
+            : resumePrompt(afterLimit, Boolean(folder))
           : item.carry?.length
             ? `${mine.prompt}\n\nA brief of this PR raised these questions for its author — ask the ones that still hold in your review, as comments:\n${item.carry.map((q) => `- ${q}`).join("\n")}`
             : mine.prompt,
@@ -2066,6 +2093,7 @@ export function createAgent(deps: AgentDeps): Agent {
           stack: pr ? stackRules(pr, item.scenario) : null,
           ...(full ? { full: true } : {}),
           ...(sonnetReviewers ? { sonnetReviewers: true } : {}),
+          ...(sonnetWorkflow ? { sonnetWorkflow: true } : {}),
         }, s.language, full ? null : { allowedTools, workflows }),
         allowedTools,
         // Full context: your own plugins load as in your sessions; the skills this run mounted come on top.

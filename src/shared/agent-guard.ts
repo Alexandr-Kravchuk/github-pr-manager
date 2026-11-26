@@ -646,7 +646,7 @@ const INSTEAD: ReadonlyArray<[ReadonlySet<string>, string]> = [
   [new Set(["cat", "head", "tail", "less", "more", "type", "wc", "sed", "awk", "od", "xxd"]), "read a file with the Read tool (offset and limit for a part of it)"],
   [new Set(["grep", "egrep", "fgrep", "rg", "findstr", "ag", "ack"]), "search with the Grep tool"],
   [new Set(["jq"]), "shape gh's JSON with its own --jq"],
-  [new Set(["sleep", "timeout", "wait", "ping"]), "don't wait in the shell — a background workflow reports to you by itself when it ends"],
+  [new Set(["sleep", "timeout", "wait", "ping"]), "don't wait at all — end your turn: a background workflow's result comes back to you as a message"],
   [new Set(["echo", "printf", "true", "pwd", "whoami", "date"]), "say it in your reply instead"],
   [new Set(["cd", "pushd"]), "commands already run in the run's working folder, and gh already points at this PR"],
   [new Set(["sh", "bash", "zsh", "dash", "cmd", "pwsh", "powershell"]), "run the program itself, as one plain command"],
@@ -726,6 +726,72 @@ function refusedSyntax(kind: AgentRunKind, command: string, error: string, run: 
 }
 
 /**
+ * What a session does once its skill's workflow is running: nothing. The
+ * workflow runs in the background and its result comes back as a message of
+ * its own; a session that checked on it — the same `gh api` on the PR's
+ * timeline, a Glob of its payload folder, again and again — re-read its whole
+ * context on every look: on 2026-11-25 such waiting was 1,006 calls, about a
+ * quarter of what the reviews cost, and one review spent more on it than its
+ * workflow did. Nothing the wrapper records shows on GitHub before the session
+ * ends, so looking there finds nothing, ever.
+ */
+export const WORKFLOW_WAIT_RULE =
+  "It runs in the background and its result comes back to you as a message: once it is launched, end your turn at once — no more tool calls, no checking on it (not on GitHub, not in its files, not in the shell), and no review of your own beside it. Nothing you record through the publish wrapper shows on GitHub before this session ends.";
+
+/** How many times in a row one agent of a read-only run makes the very same read before the guard says stop. */
+export const REPEAT_LIMIT = 3;
+
+/** JSON with its keys sorted, so the same input is the same text. */
+function stableJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(",")}]`;
+  if (v && typeof v === "object") {
+    return `{${Object.keys(v as Record<string, unknown>)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableJson((v as Record<string, unknown>)[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(v) ?? "null";
+}
+
+/**
+ * What one agent of a read-only run asked for, as a key the hook counts in a
+ * row (`REPEAT_LIMIT`, `countInARow`), or null for a call that isn't counted.
+ * Waiting for a background workflow came out as the same look again and again
+ * — the PR's timeline, a Glob of the payload folder, up to 98 times in one run
+ * — each re-reading the whole context; an answer that doesn't change won't by
+ * asking again. Only in a row: any other call in between starts the count over,
+ * so a re-read after other work, or a retry or two after a failed `gh`, is
+ * never held against it (on that day's loops the in-a-row count still caught
+ * 104 of 118 and 78 of 94 repeated looks). Per agent (`agentId`, absent for
+ * the session itself): a workflow's reviewers each read the same diff once,
+ * and that is no repeat. Counted: the
+ * file tools and gh/twg reads. Not the publish wrapper or the preflight's node
+ * — those are steps, each recorded — nor anything in a run that changes code,
+ * where the same `git diff` rightly answers anew after each edit.
+ */
+export function repeatKey(kind: AgentRunKind, toolName: string, input: unknown, agentId: string | null): string | null {
+  if (!READ_ONLY.has(kind)) return null;
+  const i = (input ?? {}) as Record<string, unknown>;
+  let what: string;
+  if (toolName === "Bash") {
+    const command = typeof i.command === "string" ? i.command.trim().replace(/\s+/g, " ") : "";
+    if (!/^(gh|twg)\s/.test(command)) return null;
+    what = command;
+  } else if (READ_TOOLS.has(toolName)) {
+    const { description: _description, ...rest } = i;
+    what = stableJson(rest);
+  } else {
+    return null;
+  }
+  return `${agentId ?? "main"}\u0000${toolName}\u0000${what}`;
+}
+
+/** The refusal of a read made `REPEAT_LIMIT` times already, with what to do instead. */
+export function repeatRefusal(count: number): string {
+  return `You made this very call ${count} times in a row already, and its answer won't change by asking again. If you are waiting for the review workflow, end your turn now — its result comes back to you as a message. Otherwise go on with the answer you have.`;
+}
+
+/**
  * The rules a session gets up front about its tools (appended to its system
  * prompt by `agentRules`): what the guard refuses, and what works instead —
  * only commands both the guard and `allowedTools` let through, so following
@@ -762,7 +828,7 @@ export function sessionToolRules(kind: AgentRunKind, t: ToolRulesRun): string {
   out.push("A result too long to show is saved to a file you are told of: Read that file (offset/limit) rather than running the command again.");
   if (t.workflows?.length) {
     out.push(
-      `Named workflows don't exist here: start a skill's workflow by its script path, even where the skill says to use its name — ${t.workflows.map((w) => `Workflow({ scriptPath: "${w.replace(/\\/g, "/")}", args })`).join(" or ")}. It runs in the background and reports when it ends: don't wait or poll from the shell.`,
+      `Named workflows don't exist here: start a skill's workflow by its script path, even where the skill says to use its name — ${t.workflows.map((w) => `Workflow({ scriptPath: "${w.replace(/\\/g, "/")}", args })`).join(" or ")}. ${WORKFLOW_WAIT_RULE}`,
     );
   }
   // A drive's rules give its one wrapper call (reply) themselves.

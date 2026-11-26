@@ -392,6 +392,8 @@ export function validateAgent(raw: unknown): AgentSettings {
       }),
     ) as AgentSettings["runModels"],
     sonnetReviewers: bool(obj.sonnetReviewers, d.sonnetReviewers),
+    sonnetSmallPrs: bool(obj.sonnetSmallPrs, d.sonnetSmallPrs),
+    keepAwake: bool(obj.keepAwake, d.keepAwake),
     language: isAgentLanguage(obj.language) ? obj.language : d.language,
     worktreeDir: str(obj.worktreeDir),
     removeWorktree: bool(obj.removeWorktree, d.removeWorktree),

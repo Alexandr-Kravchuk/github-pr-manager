@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, session, shell } from "electron";
+import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, ipcMain, nativeTheme, Notification, powerMonitor, powerSaveBlocker, session, shell } from "electron";
 
 import { agentNoticeTitle, agentTakesToast, agentTrayLine } from "../shared/agent-view";
 import { ConfigError, defaultSettings, getGhStatus, pickAppId, resolveGhToken, toHostConfigs, toPublicConfig } from "../shared/config";
@@ -46,6 +46,7 @@ import { ensureCliPath } from "./cli-path";
 import { devUserDataDir, isInstalledBuild, seedDevUserData } from "./dev-user-data";
 import { findDataCopies } from "./data-copy";
 import { diag, initDiagLog } from "./diag-log";
+import { createKeepAwake } from "./keep-awake";
 import { clearJiraCaches, deleteTask, fetchTaskInfo, transitionTask } from "../shared/jira";
 import { shouldNotifyJiraAuth } from "../shared/jira-health";
 import type { CloseStaleResult, JiraTaskInfo } from "../shared/stale";
@@ -156,10 +157,27 @@ function scheduleAgentPush(): void {
     agentPushTimer = null;
     // The tray shows the agent hidden or not — a hidden window is when it matters.
     updateTrayAgent();
+    updateKeepAwake();
     if (agent && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
       sendToRenderer("agent-state", agent.getState());
     }
   }, 250);
+}
+/**
+ * Asks the OS not to sleep while an agent run works — on 2026-11-26 six runs
+ * started in a short wake from Modern Standby froze with the system and lost
+ * their reviews. The decision is `createKeepAwake` (keep-awake.ts): mains power
+ * and the setting on, released as soon as no run works.
+ */
+const keepAwake = createKeepAwake({
+  start: () => powerSaveBlocker.start("prevent-app-suspension"),
+  stop: (id) => powerSaveBlocker.stop(id),
+  onBattery: () => powerMonitor.isOnBatteryPower(),
+  setting: () => loadSettings().agent.keepAwake,
+  log: diag,
+});
+function updateKeepAwake(): void {
+  keepAwake.update(Boolean(agent && agent.getState().running.length > 0));
 }
 let systemSuspended = false;
 
@@ -1343,8 +1361,14 @@ function startApp(): void {
   // the user sees on return is current rather than stale.
   powerMonitor.on("suspend", () => {
     systemSuspended = true;
+    // A run's time limit skips the sleep (`awakeDeadline`); the line says when it happened.
+    diag(`system suspend (agent runs working: ${agent?.getState().running.length ?? 0})`);
   });
+  // Unplugged: the computer may sleep again; plugged in, a working run keeps it awake.
+  powerMonitor.on("on-battery", () => updateKeepAwake());
+  powerMonitor.on("on-ac", () => updateKeepAwake());
   powerMonitor.on("resume", () => {
+    diag("system resume");
     systemSuspended = false;
     void poller?.wake();
   });
