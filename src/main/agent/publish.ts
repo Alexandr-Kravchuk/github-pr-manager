@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { heldLabel, isUsableWrapperPath, planRequests,postedSteps, readPlanLines, type HeldWrite, type PublishContext, type PublishRequest, type PublishStep, type PublishSub } from "../../shared/agent-publish";
+import { heldLabel, isUsableWrapperPath, planRequests,postedSteps, readPlanLines, verdictConsented, type HeldWrite, type PublishContext, type PublishRequest, type PublishStep, type PublishSub } from "../../shared/agent-publish";
 import { launcherEnv } from "../../shared/claude-launch";
 import { PLAN_FILE, type CaptureRun } from "./capture";
 
@@ -182,7 +182,7 @@ function readDone(runDir: string): number {
 }
 
 /** `changed`: the plan is not the one you were shown (edited in the session since) — nothing was posted. */
-export type PublishOutcome = { ok: true; posted: number; total: number } | { ok: false; error: string; posted: number; total: number; changed?: boolean };
+export type PublishOutcome = { ok: true; posted: number; total: number; consentHeld?: "APPROVE" | "REQUEST_CHANGES" } |{ ok: false; error: string; posted: number; total: number; changed?: boolean };
 
 const THREAD_PR_QUERY =
   "query($id:ID!){ node(id:$id){ ... on PullRequestReviewThread { isResolved pullRequest { number repository { nameWithOwner } } comments(first:1){ nodes{ url author{ login } } } } } }";
@@ -514,6 +514,14 @@ export async function publishPlan(
     return { ok: false, error: "nothing is left to post — everything it wrote is held back (a colleague's thread, a thread handed back to you, or a comment whose thread GitHub didn't name). Answer there yourself, or Discard it", posted: 0, total: 0 };
   }
   let done = Math.min(readDone(runDir), requests.length);
+  // A verdict whose opt-in was switched off after the plan was built: the
+  // build turned the off ones into comments, so this is a change mid-publish.
+  function revokedVerdict(req: PublishRequest): string | undefined {
+    const event = req.body.event;
+    if (!ctx.currentReviewConsent || (event !== "APPROVE" && event !== "REQUEST_CHANGES")) return;
+    if (verdictConsented(event, ctx.currentReviewConsent())) return;
+    return event === "APPROVE" ? "Approve" : "Request changes";
+  }
   // Nothing goes out unless every thread and comment the rest of the plan
   // touches is this PR's — and, for a review, yours.
   const { error: stray, replyRoots } = await checkPlan(
@@ -534,10 +542,13 @@ export async function publishPlan(
   }
   for (let i = done; i < requests.length; i++) {
     const req = requests[i];
+    const revoked = revokedVerdict(req);
+    if (revoked) return { ok: false, error: "Automatic " + revoked + " was turned off in Settings while publishing. Publish the rest yourself.", posted: done, total: requests.length };
     const r = await gh(ghApiArgs(req, prUrl), { input: JSON.stringify(req.body) });
     if (r.code !== 0) return { ok: false, error: `${req.label}: ${ghError(r)}`, posted: done, total: requests.length };
     done = i + 1;
     fs.writeFileSync(path.join(runDir, PROGRESS_FILE), JSON.stringify({ done }));
   }
-  return { ok: true, posted: done, total: requests.length };
+  const consentHeld = requests.find((r) => r.consentHeld)?.consentHeld;
+  return { ok: true, posted: done, total: requests.length, ...(consentHeld ? { consentHeld } : {}) };
 }

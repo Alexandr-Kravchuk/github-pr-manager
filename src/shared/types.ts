@@ -185,7 +185,12 @@ export interface NotificationSettings {
  */
 export type ClaudeTerminal = "auto" | "iterm" | "terminal" | "desktop";
 
-export interface ClaudeSettings {
+export interface ReviewPublicationConsent {
+  autoApproveReviews: boolean;
+  autoRequestChangesReviews: boolean;
+}
+
+export interface ClaudeSettings extends ReviewPublicationConsent {
   enabled: boolean;
   /** Folder whose subfolders are searched for a checkout by git remote; "" = ~/Projects. */
   projectsRoot: string;
@@ -213,12 +218,6 @@ export interface ClaudeSettings {
    * every launch. `iterm` / `terminal` fall back to `auto` off macOS.
    */
   terminal: ClaudeTerminal;
-  /**
-   * "Review all" lets a nested review with no Blocker and no Major APPROVE the
-   * head commit it read (`REVIEW_GROUP_PERMISSIONS.approve`). Off by default:
-   * the approval is posted under the user's own GitHub account.
-   */
-  reviewGroupApprove: boolean;
 }
 
 /** Persisted application settings (userData/settings.json) — no tokens. */

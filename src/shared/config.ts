@@ -310,8 +310,9 @@ export function validateClaude(raw: unknown): ClaudeSettings {
       obj.terminal === "iterm" || obj.terminal === "terminal" || obj.terminal === "desktop"
         ? obj.terminal
         : d.terminal,
-    // Only an explicit true opts in: the approval goes out under the user's account.
-    reviewGroupApprove: obj.reviewGroupApprove === true,
+    // The old Review all flag covered group reviews only.
+    autoApproveReviews: obj.autoApproveReviews === true,
+    autoRequestChangesReviews: obj.autoRequestChangesReviews === true,
   };
 }
 
@@ -531,7 +532,7 @@ export function toStoredSettings(settings: Settings): Settings {
  * whose meaning changed. `keepUnknownSettings` drops these instead of carrying
  * them, since this build no longer lists them and would otherwise keep them.
  */
-export const RETIRED_SETTINGS_FIELDS: readonly string[] = [];
+export const RETIRED_SETTINGS_FIELDS: readonly string[] = ["claude.reviewGroupApprove"];
 
 /** The keys of `Settings` that may be left out. */
 type OptionalSettingsKey = { [K in keyof Settings]-?: undefined extends Settings[K] ? K : never }[keyof Settings];

@@ -138,14 +138,28 @@ Three layers:
   all also names, for each PR from another repository, that PR's own
   checkout (`in <folder>:`, started through `start_session`'s `cwd`), since a
   review in a foreign folder loads that folder's CLAUDE.md as its rules and
-  searches the wrong code. The parent also adds to every nested prompt, word
-  for word, the user's permission to publish the review on the PR, since a
-  request from another session is not the user's consent. The template's
-  `{permission}` takes one of `REVIEW_GROUP_PERMISSIONS`: never `APPROVE` by
-  default, or — only with Settings → Claude → "Review all may approve"
-  (`reviewGroupApprove`, an explicit opt-in, because the approval goes out
-  under the user's own account) — an `APPROVE` of a review with no Blocker
-  and no Major, posted with `commit_id` of the head it read; a default prompt is stored empty and an old default saved
+  searches the wrong code. The parent passes the saved publication permission
+  verbatim to each review session via `{permission}`. Single Claude and Codex
+  review launches use the same two explicit opt-ins under Settings →
+  Integrations → Claude. Both default to chat and each applies to its own
+  formal verdict on the reviewed head; a grant also carries what makes a
+  verdict eligible (an APPROVE only with no Blocker and no Major of any
+  confidence and only while the reviewed commit is the head; a low-confidence
+  Major backs REQUEST_CHANGES only once checked), and your own PR or a draft
+  never carries one (`reviewConsentFor`, the one rule for a single launch and
+  for Review all, where a draft or your PR among the group takes it away). The
+  switches show in Settings with Claude sessions off too, since the PR agent
+  reads them. Every such launch, granted or not, tells the session to
+  run the review workflow with `dryRun: true` (`REVIEW_DRY_RUN`) and post the
+  verdict itself: the workflow's own publish APPROVEs an "approve (minor
+  issues)" over a low-confidence Major, which the rule above forbids. The PR agent reads the same two opt-ins: in On, a
+  review's APPROVE or REQUEST_CHANGES without its opt-in goes out as a COMMENT
+  with a note (`consentHeld`, like a held approve — not a failure), and an
+  On re-approval without the Approve opt-in waits as an offer; a Publish or
+  a re-approval you click is its own authorization (`currentReviewConsent` is
+  passed only when `!byYou`). The scenario mode decides whether the agent
+  posts at all, these opt-ins which verdict it may post. A default prompt is stored
+  empty and an old default saved
   verbatim is read through `PREVIOUS_DEFAULT_PROMPTS`, so a changed default
   reaches every user who never edited it — the agent's prompts too
   (`toStoredSettings`, `PREVIOUS_DEFAULT_AGENT_PROMPTS`). Each
