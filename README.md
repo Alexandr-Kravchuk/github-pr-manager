@@ -183,8 +183,10 @@ host, with the exact `gh auth login` command if not.
 changes** under your GitHub account for reviews launched by PR Dashboard with
 Claude or Codex. Both start off. Enable an event once and it applies to future
 launches. Turn it off again to revoke it for new launches. The built-in Agent
-checks the same switches before it publishes a formal verdict automatically.
-An explicit manual Publish still works. The old group-only approval preference
+checks the same switches before it publishes a formal verdict automatically:
+without its switch, a verdict goes out as a comment with a note, and an
+automatic re-approval waits for your click. An explicit manual Publish still
+works. Reviews of your own PRs and drafts never get the permission. The old group-only approval preference
 does not carry over to these switches.
 
 **Close to tray** (on by default, under Settings) turns the window's close

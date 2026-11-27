@@ -120,8 +120,13 @@ function reviewPublicationInstruction(consent: ReviewPublicationConsent): string
   return "The user authorized automatic publication in PR Dashboard Settings: " + allowed.join("; ") +
     ". Run the review in chat mode first. Submit one formal review with the findings only if its verdict is authorized for this PR. " +
     "Keep other verdicts in chat. Follow any explicit chat-only instruction, review policy and tool permissions. " +
+    "An approve verdict is eligible only with no Blocker and no Major of any confidence: a low-confidence Major you did not check " +
+    "still blocks the APPROVE. " +
+    "A request-changes verdict needs a Blocker or a high-confidence Major; a low-confidence Major counts only once it is checked " +
+    "against the code, on a stand or by a test — unchecked, ask it as a question in chat. " +
     "Skip your own PRs, drafts and duplicate reviews on the same head. Verify the current head is the commit you reviewed, " +
-    "bind the GitHub review to that SHA with commit_id, and link the submitted review in chat.";
+    "bind the GitHub review to that SHA with commit_id, and never APPROVE once the PR has a newer commit than the one you " +
+    "reviewed: report that in chat instead. Link the submitted review in chat.";
 }
 
 /**
@@ -220,6 +225,24 @@ export const PREVIOUS_DEFAULT_PROMPTS: Partial<Record<ClaudePromptKey, readonly 
     "b) A Major with low confidence is a ground for REQUEST_CHANGES only once it is checked against the platform code, on a stand " +
     "or by a test; without that check, ask it as a question in the summary. " +
     "c) APPROVE only on my separate word for that PR: this permission does not cover it. " +
+    "d) Skip the PR when I already reviewed it after its last commit. " +
+    "e) Start your report with the link to the review you published on the PR (#pullrequestreview-…) and your decision, " +
+    "or with why you published none. " +
+    "The prompts: {prompts}. " +
+    "When every session has reported, give me one summary: for each PR the link to its review, its decision and its Blocker and Major findings, " +
+    "then anything that spans several PRs — a change asked for in one PR that another already makes, a contract two PRs change differently. " +
+    "Read each report whole with list_events, paging back to the session's last message, since the note on a session's turn " +
+    "keeps only its first 400 characters. " +
+    "A later decision on one PR — a review its session could not publish, an APPROVE — is mine to give in that PR's session: " +
+    "link me to the session and leave my answer for me to type there, so each session hears it once and from me.",
+    // v3.9.1: the five lettered lines, the first three filled by `{permission}`.
+    "Review the {count} pull requests of {key} that wait for my review. Do not review them here: start one session per PR " +
+    "with the start_session tool (initiation user_asked, context fresh, use_worktree false), so each review runs in its own " +
+    "session nested under this one. A prompt that starts with a folder (in, the folder, a colon) is that PR's own repository: start its " +
+    "session there through start_session's cwd, so it reads that repository's rules and code; the others run in this folder. " +
+    "Give each session its prompt word for word, and add to it these five lines, each word for word as a line of its own " +
+    "and without its letter: " +
+    "{permission} " +
     "d) Skip the PR when I already reviewed it after its last commit. " +
     "e) Start your report with the link to the review you published on the PR (#pullrequestreview-…) and your decision, " +
     "or with why you published none. " +

@@ -223,7 +223,21 @@ export interface PublishRequest {
   endpoint: string;
   /** The JSON sent with `--input`. A GraphQL call carries `{query, variables}`. */
   body: Record<string, unknown>;
+  /** A review whose verdict went out as a comment because its automatic opt-in is off. */
+  consentHeld?: "APPROVE" | "REQUEST_CHANGES";
 }
+
+/** Whether the saved opt-in (Settings › Integrations › Claude) lets an automatic review post this verdict. */
+export function verdictConsented(event: ReviewEvent, consent: ReviewPublicationConsent | null | undefined): boolean {
+  if (event === "APPROVE") return consent?.autoApproveReviews === true;
+  if (event === "REQUEST_CHANGES") return consent?.autoRequestChangesReviews === true;
+  return true;
+}
+
+export const CONSENT_HELD_NOTE: Record<"APPROVE" | "REQUEST_CHANGES", string> = {
+  APPROVE: "_The agent would approve, but automatic Approve is off in PR Dashboard Settings — posted as a comment._",
+  REQUEST_CHANGES: "_The agent would request changes, but automatic Request changes is off in PR Dashboard Settings — posted as a comment._",
+};
 
 export interface PublishContext {
   repo: string;
@@ -231,7 +245,11 @@ export interface PublishContext {
   signature: string;
   /** An approve becomes a plain comment (Settings › Agent › hold approve while another reviewer's change request is open). */
   holdApprove: boolean;
-  /** Read the current opt-ins before automatic GitHub writes. Manual Publish has its own authorization. */
+  /**
+   * Read the current opt-ins before automatic GitHub writes: a verdict without
+   * its opt-in goes out as a comment. Absent for a Publish you clicked, which
+   * is its own authorization.
+   */
   currentReviewConsent?: () => ReviewPublicationConsent | null;
   /** Re-review: resolve threads (Settings › Agent › re-review: resolve). Absent = yes. */
   allowResolve?: boolean;
@@ -354,18 +372,29 @@ const RESOLVE_MUTATION = "mutation($id:ID!){ resolveReviewThread(input:{threadId
  */
 export function planRequests(steps: readonly PublishStep[], ctx: PublishContext): PublishRequest[] {
   const base = `repos/${ctx.repo}/pulls/${ctx.number}`;
+  // Read once per build: every review of the plan answers to the same opt-ins.
+  const consent = ctx.currentReviewConsent?.();
   return postedSteps(steps, ctx).map((s): PublishRequest => {
     switch (s.kind) {
       case "review": {
         const held = ctx.holdApprove && s.event === "APPROVE";
         const noApprove = ctx.allowApprove === false && s.event === "APPROVE";
+        // An automatic verdict without its opt-in goes out as a comment, like a held approve.
+        const consentHeld =
+          !held && !noApprove && s.event !== "COMMENT" && ctx.currentReviewConsent && !verdictConsented(s.event, consent) ? s.event : undefined;
+        const note = held ? HELD_APPROVE_NOTE : consentHeld ? CONSENT_HELD_NOTE[consentHeld] : null;
         const body: Record<string, unknown> = {
-          event: held || noApprove ? "COMMENT" : s.event,
-          body: signedBody(held ? `${s.body.trimEnd()}\n\n${HELD_APPROVE_NOTE}` : s.body, ctx.signature),
+          event: held || noApprove || consentHeld ? "COMMENT" : s.event,
+          body: signedBody(note ? `${s.body.trimEnd()}\n\n${note}` : s.body, ctx.signature),
         };
         if (s.commitId) body.commit_id = s.commitId;
         if (s.comments.length) body.comments = s.comments.map((c) => commentBody(c, null));
-        return { label: held ? "review (approve held)" : `review (${s.event.toLowerCase().replace("_", " ")})`, endpoint: `${base}/reviews`, body };
+        const label = held
+          ? "review (approve held)"
+          : consentHeld
+            ? `review (${consentHeld.toLowerCase().replace("_", " ")} held: automatic publication off)`
+            : `review (${s.event.toLowerCase().replace("_", " ")})`;
+        return { label, endpoint: `${base}/reviews`, body, ...(consentHeld ? { consentHeld } : {}) };
       }
       case "comment":
         return { label: `comment on ${s.comment.path}`, endpoint: `${base}/comments`, body: { ...commentBody(s.comment, ctx.signature), commit_id: s.commitId } };

@@ -142,8 +142,17 @@ Three layers:
   verbatim to each review session via `{permission}`. Single Claude and Codex
   review launches use the same two explicit opt-ins under Settings →
   Integrations → Claude. Both default to chat and each applies to its own
-  formal verdict on the reviewed head. The built-in Agent checks the live
-  setting before an automatic formal review write. A default prompt is stored
+  formal verdict on the reviewed head; a grant also carries what makes a
+  verdict eligible (an APPROVE only with no Blocker and no Major of any
+  confidence and only while the reviewed commit is the head; a low-confidence
+  Major backs REQUEST_CHANGES only once checked), and your own PR or a draft
+  never carries one. The PR agent reads the same two opt-ins: in On, a
+  review's APPROVE or REQUEST_CHANGES without its opt-in goes out as a COMMENT
+  with a note (`consentHeld`, like a held approve — not a failure), and an
+  On re-approval without the Approve opt-in waits as an offer; a Publish or
+  a re-approval you click is its own authorization (`currentReviewConsent` is
+  passed only when `!byYou`). The scenario mode decides whether the agent
+  posts at all, these opt-ins which verdict it may post. A default prompt is stored
   empty and an old default saved
   verbatim is read through `PREVIOUS_DEFAULT_PROMPTS`, so a changed default
   reaches every user who never edited it — the agent's prompts too

@@ -2060,6 +2060,16 @@ test("validateSettings: jira with invalid baseUrl throws", () =>
     assert.ok(!("oldSecret" in out) && !("gone" in out.agent), "a retired path is not carried");
   });
 
+  test("keepUnknownSettings: the retired Review all approve flag is not carried into a save, nor read as the new consent", () => {
+    const previous = { hosts: [], claude: { reviewGroupApprove: true, laterField: 1 } };
+    const stored = cfg.toStoredSettings(cfg.validateSettings(previous));
+    assert.strictEqual(stored.claude.autoApproveReviews, false, "the group-only flag does not become the wider opt-in");
+    const out = cfg.keepUnknownSettings(previous, stored);
+    assert.ok(!("reviewGroupApprove" in out.claude), "dropped through the default retired list");
+    assert.strictEqual(out.claude.laterField, 1, "an unknown field is still kept");
+    assert.deepStrictEqual([out.claude.autoApproveReviews, out.claude.autoRequestChangesReviews], [false, false]);
+  });
+
   test("keepUnknownSettings: nothing usable on disk leaves the save as it is", () => {
     const stored = cfg.toStoredSettings(cfg.validateSettings({ hosts: [] }));
     for (const previous of [undefined, null, "text", [1, 2], 42]) {
@@ -9420,6 +9430,20 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(viaSetting.ok, true);
         assert.strictEqual(opened.length, 1);
         assert.strictEqual(terminals.length, 2);
+        // Your own PR and a draft never carry a publication permission, both switches on or not.
+        const granted = { ...desktop, autoApproveReviews: true, autoRequestChangesReviews: true };
+        for (const [what, other] of [["your own PR", { ...quiet, roles: ["author"] }], ["a draft", { ...quiet, roles: ["reviewer"], isDraft: true }]]) {
+          for (const kind of ["review", "codexReview"]) {
+            const before = opened.length;
+            const out = await launcher.launchClaude(other, granted, { trackComments: true, openUrl, kind });
+            assert.strictEqual(out.ok, true, what);
+            assert.strictEqual(opened.length, before + 1, what);
+            const sent = opened[opened.length - 1];
+            const text = new URL(sent).searchParams.get(sent.startsWith("codex://") ? "prompt" : "q");
+            assert.match(text, /disabled automatic GitHub review publication/, `${what}, ${kind}`);
+            assert.doesNotMatch(text, /APPROVE for an eligible approve verdict|REQUEST_CHANGES for a request-changes verdict/, `${what}, ${kind}`);
+          }
+        }
       } finally {
         terminal.openTerminalWith = realOpen;
         fs.rmSync(dir, { recursive: true, force: true });
@@ -9469,11 +9493,24 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
             assert.strictEqual(prompt.includes("APPROVE for an eligible approve verdict"), approve);
             assert.strictEqual(prompt.includes("REQUEST_CHANGES for a request-changes verdict"), changes);
             assert.strictEqual(prompt.includes("with commit_id"), approve || changes);
+            // What makes a verdict eligible goes with any grant: no Major of any confidence for an
+            // APPROVE, a checked low-confidence Major for REQUEST_CHANGES, and no APPROVE past the reviewed head.
+            const rules = approve || changes;
+            assert.strictEqual(prompt.includes("no Blocker and no Major of any confidence"), rules);
+            assert.strictEqual(prompt.includes("a low-confidence Major you did not check still blocks the APPROVE"), rules);
+            assert.strictEqual(prompt.includes("a low-confidence Major counts only once it is checked"), rules);
+            assert.strictEqual(prompt.includes("never APPROVE once the PR has a newer commit than the one you reviewed"), rules);
           }
         }
       }
       const oldCodexDefault = "Use the creatio-code-review skill to review the pull request {url}. Report the findings here; do not post anything to the PR.";
       assert.strictEqual(cfg.validateClaude({ prompts: { codexReview: oldCodexDefault } }).prompts.codexReview, cl.DEFAULT_CLAUDE_PROMPTS.codexReview);
+      // v3.9.1's Review all default (five lettered lines around {permission}) reads as the new default:
+      // kept, it would ask for a), b), c) the new {permission} no longer gives.
+      const v391 = cl.PREVIOUS_DEFAULT_PROMPTS.reviewGroup.find((p) => p.includes("these five lines") && p.includes("{permission}"));
+      assert.ok(v391, "the v3.9.1 Review all default is listed");
+      assert.match(v391, /d\) Skip the PR when I already reviewed it after its last commit\. e\) Start your report/);
+      assert.strictEqual(cfg.validateClaude({ prompts: { reviewGroup: v391 } }).prompts.reviewGroup, cl.DEFAULT_CLAUDE_PROMPTS.reviewGroup);
     });
 
     test("group launches: each prompt fills its template behind its marker", () => {
@@ -14720,12 +14757,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
             return { code: 0, stdout: "{}", stderr: "" };
           };
           const wrongGrant = { autoApproveReviews: event !== "APPROVE", autoRequestChangesReviews: event !== "REQUEST_CHANGES" };
-          const blocked = await publishMod.publishPlan(runDir, url, { ...ctx, currentReviewConsent: () => wrongGrant }, targets, gh);
-          assert.strictEqual(blocked.ok, false);
-          assert.deepStrictEqual(writes, []);
+          const held = await publishMod.publishPlan(runDir, url, { ...ctx, currentReviewConsent: () => wrongGrant }, targets, gh);
+          assert.deepStrictEqual(held, { ok: true, posted: 1, total: 1, consentHeld: event }, "the verdict goes out as a comment, not as a failure");
+          assert.deepStrictEqual(writes, ["COMMENT"]);
+          nfsA.rmSync(path.join(runDir, "published.json"), { force: true });
           const manual = await publishMod.publishPlan(runDir, url, ctx, targets, gh);
           assert.strictEqual(manual.ok, true);
-          assert.deepStrictEqual(writes, [event]);
+          assert.deepStrictEqual(writes, ["COMMENT", event]);
         } finally {
           nfsA.rmSync(runDir, { recursive: true, force: true });
         }
@@ -14741,10 +14779,19 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           ...ctx, currentReviewConsent: () => ++checks === 1 ? granted : revoked,
         }, targets, gh);
         assert.strictEqual(result.ok, false);
-        assert.match(result.error, /Automatic Approve is off/);
+        assert.match(result.error, /Automatic Approve was turned off in Settings while publishing/);
       } finally {
         nfsA.rmSync(runDir, { recursive: true, force: true });
       }
+      // An approve already turned into a comment (held, or re-review approve off) needs no opt-in and keeps its own note.
+      const none = () => ({ autoApproveReviews: false, autoRequestChangesReviews: false });
+      const step = [{ kind: "review", event: "APPROVE", body: "b", commitId: SHA, comments: [] }];
+      const heldReq = pub.planRequests(step, { ...ctx, holdApprove: true, currentReviewConsent: none })[0];
+      assert.deepStrictEqual([heldReq.body.event, heldReq.consentHeld, heldReq.body.body.includes(pub.HELD_APPROVE_NOTE)], ["COMMENT", undefined, true]);
+      const noApproveReq = pub.planRequests(step, { ...ctx, allowApprove: false, currentReviewConsent: none })[0];
+      assert.deepStrictEqual([noApproveReq.body.event, noApproveReq.consentHeld], ["COMMENT", undefined]);
+      const commentReq = pub.planRequests([{ ...step[0], event: "COMMENT" }], { ...ctx, currentReviewConsent: none })[0];
+      assert.deepStrictEqual([commentReq.body.event, commentReq.consentHeld], ["COMMENT", undefined], "a plain comment needs no opt-in");
     });
 
     await atest("publish: a thread or comment of another PR stops the whole plan before anything is posted", async () => {
@@ -15664,6 +15711,49 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       } finally {
         f.agent.stop();
       }
+    });
+
+    await atest("agent publish: an automatic verdict without its opt-in goes out as a comment; the two opt-ins are independent; your own Publish posts the verdict", async () => {
+      const run = async ({ event, claude, mode = "on" }) => {
+        const posted = [];
+        const f = agentFixture({
+          claude,
+          agent: { scenarios: { review: { mode } } },
+          script: reviewWithPlan(event),
+          captureScript: captureJs,
+          fetchPr: async () => ({ pr: reviewPr(), state: "OPEN", viewer: "me" }),
+          gh: async (_args, opts) => (posted.push(JSON.parse(opts.input)), { code: 0, stdout: "", stderr: "" }),
+        });
+        try {
+          f.agent.onSnapshot(f.snapshot);
+          if (mode === "on") {
+            await until(() => only(f).some((i) => i.state === "done"));
+          } else {
+            await until(() => only(f).some((i) => i.state === "needsYou"));
+            assert.deepStrictEqual(await f.agent.act({ type: "publish", runId: only(f)[0].runId }), { ok: true });
+          }
+          return { posted, item: only(f)[0], log: readLog(f) };
+        } finally {
+          f.agent.stop();
+        }
+      };
+      // Both off: the approve is a comment with a note, published, not a failure.
+      const approveOff = await run({ event: "APPROVE", claude: {} });
+      assert.deepStrictEqual(approveOff.posted.map((p) => p.event), ["COMMENT"]);
+      assert.ok(approveOff.posted[0].body.includes(pub.CONSENT_HELD_NOTE.APPROVE));
+      assert.match(approveOff.item.headline, /^Published: comment, .*\(approve held: automatic publication is off in Settings\)$/);
+      assert.strictEqual(approveOff.log.find((l) => l.event === "published").data.consentHeld, "APPROVE");
+      // Approve on, request changes off: only the approve keeps its verdict.
+      const changesOff = await run({ event: "REQUEST_CHANGES", claude: { autoApproveReviews: true } });
+      assert.deepStrictEqual(changesOff.posted.map((p) => p.event), ["COMMENT"]);
+      assert.ok(changesOff.posted[0].body.includes(pub.CONSENT_HELD_NOTE.REQUEST_CHANGES));
+      const changesOn = await run({ event: "REQUEST_CHANGES", claude: { autoRequestChangesReviews: true } });
+      assert.deepStrictEqual(changesOn.posted.map((p) => p.event), ["REQUEST_CHANGES"]);
+      assert.match(changesOn.item.headline, /^Published: request changes/);
+      // Shadow, both off: your click posts the APPROVE as prepared.
+      const manual = await run({ event: "APPROVE", claude: {}, mode: "shadow" });
+      assert.deepStrictEqual(manual.posted.map((p) => p.event), ["APPROVE"]);
+      assert.ok(!manual.posted[0].body.includes(pub.CONSENT_HELD_NOTE.APPROVE));
     });
 
     await atest("agent merge: your ready PR gets an offer; the click merges that head only, then the Jira dry run runs", async () => {
@@ -18010,6 +18100,28 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(view.agentNoticeTitle("needsYou", { ...only(f)[0], state: "needsYou", published: undefined }), "Only the base changed — approve again: #7");
       } finally {
         f.agent.stop();
+      }
+
+      // On with automatic Approve off: no APPROVE goes out; the offer waits for your click, which gives it.
+      const consentOff = { timeline: myDismissal, posted: [] };
+      const k = agentFixture({
+        pr: reviewPr({ role: "reviewed" }),
+        claude: {},
+        agent: { scenarios: { reapprove: { mode: "on", askReviewers: true } } },
+        script: keepWorking,
+        gh: reapproveGh(consentOff), git: cleanMergeGit(consentOff.git),
+        fetchPr: async () => ({ pr: reviewPr({ role: "reviewed" }), state: "OPEN", viewer: "me" }),
+      });
+      try {
+        k.agent.onSnapshot(k.snapshot);
+        await until(() => only(k)[0]?.state === "needsYou");
+        await tickOnce();
+        assert.deepStrictEqual(consentOff.posted, [], "automatic Approve is off: nothing goes out by itself");
+        assert.ok(!readLog(k).some((l) => l.event === "not-reapproved"), "an offer, not a failure");
+        assert.deepStrictEqual(await k.agent.act({ type: "reapprove", runId: only(k)[0].runId }), { ok: true });
+        assert.strictEqual(consentOff.posted[0].body.event, "APPROVE", "your own click is its own authorization");
+      } finally {
+        k.agent.stop();
       }
 
       // The author pushed a commit of their own: nothing is offered.

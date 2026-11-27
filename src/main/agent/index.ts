@@ -1370,7 +1370,10 @@ export function createAgent(deps: AgentDeps): Agent {
     item.reapproval = { logins, oldHead: mark.oldHead ?? "" };
     item.state = "needsYou";
     item.finishedAt = stamp();
-    if (job.mode === "on") void giveAgain(item, false);
+    // An approval in On also needs its opt-in (Settings › Integrations › Claude);
+    // without it the approval waits as an offer, as in Shadow. Asking again posts no verdict.
+    const automatic = job.mode === "on" && (job.scenario === "reask" || loadAll()?.claude.autoApproveReviews === true);
+    if (automatic) void giveAgain(item, false);
     else announce(item, "needsYou");
     return true;
   }
@@ -3133,7 +3136,12 @@ export function createAgent(deps: AgentDeps): Agent {
     item.published = true;
     item.state = "done";
     const held = holdApprove && item.plan.event === "APPROVE";
-    item.headline = held ? `Published: ${describePlan({ ...item.plan, event: "COMMENT" })} (approve held)` : `Published: ${describePlan(item.plan)}`;
+    const consentHeld = out.consentHeld;
+    item.headline = held
+      ? `Published: ${describePlan({ ...item.plan, event: "COMMENT" })} (approve held)`
+      : consentHeld
+        ? `Published: ${describePlan({ ...item.plan, event: "COMMENT" })} (${consentHeld === "APPROVE" ? "approve" : "request changes"} held: automatic publication is off in Settings)`
+        : `Published: ${describePlan(item.plan)}`;
     item.finishedAt = stamp();
     store.data.ledger[item.key] = { state: "published", at: item.finishedAt, runId: item.runId };
     // Published as the run prepared it — not after an edit in the session.
@@ -3143,7 +3151,7 @@ export function createAgent(deps: AgentDeps): Agent {
       sessionId: item.sessionId,
       detail: describePlan(item.plan),
       // Who sent it, and whether it went out as prepared: what the Shadow → On hint counts.
-      data: { byYou, mode: item.mode, edited: item.planEdited === true, ...(held ? { approveHeld: true } : {}), ...(item.disputes ? { disputes: item.disputes } : {}) },
+      data: { byYou, mode: item.mode, edited: item.planEdited === true, ...(held ? { approveHeld: true } : {}), ...(consentHeld ? { consentHeld } : {}), ...(item.disputes ? { disputes: item.disputes } : {}) },
     });
     await dropWorktree(item);
     void store.save();
