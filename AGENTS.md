@@ -146,7 +146,10 @@ Three layers:
   verdict eligible (an APPROVE only with no Blocker and no Major of any
   confidence and only while the reviewed commit is the head; a low-confidence
   Major backs REQUEST_CHANGES only once checked), and your own PR or a draft
-  never carries one. The PR agent reads the same two opt-ins: in On, a
+  never carries one. Every such launch, granted or not, tells the session to
+  run the review workflow with `dryRun: true` (`REVIEW_DRY_RUN`) and post the
+  verdict itself: the workflow's own publish APPROVEs an "approve (minor
+  issues)" over a low-confidence Major, which the rule above forbids. The PR agent reads the same two opt-ins: in On, a
   review's APPROVE or REQUEST_CHANGES without its opt-in goes out as a COMMENT
   with a note (`consentHeld`, like a held approve — not a failure), and an
   On re-approval without the Approve opt-in waits as an offer; a Publish or

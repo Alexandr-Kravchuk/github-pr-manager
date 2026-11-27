@@ -109,16 +109,26 @@ const NO_REVIEW_PUBLICATION: ReviewPublicationConsent = {
   autoRequestChangesReviews: false,
 };
 
+/**
+ * The review workflow posts its own verdict — an APPROVE even over a
+ * low-confidence Major ("approve (minor issues)") — unless it runs dry, so the
+ * session reviews dry and posts the verdict itself, by the rules that follow.
+ */
+const REVIEW_DRY_RUN =
+  "Run the review workflow with dryRun: true, so it posts nothing to the PR itself — no review, no comment, no status comment.";
+
 /** Explicit publication permission from a saved user setting, shared by both launchers. */
 function reviewPublicationInstruction(consent: ReviewPublicationConsent): string {
   const allowed: string[] = [];
   if (consent.autoApproveReviews) allowed.push("APPROVE for an eligible approve verdict");
   if (consent.autoRequestChangesReviews) allowed.push("REQUEST_CHANGES for a request-changes verdict");
   if (allowed.length === 0) {
-    return "Report in chat. The user has disabled automatic GitHub review publication. Wait for explicit permission in this session before posting.";
+    return REVIEW_DRY_RUN + " Report in chat. The user has disabled automatic GitHub review publication. " +
+      "Wait for explicit permission in this session before posting.";
   }
-  return "The user authorized automatic publication in PR Dashboard Settings: " + allowed.join("; ") +
-    ". Run the review in chat mode first. Submit one formal review with the findings only if its verdict is authorized for this PR. " +
+  return "The user authorized automatic publication in PR Dashboard Settings: " + allowed.join("; ") + ". " + REVIEW_DRY_RUN +
+    " Then decide the verdict yourself by the rules below — the workflow's own decision, an approve (minor issues) included, " +
+    "does not decide it. Submit one formal review with the findings only if its verdict is authorized for this PR. " +
     "Keep other verdicts in chat. Follow any explicit chat-only instruction, review policy and tool permissions. " +
     "An approve verdict is eligible only with no Blocker and no Major of any confidence: a low-confidence Major you did not check " +
     "still blocks the APPROVE. " +

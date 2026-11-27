@@ -9386,7 +9386,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(opened.length, 0, "Claude Desktop must not open");
         assert.strictEqual(terminals.length, 1);
         assert.strictEqual(terminals[0].opts.terminal, "auto");
-        assert.match(terminals[0].command.posix, /claude '\/creatio-code-review https:\/\/github\.com\/acme\/widgets\/pull\/7 Report in chat/);
+        assert.match(terminals[0].command.posix, /claude '\/creatio-code-review https:\/\/github\.com\/acme\/widgets\/pull\/7 Run the review workflow with dryRun: true, so it posts nothing to the PR itself — no review, no comment, no status comment\. Report in chat/);
         const desktop = await launcher.launchClaude(pr, settings, { trackComments: true, openUrl, kind: "review" });
         assert.strictEqual(desktop.ok, true);
         assert.strictEqual(opened.length, 1, "without the flag Claude Desktop opens as before");
@@ -9496,6 +9496,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
             // What makes a verdict eligible goes with any grant: no Major of any confidence for an
             // APPROVE, a checked low-confidence Major for REQUEST_CHANGES, and no APPROVE past the reviewed head.
             const rules = approve || changes;
+            // The workflow never posts on its own — an "approve (minor issues)" would go out over a
+            // low-confidence Major — so every launch runs it dry and the session decides the verdict.
+            assert.ok(prompt.includes("Run the review workflow with dryRun: true, so it posts nothing to the PR itself"), `${kind} ${approve} ${changes}`);
+            assert.strictEqual(prompt.includes("the workflow's own decision, an approve (minor issues) included, does not decide it"), rules);
+            // A double quote can't reach codex through a Windows command line.
+            assert.ok(!prompt.includes('"'), "no double quote in a launch prompt");
             assert.strictEqual(prompt.includes("no Blocker and no Major of any confidence"), rules);
             assert.strictEqual(prompt.includes("a low-confidence Major you did not check still blocks the APPROVE"), rules);
             assert.strictEqual(prompt.includes("a low-confidence Major counts only once it is checked"), rules);
