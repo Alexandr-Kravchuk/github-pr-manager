@@ -9519,6 +9519,19 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(cfg.validateClaude({ prompts: { reviewGroup: v391 } }).prompts.reviewGroup, cl.DEFAULT_CLAUDE_PROMPTS.reviewGroup);
     });
 
+    test("reviewConsentFor: a draft or your own PR among them takes the permission away, for one PR and for Review all", () => {
+      const on = { autoApproveReviews: true, autoRequestChangesReviews: true, enabled: true };
+      const due = { isDraft: false, roles: ["reviewer"] };
+      const none = { autoApproveReviews: false, autoRequestChangesReviews: false };
+      assert.deepStrictEqual(cl.reviewConsentFor([due, due], on), { autoApproveReviews: true, autoRequestChangesReviews: true }, "only the two switches pass");
+      assert.deepStrictEqual(cl.reviewConsentFor([due, { ...due, isDraft: true }], on), none);
+      assert.deepStrictEqual(cl.reviewConsentFor([due, { isDraft: false, roles: ["author", "reviewer"] }], on), none);
+      const prs = [{ url: "https://github.com/a/b/pull/1" }, { url: "https://github.com/a/b/pull/2" }];
+      const mixed = cl.renderGroupPrompt({}, "review", "ENG-7", prs, [], cl.reviewConsentFor([due, { ...due, isDraft: true }], on));
+      assert.match(mixed, /disabled automatic GitHub review publication/);
+      assert.doesNotMatch(mixed, /APPROVE for an eligible approve verdict|REQUEST_CHANGES for a request-changes verdict/);
+    });
+
     test("group launches: each prompt fills its template behind its marker", () => {
       const prs = [{ url: "https://github.com/a/b/pull/1" }, { url: "https://github.com/a/b/pull/2" }];
       const explain = cl.renderGroupPrompt({}, "explain", "ENG-83532", prs);
@@ -11618,7 +11631,12 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const setAgent = (over) => {
         settings = cfg.validateSettings({ hosts: [], claude: claudeOver, agent: quiet(over) });
       };
-      return { agent, snapshot, gitCalls, rawGitCalls, children, dir, setAgent };
+      // Settings › Integrations › Claude saved anew; the agent's settings stay.
+      const setClaude = (over) => {
+        claudeOver = over;
+        settings = cfg.validateSettings({ hosts: [], claude: over, agent: settings.agent });
+      };
+      return { agent, snapshot, gitCalls, rawGitCalls, children, dir, setAgent, setClaude };
     };
 
     const captureJs = path.join(__dirname, "../dist/main/main/agent/capture.js");
@@ -18164,6 +18182,50 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(only(h).find((i) => i.scenario === "reask").headline, "Asked anna again — only the base changed");
       } finally {
         h.agent.stop();
+      }
+
+      // Asking again posts no verdict: in On it goes out with automatic Approve off.
+      const reaskOn = { author: "me", timeline: mine.timeline, posted: [] };
+      const r = agentFixture({
+        pr: unapproved(),
+        claude: {},
+        agent: { scenarios: { reapprove: { mode: "on", askReviewers: true }, selfReview: off, driveCi: { mode: "off", maxAttempts: 2 }, driveComments: off, merge: { mode: "off" } } },
+        script: keepWorking,
+        gh: reapproveGh(reaskOn), git: cleanMergeGit(reaskOn.git),
+        fetchPr: async () => ({ pr: unapproved(), state: "OPEN", viewer: "me" }),
+      });
+      try {
+        r.agent.onSnapshot(r.snapshot);
+        await until(() => reaskOn.posted.length === 1);
+        assert.deepStrictEqual(reaskOn.posted, [{ endpoint: "repos/a/b/pulls/7/requested_reviewers", body: { reviewers: ["anna"] } }]);
+        assert.strictEqual(only(r).find((i) => i.scenario === "reask").state, "done");
+      } finally {
+        r.agent.stop();
+      }
+
+      // Automatic Approve switched off between the offer and the write: the agent's own give is refused, nothing goes out.
+      const revoked = { timeline: myDismissal, posted: [] };
+      let fx;
+      fx = agentFixture({
+        pr: reviewPr({ role: "reviewed" }),
+        claude: { autoApproveReviews: true },
+        agent: { scenarios: { reapprove: { mode: "on", askReviewers: true } } },
+        script: keepWorking,
+        gh: reapproveGh(revoked), git: cleanMergeGit(revoked.git),
+        fetchPr: async () => {
+          // Only once the offer is made: the re-read before the write is what meets the switch off.
+          if (only(fx).some((i) => i.scenario === "reapprove")) fx.setClaude({});
+          return { pr: reviewPr({ role: "reviewed" }), state: "OPEN", viewer: "me" };
+        },
+      });
+      try {
+        fx.agent.onSnapshot(fx.snapshot);
+        await until(() => readLog(fx).some((l) => l.event === "not-reapproved"));
+        assert.deepStrictEqual(revoked.posted, [], "no APPROVE without the switch");
+        assert.match(only(fx)[0].headline, /^Not approved again — Automatic Approve is off in Settings/);
+        assert.strictEqual(readLog(fx).find((l) => l.event === "not-reapproved").data.byYou, false);
+      } finally {
+        fx.agent.stop();
       }
     });
 

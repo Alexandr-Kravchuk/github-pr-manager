@@ -16,6 +16,7 @@ import {
   renderClaudePrompt,
   groupLaunchPrs,
   renderGroupPrompt,
+  reviewConsentFor,
   type GroupLaunchKind,
 } from "../shared/claude-launch";
 import type {
@@ -243,10 +244,7 @@ export async function launchClaude(
     return { ok: false, error: `${pr.repo}: ${where}. Set its folder in Settings → Claude.` };
   }
   const kind = opts.kind ?? pickClaudeLaunch(pr, opts);
-  const consent = pr.isDraft || pr.roles.includes("author")
-    ? { autoApproveReviews: false, autoRequestChangesReviews: false }
-    : settings;
-  const prompt = renderClaudePrompt(settings.prompts, kind, pr, consent);
+  const prompt = renderClaudePrompt(settings.prompts, kind, pr, reviewConsentFor([pr], settings));
   const error = await startSession(dir, prompt, settings, opts.openUrl, opts.inTerminal, launchProgram(kind));
   return error ? { ok: false, error } : { ok: true, kind, dir };
 }
@@ -333,7 +331,9 @@ export async function launchGroup(
           return own && own !== dir ? own : null;
         })
       : [];
-  const prompt = renderGroupPrompt(settings.prompts, kind, key, prs, folders, settings);
+  // `groupLaunchPrs` already leaves drafts and your own PRs out of a review;
+  // the permission is still decided here, by the same rule as a single launch.
+  const prompt = renderGroupPrompt(settings.prompts, kind, key, prs, folders, reviewConsentFor(prs, settings));
   const error = await startSession(dir, prompt, settings, opts.openUrl);
   return error ? { ok: false, error } : { ok: true, count: prs.length, dir };
 }

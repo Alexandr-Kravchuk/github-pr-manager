@@ -1148,6 +1148,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
               <legend className={labelCls}>Automatic review publication</legend>
               <p className="text-xs text-fg-faint">
                 Applies to new Claude and Codex review sessions started here and to automatic verdicts from the PR Agent. Posts under your GitHub account.
+                Shown with Claude sessions off too, since the PR Agent reads them.
               </p>
               {([
                 ["autoApproveReviews", "Automatically approve"],

@@ -110,6 +110,22 @@ const NO_REVIEW_PUBLICATION: ReviewPublicationConsent = {
 };
 
 /**
+ * The publication permission a launch may carry for these PRs: none when any
+ * of them is a draft or your own, whatever the switches say — one rule for a
+ * single launch and for Review all, so the prompt's "skip your own PRs" is not
+ * the only barrier.
+ */
+export function reviewConsentFor(
+  prs: readonly Pick<PullRequest, "isDraft" | "roles">[],
+  consent: ReviewPublicationConsent,
+): ReviewPublicationConsent {
+  const eligible = prs.every((pr) => !pr.isDraft && !pr.roles.includes("author"));
+  return eligible
+    ? { autoApproveReviews: consent.autoApproveReviews, autoRequestChangesReviews: consent.autoRequestChangesReviews }
+    : NO_REVIEW_PUBLICATION;
+}
+
+/**
  * The review workflow posts its own verdict — an APPROVE even over a
  * low-confidence Major ("approve (minor issues)") — unless it runs dry, so the
  * session reviews dry and posts the verdict itself, by the rules that follow.

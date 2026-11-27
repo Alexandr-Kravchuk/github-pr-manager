@@ -146,7 +146,10 @@ Three layers:
   verdict eligible (an APPROVE only with no Blocker and no Major of any
   confidence and only while the reviewed commit is the head; a low-confidence
   Major backs REQUEST_CHANGES only once checked), and your own PR or a draft
-  never carries one. Every such launch, granted or not, tells the session to
+  never carries one (`reviewConsentFor`, the one rule for a single launch and
+  for Review all, where a draft or your PR among the group takes it away). The
+  switches show in Settings with Claude sessions off too, since the PR agent
+  reads them. Every such launch, granted or not, tells the session to
   run the review workflow with `dryRun: true` (`REVIEW_DRY_RUN`) and post the
   verdict itself: the workflow's own publish APPROVEs an "approve (minor
   issues)" over a low-confidence Major, which the rule above forbids. The PR agent reads the same two opt-ins: in On, a
