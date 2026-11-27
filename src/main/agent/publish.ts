@@ -514,6 +514,14 @@ export async function publishPlan(
     return { ok: false, error: "nothing is left to post — everything it wrote is held back (a colleague's thread, a thread handed back to you, or a comment whose thread GitHub didn't name). Answer there yourself, or Discard it", posted: 0, total: 0 };
   }
   let done = Math.min(readDone(runDir), requests.length);
+  function heldVerdict(req: PublishRequest): string | undefined {
+    if (!ctx.currentReviewConsent || (req.body.event !== "APPROVE" && req.body.event !== "REQUEST_CHANGES")) return;
+    const consent = ctx.currentReviewConsent();
+    if (req.body.event === "APPROVE" && !consent?.autoApproveReviews) return "Approve";
+    if (req.body.event === "REQUEST_CHANGES" && !consent?.autoRequestChangesReviews) return "Request changes";
+  }
+  const held = requests.slice(done).map(heldVerdict).find((event) => event !== undefined);
+  if (held) return { ok: false, error: "Automatic " + held + " is off in Settings. Review the plan and publish it yourself.", posted: done, total: requests.length };
   // Nothing goes out unless every thread and comment the rest of the plan
   // touches is this PR's — and, for a review, yours.
   const { error: stray, replyRoots } = await checkPlan(
@@ -534,6 +542,8 @@ export async function publishPlan(
   }
   for (let i = done; i < requests.length; i++) {
     const req = requests[i];
+    const held = heldVerdict(req);
+    if (held) return { ok: false, error: "Automatic " + held + " is off in Settings. Publish the remaining plan yourself.", posted: done, total: requests.length };
     const r = await gh(ghApiArgs(req, prUrl), { input: JSON.stringify(req.body) });
     if (r.code !== 0) return { ok: false, error: `${req.label}: ${ghError(r)}`, posted: done, total: requests.length };
     done = i + 1;

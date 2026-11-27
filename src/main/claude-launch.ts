@@ -243,7 +243,10 @@ export async function launchClaude(
     return { ok: false, error: `${pr.repo}: ${where}. Set its folder in Settings → Claude.` };
   }
   const kind = opts.kind ?? pickClaudeLaunch(pr, opts);
-  const prompt = renderClaudePrompt(settings.prompts, kind, pr);
+  const consent = pr.isDraft || pr.roles.includes("author")
+    ? { autoApproveReviews: false, autoRequestChangesReviews: false }
+    : settings;
+  const prompt = renderClaudePrompt(settings.prompts, kind, pr, consent);
   const error = await startSession(dir, prompt, settings, opts.openUrl, opts.inTerminal, launchProgram(kind));
   return error ? { ok: false, error } : { ok: true, kind, dir };
 }
@@ -330,7 +333,7 @@ export async function launchGroup(
           return own && own !== dir ? own : null;
         })
       : [];
-  const prompt = renderGroupPrompt(settings.prompts, kind, key, prs, folders, settings.reviewGroupApprove);
+  const prompt = renderGroupPrompt(settings.prompts, kind, key, prs, folders, settings);
   const error = await startSession(dir, prompt, settings, opts.openUrl);
   return error ? { ok: false, error } : { ok: true, count: prs.length, dir };
 }

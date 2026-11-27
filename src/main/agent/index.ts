@@ -1412,6 +1412,9 @@ export function createAgent(deps: AgentDeps): Agent {
           await closeAs(item, "You approved it again yourself");
           return { ok: true };
         }
+        if (!byYou && !loadAll()?.claude.autoApproveReviews) {
+          return refuse("Automatic Approve is off in Settings. Approve again yourself.");
+        }
         req = reapproveRequest(item.repo, item.prNumber, head, r.oldHead, all.agent.policy.signature);
       } else {
         // Not who approved since, or is asked already.
@@ -3098,6 +3101,7 @@ export function createAgent(deps: AgentDeps): Agent {
         number: item.prNumber,
         signature: all.agent.policy.signature,
         holdApprove,
+        ...(byYou ? {} : { currentReviewConsent: () => loadAll()?.claude ?? null }),
         ...(rr ? { allowResolve: rr.resolve, allowApprove: rr.approve } : {}),
         ...(item.plan.held?.length ? { held: item.plan.held } : {}),
       },

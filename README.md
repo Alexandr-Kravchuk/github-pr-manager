@@ -178,6 +178,15 @@ On first launch the dashboard is empty — open **Settings (⚙)** and add a hos
 The Settings screen also shows whether `gh` is installed and signed in for each
 host, with the exact `gh auth login` command if not.
 
+**Settings → Integrations → Claude** has two independent switches under
+**Automatic review publication**. They authorize **Approve** and **Request
+changes** under your GitHub account for reviews launched by PR Dashboard with
+Claude or Codex. Both start off. Enable an event once and it applies to future
+launches. Turn it off again to revoke it for new launches. The built-in Agent
+checks the same switches before it publishes a formal verdict automatically.
+An explicit manual Publish still works. The old group-only approval preference
+does not carry over to these switches.
+
 **Close to tray** (on by default, under Settings) turns the window's close
 button into "hide": the app stays in the tray, and while notifications are
 enabled it keeps polling so alerts keep coming. With notifications off, polling

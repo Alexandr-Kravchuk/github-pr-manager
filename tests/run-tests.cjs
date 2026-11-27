@@ -9055,10 +9055,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(cfg.validateClaude({ terminal: "iterm" }).terminal, "iterm");
       assert.strictEqual(cfg.validateClaude({ terminal: "xterm" }).terminal, "auto");
       assert.strictEqual(cfg.validateClaude({ terminal: "desktop" }).terminal, "desktop");
-      // Review all may approve only on an explicit true.
-      assert.strictEqual(cfg.validateClaude({}).reviewGroupApprove, false);
-      assert.strictEqual(cfg.validateClaude({ reviewGroupApprove: "true" }).reviewGroupApprove, false);
-      assert.strictEqual(cfg.validateClaude({ reviewGroupApprove: true }).reviewGroupApprove, true);
+      // Formal review consent is opt-in, separately for each verdict.
+      assert.strictEqual(cfg.validateClaude({}).autoApproveReviews, false);
+      assert.strictEqual(cfg.validateClaude({}).autoRequestChangesReviews, false);
+      assert.strictEqual(cfg.validateClaude({ reviewGroupApprove: true }).autoApproveReviews, false, "group-only permission cannot be broadened");
+      assert.strictEqual(cfg.validateClaude({ autoApproveReviews: "true" }).autoApproveReviews, false);
+      assert.strictEqual(cfg.validateClaude({ autoApproveReviews: true }).autoApproveReviews, true);
+      assert.strictEqual(cfg.validateClaude({ autoRequestChangesReviews: true }).autoRequestChangesReviews, true);
       assert.strictEqual(
         cl.claudeDesktopUrl("/Users/me/my repo", "/drive-pr-green https://x/pull/1?a=b&c"),
         "claude://code/new?q=%2Fdrive-pr-green%20https%3A%2F%2Fx%2Fpull%2F1%3Fa%3Db%26c&folder=%2FUsers%2Fme%2Fmy%20repo",
@@ -9373,7 +9376,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         assert.strictEqual(opened.length, 0, "Claude Desktop must not open");
         assert.strictEqual(terminals.length, 1);
         assert.strictEqual(terminals[0].opts.terminal, "auto");
-        assert.match(terminals[0].command.posix, /claude '\/creatio-code-review https:\/\/github\.com\/acme\/widgets\/pull\/7'/);
+        assert.match(terminals[0].command.posix, /claude '\/creatio-code-review https:\/\/github\.com\/acme\/widgets\/pull\/7 Report in chat/);
         const desktop = await launcher.launchClaude(pr, settings, { trackComments: true, openUrl, kind: "review" });
         assert.strictEqual(desktop.ok, true);
         assert.strictEqual(opened.length, 1, "without the flag Claude Desktop opens as before");
@@ -9395,10 +9398,13 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         const pr = { ...quiet, roles: ["reviewer"] };
         const opened = [];
         const openUrl = async (url) => { opened.push(url); };
-        const desktop = { enabled: true, projectsRoot: "", repoPaths: { [pr.repo]: dir }, prompts: {}, terminal: "desktop" };
+        const desktop = { enabled: true, projectsRoot: "", repoPaths: { [pr.repo]: dir }, prompts: {}, terminal: "desktop", autoApproveReviews: false, autoRequestChangesReviews: true };
         const app = await launcher.launchClaude(pr, desktop, { trackComments: true, openUrl, kind: "codexReview" });
         assert.strictEqual(app.ok && app.kind, "codexReview");
         assert.strictEqual(opened.length, 1);
+        const prompt = new URL(opened[0]).searchParams.get("prompt");
+        assert.match(prompt, /REQUEST_CHANGES for a request-changes verdict/);
+        assert.doesNotMatch(prompt, /APPROVE for an eligible approve verdict/);
         assert.ok(opened[0].startsWith("codex://threads/new?path="), opened[0]);
         assert.ok(!opened[0].startsWith("claude://"), "the Claude Desktop link must not be used");
         assert.strictEqual(terminals.length, 0);
@@ -9453,6 +9459,23 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.strictEqual(cl.groupLaunchPrs("review", "ENG-1", many).length, cl.MAX_GROUP_PRS);
     });
 
+    test("Claude and Codex launch prompts authorize only the selected formal verdicts", () => {
+      const pr = { url: "https://github.com/a/b/pull/1" };
+      for (const kind of ["review", "codexReview"]) {
+        for (const approve of [false, true]) {
+          for (const changes of [false, true]) {
+            const consent = { autoApproveReviews: approve, autoRequestChangesReviews: changes };
+            const prompt = cl.renderClaudePrompt({}, kind, pr, consent);
+            assert.strictEqual(prompt.includes("APPROVE for an eligible approve verdict"), approve);
+            assert.strictEqual(prompt.includes("REQUEST_CHANGES for a request-changes verdict"), changes);
+            assert.strictEqual(prompt.includes("with commit_id"), approve || changes);
+          }
+        }
+      }
+      const oldCodexDefault = "Use the creatio-code-review skill to review the pull request {url}. Report the findings here; do not post anything to the PR.";
+      assert.strictEqual(cfg.validateClaude({ prompts: { codexReview: oldCodexDefault } }).prompts.codexReview, cl.DEFAULT_CLAUDE_PROMPTS.codexReview);
+    });
+
     test("group launches: each prompt fills its template behind its marker", () => {
       const prs = [{ url: "https://github.com/a/b/pull/1" }, { url: "https://github.com/a/b/pull/2" }];
       const explain = cl.renderGroupPrompt({}, "explain", "ENG-83532", prs);
@@ -9468,38 +9491,16 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.match(review, /start_session/);
       const defaultReview = cl.renderGroupPrompt({}, "review", "ENG-7", prs);
       assert.match(defaultReview, /its prompt word for word/, "the parent must not paraphrase a session's prompt");
-      // A request from another session is not the user's consent to publish,
-      // so each review session gets the user's own words, quoted in full.
-      assert.ok(
-        defaultReview.includes(
-          "Користувач сказав: «Публікуй рев'ю на PR: рядкові коментарі до Blocker і Major, підсумок одним рев'ю. " +
-            "Подія — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю, інакше `COMMENT`. `APPROVE` не ставити.». " +
-            "Публікуй рев'ю на PR за цим дозволом.",
-        ),
-        "the publishing permission is quoted word for word",
-      );
-      // Without the opt-in every APPROVE waits for the user's word.
-      assert.match(defaultReview, /APPROVE only on my separate word for that PR/);
+      assert.match(defaultReview, /user has disabled automatic GitHub review publication/);
       assert.doesNotMatch(defaultReview, /\{permission\}/);
-      // Opted in, a review with no Blocker and no Major approves, as one review pinned to the head it read.
-      const approving = cl.renderGroupPrompt({}, "review", "ENG-7", prs, [], true);
-      assert.ok(
-        approving.includes(
-          "Подія цього рев'ю — `REQUEST_CHANGES`, коли є Blocker або Major з високою впевненістю; `COMMENT`, коли лишився " +
-            "лише Major з низькою впевненістю; `APPROVE`, коли немає ні Blocker, ні жодного Major.». " +
-            "Публікуй рев'ю на PR за цим дозволом.",
-        ),
-        "the approving permission is quoted word for word",
-      );
-      assert.doesNotMatch(approving, /`APPROVE` не ставити|APPROVE only on my separate word/);
-      assert.match(approving, /it still blocks the APPROVE/, "a Major asked as a question blocks the approval");
-      assert.match(approving, /with commit_id set to the head commit you reviewed/, "the approval is pinned to the reviewed SHA");
-      // A custom template without the token is the user's own text: the setting does not touch it.
-      assert.strictEqual(
-        cl.renderGroupPrompt({ reviewGroup: "Review {key}: {prompts}" }, "review", "ENG-7", prs, [], true),
-        cl.renderGroupPrompt({ reviewGroup: "Review {key}: {prompts}" }, "review", "ENG-7", prs),
-      );
-      assert.match(defaultReview, /low confidence is a ground for REQUEST_CHANGES only once it is checked/);
+      const consent = { autoApproveReviews: true, autoRequestChangesReviews: false };
+      const approving = cl.renderGroupPrompt({}, "review", "ENG-7", prs, [], consent);
+      assert.match(approving, /APPROVE for an eligible approve verdict/);
+      assert.doesNotMatch(approving, /REQUEST_CHANGES for a request-changes verdict/);
+      assert.match(approving, /commit_id/);
+      const customReview = cl.renderGroupPrompt({ reviewGroup: "Review {key}: {prompts}" }, "review", "ENG-7", prs, [], consent);
+      assert.match(customReview, /Append this authorization statement verbatim/);
+      assert.match(customReview, /APPROVE for an eligible approve verdict/);
       assert.match(defaultReview, /Start your report with the link to the review you published/);
       assert.match(defaultReview, /for each PR the link to its review, its decision/);
       // A session's turn note is cut at 400 characters; the summary needs the whole report.
@@ -9602,10 +9603,10 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
           opened[1].includes(`1) in ${path.join(root, "core")}: /creatio-code-review https://github.com/acme/core/pull/1 2) /creatio-code-review https://github.com/acme/ui/pull/2`),
           "the core PR is reviewed in core's checkout, the ui ones in the parent's folder",
         );
-        assert.ok(opened[1].includes("APPROVE only on my separate word for that PR"), "no opt-in: every APPROVE waits for the user");
-        const approving = await launcher.launchGroup("review", "ENG-7", prs, { ...settings, reviewGroupApprove: true }, { openUrl });
+        assert.ok(opened[1].includes("user has disabled automatic GitHub review publication"), "no opt-in: every APPROVE waits for the user");
+        const approving = await launcher.launchGroup("review", "ENG-7", prs, { ...settings, autoApproveReviews: true }, { openUrl });
         assert.strictEqual(approving.ok, true);
-        assert.ok(opened.pop().includes("with commit_id set to the head commit you reviewed"), "the opt-in reaches the prompt");
+        assert.ok(opened.pop().includes("with commit_id"), "the opt-in reaches the prompt");
 
         const terminal =await launcher.launchGroup("review", "ENG-7", prs, { ...settings, terminal: "auto" }, { openUrl });
         assert.match(terminal.ok ? "" : terminal.error, /only Claude Desktop/);
@@ -11515,7 +11516,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     };
-    const agentFixture = ({ checkout = true, script, pr = reviewPr(), plugins: mounted = [], enabled = true, openResume, agent: agentOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid, now, claudeConfigDir } = {}) => {
+    const agentFixture = ({ checkout = true, script, pr = reviewPr(), plugins: mounted = [], enabled = true, openResume, agent: agentOver = {}, claude: claudeOver = {}, captureScript, fetchPr, gh, notify, git: gitImpl, home, onChange, tickMs = 1e9, sessions = [], checkMermaid, now, claudeConfigDir } = {}) => {
       // `home`: the folder of an earlier fixture — the same app started again.
       const dir = home ?? nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-agent-"));
       const co = path.join(dir, "checkout");
@@ -11533,7 +11534,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
         ...over,
         scenarios: overScenarios({ ...SHADOW_SCENARIOS, reapprove: { mode: "off", askReviewers: true } }, over.scenarios),
       });
-      let settings = cfg.validateSettings({ hosts: [], agent: quiet({ enabled, ...agentOver }) });
+      let settings = cfg.validateSettings({ hosts: [], claude: claudeOver, agent: quiet({ enabled, ...agentOver }) });
       const agent = agentCore.createAgent({
         onChange,
         openResume,
@@ -11572,7 +11573,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       });
       // Settings › Agent saved anew.
       const setAgent = (over) => {
-        settings = cfg.validateSettings({ hosts: [], agent: quiet(over) });
+        settings = cfg.validateSettings({ hosts: [], claude: claudeOver, agent: quiet(over) });
       };
       return { agent, snapshot, gitCalls, rawGitCalls, children, dir, setAgent };
     };
@@ -14705,6 +14706,47 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       assert.deepStrictEqual(publishMod.ghApiArgs({ endpoint: "graphql" }, "https://github.com/a/b/pull/1"), ["api", "graphql", "--method", "POST", "--input", "-"]);
     });
 
+    await atest("publish: the automatic verdict switches are independent and manual publication remains possible", async () => {
+      const ctx = { repo: "a/b", number: 7, signature: "sig", holdApprove: false };
+      const url = "https://github.com/a/b/pull/7";
+      const targets = { viewer: "me", mine: true };
+      for (const event of ["APPROVE", "REQUEST_CHANGES"]) {
+        const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-consent-"));
+        try {
+          nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), JSON.stringify({ kind: "review", event, body: "b", commitId: SHA, comments: [] }) + "\n");
+          const writes = [];
+          const gh = async (_args, { input }) => {
+            writes.push(JSON.parse(input).event);
+            return { code: 0, stdout: "{}", stderr: "" };
+          };
+          const wrongGrant = { autoApproveReviews: event !== "APPROVE", autoRequestChangesReviews: event !== "REQUEST_CHANGES" };
+          const blocked = await publishMod.publishPlan(runDir, url, { ...ctx, currentReviewConsent: () => wrongGrant }, targets, gh);
+          assert.strictEqual(blocked.ok, false);
+          assert.deepStrictEqual(writes, []);
+          const manual = await publishMod.publishPlan(runDir, url, ctx, targets, gh);
+          assert.strictEqual(manual.ok, true);
+          assert.deepStrictEqual(writes, [event]);
+        } finally {
+          nfsA.rmSync(runDir, { recursive: true, force: true });
+        }
+      }
+      const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-consent-"));
+      try {
+        nfsA.writeFileSync(path.join(runDir, "plan.jsonl"), JSON.stringify({ kind: "review", event: "APPROVE", body: "b", commitId: SHA, comments: [] }) + "\n");
+        let checks = 0;
+        const granted = { autoApproveReviews: true, autoRequestChangesReviews: false };
+        const revoked = { ...granted, autoApproveReviews: false };
+        const gh = async () => { assert.fail("the revoked verdict must never be sent"); };
+        const result = await publishMod.publishPlan(runDir, url, {
+          ...ctx, currentReviewConsent: () => ++checks === 1 ? granted : revoked,
+        }, targets, gh);
+        assert.strictEqual(result.ok, false);
+        assert.match(result.error, /Automatic Approve is off/);
+      } finally {
+        nfsA.rmSync(runDir, { recursive: true, force: true });
+      }
+    });
+
     await atest("publish: a thread or comment of another PR stops the whole plan before anything is posted", async () => {
       const runDir = nfsA.mkdtempSync(path.join(os.tmpdir(), "prd-pub-"));
       const steps = [
@@ -15343,6 +15385,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const onReview = (authors) => {
         const posted = [];
         const f = agentFixture({
+          claude: { autoApproveReviews: true },
           agent: { scenarios: { review: { mode: "on" } } },
           script: (c) => {
             const outDir = c.args[c.args.indexOf("--add-dir") + 1];
@@ -17952,6 +17995,7 @@ test("emptyStateKind: no-match as soon as anything narrows", () => {
       const on = { timeline: myDismissal, posted: [] };
       const f = agentFixture({
         pr: reviewPr({ role: "reviewed" }),
+        claude: { autoApproveReviews: true },
         agent: { scenarios: { reapprove: { mode: "on", askReviewers: true } } },
         script: keepWorking,
         gh: reapproveGh(on), git: cleanMergeGit(on.git),

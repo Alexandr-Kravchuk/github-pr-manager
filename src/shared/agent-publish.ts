@@ -12,6 +12,8 @@
 // Node-free and pure: the capture script, the guard hook and the app all parse
 // through these functions, and the tests run them without a session.
 
+import type { ReviewPublicationConsent } from "./types";
+
 export type ReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 
 export interface PlanComment {
@@ -229,6 +231,8 @@ export interface PublishContext {
   signature: string;
   /** An approve becomes a plain comment (Settings › Agent › hold approve while another reviewer's change request is open). */
   holdApprove: boolean;
+  /** Read the current opt-ins before automatic GitHub writes. Manual Publish has its own authorization. */
+  currentReviewConsent?: () => ReviewPublicationConsent | null;
   /** Re-review: resolve threads (Settings › Agent › re-review: resolve). Absent = yes. */
   allowResolve?: boolean;
   /** Re-review: approve once your threads are closed (Settings › Agent › re-review: approve). Absent = yes; off turns an approve into a comment. */
